@@ -127,3 +127,5 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename }: TabItemPr
 
 
 
+
+

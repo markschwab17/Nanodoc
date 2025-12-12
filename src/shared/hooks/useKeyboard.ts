@@ -13,7 +13,7 @@ import { useUndoRedo } from "./useUndoRedo";
 export function useKeyboard() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
-  const { setZoomLevel, zoomLevel } = useUIStore();
+  const { setZoomLevel, zoomLevel, toggleReadMode } = useUIStore();
   const { closeCurrentDocument } = usePDF();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
 
@@ -151,6 +151,13 @@ export function useKeyboard() {
         setCurrentPage(pageCount - 1);
         return;
       }
+
+      // Toggle read mode: R key
+      if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        toggleReadMode();
+        return;
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -168,6 +175,7 @@ export function useKeyboard() {
     redo,
     canUndo,
     canRedo,
+    toggleReadMode,
   ]);
 }
 

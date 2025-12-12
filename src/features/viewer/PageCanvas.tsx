@@ -39,6 +39,7 @@ export function PageCanvas({
   const BASE_SCALE = 1.0; // Fixed base scale for PDF rendering (1 point = 1 pixel)
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   const [containerHeight, setContainerHeight] = useState<number | undefined>(undefined);
+  const [containerWidth, setContainerWidth] = useState<number | undefined>(undefined);
   
   const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
   const { getCurrentDocument, getAnnotations, addAnnotation, getSearchResults, updateAnnotation, setCurrentPage } = usePDFStore();
@@ -153,9 +154,10 @@ export function PageCanvas({
   }, []);
 
   // Use native event listener for wheel to properly prevent default (React synthetic events are passive)
+  // In read mode, wheel zoom is handled at the container level, not per-page
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || readMode) return; // Don't handle wheel zoom in read mode at page level
 
     const handleWheelNative = (e: WheelEvent) => {
       // Only handle zoom if ctrl/meta is pressed
@@ -250,7 +252,7 @@ export function PageCanvas({
     return () => {
       container.removeEventListener("wheel", handleWheelNative);
     };
-  }, [setZoomLevel, setFitMode]);
+  }, [setZoomLevel, setFitMode, readMode]);
 
   useEffect(() => {
     const renderPage = async () => {
@@ -273,21 +275,117 @@ export function PageCanvas({
         
         // Calculate initial viewport scale for fit modes
         let viewportScale = zoomLevel;
-        if (fitMode === "width" && containerRef.current) {
-          const containerWidth = containerRef.current.clientWidth;
+        
+        // In read mode, always calculate fit-to-width for container sizing (even if fitMode is custom)
+        // The fitMode only controls where zoom is applied, not the base container size
+        // In normal mode, use fit-to-width when fitMode is "width"
+        if (readMode || (!readMode && fitMode === "width")) {
+          // Use requestAnimationFrame to ensure DOM is laid out
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          await new Promise(resolve => setTimeout(resolve, 150)); // Wait longer for layout
+          
+          let containerWidth = 800; // Default fallback
+          
+          if (readMode) {
+            // In read mode, get width from the max-w-4xl parent container
+            // Try multiple times to get the correct width
+            let attempts = 0;
+            while (attempts < 3 && containerWidth < 500) {
+              const parentContainer = containerRef.current?.closest('.max-w-4xl') as HTMLElement;
+              if (parentContainer) {
+                containerWidth = parentContainer.clientWidth || parentContainer.offsetWidth || 0;
+                if (containerWidth > 100) break;
+              }
+              
+              // Also try getting from the scroll container
+              const scrollContainer = containerRef.current?.closest('[class*="overflow-y-auto"]') as HTMLElement;
+              if (scrollContainer && scrollContainer.clientWidth > 100) {
+                containerWidth = scrollContainer.clientWidth;
+                break;
+              }
+              
+              // Fallback to viewport calculation
+              if (containerWidth < 100) {
+                containerWidth = Math.min(896, window.innerWidth - 320);
+              }
+              
+              if (containerWidth < 500) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+                attempts++;
+              }
+            }
+            
+            // Final fallback
+            if (containerWidth < 500) {
+              containerWidth = 800;
+            }
+          } else if (containerRef.current) {
+            containerWidth = containerRef.current.clientWidth;
+          }
+          
+          // Ensure we have a valid width
+          if (containerWidth < 100) {
+            containerWidth = 800; // Safe fallback
+          }
+          
           viewportScale = containerWidth / pageMetadata.width;
+          
           // Update zoom level to match fit
-          if (Math.abs(viewportScale - zoomLevel) > 0.01) {
-            setZoomLevel(viewportScale);
+          // In read mode, only update if fitMode is NOT "custom" (user hasn't manually zoomed)
+          // When fitMode is "custom", the user has manually zoomed, so don't override their zoom
+          // IMPORTANT: Only update if the difference is significant AND fitMode is not custom
+          if (readMode && fitMode === "custom") {
+            // User has manually zoomed - don't override, but ensure viewportScale is still calculated for reference
+            // The container will use zoomLevel for sizing, not viewportScale
+          } else if (Math.abs(viewportScale - zoomLevel) > 0.01) {
+            if (readMode) {
+              // Only update zoom if user hasn't manually zoomed (fitMode is not "custom")
+              // In read mode, set zoomLevel and keep fitMode as "width"
+              // setZoomLevel automatically sets fitMode to "custom", so we need to override it
+              useUIStore.setState({ 
+                zoomLevel: Math.max(0.25, Math.min(5.0, viewportScale)), 
+                fitMode: "width" 
+              });
+            } else {
+              setZoomLevel(viewportScale);
+            }
           }
         } else if (fitMode === "page" && containerRef.current) {
-          const containerWidth = containerRef.current.clientWidth;
-          const containerHeight = containerRef.current.clientHeight;
-          const scaleX = containerWidth / pageMetadata.width;
-          const scaleY = containerHeight / pageMetadata.height;
-          viewportScale = Math.min(scaleX, scaleY);
-          // Update zoom level to match fit
-          if (Math.abs(viewportScale - zoomLevel) > 0.01) {
+          // In read mode, treat "page" mode as "width" mode to prevent tiny pages
+          if (readMode) {
+            // Use the same width calculation as fit-to-width
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            let containerWidth = 800;
+            const parentContainer = containerRef.current?.closest('.max-w-4xl') as HTMLElement;
+            if (parentContainer) {
+              containerWidth = parentContainer.clientWidth || parentContainer.offsetWidth || 800;
+              if (containerWidth < 100) {
+                containerWidth = Math.min(896, window.innerWidth - 320);
+              }
+            } else {
+              containerWidth = Math.min(896, window.innerWidth - 320);
+            }
+            if (containerWidth < 100) {
+              containerWidth = 800;
+            }
+            viewportScale = containerWidth / pageMetadata.width;
+            
+            // Update zoom level to match fit (in read mode with page fitMode, always update)
+            if (Math.abs(viewportScale - zoomLevel) > 0.01) {
+              // Set zoomLevel directly via state to avoid the "custom" override
+              useUIStore.setState({ 
+                zoomLevel: Math.max(0.25, Math.min(5.0, viewportScale)), 
+                fitMode: "width" 
+              });
+            }
+          } else {
+            let containerWidth = containerRef.current.clientWidth;
+            let containerHeight = containerRef.current.clientHeight;
+            const scaleX = containerWidth / pageMetadata.width;
+            const scaleY = containerHeight / pageMetadata.height;
+            viewportScale = Math.min(scaleX, scaleY);
             setZoomLevel(viewportScale);
           }
         }
@@ -337,12 +435,29 @@ export function PageCanvas({
           ctx.putImageData(rendered.imageData, 0, 0);
         }
         
-        // In read mode, set container height to exactly match scaled canvas height
+        // In read mode, set container dimensions to match fit-to-width size
+        // Zoom is applied via CSS transform on the parent container, not by resizing containers
+        // This prevents layout shifts and makes zoom feel like zooming into a static image
         if (readMode && containerRef.current) {
-          const scaledHeight = rendered.height * viewportScale;
+          // Use pageMetadata dimensions (PDF logical size) not rendered dimensions (canvas pixel size)
+          // Always use viewportScale (fit-to-width) for container sizing
+          // Zoom is handled via transform scale on the pages container, not container resizing
+          const scaledWidth = pageMetadata.width * viewportScale;
+          const scaledHeight = pageMetadata.height * viewportScale;
+          
+          setContainerWidth(scaledWidth);
           setContainerHeight(scaledHeight);
         } else {
+          setContainerWidth(undefined);
           setContainerHeight(undefined);
+        }
+        
+        // Force a re-render to update the width/height styles in read mode
+        if (readMode) {
+          // Trigger a state update to ensure styles are applied
+          setTimeout(() => {
+            // This will cause a re-render with updated dimensions
+          }, 0);
         }
         
         // Store the base scale (PDF is always rendered at this scale)
@@ -497,6 +612,9 @@ export function PageCanvas({
   const zoomToCenter = useCallback((newZoom: number) => {
     if (!containerRef.current) return;
     
+    // In read mode, don't use this function - zoom is handled at container level
+    if (readMode) return;
+    
     const container = containerRef.current;
     const containerRect = container.getBoundingClientRect();
     
@@ -524,7 +642,7 @@ export function PageCanvas({
     setZoomLevel(newZoom);
     setPanOffset({ x: newPanX, y: newPanY });
     setFitMode("custom");
-  }, [zoomLevel, panOffset, actualScale, fitMode, setZoomLevel, setFitMode]);
+  }, [zoomLevel, panOffset, actualScale, fitMode, setZoomLevel, setFitMode, readMode]);
 
   // Expose zoomToCenter via UI store
   useEffect(() => {
@@ -1037,8 +1155,11 @@ export function PageCanvas({
       ref={containerRef}
       data-page-canvas="true"
       className={cn(
-        "relative w-full overflow-hidden bg-muted transition-all duration-200",
+        "relative bg-muted transition-all duration-200",
+        readMode ? "" : "w-full",
         readMode ? "" : "h-full",
+        // In read mode when zoomed, allow overflow so content isn't cut off
+        readMode && fitMode === "custom" ? "overflow-visible" : "overflow-hidden",
         isDragOverPage && "ring-4 ring-primary ring-offset-4 bg-primary/10"
       )}
       onMouseDown={handleMouseDown}
@@ -1053,8 +1174,9 @@ export function PageCanvas({
         padding: 0, 
         lineHeight: readMode ? 0 : undefined, 
         fontSize: readMode ? 0 : undefined,
-        height: readMode ? (containerHeight !== undefined ? `${containerHeight}px` : 'auto') : undefined,
-      }}
+        ...(readMode && containerWidth !== undefined ? { width: `${containerWidth}px` } : {}),
+        ...(readMode && containerHeight !== undefined ? { height: `${containerHeight}px` } : {}),
+      } as React.CSSProperties}
     >
       {isRendering && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
@@ -1073,22 +1195,51 @@ export function PageCanvas({
       <div
         className={readMode ? "block relative" : "inline-block relative"}
         style={{
-          // Apply viewport transform: scale then translate
-          // PDF coordinates stay fixed, only viewport transforms
-          // Transform: scale(zoom) translate(panX/zoom, panY/zoom)
-          // This means: screenPos = (canvasPos * zoom) + pan
-          // In read mode, don't apply vertical translate to stack pages
+          // In read mode with fit-to-width, scale the canvas container to fit
+          // In read mode with custom zoom, no transform here (handled at parent level)
+          // In normal mode, apply viewport transform: scale then translate
           transform: readMode 
-            ? `scale(${zoomLevel}) translate(${(fitMode === "custom" ? panOffsetRef.current.x : panOffset.x) / zoomLevel}px, 0px)`
+            ? (fitMode === "custom" 
+                ? undefined 
+                : `scale(${zoomLevel})`)
             : `scale(${zoomLevel}) translate(${(fitMode === "custom" ? panOffsetRef.current.x : panOffset.x) / zoomLevel}px, ${(fitMode === "custom" ? panOffsetRef.current.y : panOffset.y) / zoomLevel}px)`,
           transformOrigin: "0 0",
-          margin: 0,
+          margin: readMode ? '0 auto' : 0,
           padding: 0,
           lineHeight: readMode ? 0 : undefined,
           fontSize: readMode ? 0 : undefined,
+          // In read mode, ensure proper width for the scaled content
+          // When fitMode is "custom", the outer container is already sized to zoomLevel, so inner div should match
+          // When fitMode is "width", use raw PDF dimensions and scale via transform
+          width: readMode && pageMetadata 
+            ? (fitMode === "custom" 
+                ? `${pageMetadata.width * zoomLevel}px` 
+                : `${pageMetadata.width}px`)
+            : undefined,
+          height: readMode && pageMetadata 
+            ? (fitMode === "custom" 
+                ? `${pageMetadata.height * zoomLevel}px` 
+                : `${pageMetadata.height}px`)
+            : undefined,
         }}
       >
-        <canvas ref={canvasRef} className={cn("block", !readMode && "shadow-2xl")} style={{ position: "relative", zIndex: 1, margin: 0, padding: 0, display: "block", verticalAlign: "top", border: "none", outline: "none" }} />
+        <canvas 
+          ref={canvasRef} 
+          className={cn("block", !readMode && "shadow-2xl")} 
+          style={{ 
+            position: "relative", 
+            zIndex: 1, 
+            margin: 0, 
+            padding: 0, 
+            display: "block", 
+            verticalAlign: "top", 
+            border: "none", 
+            outline: "none",
+            // In read mode when zoomed, canvas should fill its container
+            width: readMode && fitMode === "custom" ? "100%" : undefined,
+            height: readMode && fitMode === "custom" ? "100%" : undefined,
+          }} 
+        />
         
         {/* Render text box creation preview */}
         {isCreatingTextBox && textBoxStart && selectionEnd && activeTool === "text" && (
