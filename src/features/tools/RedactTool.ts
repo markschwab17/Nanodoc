@@ -19,10 +19,6 @@ export const RedactTool: ToolHandler = {
   },
 
   handleMouseUp: async (_e: React.MouseEvent, context: ToolContext, selectionStart, selectionEnd) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'RedactTool.ts:21',message:'handleMouseUp ENTRY',data:{hasSelectionStart:!!selectionStart,hasSelectionEnd:!!selectionEnd,selectionStart,selectionEnd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
-    // #endregion
-    
     if (!selectionStart || !selectionEnd) return;
 
     const { document, pageNumber, addAnnotation, editor, renderer, canvasRef, BASE_SCALE } = context;
@@ -36,10 +32,6 @@ export const RedactTool: ToolHandler = {
     const maxY = Math.max(selectionStart.y, selectionEnd.y); // Top edge
     const width = maxX - minX;
     const height = maxY - minY;
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'RedactTool.ts:35',message:'Redaction box calculation',data:{minX,minY,maxX,maxY,width,height,selectionStart,selectionEnd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
-    // #endregion
 
     // Only create if box is large enough
     if (width > 10 && height > 10) {
