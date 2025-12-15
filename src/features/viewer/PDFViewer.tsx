@@ -7,27 +7,48 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
 import { PageCanvas } from "./PageCanvas";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { ChevronLeft, ChevronRight, BookOpen } from "lucide-react";
+import { VirtualizedPageList } from "./VirtualizedPageList";
+import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTools } from "@/features/toolbar/PageTools";
-import { SearchBar } from "@/features/search/SearchBar";
+import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
+import { PDFEditor } from "@/core/pdf/PDFEditor";
+import { useTabStore } from "@/shared/stores/tabStore";
 
 export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
-  const { readMode, toggleReadMode, zoomLevel, fitMode } = useUIStore();
+  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode } = useUIStore();
+  const { showRulers, toggleRulers } = useDocumentSettingsStore();
   const currentDocument = getCurrentDocument();
   const [mupdf, setMupdf] = useState<any>(null);
   const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [showDocumentSettings, setShowDocumentSettings] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const pagesContainerRef = useRef<HTMLDivElement>(null);
-  const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  const [readModePanOffset, setReadModePanOffset] = useState({ x: 0, y: 0 });
-  const [isReadModeDragging, setIsReadModeDragging] = useState(false);
-  const [readModeDragStart, setReadModeDragStart] = useState({ x: 0, y: 0 });
   const [baseFitScale, setBaseFitScale] = useState<number>(1.0);
+  const isScrollingFromUserRef = useRef(false); // Track if page change is from user scroll vs external action
+  const previousPageRef = useRef(currentPage); // Track previous page to detect actual changes
+  const pendingScrollTopRef = useRef<number | null>(null); // Store pending scroll position to apply after zoom
+  const isZoomingRef = useRef(false); // Flag to prevent scroll interference during zoom
+  const zoomAnchorPointRef = useRef<{ x: number; y: number } | null>(null); // Store anchor point for transform origin
+  const previousReadModeRef = useRef(readMode); // Track previous read mode state
+  
+  // Use refs for smooth zoom to avoid stale closures
+  const zoomLevelRef = useRef(zoomLevel);
+  const baseFitScaleRef = useRef(baseFitScale);
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    zoomLevelRef.current = zoomLevel;
+  }, [zoomLevel]);
+  
+  useEffect(() => {
+    baseFitScaleRef.current = baseFitScale;
+  }, [baseFitScale]);
 
   // Initialize mupdf
   useEffect(() => {
@@ -45,99 +66,155 @@ export function PDFViewer() {
     initMupdf();
   }, []);
 
+  // Zoom function for read mode - zooms to anchor point (mouse cursor or viewport center)
+  const zoomToPoint = useCallback((
+    newZoom: number,
+    anchorX?: number,  // Mouse X in screen coordinates, or undefined for center
+    anchorY?: number   // Mouse Y in screen coordinates, or undefined for center
+  ) => {
+    if (!readMode || !scrollContainerRef.current || !pagesContainerRef.current || !currentDocument) return;
+
+    const scrollContainer = scrollContainerRef.current;
+    const pagesContainer = pagesContainerRef.current;
+    const currentZoom = zoomLevelRef.current;
+    const currentBaseFitScale = baseFitScaleRef.current;
+    
+    // Get container dimensions and position
+    const scrollRect = scrollContainer.getBoundingClientRect();
+    const pagesRect = pagesContainer.getBoundingClientRect();
+    const viewportWidth = scrollContainer.clientWidth;
+    const viewportHeight = scrollContainer.clientHeight;
+    
+    // Determine anchor point in viewport coordinates (relative to scroll container)
+    const anchorPointX = anchorX !== undefined 
+      ? anchorX - scrollRect.left
+      : viewportWidth / 2;
+    const anchorPointY = anchorY !== undefined
+      ? anchorY - scrollRect.top
+      : viewportHeight / 2;
+    
+    // Get current scroll position
+    const scrollTop = scrollContainer.scrollTop;
+    
+    // Current and new scale factors
+    const currentScale = currentZoom / currentBaseFitScale;
+    const newScale = newZoom / currentBaseFitScale;
+    
+    // Calculate the document position that is currently at the anchor point
+    // The key insight: scrollTop is the scroll position in base-scale coordinates
+    // The anchor point in the viewport (anchorPointY) is the offset from the top of the viewport
+    // The document position at the anchor = scrollTop + anchorPointY (in base-scale coordinates)
+    // const documentY = scrollTop + anchorPointY; // Reserved for future use
+    
+    // Calculate new scroll position to maintain the document position at the anchor point
+    // Formula: newScrollTop = ((scrollTop + anchorPointY) * currentScale / newScale) - anchorPointY
+    // This maintains the visual position of the anchor point during zoom
+    const newScrollTop = ((scrollTop + anchorPointY) * currentScale / newScale) - anchorPointY;
+    
+    // Store the target scroll position and anchor point for transform origin
+    // The transform origin needs to be relative to the pages container, not the scroll container
+    // The pages container is centered horizontally with flex justify-center
+    // We need to calculate the base width (at baseFitScale) to find the left edge
+    // Base width = firstPageMetadata.width * baseFitScale
+    // Pages container left edge = (viewportWidth - baseWidth) / 2
+    // But pagesRect.width is the transformed width, which changes with zoom
+    // So we need to use the base width divided by currentScale to get the untransformed width
+    const firstPageMetadata = currentDocument.getPageMetadata(0);
+    const baseWidth = firstPageMetadata ? firstPageMetadata.width * currentBaseFitScale : pagesRect.width / currentScale;
+    const pagesContainerLeftInScroll = (viewportWidth - baseWidth) / 2;
+    // Transform origin is relative to the pages container's coordinate system
+    // Y coordinate must include scrollTop since the container's top is at scrollTop=0 in its own coordinates
+    const anchorPointRelativeToPages = {
+      x: anchorPointX - pagesContainerLeftInScroll,
+      y: scrollTop + anchorPointY
+    };
+    
+    pendingScrollTopRef.current = newScrollTop;
+    isZoomingRef.current = true;
+    zoomAnchorPointRef.current = anchorPointRelativeToPages;
+    
+    // Update zoom state (this may trigger re-renders)
+    zoomLevelRef.current = newZoom;
+    setFitMode("custom");
+    setZoomLevel(newZoom);
+    
+    // Apply scroll position after transform has been applied
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (scrollContainer && pendingScrollTopRef.current !== null) {
+            const currentMaxScrollTop = Math.max(0, scrollContainer.scrollHeight - viewportHeight);
+            const targetScroll = Math.max(0, Math.min(currentMaxScrollTop, pendingScrollTopRef.current));
+            
+            scrollContainer.scrollTop = targetScroll;
+            
+            // Verify and retry if needed
+            if (Math.abs(scrollContainer.scrollTop - targetScroll) > 1) {
+              scrollContainer.scrollTop = targetScroll;
+              if (Math.abs(scrollContainer.scrollTop - targetScroll) > 1) {
+                scrollContainer.scrollTo({ top: targetScroll, behavior: 'auto' });
+              }
+            }
+            
+            setTimeout(() => {
+              pendingScrollTopRef.current = null;
+              isZoomingRef.current = false;
+              zoomAnchorPointRef.current = null;
+            }, 10);
+          }
+        });
+      });
+    }, 50);
+  }, [readMode, currentDocument, setZoomLevel, setFitMode]);
+
   // Scroll to current page in read mode
   const scrollToPage = useCallback((pageNumber: number, center: boolean = true) => {
-    if (!readMode || !scrollContainerRef.current) return;
+    if (!readMode || !scrollContainerRef.current || !currentDocument) return;
     
-    const pageEl = pageRefs.current.get(pageNumber);
     const container = scrollContainerRef.current;
+    const firstPageMetadata = currentDocument.getPageMetadata(0);
+    if (!firstPageMetadata) return;
     
-    if (pageEl && container) {
+    const scale = zoomLevel / baseFitScale;
+    const pageHeight = (firstPageMetadata.height * baseFitScale) * scale;
+    const pageGap = 24;
+    
+    // Calculate page position
+    let pageTop = 0;
+    for (let i = 0; i < pageNumber; i++) {
+      const pageMetadata = currentDocument.getPageMetadata(i);
+      if (pageMetadata) {
+        pageTop += (pageMetadata.height * baseFitScale) * scale + pageGap;
+      }
+    }
+    
       if (center) {
         const containerHeight = container.clientHeight;
-        const pageHeight = pageEl.offsetHeight;
-        const pageTopRelativeToContainer = pageEl.offsetTop;
-        const targetScroll = pageTopRelativeToContainer - (containerHeight / 2) + (pageHeight / 2);
+      const targetScroll = pageTop - (containerHeight / 2) + (pageHeight / 2);
         container.scrollTo({
           top: Math.max(0, targetScroll),
           behavior: "smooth"
         });
       } else {
-        pageEl.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    }
-  }, [readMode]);
-
-  // Track scroll position in read mode to update current page
-  useEffect(() => {
-    if (!readMode || !currentDocument || !scrollContainerRef.current) return;
-
-    const container = scrollContainerRef.current;
-    let isScrolling = false;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (isScrolling) return;
-
-        let maxRatio = 0;
-        let visiblePage = currentPage;
-        const containerRect = container.getBoundingClientRect();
-        const viewportCenterY = containerRect.top + containerRect.height / 2;
-
-        entries.forEach((entry) => {
-          const pageNum = parseInt(entry.target.getAttribute("data-page-number") || "0");
-          const pageRect = entry.boundingClientRect;
-          const pageCenterY = pageRect.top + pageRect.height / 2;
-          
-          const distanceFromCenter = Math.abs(pageCenterY - viewportCenterY);
-          const maxDistance = containerRect.height / 2;
-          const centerScore = Math.max(0, 1 - Math.min(1, distanceFromCenter / maxDistance));
-          
-          const zoomWeight = fitMode === "custom" ? 0.7 : 0.5;
-          const combinedScore = entry.intersectionRatio * zoomWeight + centerScore * (1 - zoomWeight);
-          
-          if (combinedScore > maxRatio) {
-            maxRatio = combinedScore;
-            visiblePage = pageNum;
-          }
-        });
-
-        const threshold = fitMode === "custom" ? 0.2 : 0.3;
-        if (visiblePage !== currentPage && maxRatio > threshold) {
-          setCurrentPage(visiblePage);
-        }
-      },
-      {
-        root: container,
-        rootMargin: fitMode === "custom" ? "-10% 0px -10% 0px" : "-5% 0px -5% 0px",
-        threshold: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-      }
-    );
-
-    let scrollTimeout: NodeJS.Timeout | null = null;
-    const handleScroll = () => {
-      isScrolling = true;
-      if (scrollTimeout) clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => {
-        isScrolling = false;
-      }, 150);
-    };
-
-    container.addEventListener('scroll', handleScroll, { passive: true });
-
-    const timeoutId = setTimeout(() => {
-      pageRefs.current.forEach((pageEl) => {
-        if (pageEl) observer.observe(pageEl);
+      container.scrollTo({
+        top: Math.max(0, pageTop),
+        behavior: "smooth"
       });
-    }, 100);
+    }
+  }, [readMode, currentDocument, zoomLevel, baseFitScale]);
 
-    return () => {
-      clearTimeout(timeoutId);
-      if (scrollTimeout) clearTimeout(scrollTimeout);
-      container.removeEventListener('scroll', handleScroll);
-      observer.disconnect();
-    };
-  }, [readMode, currentDocument, currentPage, setCurrentPage, fitMode]);
+  // Handle page visibility changes from VirtualizedPageList
+  // This updates the current page as the user scrolls
+  const handlePageVisible = useCallback((pageNumber: number) => {
+    if (pageNumber !== currentPage) {
+      isScrollingFromUserRef.current = true; // Mark as user scroll
+      setCurrentPage(pageNumber);
+      // Reset flag after a short delay
+      setTimeout(() => {
+        isScrollingFromUserRef.current = false;
+      }, 100);
+    }
+  }, [currentPage, setCurrentPage]);
 
   // Handle wheel zoom in read mode at container level
   useEffect(() => {
@@ -151,68 +228,15 @@ export function PDFViewer() {
       e.preventDefault();
       e.stopPropagation();
 
-      // Use smaller delta for smoother, less aggressive zooming
+      const currentZoom = zoomLevelRef.current;
       const delta = e.deltaY > 0 ? 0.97 : 1.03;
-      const newZoom = Math.max(0.25, Math.min(5, zoomLevel * delta));
+      const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
 
-      if (Math.abs(newZoom - zoomLevel) > 0.001) {
-        const containerRect = container.getBoundingClientRect();
-        const viewportWidth = containerRect.width;
-        const viewportHeight = containerRect.height;
-        
-        // Center-based zoom: keep the center of the viewport centered on the content
-        // Calculate the center point in the current coordinate system
-        const scrollTop = container.scrollTop;
-        const scrollLeft = container.scrollLeft;
-        const viewportCenterX = viewportWidth / 2 + scrollLeft;
-        const viewportCenterY = viewportHeight / 2 + scrollTop;
-        
-        // Convert viewport center to pages container space (accounting for current pan)
-        const centerInPagesSpace = {
-          x: viewportCenterX - readModePanOffset.x,
-          y: viewportCenterY - readModePanOffset.y
-        };
-        
-        // Convert to PDF coordinate space (accounting for current transform scale)
-        const currentScale = zoomLevel / baseFitScale;
-        const pdfCenterPoint = {
-          x: centerInPagesSpace.x / currentScale,
-          y: centerInPagesSpace.y / currentScale
-        };
-        
-        // Calculate where this PDF center point will be at the new zoom level
-        const newScale = newZoom / baseFitScale;
-        const pdfCenterAtNewZoom = {
-          x: pdfCenterPoint.x * newScale,
-          y: pdfCenterPoint.y * newScale
-        };
-        
-        // Calculate new pan offset to keep the PDF center point at viewport center
-        let newPanX = viewportCenterX - pdfCenterAtNewZoom.x;
-        let newPanY = viewportCenterY - pdfCenterAtNewZoom.y;
-        
-        // Constrain pan to PDF content bounds
-        if (currentDocument) {
-          const pageCount = currentDocument.getPageCount();
-          const firstPageMetadata = currentDocument.getPageMetadata(0);
-          if (firstPageMetadata) {
-            // Content dimensions at the new zoom level (accounting for transform scale)
-            const contentWidth = firstPageMetadata.width * baseFitScale * newScale;
-            const contentHeight = (pageCount * (firstPageMetadata.height * baseFitScale) + (pageCount - 1) * 150) * newScale;
-            
-            // Constrain pan: can't pan beyond content bounds
-            const maxPanX = Math.max(0, contentWidth - viewportWidth);
-            const maxPanY = Math.max(0, contentHeight - viewportHeight);
-            
-            newPanX = Math.max(-maxPanX, Math.min(0, newPanX));
-            newPanY = Math.max(-maxPanY, Math.min(0, newPanY));
-          }
-        }
-
-        const { setZoomLevel, setFitMode } = useUIStore.getState();
-        setFitMode("custom"); // User is manually zooming, set to custom
-        setZoomLevel(newZoom);
-        setReadModePanOffset({ x: newPanX, y: newPanY });
+      if (Math.abs(newZoom - currentZoom) > 0.001) {
+        // Pass mouse cursor position to zoom to that point
+        // e.clientX and e.clientY are relative to the viewport (screen coordinates)
+        // These will be converted to scroll container coordinates in zoomToPoint
+        zoomToPoint(newZoom, e.clientX, e.clientY);
       }
     };
 
@@ -221,24 +245,126 @@ export function PDFViewer() {
     return () => {
       container.removeEventListener("wheel", handleWheelNative);
     };
-  }, [readMode, zoomLevel, readModePanOffset]);
+  }, [readMode, zoomToPoint]);
 
-  // Scroll to current page when entering read mode or when page changes
+  // Expose read mode zoom function via UI store callback
+  // For button clicks, zoom to viewport center
+  useEffect(() => {
+    if (readMode) {
+      const { setZoomToCenterCallback } = useUIStore.getState();
+      // Create a wrapper that zooms to viewport center when called from buttons
+      const zoomToCenterWrapper = (newZoom: number) => {
+        if (!scrollContainerRef.current) return;
+        const container = scrollContainerRef.current;
+        const containerRect = container.getBoundingClientRect();
+        const viewportCenterX = containerRect.left + containerRect.width / 2;
+        const viewportCenterY = containerRect.top + containerRect.height / 2;
+        zoomToPoint(newZoom, viewportCenterX, viewportCenterY);
+      };
+      setZoomToCenterCallback(zoomToCenterWrapper);
+      return () => {
+        setZoomToCenterCallback(null);
+      };
+    }
+  }, [readMode, zoomToPoint]);
+
+  // Track the page we should scroll to when entering read mode
+  const targetPageOnReadModeEntryRef = useRef<number | null>(null);
+  
+  // Scroll to current page when entering read mode
+  useEffect(() => {
+    // Check if we just entered read mode (transitioned from false to true)
+    const justEnteredReadMode = !previousReadModeRef.current && readMode;
+    previousReadModeRef.current = readMode;
+    
+    if (justEnteredReadMode) {
+      // Store the current page to scroll to
+      targetPageOnReadModeEntryRef.current = currentPage;
+    }
+    
+    // Only proceed if we're in read mode and have a target page
+    if (!readMode || !scrollContainerRef.current || !currentDocument || targetPageOnReadModeEntryRef.current === null) {
+      if (!readMode) {
+        targetPageOnReadModeEntryRef.current = null; // Clear target when exiting read mode
+      }
+      return;
+    }
+    
+    // Wait for baseFitScale to be calculated and view to be ready
+    const targetPage = targetPageOnReadModeEntryRef.current;
+    const scrollToCurrentPage = () => {
+      if (scrollContainerRef.current && pagesContainerRef.current && baseFitScale > 0) {
+        scrollToPage(targetPage, true);
+        targetPageOnReadModeEntryRef.current = null; // Clear after scrolling
+      }
+    };
+    
+    let checkInterval: NodeJS.Timeout | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+    let rafId1: number | null = null;
+    let rafId2: number | null = null;
+    let scrollTimeoutId: NodeJS.Timeout | null = null;
+    
+    // Wait for baseFitScale calculation and VirtualizedPageList to render
+    // Use multiple requestAnimationFrame calls and a timeout to ensure everything is ready
+    if (baseFitScale > 0) {
+      // baseFitScale is already ready
+      rafId1 = requestAnimationFrame(() => {
+        rafId2 = requestAnimationFrame(() => {
+          scrollTimeoutId = setTimeout(scrollToCurrentPage, 150);
+        });
+      });
+    } else {
+      // Wait for baseFitScale to be calculated first
+      checkInterval = setInterval(() => {
+        if (baseFitScale > 0 && scrollContainerRef.current && pagesContainerRef.current) {
+          if (checkInterval) clearInterval(checkInterval);
+          rafId1 = requestAnimationFrame(() => {
+            rafId2 = requestAnimationFrame(() => {
+              scrollTimeoutId = setTimeout(scrollToCurrentPage, 150);
+            });
+          });
+        }
+      }, 50);
+      
+      // Timeout after 2 seconds to prevent infinite waiting
+      timeoutId = setTimeout(() => {
+        if (checkInterval) clearInterval(checkInterval);
+      }, 2000);
+    }
+    
+    // Cleanup function
+    return () => {
+      if (checkInterval) clearInterval(checkInterval);
+      if (timeoutId) clearTimeout(timeoutId);
+      if (rafId1 !== null) cancelAnimationFrame(rafId1);
+      if (rafId2 !== null) cancelAnimationFrame(rafId2);
+      if (scrollTimeoutId) clearTimeout(scrollTimeoutId);
+    };
+  }, [readMode, currentPage, currentDocument, baseFitScale, scrollToPage]);
+
+  // Listen for page changes from thumbnail clicks (external actions)
+  // Only scroll if the change didn't come from user scrolling
   useEffect(() => {
     if (!readMode || !scrollContainerRef.current) return;
-    const timeoutId = setTimeout(() => {
-      scrollToPage(currentPage, true);
-    }, 200);
-    return () => clearTimeout(timeoutId);
-  }, [readMode, scrollToPage, currentPage]);
-
-  // Listen for page changes from thumbnail clicks
-  useEffect(() => {
-    if (readMode && scrollContainerRef.current) {
+    
+    // Skip if page didn't actually change
+    if (previousPageRef.current === currentPage) {
+      return;
+    }
+    
+    // Don't scroll if this page change came from user scrolling
+    if (isScrollingFromUserRef.current) {
+      previousPageRef.current = currentPage;
+      return;
+    }
+    
+    // This is an external action (thumbnail click, etc.) - scroll to the page
       requestAnimationFrame(() => {
         scrollToPage(currentPage, true);
       });
-    }
+    
+    previousPageRef.current = currentPage;
   }, [currentPage, readMode, scrollToPage]);
 
   // Calculate base fit-to-width scale when entering read mode or document changes
@@ -263,12 +389,6 @@ export function PDFViewer() {
     }
   }, [readMode, fitMode]);
 
-  // Reset pan when exiting read mode
-  useEffect(() => {
-    if (!readMode || fitMode !== "custom") {
-      setReadModePanOffset({ x: 0, y: 0 });
-    }
-  }, [readMode, fitMode]);
 
   const handlePreviousPage = () => {
     if (currentDocument && currentPage > 0) {
@@ -282,24 +402,44 @@ export function PDFViewer() {
     }
   };
 
+  const handleApplyDocumentSettings = async (width: number, height: number, applyToAll: boolean) => {
+    const currentDoc = getCurrentDocument();
+    if (!currentDoc) return;
+
+    try {
+      const mupdfModule = await import("mupdf");
+      const editor = new PDFEditor(mupdfModule.default);
+      
+      if (applyToAll) {
+        // Resize all pages
+        await editor.resizeAllPages(currentDoc, width, height);
+      } else {
+        // Resize current page only
+        await editor.resizePage(currentDoc, currentPage, width, height);
+      }
+      
+      // Mark tab as modified
+      const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
+      if (tab) {
+        useTabStore.getState().setTabModified(tab.id, true);
+      }
+    } catch (error) {
+      console.error("Error applying document settings:", error);
+      throw error;
+    }
+  };
+
 
   if (!isInitialized || !mupdf || !renderer) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div className="absolute inset-0 flex items-center justify-center">
         <div className="text-muted-foreground">Initializing PDF viewer...</div>
       </div>
     );
   }
 
   if (!currentDocument) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center text-muted-foreground">
-          <p className="text-lg mb-2">No PDF loaded</p>
-          <p className="text-sm">Open a PDF file to get started</p>
-        </div>
-      </div>
-    );
+    return null; // Don't show anything - let App's drag and drop area handle it
   }
 
   const pageCount = currentDocument.getPageCount();
@@ -308,162 +448,61 @@ export function PDFViewer() {
 
   return (
     <div className="flex flex-col h-full w-full">
-      {/* Search Bar */}
-      <SearchBar />
-
-      {/* Top Navigation Bar */}
-      <div className="flex items-center justify-between p-2 border-b bg-background">
-        <div className="flex items-center gap-2">
-          <PageTools />
-        </div>
-      </div>
-
       {/* Page Canvas - Full Height */}
-      {readMode ? (
-        // Read mode: All pages in scrollable container
+      {/* Cache both views for fast switching - both stay mounted but only one is visible */}
+      <div className="flex-1 relative">
+        {/* Read mode: Virtualized page list with native scrolling */}
         <div
           ref={scrollContainerRef}
-          className="flex-1 bg-muted"
+          className={`absolute inset-0 bg-muted overflow-auto ${
+            readMode ? "" : "hidden"
+          }`}
           style={{ 
             scrollBehavior: "smooth",
-            // When zoomed, allow both horizontal and vertical scrolling
-            // When not zoomed, only vertical scrolling
-            overflowX: fitMode === "custom" ? "auto" : "hidden",
-            overflowY: "auto",
-            // Ensure content can overflow when zoomed
-            position: "relative",
           }}
         >
           <div 
             ref={pagesContainerRef}
-            className="flex flex-col items-center" 
+            className="flex justify-center"
             style={{ 
-              margin: 0, 
-              padding: 0, 
-              gap: 0, 
-              fontSize: 0,
-              paddingTop: "50vh",
-              paddingBottom: "50vh",
-              // Apply zoom via transform scale - this makes it feel like zooming into a static image
-              // Pages stay at fit-to-width size, but are scaled via transform
-              // The scale factor is zoomLevel / baseFitScale to scale from fit-to-width
-              transform: fitMode === "custom"
-                ? `translate(${readModePanOffset.x}px, ${readModePanOffset.y}px) scale(${zoomLevel / baseFitScale})`
-                : undefined,
-              transformOrigin: "0 0",
-              cursor: isReadModeDragging ? "grabbing" : (fitMode === "custom" ? "grab" : undefined),
-            }}
-            onMouseDown={(e) => {
-              if (fitMode === "custom" && e.button === 0 && scrollContainerRef.current) {
-                setIsReadModeDragging(true);
-                const container = scrollContainerRef.current;
-                const containerRect = container.getBoundingClientRect();
-                const mouseX = e.clientX - containerRect.left;
-                const mouseY = e.clientY - containerRect.top;
-                const scrollLeft = container.scrollLeft;
-                const scrollTop = container.scrollTop;
-                
-                // Calculate drag start position in pages coordinate system
-                setReadModeDragStart({ 
-                  x: mouseX + scrollLeft - readModePanOffset.x, 
-                  y: mouseY + scrollTop - readModePanOffset.y 
-                });
-              }
-            }}
-            onMouseMove={(e) => {
-              if (isReadModeDragging && fitMode === "custom" && pagesContainerRef.current && scrollContainerRef.current) {
-                const container = scrollContainerRef.current;
-                const scrollLeft = container.scrollLeft;
-                const scrollTop = container.scrollTop;
-                
-                // Calculate mouse position relative to scroll container
-                const containerRect = container.getBoundingClientRect();
-                const mouseX = e.clientX - containerRect.left;
-                const mouseY = e.clientY - containerRect.top;
-                
-                // Calculate new pan offset based on drag start position
-                let newPanX = (mouseX + scrollLeft) - readModeDragStart.x;
-                let newPanY = (mouseY + scrollTop) - readModeDragStart.y;
-                
-                // Constrain pan to PDF content bounds
-                if (currentDocument) {
-                  const pageCount = currentDocument.getPageCount();
-                  const firstPageMetadata = currentDocument.getPageMetadata(0);
-                  if (firstPageMetadata) {
-                    // Content dimensions at current zoom level (accounting for transform scale)
-                    const currentScale = zoomLevel / baseFitScale;
-                    const contentWidth = firstPageMetadata.width * baseFitScale * currentScale;
-                    const contentHeight = (pageCount * (firstPageMetadata.height * baseFitScale) + (pageCount - 1) * 150) * currentScale;
-                    
-                    const viewportWidth = containerRect.width;
-                    const viewportHeight = containerRect.height;
-                    
-                    // Constrain pan: can't pan beyond content bounds
-                    const maxPanX = Math.max(0, contentWidth - viewportWidth);
-                    const maxPanY = Math.max(0, contentHeight - viewportHeight);
-                    
-                    newPanX = Math.max(-maxPanX, Math.min(0, newPanX));
-                    newPanY = Math.max(-maxPanY, Math.min(0, newPanY));
-                  }
-                }
-                
-                setReadModePanOffset({
-                  x: newPanX,
-                  y: newPanY,
-                });
-              }
-            }}
-            onMouseUp={() => {
-              if (readMode) {
-                setIsReadModeDragging(false);
-              }
-            }}
-            onMouseLeave={() => {
-              if (readMode) {
-                setIsReadModeDragging(false);
-              }
+              transform: fitMode === "custom" ? `scale(${zoomLevel / baseFitScale})` : undefined,
+              transformOrigin: zoomAnchorPointRef.current && isZoomingRef.current
+                ? `${zoomAnchorPointRef.current.x}px ${zoomAnchorPointRef.current.y}px`
+                : "top left",
+              willChange: "transform",
             }}
           >
-            {Array.from({ length: pageCount }, (_, i) => (
-              <div
-                key={i}
-                ref={(el) => {
-                  if (el) {
-                    pageRefs.current.set(i, el);
-                  } else {
-                    pageRefs.current.delete(i);
-                  }
-                }}
-                data-page-number={i}
-                className="w-full flex justify-center"
-                style={{ margin: 0, padding: 0, marginBottom: i < pageCount - 1 ? "150px" : 0, lineHeight: 0, fontSize: 0 }}
-              >
-                <div className="w-full" style={{ margin: 0, padding: 0, lineHeight: 0, fontSize: 0, display: 'flex', justifyContent: 'center' }}>
-                  <PageCanvas
-                    document={currentDocument}
-                    pageNumber={i}
-                    renderer={renderer}
-                    readMode={true}
-                  />
-                </div>
-              </div>
-            ))}
+            {currentDocument && renderer && (
+              <VirtualizedPageList
+                  document={currentDocument}
+                  renderer={renderer}
+                zoomLevel={zoomLevel}
+                baseFitScale={baseFitScale}
+                pageGap={24}
+                bufferPages={2}
+                onPageVisible={handlePageVisible}
+                scrollContainerRef={scrollContainerRef}
+              />
+            )}
           </div>
         </div>
-      ) : (
-        // Normal mode: Single page
-        <div className="flex-1 overflow-hidden">
+        
+        {/* Normal mode: Single page */}
+        <div className={`absolute inset-0 overflow-hidden ${
+          readMode ? "hidden" : ""
+        }`}>
           <PageCanvas
             document={currentDocument}
             pageNumber={currentPage}
             renderer={renderer}
           />
         </div>
-      )}
+      </div>
       
       {/* Bottom Navigation Bar with Read Mode Toggle */}
       <div className="flex items-center justify-between p-2 border-t bg-background">
         <div className="flex items-center gap-2">
+          {!readMode && <PageTools />}
           <Button
             variant="outline"
             size="icon"
@@ -483,6 +522,27 @@ export function PDFViewer() {
           >
             <ChevronRight className="h-4 w-4" />
           </Button>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <Button
+            variant={showRulers ? "default" : "outline"}
+            size="icon"
+            onClick={toggleRulers}
+            title="Toggle Rulers"
+            disabled={!currentDocument || readMode}
+          >
+            <Ruler className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => setShowDocumentSettings(true)}
+            title="Document Settings"
+            disabled={!currentDocument}
+          >
+            <Settings className="h-4 w-4" />
+          </Button>
           <Button
             variant={readMode ? "default" : "outline"}
             size="icon"
@@ -493,6 +553,15 @@ export function PDFViewer() {
           </Button>
         </div>
       </div>
+
+      {/* Document Settings Dialog */}
+      <DocumentSettingsDialog
+        open={showDocumentSettings}
+        onOpenChange={setShowDocumentSettings}
+        document={currentDocument}
+        currentPage={currentPage}
+        onApply={handleApplyDocumentSettings}
+      />
     </div>
   );
 }

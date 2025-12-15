@@ -28,8 +28,10 @@ export function SearchBar() {
 
   // Debounced search
   useEffect(() => {
-    if (!query.trim() || !currentDocument) {
-      setSearchResults(currentDocument!.getId(), []);
+    if (!currentDocument) return;
+    
+    if (!query.trim()) {
+      setSearchResults(currentDocument.getId(), []);
       setCurrentSearchResult(-1);
       return;
     }
@@ -112,15 +114,15 @@ export function SearchBar() {
   if (!currentDocument) return null;
 
   return (
-    <div className="flex items-center gap-2 p-2 border-b bg-background">
-      <div className="relative flex-1 max-w-md">
+    <div className="flex flex-col gap-2 p-2">
+      <div className="relative w-full">
         <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           type="text"
           placeholder="Search PDF..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="pl-8 pr-8"
+          className="pl-8 pr-8 w-full"
         />
         {query && (
           <Button
@@ -134,32 +136,37 @@ export function SearchBar() {
         )}
       </div>
 
-      {results.length > 0 && (
-        <>
-          <div className="text-sm text-muted-foreground">
-            {currentResultIndex + 1} of {results.length}
-          </div>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={handlePrevious}
-            disabled={results.length === 0}
-          >
-            <ChevronUp className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={handleNext}
-            disabled={results.length === 0}
-          >
-            <ChevronDown className="h-4 w-4" />
-          </Button>
-        </>
-      )}
-
-      {isSearching && (
-        <div className="text-sm text-muted-foreground">Searching...</div>
+      {(results.length > 0 || isSearching) && (
+        <div className="flex items-center gap-2">
+          {results.length > 0 && (
+            <>
+              <div className="text-xs text-muted-foreground flex-1">
+                {currentResultIndex + 1} of {results.length}
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-7 w-7"
+                onClick={handlePrevious}
+                disabled={results.length === 0}
+              >
+                <ChevronUp className="h-3 w-3" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-7 w-7"
+                onClick={handleNext}
+                disabled={results.length === 0}
+              >
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            </>
+          )}
+          {isSearching && (
+            <div className="text-xs text-muted-foreground">Searching...</div>
+          )}
+        </div>
       )}
     </div>
   );

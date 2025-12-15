@@ -6,12 +6,15 @@ import { useKeyboard } from "@/shared/hooks/useKeyboard";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
+import { useUIStore } from "@/shared/stores/uiStore";
 import { PDFViewer } from "@/features/viewer/PDFViewer";
 import { TabBar } from "@/features/tabs/TabBar";
 import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
+import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
+import { SearchBar } from "@/features/search/SearchBar";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { Button } from "@/components/ui/button";
 import { FileText, Upload, File } from "lucide-react";
@@ -23,6 +26,7 @@ function App() {
   const { tabs } = useTabStore();
   const { setCurrentDocument } = usePDFStore();
   const { getRecentFiles } = useRecentFilesStore();
+  const { readMode, activeTool } = useUIStore();
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
@@ -217,8 +221,8 @@ function App() {
         <aside className="w-64 border-r bg-secondary/50 flex flex-col overflow-hidden">
           {/* Thumbnails Section - takes available space from top */}
           <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            <div className="p-3 border-b bg-background">
-              <h2 className="text-sm font-semibold text-foreground">Pages</h2>
+            <div className="border-b bg-background">
+              <SearchBar />
             </div>
             <div className="flex-1 overflow-hidden">
               <ThumbnailCarousel />
@@ -242,8 +246,17 @@ function App() {
         </aside>
       </div>
 
-      {/* Floating Text Formatting Toolbar with Tabs - only when PDF is loaded */}
-      {currentDocument && (
+      {/* Floating Highlight Toolbar - only when highlight tool is active and PDF is loaded */}
+      {currentDocument && !readMode && activeTool === "highlight" && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
+          <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg">
+            <HighlightToolbar />
+          </div>
+        </div>
+      )}
+
+      {/* Floating Text Formatting Toolbar with Tabs - only when PDF is loaded and not in read mode */}
+      {currentDocument && !readMode && activeTool !== "highlight" && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
           <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg flex flex-col">
             <TextFormattingToolbar

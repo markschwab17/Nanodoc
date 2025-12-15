@@ -12,6 +12,7 @@ import {
   Type, 
   Highlighter, 
   MessageSquare,
+  Eraser,
   ZoomIn,
   ZoomOut,
   Maximize,
@@ -24,7 +25,10 @@ import {
   Printer,
   HardDrive,
   Clock,
-  Maximize2
+  Maximize2,
+  Settings,
+  Ruler,
+  TextSelect
 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
@@ -45,9 +49,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
+import { PrintSettingsDialog } from "@/features/print/PrintSettingsDialog";
+import type { PrintSettings } from "@/shared/stores/printStore";
+import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
+import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
 
 export function Toolbar() {
-  const { activeTool, setActiveTool, zoomLevel, zoomToCenter, setFitMode } = useUIStore();
+  const { activeTool, setActiveTool, zoomLevel, zoomToCenter, setFitMode, readMode } = useUIStore();
   const { currentPage, getCurrentDocument, addBookmark } = usePDFStore();
   const currentDocument = getCurrentDocument();
   const [, setIsFullscreen] = useState(false);
@@ -56,8 +64,11 @@ export function Toolbar() {
   const { loadPDF } = usePDF();
   const [showRecentFiles, setShowRecentFiles] = useState(false);
   const [showSizeDialog, setShowSizeDialog] = useState(false);
+  const [showPrintDialog, setShowPrintDialog] = useState(false);
+  const [showDocumentSettings, setShowDocumentSettings] = useState(false);
   const [pageWidth, setPageWidth] = useState("8.5");
   const [pageHeight, setPageHeight] = useState("11");
+  const { showRulers, toggleRulers } = useDocumentSettingsStore();
 
   const handleOpenFile = async () => {
     const result = await fileSystem.openFile();
@@ -142,7 +153,19 @@ export function Toolbar() {
     });
   };
 
-  const handlePrint = async () => {
+  const handlePrint = () => {
+    const currentDoc = getCurrentDocument();
+    if (!currentDoc) return;
+
+    // Open print settings dialog
+    setShowPrintDialog(true);
+  };
+
+  const handleExecutePrint = async (
+    settings: PrintSettings,
+    startPage: number,
+    endPage: number
+  ) => {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
@@ -153,7 +176,7 @@ export function Toolbar() {
       const mupdfModule = await import("mupdf");
       const printer = new PDFPrinter(mupdfModule.default);
       
-      await printer.printDocument(currentDoc);
+      await printer.printPages(currentDoc, startPage, endPage, settings);
     } catch (error) {
       console.error("Error printing PDF:", error);
     }
@@ -226,6 +249,33 @@ export function Toolbar() {
     } catch (error) {
       console.error("Error resizing page:", error);
       alert("Failed to resize page: " + (error instanceof Error ? error.message : String(error)));
+    }
+  };
+
+  const handleApplyDocumentSettings = async (width: number, height: number, applyToAll: boolean) => {
+    const currentDoc = getCurrentDocument();
+    if (!currentDoc) return;
+
+    try {
+      const mupdfModule = await import("mupdf");
+      const editor = new PDFEditor(mupdfModule.default);
+      
+      if (applyToAll) {
+        // Resize all pages
+        await editor.resizeAllPages(currentDoc, width, height);
+      } else {
+        // Resize current page only
+        await editor.resizePage(currentDoc, currentPage, width, height);
+      }
+      
+      // Mark tab as modified
+      const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
+      if (tab) {
+        useTabStore.getState().setTabModified(tab.id, true);
+      }
+    } catch (error) {
+      console.error("Error applying document settings:", error);
+      throw error;
     }
   };
 
@@ -364,6 +414,15 @@ export function Toolbar() {
           <MousePointer2 className="h-5 w-5" />
         </Button>
         <Button
+          variant={activeTool === "selectText" ? "default" : "outline"}
+          size="icon"
+          onClick={() => setActiveTool("selectText")}
+          title="Select Text Tool"
+          className="w-12 h-12"
+        >
+          <TextSelect className="h-5 w-5" />
+        </Button>
+        <Button
           variant={activeTool === "pan" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("pan")}
@@ -398,6 +457,15 @@ export function Toolbar() {
           className="w-12 h-12"
         >
           <MessageSquare className="h-5 w-5" />
+        </Button>
+        <Button
+          variant={activeTool === "redact" ? "default" : "outline"}
+          size="icon"
+          onClick={() => setActiveTool("redact")}
+          title="Redact (Permanently Remove Content)"
+          className="w-12 h-12"
+        >
+          <Eraser className="h-5 w-5" />
         </Button>
       </div>
 
@@ -491,11 +559,31 @@ export function Toolbar() {
           variant="outline"
           size="icon"
           onClick={handleOpenSizeDialog}
-          title="Adjust Page Size"
+          title="Adjust Page Size (Current Page)"
           className="w-12 h-12"
           disabled={!currentDocument}
         >
           <Maximize2 className="h-5 w-5" />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => setShowDocumentSettings(true)}
+          title="Document Settings (All Pages)"
+          className="w-12 h-12"
+          disabled={!currentDocument}
+        >
+          <Settings className="h-5 w-5" />
+        </Button>
+        <Button
+          variant={showRulers ? "default" : "outline"}
+          size="icon"
+          onClick={toggleRulers}
+          title="Toggle Rulers"
+          className="w-12 h-12"
+          disabled={!currentDocument || readMode}
+        >
+          <Ruler className="h-5 w-5" />
         </Button>
         <Button
           variant="outline"
@@ -512,6 +600,15 @@ export function Toolbar() {
       <RecentFilesModal
         open={showRecentFiles}
         onOpenChange={setShowRecentFiles}
+      />
+
+      {/* Print Settings Dialog */}
+      <PrintSettingsDialog
+        open={showPrintDialog}
+        onOpenChange={setShowPrintDialog}
+        document={currentDocument}
+        onPrint={handleExecutePrint}
+        currentPage={currentPage}
       />
 
       {/* Page Size Dialog */}
@@ -559,6 +656,15 @@ export function Toolbar() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Document Settings Dialog */}
+      <DocumentSettingsDialog
+        open={showDocumentSettings}
+        onOpenChange={setShowDocumentSettings}
+        document={currentDocument}
+        currentPage={currentPage}
+        onApply={handleApplyDocumentSettings}
+      />
     </div>
   );
 }

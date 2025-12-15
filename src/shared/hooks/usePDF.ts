@@ -8,6 +8,7 @@ import { useCallback } from "react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
+import { useUIStore } from "@/shared/stores/uiStore";
 import { PDFDocument } from "@/core/pdf/PDFDocument";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 
@@ -15,6 +16,7 @@ export function usePDF() {
   const pdfStore = usePDFStore();
   const tabStore = useTabStore();
   const recentFilesStore = useRecentFilesStore();
+  const { setActiveTool } = useUIStore();
 
   const currentDocument = pdfStore.getCurrentDocument();
   const activeTab = tabStore.getActiveTab();
@@ -72,6 +74,14 @@ export function usePDF() {
           order: tabStore.tabs.length,
         });
 
+        // Set select tool as default when PDF is loaded
+        setActiveTool("select");
+        
+        // Blur any focused elements to prevent Enter/Space from triggering buttons
+        if (typeof window !== 'undefined' && window.document.activeElement instanceof HTMLElement) {
+          window.document.activeElement.blur();
+        }
+
         return document;
       } catch (error) {
         pdfStore.setError(
@@ -82,7 +92,7 @@ export function usePDF() {
         pdfStore.setLoading(false);
       }
     },
-    [pdfStore, tabStore, recentFilesStore]
+    [pdfStore, tabStore, recentFilesStore, setActiveTool]
   );
 
   const closeCurrentDocument = useCallback(() => {

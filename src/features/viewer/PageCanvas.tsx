@@ -7,14 +7,20 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
+import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
 import { cn } from "@/lib/utils";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { RichTextEditor } from "./RichTextEditor";
+import { HorizontalRuler } from "./HorizontalRuler";
+import { VerticalRuler } from "./VerticalRuler";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { PDFDocument as PDFDocumentClass } from "@/core/pdf/PDFDocument";
+import { toolHandlers } from "@/features/tools";
+import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 
 interface PageCanvasProps {
   document: PDFDocument;
@@ -35,14 +41,14 @@ export function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
-  const BASE_SCALE = 1.0; // Fixed base scale for PDF rendering (1 point = 1 pixel)
+  const [actualScale, setActualScale] = useState<number>(2.0); // Store the actual scale used for rendering
+  const BASE_SCALE = 2.0; // Fixed base scale for PDF rendering (2x resolution for crisp text and vectors)
   const [editor, setEditor] = useState<PDFEditor | null>(null);
-  const [containerHeight, setContainerHeight] = useState<number | undefined>(undefined);
-  const [containerWidth, setContainerWidth] = useState<number | undefined>(undefined);
   
   const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
   const { getCurrentDocument, getAnnotations, addAnnotation, getSearchResults, updateAnnotation, setCurrentPage } = usePDFStore();
+  const { showRulers } = useDocumentSettingsStore();
+  const { showNotification } = useNotificationStore();
   const currentDocument = getCurrentDocument();
   
   const searchResults = currentDocument
@@ -90,6 +96,19 @@ export function PageCanvas({
   const draggingAnnotationRef = useRef<{ id: string; initialX: number; initialY: number } | null>(null);
   const resizingAnnotationRef = useRef<{ id: string; initialWidth: number; initialHeight: number } | null>(null);
   const rotatingAnnotationRef = useRef<{ id: string; initialRotation: number } | null>(null);
+  // Text selection state
+  const [selectedTextSpans, setSelectedTextSpans] = useState<TextSpan[]>([]);
+  const selectedTextRef = useRef<string>("");
+  // Track if hovering over selectable text for cursor changes
+  const [isHoveringOverText, setIsHoveringOverText] = useState(false);
+  // Overlay highlight path for preview
+  const [overlayHighlightPath, setOverlayHighlightPath] = useState<Array<{ x: number; y: number }>>([]);
+  // Mouse position for cursor preview
+  const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
+  // Track if shift is pressed for locked line preview
+  const [isShiftPressed, setIsShiftPressed] = useState(false);
+  // Cache all text spans for the current page for hover detection
+  const allTextSpansRef = useRef<TextSpan[]>([]);
 
   // Get annotations for current page - force re-render when annotations change
   const allAnnotations = currentDocument
@@ -103,6 +122,29 @@ export function PageCanvas({
   useEffect(() => {
     // This effect ensures component re-renders when annotations are added/updated
   }, [allAnnotations.length, annotations.length]);
+
+  // Load all text spans for the current page when document/page changes (for hover detection)
+  useEffect(() => {
+    if (currentDocument) {
+      getStructuredTextForPage(currentDocument, pageNumber)
+        .then((spans) => {
+          allTextSpansRef.current = spans;
+        })
+        .catch((error) => {
+          console.error("Error loading text spans for hover detection:", error);
+          allTextSpansRef.current = [];
+        });
+    } else {
+      allTextSpansRef.current = [];
+    }
+  }, [currentDocument, pageNumber]);
+
+  // Reset hover state when tool changes
+  useEffect(() => {
+    if (activeTool !== "selectText") {
+      setIsHoveringOverText(false);
+    }
+  }, [activeTool]);
 
   // Initialize PDF editor
   useEffect(() => {
@@ -121,6 +163,88 @@ export function PageCanvas({
   useEffect(() => {
     setPanOffset({ x: 0, y: 0 });
   }, [pageNumber]);
+
+  // Clear text selection when page changes or tool changes
+  useEffect(() => {
+    if (activeTool !== "selectText") {
+      setSelectedTextSpans([]);
+      selectedTextRef.current = "";
+    }
+  }, [pageNumber, activeTool]);
+
+  // Global mouseup listener to catch mouse release outside browser window
+  useEffect(() => {
+    const handleGlobalMouseUp = (e: MouseEvent) => {
+      // Only handle if we're in the middle of a highlight drag
+      if (activeTool === "highlight" && isSelecting && selectionStart && overlayHighlightPath.length > 0 && !selectionEnd) {
+        // Use the last point in the path as selectionEnd
+        const lastPoint = overlayHighlightPath[overlayHighlightPath.length - 1];
+        if (lastPoint) {
+          // Create a synthetic event
+          const syntheticEvent = {
+            clientX: e.clientX,
+            clientY: e.clientY,
+            button: e.button,
+            shiftKey: false,
+            preventDefault: () => {},
+            stopPropagation: () => {},
+          } as unknown as React.MouseEvent;
+          
+          // Set selectionEnd before calling handleMouseUp
+          setSelectionEnd(lastPoint);
+          
+          // Small delay to ensure state is updated
+          setTimeout(() => {
+            handleMouseUp(syntheticEvent);
+          }, 0);
+        }
+      }
+    };
+
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+    return () => {
+      window.removeEventListener("mouseup", handleGlobalMouseUp);
+    };
+  }, [activeTool, isSelecting, selectionStart, selectionEnd, overlayHighlightPath]);
+
+  // Keyboard handler for copy (Ctrl+C / Cmd+C)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only handle copy when selectText tool is active and text is selected
+      if (activeTool !== "selectText" || selectedTextSpans.length === 0) {
+        return;
+      }
+
+      // Don't handle if typing in inputs or contenteditable
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) {
+        return;
+      }
+
+      // Copy: Cmd/Ctrl + C
+      if ((e.metaKey || e.ctrlKey) && e.key === "c") {
+        e.preventDefault();
+        
+        const textToCopy = selectedTextRef.current;
+        if (textToCopy) {
+          navigator.clipboard.writeText(textToCopy).then(() => {
+            showNotification("Text copied to clipboard", "success");
+          }).catch((error) => {
+            console.error("Error copying text:", error);
+            showNotification("Failed to copy text", "error");
+          });
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeTool, selectedTextSpans, showNotification]);
 
   // Handle keyboard for space+drag pan
   useEffect(() => {
@@ -276,111 +400,19 @@ export function PageCanvas({
         // Calculate initial viewport scale for fit modes
         let viewportScale = zoomLevel;
         
-        // In read mode, always calculate fit-to-width for container sizing (even if fitMode is custom)
-        // The fitMode only controls where zoom is applied, not the base container size
-        // In normal mode, use fit-to-width when fitMode is "width"
-        if (readMode || (!readMode && fitMode === "width")) {
-          // Use requestAnimationFrame to ensure DOM is laid out
-          await new Promise(resolve => requestAnimationFrame(resolve));
-          await new Promise(resolve => setTimeout(resolve, 150)); // Wait longer for layout
-          
-          let containerWidth = 800; // Default fallback
-          
-          if (readMode) {
-            // In read mode, get width from the max-w-4xl parent container
-            // Try multiple times to get the correct width
-            let attempts = 0;
-            while (attempts < 3 && containerWidth < 500) {
-              const parentContainer = containerRef.current?.closest('.max-w-4xl') as HTMLElement;
-              if (parentContainer) {
-                containerWidth = parentContainer.clientWidth || parentContainer.offsetWidth || 0;
-                if (containerWidth > 100) break;
-              }
-              
-              // Also try getting from the scroll container
-              const scrollContainer = containerRef.current?.closest('[class*="overflow-y-auto"]') as HTMLElement;
-              if (scrollContainer && scrollContainer.clientWidth > 100) {
-                containerWidth = scrollContainer.clientWidth;
-                break;
-              }
-              
-              // Fallback to viewport calculation
-              if (containerWidth < 100) {
-                containerWidth = Math.min(896, window.innerWidth - 320);
-              }
-              
-              if (containerWidth < 500) {
-                await new Promise(resolve => setTimeout(resolve, 50));
-                attempts++;
-              }
-            }
-            
-            // Final fallback
-            if (containerWidth < 500) {
-              containerWidth = 800;
-            }
-          } else if (containerRef.current) {
-            containerWidth = containerRef.current.clientWidth;
-          }
-          
-          // Ensure we have a valid width
-          if (containerWidth < 100) {
-            containerWidth = 800; // Safe fallback
-          }
-          
-          viewportScale = containerWidth / pageMetadata.width;
-          
-          // Update zoom level to match fit
-          // In read mode, only update if fitMode is NOT "custom" (user hasn't manually zoomed)
-          // When fitMode is "custom", the user has manually zoomed, so don't override their zoom
-          // IMPORTANT: Only update if the difference is significant AND fitMode is not custom
-          if (readMode && fitMode === "custom") {
-            // User has manually zoomed - don't override, but ensure viewportScale is still calculated for reference
-            // The container will use zoomLevel for sizing, not viewportScale
-          } else if (Math.abs(viewportScale - zoomLevel) > 0.01) {
-            if (readMode) {
-              // Only update zoom if user hasn't manually zoomed (fitMode is not "custom")
-              // In read mode, set zoomLevel and keep fitMode as "width"
-              // setZoomLevel automatically sets fitMode to "custom", so we need to override it
-              useUIStore.setState({ 
-                zoomLevel: Math.max(0.25, Math.min(5.0, viewportScale)), 
-                fitMode: "width" 
-              });
-            } else {
-              setZoomLevel(viewportScale);
-            }
-          }
-        } else if (fitMode === "page" && containerRef.current) {
-          // In read mode, treat "page" mode as "width" mode to prevent tiny pages
-          if (readMode) {
-            // Use the same width calculation as fit-to-width
+        // In read mode, PageCanvas just renders at base scale
+        // Layout and zoom are handled by VirtualizedPageList and parent container
+        if (!readMode) {
+          if (fitMode === "width" && containerRef.current) {
             await new Promise(resolve => requestAnimationFrame(resolve));
-            await new Promise(resolve => setTimeout(resolve, 100));
-            
-            let containerWidth = 800;
-            const parentContainer = containerRef.current?.closest('.max-w-4xl') as HTMLElement;
-            if (parentContainer) {
-              containerWidth = parentContainer.clientWidth || parentContainer.offsetWidth || 800;
-              if (containerWidth < 100) {
-                containerWidth = Math.min(896, window.innerWidth - 320);
+            const containerWidth = containerRef.current.clientWidth;
+            if (containerWidth > 0) {
+              viewportScale = containerWidth / pageMetadata.width;
+              if (Math.abs(viewportScale - zoomLevel) > 0.01) {
+                setZoomLevel(viewportScale);
               }
-            } else {
-              containerWidth = Math.min(896, window.innerWidth - 320);
             }
-            if (containerWidth < 100) {
-              containerWidth = 800;
-            }
-            viewportScale = containerWidth / pageMetadata.width;
-            
-            // Update zoom level to match fit (in read mode with page fitMode, always update)
-            if (Math.abs(viewportScale - zoomLevel) > 0.01) {
-              // Set zoomLevel directly via state to avoid the "custom" override
-              useUIStore.setState({ 
-                zoomLevel: Math.max(0.25, Math.min(5.0, viewportScale)), 
-                fitMode: "width" 
-              });
-            }
-          } else {
+          } else if (fitMode === "page" && containerRef.current) {
             let containerWidth = containerRef.current.clientWidth;
             let containerHeight = containerRef.current.clientHeight;
             const scaleX = containerWidth / pageMetadata.width;
@@ -388,30 +420,22 @@ export function PageCanvas({
             viewportScale = Math.min(scaleX, scaleY);
             setZoomLevel(viewportScale);
           }
-        }
-        
-        // Center canvas in container when fitting
-        // IMPORTANT: In custom mode, don't modify panOffset - it's controlled by zoom/pan operations
-        // Only center when in fit modes (page/width)
-        // In read mode, don't center vertically - stack from top
-        if ((fitMode === "page" || fitMode === "width") && containerRef.current) {
-          const containerWidth = containerRef.current.clientWidth;
-          const containerHeight = containerRef.current.clientHeight;
-          const scaledWidth = pageMetadata.width * viewportScale;
-          const scaledHeight = pageMetadata.height * viewportScale;
           
-          // Center the canvas horizontally, but only center vertically if not in read mode
-          const centerX = (containerWidth - scaledWidth) / 2;
-          const centerY = readMode ? 0 : (containerHeight - scaledHeight) / 2;
-          
-          // In read mode, always set pan offset Y to 0 to stack pages
-          const finalPanY = readMode ? 0 : centerY;
-          
-          // Only update pan offset if it's significantly different (avoid render loops)
-          if (Math.abs(panOffset.x - centerX) > 1 || Math.abs(panOffset.y - finalPanY) > 1) {
-            setTimeout(() => {
-              setPanOffset({ x: centerX, y: finalPanY });
-            }, 0);
+          // Center canvas in container when fitting (normal mode only)
+          if ((fitMode === "page" || fitMode === "width") && containerRef.current) {
+            const containerWidth = containerRef.current.clientWidth;
+            const containerHeight = containerRef.current.clientHeight;
+            const scaledWidth = pageMetadata.width * viewportScale;
+            const scaledHeight = pageMetadata.height * viewportScale;
+            
+            const centerX = (containerWidth - scaledWidth) / 2;
+            const centerY = (containerHeight - scaledHeight) / 2;
+            
+            if (Math.abs(panOffset.x - centerX) > 1 || Math.abs(panOffset.y - centerY) > 1) {
+              setTimeout(() => {
+                setPanOffset({ x: centerX, y: centerY });
+              }, 0);
+            }
           }
         }
 
@@ -427,38 +451,37 @@ export function PageCanvas({
         });
 
         const canvas = canvasRef.current;
-        canvas.width = rendered.width;
-        canvas.height = rendered.height;
+        
+        // Account for device pixel ratio for crisp rendering on high-DPI displays
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        const displayWidth = rendered.width;
+        const displayHeight = rendered.height;
+        
+        // Set canvas internal resolution (actual pixels)
+        canvas.width = displayWidth * devicePixelRatio;
+        canvas.height = displayHeight * devicePixelRatio;
+        
+        // Set canvas display size (CSS pixels)
+        canvas.style.width = `${displayWidth}px`;
+        canvas.style.height = `${displayHeight}px`;
 
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", {
+          willReadFrequently: false,
+          colorSpace: "srgb"
+        });
+        
         if (ctx && rendered.imageData instanceof ImageData) {
+          // Scale context to account for device pixel ratio
+          ctx.scale(devicePixelRatio, devicePixelRatio);
+          
+          // Disable image smoothing for crisp pixel-perfect rendering
+          ctx.imageSmoothingEnabled = false;
+          ctx.imageSmoothingQuality = "high";
+          
+          // Draw the rendered image data
           ctx.putImageData(rendered.imageData, 0, 0);
         }
         
-        // In read mode, set container dimensions to match fit-to-width size
-        // Zoom is applied via CSS transform on the parent container, not by resizing containers
-        // This prevents layout shifts and makes zoom feel like zooming into a static image
-        if (readMode && containerRef.current) {
-          // Use pageMetadata dimensions (PDF logical size) not rendered dimensions (canvas pixel size)
-          // Always use viewportScale (fit-to-width) for container sizing
-          // Zoom is handled via transform scale on the pages container, not container resizing
-          const scaledWidth = pageMetadata.width * viewportScale;
-          const scaledHeight = pageMetadata.height * viewportScale;
-          
-          setContainerWidth(scaledWidth);
-          setContainerHeight(scaledHeight);
-        } else {
-          setContainerWidth(undefined);
-          setContainerHeight(undefined);
-        }
-        
-        // Force a re-render to update the width/height styles in read mode
-        if (readMode) {
-          // Trigger a state update to ensure styles are applied
-          setTimeout(() => {
-            // This will cause a re-render with updated dimensions
-          }, 0);
-        }
         
         // Store the base scale (PDF is always rendered at this scale)
         // The viewport zoom is handled via CSS transforms
@@ -505,10 +528,33 @@ export function PageCanvas({
         
         const canvas = canvasRef.current;
         if (canvas) {
-          canvas.width = rendered.width;
-          canvas.height = rendered.height;
-          const ctx = canvas.getContext("2d");
+          // Account for device pixel ratio for crisp rendering on high-DPI displays
+          const devicePixelRatio = window.devicePixelRatio || 1;
+          const displayWidth = rendered.width;
+          const displayHeight = rendered.height;
+          
+          // Set canvas internal resolution (actual pixels)
+          canvas.width = displayWidth * devicePixelRatio;
+          canvas.height = displayHeight * devicePixelRatio;
+          
+          // Set canvas display size (CSS pixels)
+          canvas.style.width = `${displayWidth}px`;
+          canvas.style.height = `${displayHeight}px`;
+          
+          const ctx = canvas.getContext("2d", {
+            willReadFrequently: false,
+            colorSpace: "srgb"
+          });
+          
           if (ctx && rendered.imageData instanceof ImageData) {
+            // Scale context to account for device pixel ratio
+            ctx.scale(devicePixelRatio, devicePixelRatio);
+            
+            // Disable image smoothing for crisp pixel-perfect rendering
+            ctx.imageSmoothingEnabled = false;
+            ctx.imageSmoothingQuality = "high";
+            
+            // Draw the rendered image data
             ctx.putImageData(rendered.imageData, 0, 0);
           }
         }
@@ -528,47 +574,70 @@ export function PageCanvas({
   // Helper function to convert mouse coordinates to PDF coordinates
   // PDF uses bottom-up Y coordinate system, canvas uses top-down
   const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null => {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PageCanvas.tsx:576',message:'getPDFCoordinates ENTRY',data:{activeTool,hasContainer:!!containerRef.current,hasCanvas:!!canvasRef.current},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
+    // #endregion
+    
     if (!containerRef.current || !canvasRef.current) return null;
     
-    const containerRect = containerRef.current.getBoundingClientRect();
+    const canvasElement = canvasRef.current;
     const pageMetadata = document.getPageMetadata(pageNumber);
     
     if (!pageMetadata) return null;
     
-    // Mouse position relative to container viewport
-    const mouseX = e.clientX - containerRect.left;
-    const mouseY = e.clientY - containerRect.top;
+    // Get canvas position on screen (accounts for ALL CSS transforms including zoom/pan)
+    // The canvas is inside a div with transform: scale(zoomLevel) translate(...)
+    // getBoundingClientRect() returns the canvas position and size AFTER the parent transform
+    const canvasRect = canvasElement.getBoundingClientRect();
     
-    // The canvas container has: transform: scale(zoom) translate(panX/zoom, panY/zoom)
-    // To reverse this transformation:
-    // 1. Remove pan offset: (mouseX - panX, mouseY - panY)
-    // 2. Divide by zoom: (mouseX - panX) / zoom, (mouseY - panY) / zoom
-    // 3. This gives us canvas coordinates (PDF rendered at BASE_SCALE)
-    // 4. Convert canvas coordinates to PDF coordinates
+    // Mouse position relative to canvas element (in viewport coordinates, already scaled by zoom)
+    const canvasRelativeX = e.clientX - canvasRect.left;
+    const canvasRelativeY = e.clientY - canvasRect.top;
     
+    // Get canvas display size from style (CSS pixels) - this is the actual canvas size before zoom
+    const styleWidth = canvasElement.style.width;
+    const styleHeight = canvasElement.style.height;
+    const parsedWidth = parseFloat(styleWidth);
+    const parsedHeight = parseFloat(styleHeight);
+    const fallbackWidth = canvasElement.width / (window.devicePixelRatio || 1);
+    const fallbackHeight = canvasElement.height / (window.devicePixelRatio || 1);
+    const canvasDisplayWidth = parsedWidth || fallbackWidth;
+    const canvasDisplayHeight = parsedHeight || fallbackHeight;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PageCanvas.tsx:600',message:'Canvas size calculation',data:{styleWidth,styleHeight,parsedWidth,parsedHeight,canvasWidth:canvasElement.width,canvasHeight:canvasElement.height,devicePixelRatio:window.devicePixelRatio,fallbackWidth,fallbackHeight,canvasDisplayWidth,canvasDisplayHeight},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    // The canvas is inside a div with transform: scale(zoomLevel)
+    // getBoundingClientRect() returns scaled dimensions (displaySize * zoomLevel)
+    // Convert from scaled viewport coordinates to unscaled canvas display coordinates
+    // Use ratio: (mouse position / scaled size) * actual display size
+    const canvasDisplayX = (canvasRelativeX / canvasRect.width) * canvasDisplayWidth;
+    const canvasDisplayY = (canvasRelativeY / canvasRect.height) * canvasDisplayHeight;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PageCanvas.tsx:610',message:'Coordinate conversion intermediate',data:{canvasRect:{left:canvasRect.left,top:canvasRect.top,width:canvasRect.width,height:canvasRect.height},mouse:{x:e.clientX,y:e.clientY},canvasRelative:{x:canvasRelativeX,y:canvasRelativeY},ratioX:canvasRelativeX/canvasRect.width,ratioY:canvasRelativeY/canvasRect.height,canvasDisplay:{x:canvasDisplayX,y:canvasDisplayY}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
+    // Convert canvas display coordinates to PDF coordinates
+    // The canvas is rendered at BASE_SCALE, so 1 PDF point = BASE_SCALE canvas pixels
+    // CRITICAL: mupdf's toPixmap() does NOT flip Y-axis when rendering!
+    // Content at PDF y:32 renders at canvas pixel y:32 (not y:1703)
+    // So we should NOT flip the Y-axis here
+    const pdfX = canvasDisplayX / BASE_SCALE;
+    const pdfY = canvasDisplayY / BASE_SCALE;  // FIXED: No Y-flip!
+    
+    // #region agent log
     const currentZoom = zoomLevelRef.current;
-    const currentPan = fitMode === "custom" ? panOffsetRef.current : panOffset;
-    
-    // Remove pan offset to get canvas-relative coordinates
-    const canvasRelativeX = mouseX - currentPan.x;
-    const canvasRelativeY = mouseY - currentPan.y;
-    
-    // Divide by zoom to get actual canvas coordinates (PDF rendered at BASE_SCALE)
-    const canvasCoordX = canvasRelativeX / currentZoom;
-    const canvasCoordY = canvasRelativeY / currentZoom;
-    
-    // Convert canvas coordinates to PDF coordinates
-    // Canvas Y=0 is at top, PDF Y=0 is at bottom
-    // PDF is rendered at BASE_SCALE, so canvas coordinates map directly
-    const pdfX = canvasCoordX / BASE_SCALE;
-    const pdfY = pageMetadata.height - (canvasCoordY / BASE_SCALE);
+    fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PageCanvas.tsx:620',message:'getPDFCoordinates RESULT',data:{pdf:{x:pdfX,y:pdfY},canvasDisplay:{x:canvasDisplayX,y:canvasDisplayY},BASE_SCALE,currentZoom,pageMetadata:{width:pageMetadata.width,height:pageMetadata.height},expectedCanvasWidth:pageMetadata.width*BASE_SCALE,expectedCanvasHeight:pageMetadata.height*BASE_SCALE,actualCanvasWidth:canvasDisplayWidth,actualCanvasHeight:canvasDisplayHeight,canvasRectWidth:canvasRect.width,canvasRectHeight:canvasRect.height,zoomRatio:canvasRect.width/canvasDisplayWidth},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
+    // #endregion
     
     return { x: pdfX, y: pdfY };
   };
 
   // Helper function to convert PDF coordinates to canvas coordinates
-  // PDF uses bottom-up Y coordinate system, canvas uses top-down
-  // PDF is rendered at BASE_SCALE, so coordinates are 1:1 with canvas pixels
+  // CRITICAL: mupdf's toPixmap() does NOT flip Y-axis when rendering
+  // So PDF and canvas coordinates map 1:1, no Y-flip needed
   const pdfToCanvas = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
     const pageMetadata = document.getPageMetadata(pageNumber);
     
@@ -576,35 +645,45 @@ export function PageCanvas({
       return { x: pdfX * BASE_SCALE, y: pdfY * BASE_SCALE };
     }
     
-    // PDF Y=0 is at bottom, canvas Y=0 is at top
-    // Flip Y coordinate: canvasY = (pageHeight - pdfY) * BASE_SCALE
-    // PDF is rendered at BASE_SCALE, so coordinates map directly
-    const flippedY = pageMetadata.height - pdfY;
-    
+    // FIXED: No Y-flip! mupdf renders PDF y:32 at canvas y:32 directly
     return {
       x: pdfX * BASE_SCALE,
-      y: flippedY * BASE_SCALE,
+      y: pdfY * BASE_SCALE,
     };
   };
 
-  // Helper function to convert PDF coordinates to container-relative coordinates
-  // Accounts for viewport transform (zoom and pan)
-  // PDF coordinates are fixed, viewport transforms via CSS
-  const pdfToContainer = (pdfX: number, pdfY: number, useRefs: boolean = false): { x: number; y: number } => {
-    const canvasPos = pdfToCanvas(pdfX, pdfY, useRefs);
+  // Helper function to convert PDF coordinates to container-relative (screen) coordinates
+  // This is the REVERSE of getPDFCoordinates
+  const pdfToContainer = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
+    if (!canvasRef.current) {
+      return { x: 0, y: 0 };
+    }
     
-    // Get current viewport transform values
-    const currentZoom = useRefs ? zoomLevelRef.current : zoomLevel;
-    const currentPan = useRefs 
-      ? (fitModeRef.current === "custom" ? panOffsetRef.current : panOffset)
-      : (fitMode === "custom" ? panOffsetRef.current : panOffset);
+    const pageMetadata = document.getPageMetadata(pageNumber);
     
-    // Apply viewport transform: scale then translate
-    // The canvas container has: transform: scale(zoom) translate(panX/zoom, panY/zoom)
-    // So screen position = (canvasPos * zoom) + pan
+    if (!pageMetadata) {
+      return { x: 0, y: 0 };
+    }
+    
+    // Convert PDF coordinates to canvas display coordinates (in display pixels)
+    // PDF Y=0 is at bottom, canvas Y=0 is at top
+    const canvasDisplayX = pdfX * BASE_SCALE;
+    const canvasDisplayY = (pageMetadata.height - pdfY) * BASE_SCALE;
+    
+    // Canvas display coordinates are already in the correct coordinate system
+    // (rendered image is at BASE_SCALE resolution, canvas display size matches)
+    const screenRelativeX = canvasDisplayX;
+    const screenRelativeY = canvasDisplayY;
+    
+    // Add canvas position to get absolute screen coordinates
+    // const screenX = canvasRect.left + screenRelativeX;
+    // const screenY = canvasRect.top + screenRelativeY;
+    
+    // But we want container-relative, so just use the relative values
+    // Actually, for rendering purposes we want canvas-relative which is screen-relative
     return {
-      x: canvasPos.x * currentZoom + currentPan.x,
-      y: canvasPos.y * currentZoom + currentPan.y,
+      x: screenRelativeX,
+      y: screenRelativeY,
     };
   };
 
@@ -622,12 +701,20 @@ export function PageCanvas({
     const centerX = containerRect.width / 2;
     const centerY = containerRect.height / 2;
     
+    // Use refs to get current values to avoid stale closures
+    const currentPanOffset = panOffsetRef.current;
+    const currentZoomLevel = zoomLevelRef.current;
+    const currentActualScale = actualScaleRef.current;
+    const currentFitMode = fitModeRef.current;
+    
     // Get current scale (use actualScale if available, otherwise zoomLevel)
-    const currentScale = fitMode === "custom" ? zoomLevel : actualScale;
+    const currentScale = currentFitMode === "custom" ? currentZoomLevel : (currentActualScale > 0 ? currentActualScale : currentZoomLevel);
     
     // Convert center to document coordinates
-    const canvasX = centerX - panOffset.x;
-    const canvasY = centerY - panOffset.y;
+    // Remove pan offset to get canvas-relative coordinates
+    const canvasX = centerX - currentPanOffset.x;
+    const canvasY = centerY - currentPanOffset.y;
+    // Divide by current scale to get document coordinates
     const documentX = canvasX / currentScale;
     const documentY = canvasY / currentScale;
     
@@ -639,18 +726,30 @@ export function PageCanvas({
     const newPanX = centerX - newCanvasX;
     const newPanY = centerY - newCanvasY;
     
-    setZoomLevel(newZoom);
-    setPanOffset({ x: newPanX, y: newPanY });
-    setFitMode("custom");
-  }, [zoomLevel, panOffset, actualScale, fitMode, setZoomLevel, setFitMode, readMode]);
+    // Update refs immediately
+    panOffsetRef.current = { x: newPanX, y: newPanY };
+    zoomLevelRef.current = newZoom;
+    fitModeRef.current = "custom";
+    
+    // Batch state updates
+    requestAnimationFrame(() => {
+      setFitMode("custom");
+      setZoomLevel(newZoom);
+      setPanOffset({ x: newPanX, y: newPanY });
+    });
+  }, [readMode, setZoomLevel, setFitMode]);
 
-  // Expose zoomToCenter via UI store
+  // Expose zoomToCenter via UI store (only when not in read mode)
   useEffect(() => {
+    if (readMode) {
+      // In read mode, zoom is handled at the PDFViewer level
+      return;
+    }
     setZoomToCenterCallback(zoomToCenter);
     return () => {
       setZoomToCenterCallback(null);
     };
-  }, [zoomToCenter, setZoomToCenterCallback]);
+  }, [zoomToCenter, setZoomToCenterCallback, readMode]);
 
   // Note: Focus is now handled by RichTextEditor component
 
@@ -662,88 +761,131 @@ export function PageCanvas({
       // Use ref value in custom mode to avoid stale state
       const currentPanForDrag = fitMode === "custom" ? panOffsetRef.current : panOffset;
       setDragStart({ x: e.clientX - currentPanForDrag.x, y: e.clientY - currentPanForDrag.y });
-    } else if (activeTool === "highlight" && currentDocument) {
-      // Start text selection for highlighting
+      return;
+    }
+
+    // Initialize overlay path for highlight tool - start immediately
+    if (activeTool === "highlight") {
       const coords = getPDFCoordinates(e);
       if (coords) {
-        setIsSelecting(true);
-        setSelectionStart(coords);
-        setSelectionEnd(coords);
+        // Initialize path immediately so preview shows right away
+        setOverlayHighlightPath([coords]);
+        // Hide cursor preview when starting to draw
+        setMousePosition(null);
       }
-    } else if (activeTool === "callout" && currentDocument) {
-      // Start drawing callout box
-      const coords = getPDFCoordinates(e);
-      if (coords) {
-        setIsSelecting(true);
-        setSelectionStart(coords);
-        setSelectionEnd(coords);
-      }
-    } else if (activeTool === "text" && currentDocument) {
-      // Check if clicking on an existing annotation first
-      // Check each text annotation to see if click is within bounds
-        // Since annotations are inside the transformed div, we need to account for the transform
-        const clickedAnnotation = annotations.find((annot) => {
-          if (annot.type !== "text") return false;
-          
-          // Get the transformed div element
-          const transformedDiv = containerRef.current?.querySelector('div[style*="transform"]') as HTMLElement;
-          if (!transformedDiv) return false;
-          
-          const transformedRect = transformedDiv.getBoundingClientRect();
-          
-          // Convert mouse position to coordinates relative to the transformed div
-          const transformedX = e.clientX - transformedRect.left;
-          const transformedY = e.clientY - transformedRect.top;
-          
-          // Get canvas position (in canvas coordinates, before transform)
-          const canvasPos = pdfToCanvas(annot.x, annot.y);
-          
-          // Account for the transform: the div has scale(zoom) translate(panX/zoom, panY/zoom)
-          // The transform is: scale(zoom) translate(panX/zoom, panY/zoom)
-          // So screen position = (canvasPos * zoom) + pan
-          // To reverse: canvasPos = (screenPos - pan) / zoom
-          const currentZoom = zoomLevelRef.current;
-          const currentPan = fitMode === "custom" ? panOffsetRef.current : panOffset;
-          
-          // Reverse the transform to get canvas coordinates
-          // Note: the translate is applied AFTER scale, so we need to account for that
-          // transform: scale(zoom) translate(panX/zoom, panY/zoom)
-          // This means: screenPos = canvasPos * zoom + pan
-          const canvasX = (transformedX - currentPan.x) / currentZoom;
-          const canvasY = (transformedY - currentPan.y) / currentZoom;
-          
-          // Check if click is within annotation bounds (in canvas coordinates)
-          const width = annot.width || 200;
-          const height = annot.height || 100;
-          
-          return (
-            canvasX >= canvasPos.x &&
-            canvasX <= canvasPos.x + width &&
-            canvasY >= canvasPos.y &&
-            canvasY <= canvasPos.y + height
-          );
-        });
+    }
+
+    // Use tool handlers for tool-specific interactions
+    if (currentDocument && activeTool !== "select" && activeTool !== "pan") {
+      const toolHandler = toolHandlers[activeTool];
+      if (toolHandler) {
+        const toolContext = {
+          document,
+          pageNumber,
+          currentDocument,
+          annotations,
+          activeTool,
+          getPDFCoordinates,
+          pdfToCanvas,
+          pdfToContainer,
+          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          setEditingAnnotation,
+          setAnnotationText,
+          setIsEditingMode,
+          setIsSelecting,
+          setSelectionStart,
+          setSelectionEnd,
+          setIsCreatingTextBox,
+          setTextBoxStart,
+          editor,
+          renderer,
+          canvasRef,
+          containerRef,
+          BASE_SCALE,
+          zoomLevelRef,
+          fitMode,
+          panOffset,
+          panOffsetRef,
+          isSelecting,
+          selectionStart,
+          setSelectedTextSpans,
+        };
         
-        if (clickedAnnotation) {
-          // Single click: select annotation (shows handles, ready to drag/resize)
-          // Double click will enter edit mode (handled in RichTextEditor)
-          e.preventDefault();
-          e.stopPropagation();
-          setEditingAnnotation(clickedAnnotation);
-          setAnnotationText(clickedAnnotation.content || "");
-          setIsEditingMode(false); // Start in selection mode, not edit mode
+        const result = await toolHandler.handleMouseDown(e, toolContext);
+        if (result === true) {
+          // Handler indicates it fully handled the event
           return;
         }
-      
-      // Start creating text box - track if it's a click or drag
-      const coords = getPDFCoordinates(e);
-      if (coords) {
-        setIsCreatingTextBox(true);
-        setTextBoxStart(coords);
-        setSelectionStart(coords);
-        setSelectionEnd(coords); // Initialize selectionEnd so preview shows immediately
       }
-    } else if (onPageClick) {
+    }
+
+    // Handle selectText tool - clear previous selection only if clicking outside current selection
+    if (activeTool === "selectText" && currentDocument) {
+      const coords = getPDFCoordinates(e);
+      let shouldClearSelection = true;
+      
+      // Check if click is within current selection bounds
+      if (coords && selectedTextSpans.length > 0 && selectionStart && selectionEnd) {
+        const minX = Math.min(selectionStart.x, selectionEnd.x);
+        const maxX = Math.max(selectionStart.x, selectionEnd.x);
+        const minY = Math.min(selectionStart.y, selectionEnd.y);
+        const maxY = Math.max(selectionStart.y, selectionEnd.y);
+        
+        // Check if click is within selection rectangle
+        if (coords.x >= minX && coords.x <= maxX && coords.y >= minY && coords.y <= maxY) {
+          shouldClearSelection = false;
+        }
+      }
+      
+      // Only clear if clicking outside selection or if no selection exists
+      if (shouldClearSelection) {
+        setSelectedTextSpans([]);
+        selectedTextRef.current = "";
+        setIsSelecting(false);
+        setSelectionStart(null);
+        setSelectionEnd(null);
+      }
+      
+      const toolHandler = toolHandlers[activeTool];
+      if (toolHandler) {
+        const toolContext = {
+          document,
+          pageNumber,
+          currentDocument,
+          annotations,
+          activeTool,
+          getPDFCoordinates,
+          pdfToCanvas,
+          pdfToContainer,
+          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          setEditingAnnotation,
+          setAnnotationText,
+          setIsEditingMode,
+          setIsSelecting,
+          setSelectionStart,
+          setSelectionEnd,
+          setIsCreatingTextBox,
+          setTextBoxStart,
+          editor,
+          renderer,
+          canvasRef,
+          containerRef,
+          BASE_SCALE,
+          zoomLevelRef,
+          fitMode,
+          panOffset,
+          panOffsetRef,
+          isSelecting,
+          selectionStart,
+          setSelectedTextSpans,
+        };
+        
+        await toolHandler.handleMouseDown(e, toolContext);
+      }
+    }
+
+    // Fallback to page click handler
+    if (onPageClick) {
       const coords = getPDFCoordinates(e);
       if (coords) {
         onPageClick(coords.x, coords.y);
@@ -752,6 +894,20 @@ export function PageCanvas({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    // Track shift key state
+    setIsShiftPressed(e.shiftKey);
+    
+    // Track mouse position for cursor preview (when highlight tool is active)
+    if (activeTool === "highlight" && !isDragging && !isSelecting) {
+      const coords = getPDFCoordinates(e);
+      if (coords) {
+        const canvasPos = pdfToCanvas(coords.x, coords.y);
+        setMousePosition({ x: canvasPos.x, y: canvasPos.y });
+      }
+    } else if (activeTool !== "highlight" || isSelecting) {
+      setMousePosition(null);
+    }
+
     if (isDragging) {
       setPanOffset({
         x: e.clientX - dragStart.x,
@@ -766,7 +922,190 @@ export function PageCanvas({
     } else if (isSelecting && selectionStart) {
       const coords = getPDFCoordinates(e);
       if (coords) {
-        setSelectionEnd(coords);
+        // For highlight tool with shift, the tool handler will update selectionEnd with locked coordinates
+        // So we should use the updated selectionEnd for path tracking, not raw coords
+        if (activeTool === "highlight" && e.shiftKey) {
+          // Let the tool handler update selectionEnd first, then we'll track it
+          setSelectionEnd(coords);
+        } else {
+          setSelectionEnd(coords);
+          
+          // Track overlay path directly here for live preview - update immediately
+          if (activeTool === "highlight") {
+            setOverlayHighlightPath(prev => {
+              // Always add the new point for smooth continuous preview
+              // Only skip if it's exactly the same (within very small tolerance)
+              if (prev.length === 0 || 
+                  Math.abs(prev[prev.length - 1].x - coords.x) > 0.01 || 
+                  Math.abs(prev[prev.length - 1].y - coords.y) > 0.01) {
+                return [...prev, coords];
+              }
+              return prev;
+            });
+          }
+        }
+      }
+    }
+    
+    // For selectText tool, check if hovering over text for cursor changes
+    if (activeTool === "selectText" && !isSelecting && !selectionStart) {
+      const coords = getPDFCoordinates(e);
+      if (coords && allTextSpansRef.current.length > 0) {
+        // Check if mouse is over any text span
+        const isOverText = allTextSpansRef.current.some((span) => {
+          const [spanX0, spanY0, spanX1, spanY1] = span.bbox;
+          return (
+            coords.x >= spanX0 &&
+            coords.x <= spanX1 &&
+            coords.y >= spanY0 &&
+            coords.y <= spanY1
+          );
+        });
+        setIsHoveringOverText(isOverText);
+      } else {
+        setIsHoveringOverText(false);
+      }
+    } else if (activeTool !== "selectText") {
+      setIsHoveringOverText(false);
+    }
+    
+    // For selectText tool, also handle mouseMove when selectionStart exists (even if isSelecting is false)
+    // This allows the tool to detect drag and set isSelecting to true
+    if (activeTool === "selectText" && selectionStart && !isSelecting) {
+      const coords = getPDFCoordinates(e);
+      if (coords && currentDocument) {
+        const toolHandler = toolHandlers[activeTool];
+        if (toolHandler && toolHandler.handleMouseMove) {
+          const toolContext = {
+            document,
+            pageNumber,
+            currentDocument,
+            annotations,
+            activeTool,
+            getPDFCoordinates,
+            pdfToCanvas,
+            pdfToContainer,
+            addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+            setEditingAnnotation,
+            setAnnotationText,
+            setIsEditingMode,
+            setIsSelecting,
+            setSelectionStart,
+            setSelectionEnd,
+            setIsCreatingTextBox,
+            setTextBoxStart,
+            editor,
+            renderer,
+            canvasRef,
+            containerRef,
+            BASE_SCALE,
+            zoomLevelRef,
+            fitMode,
+            panOffset,
+            panOffsetRef,
+            isSelecting,
+            selectionStart,
+            setSelectedTextSpans,
+          };
+          
+          toolHandler.handleMouseMove(e, toolContext);
+        }
+      }
+    } else if (isSelecting && selectionStart && activeTool === "selectText") {
+      // Update text selection preview for selectText tool when already selecting
+      const coords = getPDFCoordinates(e);
+      if (coords && currentDocument) {
+        const toolHandler = toolHandlers[activeTool];
+        if (toolHandler && toolHandler.handleMouseMove) {
+          const toolContext = {
+            document,
+            pageNumber,
+            currentDocument,
+            annotations,
+            activeTool,
+            getPDFCoordinates,
+            pdfToCanvas,
+            pdfToContainer,
+            addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+            setEditingAnnotation,
+            setAnnotationText,
+            setIsEditingMode,
+            setIsSelecting,
+            setSelectionStart,
+            setSelectionEnd,
+            setIsCreatingTextBox,
+            setTextBoxStart,
+            editor,
+            renderer,
+            canvasRef,
+            containerRef,
+            BASE_SCALE,
+            zoomLevelRef,
+            fitMode,
+            panOffset,
+            panOffsetRef,
+            isSelecting,
+            selectionStart,
+            setSelectedTextSpans,
+          };
+          
+          toolHandler.handleMouseMove(e, toolContext);
+        }
+      }
+    }
+    
+    // Handle highlight tool mouse move for overlay path and shift+drag
+    if (activeTool === "highlight" && isSelecting && selectionStart && currentDocument) {
+      const toolHandler = toolHandlers[activeTool];
+      if (toolHandler && toolHandler.handleMouseMove) {
+        const toolContext = {
+          document,
+          pageNumber,
+          currentDocument,
+          annotations,
+          activeTool,
+          getPDFCoordinates,
+          pdfToCanvas,
+          pdfToContainer,
+          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          setEditingAnnotation,
+          setAnnotationText,
+          setIsEditingMode,
+          setIsSelecting,
+          setSelectionStart,
+          setSelectionEnd: (coords: { x: number; y: number } | null) => {
+            setSelectionEnd(coords);
+            // Track overlay path using the updated selectionEnd (includes shift-locked coordinates)
+            if (coords && activeTool === "highlight") {
+              setOverlayHighlightPath(prev => {
+                // Always add the new point for smooth continuous preview
+                // Only skip if it's exactly the same (within very small tolerance)
+                if (prev.length === 0 || 
+                    Math.abs(prev[prev.length - 1].x - coords.x) > 0.01 || 
+                    Math.abs(prev[prev.length - 1].y - coords.y) > 0.01) {
+                  return [...prev, coords];
+                }
+                return prev;
+              });
+            }
+          },
+          setIsCreatingTextBox,
+          setTextBoxStart,
+          editor,
+          renderer,
+          canvasRef,
+          containerRef,
+          BASE_SCALE,
+          zoomLevelRef,
+          fitMode,
+          panOffset,
+          panOffsetRef,
+          isSelecting,
+          selectionStart,
+          setSelectedTextSpans,
+        };
+        
+        toolHandler.handleMouseMove(e, toolContext);
       }
     }
   };
@@ -937,188 +1276,144 @@ export function PageCanvas({
   }, [currentDocument, editor, pageNumber, getAnnotations, setCurrentPage]);
 
 
-  const handleMouseUp = async () => {
+  const handleMouseUp = async (e: React.MouseEvent) => {
     if (isDragging) {
       setIsDragging(false);
-    } else if (isCreatingTextBox && textBoxStart && selectionEnd && currentDocument) {
-      // Determine if it was a click (no drag) or drag
-      const dragDistance = Math.sqrt(
-        Math.pow(selectionEnd.x - textBoxStart.x, 2) + 
-        Math.pow(selectionEnd.y - textBoxStart.y, 2)
-      );
-      const isClick = dragDistance < 5; // Less than 5 points = click
-      
-      const defaultFontSize = 12;
-      let width: number;
-      let height: number;
-      let autoFit = false;
-      let boxX = textBoxStart.x;
-      let boxY = textBoxStart.y;
-      
-      if (isClick) {
-        // Click: auto-fit mode (typewriter style)
-        autoFit = true;
-        width = defaultFontSize * 9; // Initial width, will auto-fit
-        height = defaultFontSize * 1.5; // Initial height, will auto-fit
-      } else {
-        // Drag: fixed box size - use top-left corner of drag
-        // Note: PDF coordinates have Y=0 at bottom, so larger Y = higher up
-        // For top-left corner in PDF: use minX and maxY (maxY is the top)
-        const minX = Math.min(textBoxStart.x, selectionEnd.x);
-        const maxX = Math.max(textBoxStart.x, selectionEnd.x);
-        const minY = Math.min(textBoxStart.y, selectionEnd.y); // Smaller Y = lower (closer to bottom)
-        const maxY = Math.max(textBoxStart.y, selectionEnd.y); // Larger Y = higher (closer to top)
-        boxX = minX;
-        boxY = maxY; // Use maxY for top position in PDF coordinates
-        width = Math.max(50, maxX - minX);
-        height = Math.max(30, maxY - minY); // Height is positive (top - bottom)
-      }
-      
-      const tempAnnotation: Annotation = {
-        id: `temp_annot_${Date.now()}`,
-        type: "text",
-        pageNumber,
-        x: boxX,
-        y: boxY,
-        content: "",
-        fontSize: defaultFontSize,
-        fontFamily: "Arial",
-        color: "#000000",
-        width,
-        height,
-        autoFit, // Flag to indicate auto-fit mode
-      };
-      
-      setEditingAnnotation(tempAnnotation);
-      setAnnotationText("");
-      setIsEditingMode(true);
-      setIsCreatingTextBox(false);
-      setTextBoxStart(null);
-      setSelectionStart(null);
-      setSelectionEnd(null);
-    } else if (isSelecting && selectionStart && selectionEnd && currentDocument) {
-      if (activeTool === "highlight") {
-        // Create highlight from selection
-        try {
-          const mupdfDoc = currentDocument.getMupdfDocument();
-          const page = mupdfDoc.loadPage(pageNumber);
-          
-          // Convert selection coordinates to mupdf points
-          const p = [selectionStart.x, selectionStart.y];
-          const q = [selectionEnd.x, selectionEnd.y];
-          
-          // Get highlighted quads from StructuredText (not page)
-          // highlight() returns Quad[] where each Quad is [x0, y0, x1, y1, x2, y2, x3, y3]
-          const structuredText = page.toStructuredText();
-          const quads = structuredText.highlight(p, q);
-          
-          if (quads && quads.length > 0) {
-            // Get selected text using structured text
-            let selectedText = "";
-            try {
-              // TODO: Extract text from quads region using structured text
-              // For now, store empty string - can be enhanced later
-              selectedText = "";
-            } catch (error) {
-              console.error("Error extracting text:", error);
-            }
-            
-            // Convert quads to the format we need (array of arrays)
-            const quadArray = quads.map((quad: any) => {
-              if (Array.isArray(quad) && quad.length >= 8) {
-                return quad;
-              }
-              // If quad is an object, extract coordinates
-              return [quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0, 
-                      quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0];
-            });
-            
-            const annotation: Annotation = {
-              id: `highlight_${Date.now()}`,
-              type: "highlight",
-              pageNumber,
-              x: Math.min(selectionStart.x, selectionEnd.x),
-              y: Math.min(selectionStart.y, selectionEnd.y),
-              width: Math.abs(selectionEnd.x - selectionStart.x),
-              height: Math.abs(selectionEnd.y - selectionStart.y),
-              quads: quadArray,
-              selectedText: selectedText,
-              color: "#FFFF00",
-            };
-            
-            // Add to app state first (so it renders immediately)
-            addAnnotation(currentDocument.getId(), annotation);
-            
-            // Write to PDF document
-            if (!editor) {
-              console.warn("PDF editor not initialized, annotation not saved to PDF");
-            } else {
-              try {
-                await editor.addHighlightAnnotation(currentDocument, annotation);
-                console.log("Highlight annotation saved to PDF");
-              } catch (err) {
-                console.error("Error writing highlight to PDF:", err);
-              }
-            }
-          }
-        } catch (error) {
-          console.error("Error creating highlight:", error);
-        }
-      } else if (activeTool === "callout") {
-        // Create callout from selection box
-        const minX = Math.min(selectionStart.x, selectionEnd.x);
-        const minY = Math.min(selectionStart.y, selectionEnd.y);
-        const maxX = Math.max(selectionStart.x, selectionEnd.x);
-        const maxY = Math.max(selectionStart.y, selectionEnd.y);
-        const width = maxX - minX;
-        const height = maxY - minY;
+    } else if (currentDocument && activeTool === "selectText" && selectionStart && selectionEnd) {
+      // Handle text selection using mupdf's highlight method
+      try {
+        const isClick = Math.abs(selectionStart.x - selectionEnd.x) < 1 && Math.abs(selectionStart.y - selectionEnd.y) < 1;
+        console.log("Extracting text selection:", { selectionStart, selectionEnd, pageNumber });
         
-        // Only create if box is large enough
-        if (width > 20 && height > 20) {
-          const annotation: Annotation = {
-            id: `callout_${Date.now()}`,
-            type: "callout",
+        let result: { spans: TextSpan[]; text: string };
+        
+        if (isClick) {
+          // For clicks, expand to a small area around the point to find text
+          const expandSize = 10; // 10 points in each direction
+          const expandedStart = { x: selectionStart.x - expandSize, y: selectionStart.y - expandSize };
+          const expandedEnd = { x: selectionStart.x + expandSize, y: selectionStart.y + expandSize };
+          result = await getSpansInSelectionFromPage(
+            currentDocument,
             pageNumber,
-            x: minX,
-            y: minY,
-            width: width,
-            height: height,
-            arrowPoint: { x: minX + width / 2, y: minY + height / 2 },
-            boxPosition: { x: minX + width + 20, y: minY },
-            content: "",
-            color: "#FFFF00",
-          };
-          
-          // Add to app state first (so it renders immediately)
-          addAnnotation(currentDocument.getId(), annotation);
-          
-          // Set as editing so user can type immediately
-          setEditingAnnotation(annotation);
-          setAnnotationText("");
-          
-          // Write to PDF document
-          if (!editor) {
-            console.warn("PDF editor not initialized, callout annotation not saved to PDF");
-          } else {
-            try {
-              await editor.addCalloutAnnotation(currentDocument, annotation);
-              console.log("Callout annotation saved to PDF");
-            } catch (err) {
-              console.error("Error writing callout to PDF:", err);
-            }
-          }
+            expandedStart,
+            expandedEnd
+          );
+        } else {
+          // For drags, use the actual selection
+          result = await getSpansInSelectionFromPage(
+            currentDocument,
+            pageNumber,
+            selectionStart,
+            selectionEnd
+          );
         }
+        
+        setSelectedTextSpans(result.spans);
+        selectedTextRef.current = result.text;
+        
+        // Always clear isSelecting after mouseUp, regardless of result
+        setIsSelecting(false);
+        
+        // For drags (not clicks), clear selectionStart/selectionEnd to stop handleMouseMove from continuing
+        // The selectedTextSpans are already stored, so we don't need these anymore
+        if (!isClick) {
+          setSelectionStart(null);
+          setSelectionEnd(null);
+        }
+        
+        if (result.text) {
+          console.log("Selected text:", result.text);
+        } else {
+          console.warn("No text selected");
+          // Clear selection state if no text found (for clicks)
+          setSelectionStart(null);
+          setSelectionEnd(null);
+        }
+      } catch (error) {
+        console.error("Error extracting text selection:", error);
+        setSelectedTextSpans([]);
+        selectedTextRef.current = "";
+        setIsSelecting(false);
+        setSelectionStart(null);
+        setSelectionEnd(null);
       }
-      
-      setIsSelecting(false);
-      setSelectionStart(null);
-      setSelectionEnd(null);
+    } else if (currentDocument && activeTool !== "select" && activeTool !== "pan" && activeTool !== "selectText") {
+      // Use tool handlers for ALL tools that have mouse up logic (not just text tool)
+      const toolHandler = toolHandlers[activeTool];
+      if (toolHandler && toolHandler.handleMouseUp) {
+        const toolContext = {
+          document,
+          pageNumber,
+          currentDocument,
+          annotations,
+          activeTool,
+          getPDFCoordinates,
+          pdfToCanvas,
+          pdfToContainer,
+          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          setEditingAnnotation,
+          setAnnotationText,
+          setIsEditingMode,
+          setIsSelecting,
+          setSelectionStart,
+          setSelectionEnd,
+          setIsCreatingTextBox,
+          setTextBoxStart,
+          editor,
+          renderer,
+          canvasRef,
+          containerRef,
+          BASE_SCALE,
+          zoomLevelRef,
+          fitMode,
+          panOffset,
+          panOffsetRef,
+          isSelecting,
+          selectionStart,
+          setSelectedTextSpans,
+          overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
+        };
+        
+        // For highlight tool, ensure we have selectionEnd from the path if it's missing
+        let finalSelectionEnd = selectionEnd;
+        if (activeTool === "highlight") {
+          if (!finalSelectionEnd && selectionStart && overlayHighlightPath.length > 0) {
+            // Use the last point in the path as selectionEnd
+            finalSelectionEnd = overlayHighlightPath[overlayHighlightPath.length - 1];
+            console.log("PageCanvas: Using last path point as selectionEnd", finalSelectionEnd);
+          } else if (!finalSelectionEnd && selectionStart) {
+            // Fallback: use selectionStart if no end point
+            finalSelectionEnd = selectionStart;
+            console.log("PageCanvas: Using selectionStart as selectionEnd (fallback)");
+          }
+          console.log("PageCanvas: Calling highlight tool handleMouseUp", {
+            selectionStart,
+            selectionEnd,
+            finalSelectionEnd,
+            pathLength: overlayHighlightPath.length
+          });
+        }
+        
+        await toolHandler.handleMouseUp(e, toolContext, selectionStart, finalSelectionEnd || selectionStart, textBoxStart);
+      }
     }
     
     // Clean up text box creation state
     if (isCreatingTextBox) {
       setIsCreatingTextBox(false);
       setTextBoxStart(null);
+    }
+    
+    // Clean up overlay highlight path - but only after highlight is committed
+    // Don't clear if we're still in the process of creating it
+    if (activeTool === "highlight" && !isSelecting) {
+      // Use setTimeout to ensure cleanup happens after highlight is committed
+      // Give it a longer delay to ensure the tool handler has finished
+      setTimeout(() => {
+        setOverlayHighlightPath([]);
+        setMousePosition(null);
+        setIsShiftPressed(false);
+      }, 100);
     }
   };
 
@@ -1144,9 +1439,15 @@ export function PageCanvas({
     ? "grab"
     : activeTool === "text"
     ? "text"
+    : activeTool === "selectText"
+    ? isHoveringOverText
+      ? "text"
+      : "default"
     : activeTool === "highlight"
     ? "crosshair"
     : activeTool === "callout"
+    ? "crosshair"
+    : activeTool === "redact"
     ? "crosshair"
     : "default";
 
@@ -1165,19 +1466,61 @@ export function PageCanvas({
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
+      onMouseLeave={(e) => {
+        // If we're in the middle of a highlight drag, commit it before cleaning up
+        if (activeTool === "highlight" && isSelecting && selectionStart && overlayHighlightPath.length > 0) {
+          // Use the last point in the path as selectionEnd to ensure we commit the highlight
+          const lastPoint = overlayHighlightPath[overlayHighlightPath.length - 1];
+          if (lastPoint) {
+            // Set selectionEnd first
+            setSelectionEnd(lastPoint);
+            
+            // Create a synthetic mouse event to commit the highlight
+            const syntheticEvent = {
+              ...e,
+              shiftKey: false, // Can't determine shift state when mouse leaves
+            } as React.MouseEvent;
+            
+            // Small delay to ensure state is updated before calling handleMouseUp
+            setTimeout(() => {
+              handleMouseUp(syntheticEvent);
+            }, 0);
+          }
+        } else {
+          handleMouseUp(e);
+        }
+        setIsHoveringOverText(false);
+        setMousePosition(null);
+        setIsShiftPressed(false);
+      }}
       onContextMenu={handleContextMenu}
       // Remove React handlers - using native handlers in useEffect instead
       style={{ 
         cursor, 
-        margin: 0, 
+        margin: readMode ? '0 auto' : 0, // Center the container in read mode
         padding: 0, 
         lineHeight: readMode ? 0 : undefined, 
         fontSize: readMode ? 0 : undefined,
-        ...(readMode && containerWidth !== undefined ? { width: `${containerWidth}px` } : {}),
-        ...(readMode && containerHeight !== undefined ? { height: `${containerHeight}px` } : {}),
       } as React.CSSProperties}
     >
+      {/* Rulers - only in normal mode when enabled */}
+      {!readMode && showRulers && containerRef.current && pageMetadata && (
+        <>
+          <HorizontalRuler
+            width={pageMetadata.width}
+            zoomLevel={zoomLevel}
+            panOffset={panOffset}
+            containerWidth={containerRef.current.clientWidth}
+          />
+          <VerticalRuler
+            height={pageMetadata.height}
+            zoomLevel={zoomLevel}
+            panOffset={panOffset}
+            containerHeight={containerRef.current.clientHeight}
+          />
+        </>
+      )}
+      
       {isRendering && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
           <div className="text-muted-foreground">Rendering...</div>
@@ -1195,32 +1538,19 @@ export function PageCanvas({
       <div
         className={readMode ? "block relative" : "inline-block relative"}
         style={{
-          // In read mode with fit-to-width, scale the canvas container to fit
-          // In read mode with custom zoom, no transform here (handled at parent level)
+          // In read mode, no transform - zoom is handled at the pages container level
           // In normal mode, apply viewport transform: scale then translate
           transform: readMode 
-            ? (fitMode === "custom" 
-                ? undefined 
-                : `scale(${zoomLevel})`)
+            ? undefined
             : `scale(${zoomLevel}) translate(${(fitMode === "custom" ? panOffsetRef.current.x : panOffset.x) / zoomLevel}px, ${(fitMode === "custom" ? panOffsetRef.current.y : panOffset.y) / zoomLevel}px)`,
           transformOrigin: "0 0",
           margin: readMode ? '0 auto' : 0,
           padding: 0,
           lineHeight: readMode ? 0 : undefined,
           fontSize: readMode ? 0 : undefined,
-          // In read mode, ensure proper width for the scaled content
-          // When fitMode is "custom", the outer container is already sized to zoomLevel, so inner div should match
-          // When fitMode is "width", use raw PDF dimensions and scale via transform
-          width: readMode && pageMetadata 
-            ? (fitMode === "custom" 
-                ? `${pageMetadata.width * zoomLevel}px` 
-                : `${pageMetadata.width}px`)
-            : undefined,
-          height: readMode && pageMetadata 
-            ? (fitMode === "custom" 
-                ? `${pageMetadata.height * zoomLevel}px` 
-                : `${pageMetadata.height}px`)
-            : undefined,
+          // In read mode, let parent container handle sizing
+          width: readMode ? "100%" : undefined,
+          height: readMode ? "100%" : undefined,
         }}
       >
         <canvas 
@@ -1235,9 +1565,9 @@ export function PageCanvas({
             verticalAlign: "top", 
             border: "none", 
             outline: "none",
-            // In read mode when zoomed, canvas should fill its container
-            width: readMode && fitMode === "custom" ? "100%" : undefined,
-            height: readMode && fitMode === "custom" ? "100%" : undefined,
+            // In read mode, canvas fills its container (sized by VirtualizedPageList)
+            width: readMode ? "100%" : undefined,
+            height: readMode ? "100%" : undefined,
           }} 
         />
         
@@ -1266,25 +1596,125 @@ export function PageCanvas({
           })()
         )}
 
+        {/* Render overlay highlight preview */}
+        {activeTool === "highlight" && overlayHighlightPath.length > 0 && (isSelecting || selectionStart) && (() => {
+          const { highlightColor, highlightStrokeWidth, highlightOpacity } = useUIStore.getState();
+          
+          // If shift is pressed and we have start and end, show straight line preview
+          let pathToRender = overlayHighlightPath;
+          if (isShiftPressed && selectionStart && selectionEnd) {
+            // Use selectionStart and selectionEnd (which are locked) for straight line preview
+            pathToRender = [selectionStart, selectionEnd];
+          } else if (isShiftPressed && selectionStart && overlayHighlightPath.length > 0) {
+            // Fallback: use first and last point from path
+            const start = overlayHighlightPath[0];
+            const end = overlayHighlightPath[overlayHighlightPath.length - 1];
+            pathToRender = [start, end];
+          }
+          
+          // Calculate bounding box for SVG positioning with padding for stroke width
+          const allCanvasX = pathToRender.map(p => pdfToCanvas(p.x, p.y).x);
+          const allCanvasY = pathToRender.map(p => pdfToCanvas(p.x, p.y).y);
+          const minCanvasX = Math.min(...allCanvasX);
+          const minCanvasY = Math.min(...allCanvasY);
+          const maxCanvasX = Math.max(...allCanvasX);
+          const maxCanvasY = Math.max(...allCanvasY);
+          
+          // Add padding for stroke width to ensure full visibility
+          const padding = highlightStrokeWidth / 2;
+          // Ensure minimum size for single point or very small paths
+          const rawWidth = maxCanvasX - minCanvasX;
+          const rawHeight = maxCanvasY - minCanvasY;
+          const minSize = highlightStrokeWidth;
+          const boxX = minCanvasX - padding;
+          const boxY = minCanvasY - padding;
+          const boxWidth = Math.max(rawWidth, minSize) + (padding * 2);
+          const boxHeight = Math.max(rawHeight, minSize) + (padding * 2);
+          
+          // Convert path points to relative coordinates within bounding box (with padding)
+          const relativePathPoints = pathToRender.map(p => {
+            const canvas = pdfToCanvas(p.x, p.y);
+            return `${canvas.x - boxX},${canvas.y - boxY}`;
+          }).join(" ");
+          
+          return (
+            <div
+              className="absolute pointer-events-none z-50"
+              style={{
+                left: `${boxX}px`,
+                top: `${boxY}px`,
+                width: `${boxWidth}px`,
+                height: `${boxHeight}px`,
+              }}
+            >
+              <svg
+                className="absolute"
+                style={{
+                  left: 0,
+                  top: 0,
+                  width: `${boxWidth}px`,
+                  height: `${boxHeight}px`,
+                  overflow: "visible",
+                }}
+                viewBox={`0 0 ${boxWidth} ${boxHeight}`}
+              >
+                <polyline
+                  points={relativePathPoints}
+                  fill="none"
+                  stroke={highlightColor}
+                  strokeWidth={highlightStrokeWidth}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={highlightOpacity}
+                />
+              </svg>
+            </div>
+          );
+        })()}
+
+        {/* Cursor preview circle for highlight tool */}
+        {activeTool === "highlight" && !isSelecting && mousePosition && (() => {
+          const { highlightColor, highlightStrokeWidth, highlightOpacity } = useUIStore.getState();
+          const radius = highlightStrokeWidth / 2;
+          
+          return (
+            <div
+              className="absolute pointer-events-none z-50"
+              style={{
+                left: `${mousePosition.x}px`,
+                top: `${mousePosition.y}px`,
+                width: `${highlightStrokeWidth}px`,
+                height: `${highlightStrokeWidth}px`,
+                borderRadius: "50%",
+                border: `2px solid ${highlightColor}`,
+                backgroundColor: `${highlightColor}${Math.round(highlightOpacity * 255).toString(16).padStart(2, '0')}`,
+                opacity: 0.6,
+                transform: "translate(-50%, -50%)",
+                pointerEvents: "none",
+              }}
+            />
+          );
+        })()}
+
         {/* Render selection rectangle */}
-        {isSelecting && selectionStart && selectionEnd && (
+        {isSelecting && selectionStart && selectionEnd && activeTool !== "selectText" && activeTool !== "highlight" && (
           (() => {
-            // Convert PDF coordinates to container coordinates (accounts for viewport transform)
-            const startContainer = pdfToContainer(selectionStart.x, selectionStart.y);
-            const endContainer = pdfToContainer(selectionEnd.x, selectionEnd.y);
-            const minX = Math.min(startContainer.x, endContainer.x);
-            const minY = Math.min(startContainer.y, endContainer.y);
-            const width = Math.abs(endContainer.x - startContainer.x);
-            const height = Math.abs(endContainer.y - startContainer.y);
+            // Convert PDF coordinates to CANVAS coordinates (like text box does)
+            const startCanvas = pdfToCanvas(selectionStart.x, selectionStart.y);
+            const endCanvas = pdfToCanvas(selectionEnd.x, selectionEnd.y);
+            const minX = Math.min(startCanvas.x, endCanvas.x);
+            const minY = Math.min(startCanvas.y, endCanvas.y);
+            const width = Math.abs(endCanvas.x - startCanvas.x);
+            const height = Math.abs(endCanvas.y - startCanvas.y);
             
             return (
               <div
                 className={cn(
-                  "absolute border-2 pointer-events-none",
-                  activeTool === "highlight" 
-                    ? "border-yellow-500 bg-yellow-400/20" 
-                    : activeTool === "callout"
+                  "absolute border-2 pointer-events-none z-50",
+                  activeTool === "callout"
                     ? "border-blue-500 bg-blue-400/20"
+                    : activeTool === "redact"
+                    ? "border-red-500 bg-red-400/30"
                     : "border-primary bg-primary/10"
                 )}
                 style={{
@@ -1297,6 +1727,74 @@ export function PageCanvas({
             );
           })()
         )}
+
+        {/* Render text selection highlights - show during drag and after release */}
+        {(() => {
+          // Show highlights if we have spans, whether we're dragging or not
+          const shouldShowHighlights = activeTool === "selectText" && selectedTextSpans.length > 0;
+          
+          if (!shouldShowHighlights) return null;
+          
+          // Group spans by line (same Y coordinate, within tolerance)
+          const lineGroups: { [key: string]: typeof selectedTextSpans } = {};
+          const Y_TOLERANCE = 2; // Group spans within 2 points vertically
+          
+          selectedTextSpans.forEach((span) => {
+            const [, spanY0, , spanY1] = span.bbox;
+            // Use the center Y coordinate for grouping
+            const centerY = (spanY0 + spanY1) / 2;
+            // Round to nearest tolerance value to group nearby lines
+            const lineKey = Math.round(centerY / Y_TOLERANCE) * Y_TOLERANCE;
+            
+            if (!lineGroups[lineKey]) {
+              lineGroups[lineKey] = [];
+            }
+            lineGroups[lineKey].push(span);
+          });
+          
+          // Render one continuous highlight per line
+          return (
+            <>
+              {Object.entries(lineGroups).map(([lineKey, lineSpans], lineIdx) => {
+                // Calculate bounding box for all spans in this line
+                let minX = Infinity;
+                let maxX = -Infinity;
+                let minY = Infinity;
+                let maxY = -Infinity;
+                
+                lineSpans.forEach((span) => {
+                  const [spanX0, spanY0, spanX1, spanY1] = span.bbox;
+                  minX = Math.min(minX, spanX0);
+                  maxX = Math.max(maxX, spanX1);
+                  minY = Math.min(minY, spanY0);
+                  maxY = Math.max(maxY, spanY1);
+                });
+                
+                // Convert PDF coordinates to canvas coordinates
+                const bottomLeft = pdfToCanvas(minX, minY);
+                const topRight = pdfToCanvas(maxX, maxY);
+                
+                const width = topRight.x - bottomLeft.x;
+                const height = topRight.y - bottomLeft.y;
+                
+                return (
+                  <div
+                    key={`text-selection-line-${lineKey}-${lineIdx}`}
+                    className="absolute bg-blue-400/40 pointer-events-none z-50"
+                    style={{
+                      left: `${bottomLeft.x}px`,
+                      top: `${bottomLeft.y}px`,
+                      width: `${Math.abs(width)}px`,
+                      height: `${Math.abs(height)}px`,
+                    }}
+                  />
+                );
+              })}
+            </>
+          );
+        })()}
+
+        {/* No selection rectangle for selectText - only show text highlights */}
 
         {/* Render search result highlights */}
         {searchResults.map((result, resultIdx) => (
@@ -1346,51 +1844,154 @@ export function PageCanvas({
               // Get current zoom for rendering
               const currentZoom = zoomLevelRef.current;
           
-          if (annot.type === "highlight" && annot.quads && annot.quads.length > 0) {
-            // Render highlight quads
-            return (
-              <div 
-                key={annot.id} 
-                className={cn(
-                  "absolute",
-                  activeTool === "select" ? "cursor-pointer" : ""
-                )}
-                style={{ pointerEvents: activeTool === "select" ? "auto" : "none", zIndex: 30 }}
-                onClick={() => {
-                  if (activeTool === "select") {
-                    setEditingAnnotation(annot);
-                    setAnnotationText(annot.content || "");
-                  }
-                }}
-              >
-                {annot.quads.map((quad, idx) => {
-                  // Quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
-                  if (!Array.isArray(quad) || quad.length < 8) return null;
-                  
-                  const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
-                  const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
-                  const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
-                  const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
-                  
-                  // Convert PDF coordinates to container coordinates (accounts for viewport transform)
-                  const minContainer = pdfToContainer(minX, minY);
-                  const maxContainer = pdfToContainer(maxX, maxY);
-                  
-                  return (
-                    <div
-                      key={idx}
-                      className="absolute bg-yellow-400/50"
-                      style={{
-                        left: `${minContainer.x}px`,
-                        top: `${minContainer.y}px`,
-                        width: `${maxContainer.x - minContainer.x}px`,
-                        height: `${maxContainer.y - minContainer.y}px`,
-                      }}
+          if (annot.type === "highlight") {
+            const highlightColor = annot.color || "#FFFF00";
+            const opacity = annot.opacity !== undefined ? annot.opacity : 0.5;
+            const strokeWidth = annot.strokeWidth || 15;
+            
+            // Render overlay highlights (freehand path)
+            // Always render overlay highlights if they have a path or quads
+            if (annot.highlightMode === "overlay") {
+              // Prefer path if available, otherwise use quads
+              const pathToRender = annot.path && annot.path.length > 0 
+                ? annot.path 
+                : (annot.quads && annot.quads.length > 0
+                  ? annot.quads.map((quad: number[]) => {
+                      // Convert quad to path points (use corners of quad)
+                      return [
+                        { x: quad[0], y: quad[1] },
+                        { x: quad[2], y: quad[3] },
+                        { x: quad[4], y: quad[5] },
+                        { x: quad[6], y: quad[7] }
+                      ];
+                    }).flat()
+                  : null);
+              
+              if (!pathToRender || pathToRender.length === 0) {
+                console.warn("Overlay highlight has no path or quads:", annot);
+                return null;
+              }
+              
+              // Convert path points to canvas coordinates
+              const pathPoints = pathToRender.map((p: { x: number; y: number }) => {
+                const canvas = pdfToCanvas(p.x, p.y);
+                return `${canvas.x},${canvas.y}`;
+              }).join(" ");
+              
+              // Calculate bounding box for SVG positioning
+              const allCanvasX = pathToRender.map((p: { x: number; y: number }) => pdfToCanvas(p.x, p.y).x);
+              const allCanvasY = pathToRender.map((p: { x: number; y: number }) => pdfToCanvas(p.x, p.y).y);
+              const minCanvasX = Math.min(...allCanvasX);
+              const minCanvasY = Math.min(...allCanvasY);
+              const maxCanvasX = Math.max(...allCanvasX);
+              const maxCanvasY = Math.max(...allCanvasY);
+              
+              // Add padding for stroke width
+              const padding = strokeWidth / 2;
+              const boxX = minCanvasX - padding;
+              const boxY = minCanvasY - padding;
+              const boxWidth = (maxCanvasX - minCanvasX) + (padding * 2);
+              const boxHeight = (maxCanvasY - minCanvasY) + (padding * 2);
+              
+              // Adjust path points to be relative to bounding box
+              const relativePathPoints = pathToRender.map((p: { x: number; y: number }) => {
+                const canvas = pdfToCanvas(p.x, p.y);
+                return `${canvas.x - boxX},${canvas.y - boxY}`;
+              }).join(" ");
+              
+              return (
+                <div 
+                  key={annot.id} 
+                  className={cn(
+                    "absolute",
+                    activeTool === "select" ? "cursor-pointer" : ""
+                  )}
+                  style={{ 
+                    pointerEvents: activeTool === "select" ? "auto" : "none", 
+                    zIndex: 30,
+                    left: `${boxX}px`,
+                    top: `${boxY}px`,
+                  }}
+                  onClick={() => {
+                    if (activeTool === "select") {
+                      setEditingAnnotation(annot);
+                      setAnnotationText(annot.content || "");
+                    }
+                  }}
+                >
+                  <svg
+                    className="absolute"
+                    style={{
+                      left: 0,
+                      top: 0,
+                      width: `${boxWidth}px`,
+                      height: `${boxHeight}px`,
+                      overflow: "visible",
+                    }}
+                    viewBox={`0 0 ${boxWidth} ${boxHeight}`}
+                  >
+                    <polyline
+                      points={relativePathPoints}
+                      fill="none"
+                      stroke={highlightColor}
+                      strokeWidth={strokeWidth}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={opacity}
                     />
-                  );
-                })}
-              </div>
-            );
+                  </svg>
+                </div>
+              );
+            }
+            
+            // Render text selection highlights (quads)
+            if (annot.quads && annot.quads.length > 0) {
+              return (
+                <div 
+                  key={annot.id} 
+                  className={cn(
+                    "absolute",
+                    activeTool === "select" ? "cursor-pointer" : ""
+                  )}
+                  style={{ pointerEvents: activeTool === "select" ? "auto" : "none", zIndex: 30 }}
+                  onClick={() => {
+                    if (activeTool === "select") {
+                      setEditingAnnotation(annot);
+                      setAnnotationText(annot.content || "");
+                    }
+                  }}
+                >
+                  {annot.quads.map((quad, idx) => {
+                    // Quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
+                    if (!Array.isArray(quad) || quad.length < 8) return null;
+                    
+                    const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+                    const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+                    const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+                    const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+                    
+                    // Convert PDF coordinates to canvas coordinates (for rendering)
+                    const minCanvas = pdfToCanvas(minX, minY);
+                    const maxCanvas = pdfToCanvas(maxX, maxY);
+                    
+                    return (
+                      <div
+                        key={idx}
+                        className="absolute"
+                        style={{
+                          left: `${minCanvas.x}px`,
+                          top: `${minCanvas.y}px`,
+                          width: `${maxCanvas.x - minCanvas.x}px`,
+                          height: `${maxCanvas.y - minCanvas.y}px`,
+                          backgroundColor: highlightColor,
+                          opacity: opacity,
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              );
+            }
           } else if (annot.type === "callout") {
             // Render callout with arrow
             const arrowPoint = annot.arrowPoint || { x: annot.x + (annot.width || 0) / 2, y: annot.y + (annot.height || 0) / 2 };
@@ -1454,6 +2055,40 @@ export function PageCanvas({
                 </div>
               </div>
             );
+          } else if (annot.type === "redact") {
+            // Don't render redactions as overlays - the content is actually deleted from the PDF
+            // The PDF canvas will show the white background where content was removed
+            // We only show a subtle outline when in select mode
+            if (activeTool === "select") {
+              const redactWidth = annot.width || 100;
+              const redactHeight = annot.height || 50;
+              
+              // Convert PDF coordinates to container coordinates
+              // annot.y is the BOTTOM edge, we need TOP edge for canvas rendering
+              const pdfTopY = annot.y + redactHeight;
+              const redactContainer = pdfToContainer(annot.x, pdfTopY);
+              const redactContainerWidth = redactWidth * currentZoom;
+              const redactContainerHeight = redactHeight * currentZoom;
+              
+              return (
+                <div 
+                  key={annot.id} 
+                  className="absolute border-2 border-dashed border-red-400 cursor-pointer"
+                  style={{ 
+                    pointerEvents: "auto", 
+                    zIndex: 25,
+                    left: `${redactContainer.x}px`,
+                    top: `${redactContainer.y}px`,
+                    width: `${redactContainerWidth}px`,
+                    height: `${redactContainerHeight}px`,
+                  }}
+                  onClick={() => {
+                    setEditingAnnotation(annot);
+                  }}
+                />
+              );
+            }
+            return null; // Don't render anything when not in select mode
           } else if (annot.type === "text") {
             // Text annotations are now always rendered using RichTextEditor
             // This is handled below in the RichTextEditor section

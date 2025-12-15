@@ -17,7 +17,7 @@ export interface PageReorderOperation {
 
 export interface Annotation {
   id: string;
-  type: "text" | "highlight" | "note" | "callout";
+  type: "text" | "highlight" | "note" | "callout" | "redact";
   pageNumber: number;
   x: number;
   y: number;
@@ -36,6 +36,11 @@ export interface Annotation {
   // For highlights
   quads?: number[][]; // Array of quads [x0, y0, x1, y1, x2, y2, x3, y3]
   selectedText?: string;
+  strokeWidth?: number; // Stroke width for overlay highlights
+  opacity?: number; // Opacity for highlights (0.0-1.0)
+  highlightMode?: "text" | "overlay"; // Highlight mode: text selection or overlay
+  // For overlay highlights: path points
+  path?: Array<{ x: number; y: number }>; // Path points for overlay highlights
   // For callouts
   arrowPoint?: { x: number; y: number };
   boxPosition?: { x: number; y: number };
@@ -499,21 +504,68 @@ export class PDFEditor {
 
     const page = pdfDoc.loadPage(pageNumber);
     
-    // Get current mediabox
-    const mediabox = page.getMediabox();
+    // Get the page object to modify MediaBox
+    const pageObj = page.getObject();
+    if (!pageObj) {
+      throw new Error("Could not get page object");
+    }
     
-    // Create new mediabox with new dimensions
-    const newMediabox: [number, number, number, number] = [
-      mediabox[0], // x0 (usually 0)
-      mediabox[1], // y0 (usually 0)
-      mediabox[0] + width,  // x1
-      mediabox[1] + height   // y1
-    ];
+    // Get current bounds to preserve origin
+    const currentBounds = page.getBounds(); // [x0, y0, x1, y1]
+    const x0 = currentBounds[0];
+    const y0 = currentBounds[1];
     
-    // Set new mediabox
-    page.setMediabox(newMediabox);
+    // Create new MediaBox array with new dimensions
+    // MediaBox format: [x0, y0, x1, y1]
+    const newMediaBox = [x0, y0, x0 + width, y0 + height];
+    
+    // Try different methods to set MediaBox
+    let success = false;
+    
+    // Method 1: Try put with plain array
+    try {
+      pageObj.put("MediaBox", newMediaBox);
+      success = true;
+      console.log(`Set MediaBox to [${newMediaBox}] using Method 1`);
+    } catch (e) {
+      console.warn("Method 1 (put with array) failed:", e);
+    }
+    
+    // Method 2: Try using set if put failed
+    if (!success && pageObj.set) {
+      try {
+        pageObj.set("MediaBox", newMediaBox);
+        success = true;
+        console.log(`Set MediaBox to [${newMediaBox}] using Method 2`);
+      } catch (e) {
+        console.warn("Method 2 (set with array) failed:", e);
+      }
+    }
+    
+    if (!success) {
+      throw new Error("Failed to set MediaBox - all methods failed");
+    }
     
     // Update page metadata
+    document.refreshPageMetadata();
+  }
+
+  /**
+   * Resize all pages in a document to the same dimensions
+   */
+  async resizeAllPages(
+    document: PDFDocument,
+    width: number,
+    height: number
+  ): Promise<void> {
+    const pageCount = document.getPageCount();
+    
+    // Resize each page
+    for (let i = 0; i < pageCount; i++) {
+      await this.resizePage(document, i, width, height);
+    }
+    
+    // Final metadata refresh
     document.refreshPageMetadata();
   }
 
@@ -573,8 +625,55 @@ export class PDFEditor {
 
     const page = pdfDoc.loadPage(annotation.pageNumber);
     
+    // For overlay highlights, quads might be empty (path is used instead for rendering)
+    // For text highlights, quads are required
+    if (annotation.highlightMode === "text" && (!annotation.quads || annotation.quads.length === 0)) {
+      throw new Error("Text highlight annotation requires quads");
+    }
+    
+    // For overlay highlights, generate quads from path if quads are empty
+    if (annotation.highlightMode === "overlay" && (!annotation.quads || annotation.quads.length === 0)) {
+      if (annotation.path && annotation.path.length >= 2) {
+        // Generate quads from path - create a quad for each path segment
+        const quads: number[][] = [];
+        const strokeWidth = annotation.strokeWidth || 15;
+        const halfWidth = strokeWidth / 2;
+        
+        for (let i = 0; i < annotation.path.length - 1; i++) {
+          const p1 = annotation.path[i];
+          const p2 = annotation.path[i + 1];
+          
+          const dx = p2.x - p1.x;
+          const dy = p2.y - p1.y;
+          const len = Math.sqrt(dx * dx + dy * dy);
+          
+          if (len === 0) continue;
+          
+          const perpX = -dy / len;
+          const perpY = dx / len;
+          
+          quads.push([
+            p1.x + perpX * halfWidth, p1.y + perpY * halfWidth,
+            p1.x - perpX * halfWidth, p1.y - perpY * halfWidth,
+            p2.x - perpX * halfWidth, p2.y - perpY * halfWidth,
+            p2.x + perpX * halfWidth, p2.y + perpY * halfWidth
+          ]);
+        }
+        
+        annotation.quads = quads;
+      } else {
+        // If no path and no quads, create a minimal quad from bounds
+        const x = annotation.x;
+        const y = annotation.y;
+        const w = annotation.width || 10;
+        const h = annotation.height || 10;
+        annotation.quads = [[x, y, x + w, y, x + w, y + h, x, y + h]];
+      }
+    }
+    
+    // Ensure we have quads before creating annotation
     if (!annotation.quads || annotation.quads.length === 0) {
-      throw new Error("Highlight annotation requires quads");
+      throw new Error("Highlight annotation requires quads or path");
     }
     
     // Create highlight annotation
@@ -599,6 +698,39 @@ export class PDFEditor {
     const g = parseInt(hex.substring(2, 4), 16) / 255;
     const b = parseInt(hex.substring(4, 6), 16) / 255;
     annot.setColor([r, g, b]);
+    
+    // Set opacity if provided (PDF annotations support opacity via CA field)
+    if (annotation.opacity !== undefined) {
+      try {
+        // Try to set opacity using setOpacity or CA field
+        if (annot.setOpacity) {
+          annot.setOpacity(annotation.opacity);
+        } else {
+          // Fallback: set CA (constant alpha) field directly
+          const annotObj = annot.getObject();
+          if (annotObj) {
+            annotObj.put("CA", annotation.opacity);
+          }
+        }
+      } catch (error) {
+        console.warn("Could not set highlight opacity:", error);
+      }
+    }
+    
+    // Store stroke width in annotation metadata if provided (for overlay highlights)
+    // Note: PDF Highlight annotations don't directly support stroke width,
+    // but we store it in the annotation for rendering purposes
+    if (annotation.strokeWidth !== undefined) {
+      try {
+        const annotObj = annot.getObject();
+        if (annotObj) {
+          // Store as custom metadata
+          annotObj.put("StrokeWidth", annotation.strokeWidth);
+        }
+      } catch (error) {
+        console.warn("Could not store stroke width:", error);
+      }
+    }
     
     if (annotation.content) {
       annot.setContents(annotation.content);
@@ -646,6 +778,150 @@ export class PDFEditor {
     }
     
     annot.update();
+  }
+
+  /**
+   * Add redaction annotation to a page
+   * Redactions permanently remove content from the PDF
+   */
+  async addRedactionAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    let page = pdfDoc.loadPage(annotation.pageNumber);
+    
+    // Get page dimensions FIRST (needed for clamping)
+    const pageBounds = page.getBounds();
+    const pageWidth = pageBounds[2] - pageBounds[0];
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    // Create redaction annotation
+    // Rect format: [x0, y0, x1, y1] where (x0, y0) is bottom-left and (x1, y1) is top-right
+    // annotation.x, annotation.y is the bottom-left corner
+    // annotation.x + width, annotation.y + height is the top-right corner
+    
+    // CRITICAL: Clamp rect to page bounds - rects outside page bounds are ignored by mupdf!
+    const x0 = Math.max(0, Math.min(annotation.x, pageWidth));
+    const y0 = Math.max(0, Math.min(annotation.y, pageHeight));
+    const x1 = Math.max(0, Math.min(annotation.x + (annotation.width || 100), pageWidth));
+    const y1 = Math.max(0, Math.min(annotation.y + (annotation.height || 50), pageHeight));
+    
+    const rect: [number, number, number, number] = [x0, y0, x1, y1];
+    
+    console.log(`🔴 Creating redaction annotation at rect: [${rect.join(', ')}]`);
+    
+    const annot = page.createAnnotation("Redact");
+    annot.setRect(rect);
+    
+    // Note: Redaction annotations don't support setInteriorColor - that's applied during applyRedactions
+    // We can only set the appearance before redaction is applied
+    
+    annot.update();
+    
+    // CRITICAL: Apply the redaction to actually remove content
+    // This processes ALL redaction annotations on the page and permanently removes the underlying content
+    console.log("🔄 Calling page.applyRedactions() to permanently remove content...");
+    
+    let success = false;
+    let method = "";
+    
+    try {
+      if (typeof page.applyRedactions === 'function') {
+        // Try different parameter combinations based on mupdf version
+        
+        // Method 1: Try with 4 parameters (newest mupdf.js API)
+        // applyRedactions(blackBoxes, imageMethod, lineArtMethod, textMethod)
+        // imageMethod: 1 = remove entire images, 2 = remove pixels
+        // lineArtMethod: 1 = remove if covered, 2 = remove if touched
+        // textMethod: 0 = remove text
+        try {
+          page.applyRedactions(false, 2, 2, 0);  // White fill, remove image pixels, remove line art if touched, remove text
+          success = true;
+          method = "4 parameters (false, 2, 2, 0)";
+          console.log("✓ Applied redactions with 4 parameters (aggressive)");
+        } catch (e1) {
+          // Method 2: Try with 2 parameters (older API)
+          // applyRedactions(blackBoxes, imageMethod)
+          try {
+            page.applyRedactions(false, 0);  // White fill, remove images
+            success = true;
+            method = "2 parameters (false, 0)";
+            console.log("✓ Applied redactions with 2 parameters");
+          } catch (e2) {
+            // Method 3: Try with boolean only
+            try {
+              page.applyRedactions(false);  // White fill
+              success = true;
+              method = "1 parameter (false)";
+              console.log("✓ Applied redactions with 1 parameter");
+            } catch (e3) {
+              // Method 4: Try with no parameters (oldest API)
+              try {
+                page.applyRedactions();
+                success = true;
+                method = "no parameters";
+                console.log("✓ Applied redactions with no parameters");
+              } catch (e4) {
+                console.error("All applyRedactions methods failed:", {
+                  method1: e1,
+                  method2: e2,
+                  method3: e3,
+                  method4: e4
+                });
+                throw new Error("Could not apply redactions with any known method");
+              }
+            }
+          }
+        }
+        
+        if (success) {
+          console.log(`✅ Redactions applied successfully using ${method}`);
+          console.log("📄 Content permanently removed from PDF content stream");
+          
+          // CRITICAL: Reload the page to get fresh content with redactions applied
+          // This clears mupdf's internal page cache and forces it to re-parse the content stream
+          console.log("🔄 Reloading page to refresh content...");
+          page = pdfDoc.loadPage(annotation.pageNumber);
+          
+          // Verify redaction was applied by checking if Redact annotations remain
+          // After applyRedactions(), the Redact annotations should be removed
+          const remainingAnnots = page.getAnnotations();
+          const redactAnnotsAfter = remainingAnnots.filter((a: any) => {
+            try {
+              return a.getType() === "Redact";
+            } catch {
+              return false;
+            }
+          });
+          const hasRedactAnnots = redactAnnotsAfter.length > 0;
+          
+          if (hasRedactAnnots) {
+            console.warn("⚠️ Warning: Redact annotations still present after applyRedactions()");
+            console.warn("This may indicate the content was not fully removed");
+          } else {
+            console.log("✓ Verification passed: Redact annotations removed from page");
+          }
+          
+          // Force document metadata refresh to update cached page info
+          document.refreshPageMetadata();
+          console.log("✓ Document metadata refreshed");
+        }
+      } else {
+        throw new Error("applyRedactions method not available in this mupdf version");
+      }
+    } catch (err) {
+      console.error("❌ Error applying redactions:", err);
+      console.error("Rect that failed:", rect);
+      console.error("Page number:", annotation.pageNumber);
+      throw err; // Re-throw so user knows it failed
+    }
   }
 
   /**
@@ -705,6 +981,17 @@ export class PDFEditor {
               quads: quadPoints,
               content: contents,
               color: "#FFFF00",
+            });
+          } else if (type === "Redact") {
+            // Load redaction annotation
+            annotations.push({
+              id,
+              type: "redact",
+              pageNumber,
+              x: rect[0],
+              y: rect[1],
+              width: rect[2] - rect[0],
+              height: rect[3] - rect[1],
             });
           } else if (type === "FreeText") {
             // Determine if it's a callout or text annotation
@@ -828,6 +1115,8 @@ export class PDFEditor {
             await this.addHighlightAnnotation(document, annot);
           } else if (annot.type === "callout") {
             await this.addCalloutAnnotation(document, annot);
+          } else if (annot.type === "redact") {
+            await this.addRedactionAnnotation(document, annot);
           }
         } catch (error) {
           console.error(`Error syncing annotation ${annot.id}:`, error);
@@ -847,6 +1136,41 @@ export class PDFEditor {
     // Sync annotations if provided
     if (annotations && annotations.length > 0) {
       await this.syncAllAnnotations(document, annotations);
+      
+      // Apply redactions on all pages that have redaction annotations
+      const mupdfDoc = document.getMupdfDocument();
+      const pdfDoc = mupdfDoc.asPDF();
+      
+      if (pdfDoc) {
+        // Group redactions by page
+        const redactionsByPage = new Map<number, Annotation[]>();
+        for (const annot of annotations) {
+          if (annot.type === "redact") {
+            if (!redactionsByPage.has(annot.pageNumber)) {
+              redactionsByPage.set(annot.pageNumber, []);
+            }
+            redactionsByPage.get(annot.pageNumber)!.push(annot);
+          }
+        }
+        
+        // Apply redactions on each page that has them
+        for (const pageNumber of redactionsByPage.keys()) {
+          try {
+            const page = pdfDoc.loadPage(pageNumber);
+            if (typeof page.applyRedactions === 'function') {
+              try {
+                // Try with parameters first (0 = white fill, 0 = remove images)
+                page.applyRedactions(0, 0);
+              } catch (e) {
+                // Fallback to no parameters
+                page.applyRedactions();
+              }
+            }
+          } catch (err) {
+            console.error(`Error applying redactions on page ${pageNumber}:`, err);
+          }
+        }
+      }
     }
 
     const mupdfDoc = document.getMupdfDocument();

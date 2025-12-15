@@ -6,11 +6,13 @@
 
 import { create } from "zustand";
 
-export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout";
+export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectText";
 export type ViewMode = "single" | "spread" | "thumbnails";
 
 export interface UIState {
-  zoomLevel: number;
+  zoomLevel: number; // Current active zoom level (switches between modes)
+  readModeZoomLevel: number; // Separate zoom level for read mode
+  normalModeZoomLevel: number; // Separate zoom level for normal mode
   fitMode: "width" | "page" | "custom";
   activeTool: ToolType;
   viewMode: ViewMode;
@@ -18,6 +20,11 @@ export interface UIState {
   showToolbar: boolean;
   zoomToCenterCallback: ((newZoom: number) => void) | null;
   readMode: boolean;
+  
+  // Highlight tool settings
+  highlightColor: string;
+  highlightStrokeWidth: number;
+  highlightOpacity: number;
   
   // Actions
   setZoomLevel: (level: number) => void;
@@ -31,10 +38,15 @@ export interface UIState {
   zoomToCenter: (newZoom: number) => void;
   setReadMode: (enabled: boolean) => void;
   toggleReadMode: () => void;
+  setHighlightColor: (color: string) => void;
+  setHighlightStrokeWidth: (width: number) => void;
+  setHighlightOpacity: (opacity: number) => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
   zoomLevel: 1.0,
+  readModeZoomLevel: 1.0, // Separate zoom level for read mode, starts at base fit scale
+  normalModeZoomLevel: 1.0, // Separate zoom level for normal mode
   fitMode: "page", // Default to fit page
   activeTool: "select",
   viewMode: "single",
@@ -42,9 +54,23 @@ export const useUIStore = create<UIState>((set, get) => ({
   showToolbar: true,
   zoomToCenterCallback: null,
   readMode: false,
+  
+  // Highlight tool settings
+  highlightColor: "#FFFF00",
+  highlightStrokeWidth: 15,
+  highlightOpacity: 0.5,
 
-  setZoomLevel: (level) =>
-    set({ zoomLevel: Math.max(0.25, Math.min(5.0, level)), fitMode: "custom" }),
+  setZoomLevel: (level) => {
+    const state = get();
+    const clampedLevel = Math.max(0.25, Math.min(5.0, level));
+    if (state.readMode) {
+      // Save to read mode zoom level
+      set({ readModeZoomLevel: clampedLevel, zoomLevel: clampedLevel, fitMode: "custom" });
+    } else {
+      // Save to normal mode zoom level
+      set({ normalModeZoomLevel: clampedLevel, zoomLevel: clampedLevel, fitMode: "custom" });
+    }
+  },
 
   setFitMode: (mode) => set({ fitMode: mode }),
 
@@ -68,12 +94,72 @@ export const useUIStore = create<UIState>((set, get) => ({
       callback(newZoom);
     } else {
       // Fallback to regular zoom if callback not set
-      set({ zoomLevel: Math.max(0.25, Math.min(5.0, newZoom)), fitMode: "custom" });
+      const state = get();
+      const clampedLevel = Math.max(0.25, Math.min(5.0, newZoom));
+      if (state.readMode) {
+        set({ readModeZoomLevel: clampedLevel, zoomLevel: clampedLevel, fitMode: "custom" });
+      } else {
+        set({ normalModeZoomLevel: clampedLevel, zoomLevel: clampedLevel, fitMode: "custom" });
+      }
     }
   },
 
-  setReadMode: (enabled) => set({ readMode: enabled }),
+  setReadMode: (enabled) => {
+    const state = get();
+    if (enabled && !state.readMode) {
+      // Entering read mode: save current zoom to normalModeZoomLevel and reset to base fit scale (1.0)
+      set({ 
+        readMode: true, 
+        normalModeZoomLevel: state.zoomLevel, // Save current zoom
+        zoomLevel: 1.0, // Always reset to base fit scale when entering read mode
+        readModeZoomLevel: 1.0, // Reset read mode zoom
+        fitMode: "width" 
+      });
+    } else if (!enabled && state.readMode) {
+      // Exiting read mode: save current zoom to readModeZoomLevel and reset to full view (fit to page)
+      set({ 
+        readMode: false,
+        readModeZoomLevel: state.zoomLevel, // Save current read mode zoom
+        zoomLevel: 1.0, // Reset to base zoom (will be recalculated to fit page)
+        fitMode: "page" // Reset to fit page for full view
+      });
+    } else {
+      set({ readMode: enabled });
+    }
+  },
 
-  toggleReadMode: () => set((state) => ({ readMode: !state.readMode })),
+  toggleReadMode: () => {
+    const state = get();
+    if (!state.readMode) {
+      // Entering read mode: save current zoom to normalModeZoomLevel and reset to base fit scale (1.0)
+      set({ 
+        readMode: true, 
+        normalModeZoomLevel: state.zoomLevel, // Save current zoom
+        zoomLevel: 1.0, // Always reset to base fit scale when entering read mode
+        readModeZoomLevel: 1.0, // Reset read mode zoom
+        fitMode: "width" 
+      });
+    } else {
+      // Exiting read mode: save current zoom to readModeZoomLevel and reset to full view (fit to page)
+      set({ 
+        readMode: false,
+        readModeZoomLevel: state.zoomLevel, // Save current read mode zoom
+        zoomLevel: 1.0, // Reset to base zoom (will be recalculated to fit page)
+        fitMode: "page" // Reset to fit page for full view
+      });
+    }
+  },
+
+  setHighlightColor: (color) => set({ highlightColor: color }),
+  
+  setHighlightStrokeWidth: (width) => {
+    const clampedWidth = Math.max(5, Math.min(50, width));
+    set({ highlightStrokeWidth: clampedWidth });
+  },
+  
+  setHighlightOpacity: (opacity) => {
+    const clampedOpacity = Math.max(0.1, Math.min(1.0, opacity));
+    set({ highlightOpacity: clampedOpacity });
+  },
 }));
 

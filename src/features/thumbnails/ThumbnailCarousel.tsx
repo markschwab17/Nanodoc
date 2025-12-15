@@ -23,7 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal } from "lucide-react";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
@@ -64,6 +64,26 @@ export function ThumbnailCarousel() {
   
   const results = currentDocument ? getSearchResults(currentDocument.getId()) : [];
   const currentResultIndex = currentSearchResult;
+  
+  // Track if the last page change was from a click (to preserve selection)
+  const lastClickPageRef = useRef<number | null>(null);
+  
+  // Clear selected pages when current page changes from scrolling (not clicking)
+  // This prevents the ring border from staying on previously selected pages
+  useEffect(() => {
+    // If current page changed and it wasn't from a click, clear selection
+    if (selectedPages.size > 0 && lastClickPageRef.current !== currentPage) {
+      // Small delay to ensure click events have processed
+      const timeoutId = setTimeout(() => {
+        // Only clear if current page is still not the clicked page
+        if (lastClickPageRef.current !== currentPage) {
+          setSelectedPages(new Set());
+          lastClickPageRef.current = null; // Reset after clearing
+        }
+      }, 100);
+      return () => clearTimeout(timeoutId);
+    }
+  }, [currentPage, selectedPages]);
 
   useEffect(() => {
     const initRenderer = async () => {
@@ -409,9 +429,11 @@ export function ThumbnailCarousel() {
         }
         return newSet;
       });
+      lastClickPageRef.current = pageNumber;
     } else {
       // Single select
       setSelectedPages(new Set([pageNumber]));
+      lastClickPageRef.current = pageNumber;
       setCurrentPage(pageNumber);
     }
   };
