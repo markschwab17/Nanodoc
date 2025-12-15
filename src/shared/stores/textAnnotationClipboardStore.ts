@@ -33,7 +33,6 @@ export const useTextAnnotationClipboardStore = create<TextAnnotationClipboardSto
         annotation: clonedAnnotation,
       },
     });
-    const state = get();
   },
 
   pasteTextAnnotation: () => {

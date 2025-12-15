@@ -247,7 +247,6 @@ export class PDFEditor {
       
       // Try different methods to set the rotation
       let rotationSet = false;
-      let setMethod = "";
       
       // Method 1: Use put with newNumber (preferred method)
       if (pageObj.put && pdfDoc.newNumber) {
@@ -255,7 +254,6 @@ export class PDFEditor {
           const rotateNumber = pdfDoc.newNumber(finalRotation);
           pageObj.put("Rotate", rotateNumber);
           rotationSet = true;
-          setMethod = "put with newNumber";
         } catch (e) {
           console.warn("Method 1 (put with newNumber) failed:", e);
         }
@@ -266,7 +264,6 @@ export class PDFEditor {
         try {
           pageObj.put("Rotate", finalRotation);
           rotationSet = true;
-          setMethod = "put with number";
         } catch (e) {
           console.warn("Method 2 (put with number) failed:", e);
         }
@@ -277,7 +274,6 @@ export class PDFEditor {
         try {
           pageObj.set("Rotate", finalRotation);
           rotationSet = true;
-          setMethod = "set";
         } catch (e) {
           console.warn("Method 3 (set) failed:", e);
         }

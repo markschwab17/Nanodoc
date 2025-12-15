@@ -259,14 +259,16 @@ export const usePrintStore = create<PrintStore>()(
       name: "civil-pdf-print-settings",
       version: 2,
       // Custom serialization for Map
-      serialize: (state) => {
-        const serialized: any = {};
-        state.settings.forEach((value, key) => {
-          serialized[key] = value;
-        });
+      serialize: (state: any) => {
+        const serialized: Record<string, PrintSettings> = {};
+        if (state?.settings) {
+          state.settings.forEach((value: PrintSettings, key: string) => {
+            serialized[key] = value;
+          });
+        }
         return JSON.stringify({ settings: serialized });
       },
-      deserialize: (str) => {
+      deserialize: (str: string): any => {
         const parsed = JSON.parse(str);
         const settingsMap = new Map<string, PrintSettings>();
         if (parsed.settings) {
