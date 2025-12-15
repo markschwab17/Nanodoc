@@ -7,6 +7,7 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import type { Annotation } from "@/core/pdf/PDFEditor";
+import { useUIStore } from "@/shared/stores/uiStore";
 // Circular rotation handle component
 const RotationHandle = ({ 
   size, 
@@ -79,8 +80,9 @@ export function RichTextEditor({
   const [isDragging, setIsDragging] = useState(false);
   const [resizeCorner, setResizeCorner] = useState<string | null>(null);
   const [rotationStart, setRotationStart] = useState({ x: 0, y: 0, angle: 0, centerX: 0, centerY: 0 });
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const dragStartRef = useRef({ x: 0, y: 0 }); // Use ref for synchronous updates during drag
   const [isRotationHandleHovered, setIsRotationHandleHovered] = useState(false);
+  const { zoomLevel } = useUIStore();
   // Calculate initial size based on font size if not provided
   const calculateInitialSize = (fontSize: number) => {
     // Width: approximately 15-20 characters worth (font size * 0.6 per char, so ~15 chars = fontSize * 9)
@@ -100,7 +102,8 @@ export function RichTextEditor({
   const [rotation, setRotation] = useState(annotation.rotation || 0);
   const [hasBackground, setHasBackground] = useState(annotation.hasBackground || false);
   const [backgroundColor, setBackgroundColor] = useState(annotation.backgroundColor || "#ffffff");
-  const [fontSize, setFontSize] = useState(defaultFontSize);
+  // Use annotation.fontSize directly instead of state to ensure it updates immediately
+  const fontSize = annotation.fontSize || 12;
   const initialSizeRef = useRef({ 
     width: annotation.width || defaultSize.width, 
     height: annotation.height || defaultSize.height 
@@ -116,7 +119,7 @@ export function RichTextEditor({
     sizeRef.current = size;
   }, [size]);
 
-  // Sync size, background, and font size with annotation
+  // Sync size and background with annotation
   useEffect(() => {
     const currentFontSize = annotation.fontSize || 12;
     const calculatedSize = calculateInitialSize(currentFontSize);
@@ -129,8 +132,8 @@ export function RichTextEditor({
       setSize(prev => ({ ...prev, height: annotation.height || calculatedSize.height }));
       initialSizeRef.current.height = annotation.height || calculatedSize.height;
     }
-    if (annotation.fontSize && annotation.fontSize !== fontSize) {
-      setFontSize(annotation.fontSize);
+    // Update initialFontSizeRef when annotation fontSize changes
+    if (annotation.fontSize && annotation.fontSize !== initialFontSizeRef.current) {
       initialFontSizeRef.current = annotation.fontSize;
     }
     if (annotation.hasBackground !== undefined && annotation.hasBackground !== hasBackground) {
@@ -139,7 +142,19 @@ export function RichTextEditor({
     if (annotation.backgroundColor && annotation.backgroundColor !== backgroundColor) {
       setBackgroundColor(annotation.backgroundColor);
     }
-  }, [annotation.width, annotation.height, annotation.fontSize, annotation.hasBackground, annotation.backgroundColor]);
+  }, [annotation.width, annotation.height, annotation.fontSize, annotation.hasBackground, annotation.backgroundColor, size.width, size.height, hasBackground, backgroundColor]);
+
+  // Clear inline styles and ensure annotation prop is the single source of truth
+  useEffect(() => {
+    if (!editorRef.current) return;
+    
+    // Clear any inline styles that might have been set by the toolbar
+    // The annotation prop values will be applied via the style prop below
+    editorRef.current.style.fontSize = '';
+    editorRef.current.style.color = '';
+    editorRef.current.style.fontFamily = '';
+    // Note: We don't clear backgroundColor here as it's handled conditionally in the style prop
+  }, [annotation.id, annotation.fontSize, annotation.fontFamily, annotation.color]);
   
   // Track previous content to prevent unnecessary updates
   const previousContentRef = useRef<string>("");
@@ -278,7 +293,7 @@ export function RichTextEditor({
         }
       };
     }
-  }, [isEditing, scale, onResize, fontSize, annotation.fontFamily]);
+  }, [isEditing, scale, onResize, annotation.fontSize, annotation.fontFamily]);
 
   // Handle ESC key to exit edit mode
   useEffect(() => {
@@ -368,7 +383,7 @@ export function RichTextEditor({
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(true);
-        setDragStart({ x: e.clientX, y: e.clientY });
+        dragStartRef.current = { x: e.clientX, y: e.clientY };
       }
       // If clicking on rotation handle, handle rotation
       if (target.closest('[data-rotation-handle]')) {
@@ -393,7 +408,7 @@ export function RichTextEditor({
     // Don't prevent default or stop propagation - allow double-click to work
     // Only track the mouse position for potential drag
     setIsDragging(true);
-    setDragStart({ x: e.clientX, y: e.clientY });
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
   }, [isEditing]);
 
   // Handle drag to move
@@ -401,26 +416,64 @@ export function RichTextEditor({
     if (!isDragging || isEditing) return;
 
     const handleMouseMove = (e: MouseEvent) => {
-      // Calculate delta in screen coordinates
-      const deltaX = (e.clientX - dragStart.x) / scale;
-      const deltaY = (e.clientY - dragStart.y) / scale;
+      // Calculate delta in screen coordinates (pixels)
+      // Use the current dragStartRef position to calculate incremental delta (ref updates synchronously)
+      const screenDeltaX = e.clientX - dragStartRef.current.x;
+      const screenDeltaY = e.clientY - dragStartRef.current.y;
       
       // Only move if we've actually dragged (moved more than a few pixels)
       const moveDistance = Math.sqrt(
-        Math.pow(e.clientX - dragStart.x, 2) + Math.pow(e.clientY - dragStart.y, 2)
+        Math.pow(screenDeltaX, 2) + Math.pow(screenDeltaY, 2)
       );
       
       if (moveDistance > 3) {
         e.preventDefault();
         
-        // PDF Y coordinate is inverted (Y=0 at bottom, increases upward)
-        // So when dragging down (positive screen Y), we need to decrease PDF Y
-        // Therefore, negate deltaY
+        // Convert screen pixel delta to PDF coordinate delta
+        // The text box is positioned using: canvasPos = pdfToCanvas(annot.x, annot.y) / devicePixelRatio
+        // This gives display pixel coordinates
+        // The text box is inside a container with CSS transform: scale(zoomLevel)
+        // So screen pixel deltas need to be divided by zoomLevel to get display pixel deltas
+        
+        // Get zoom level from UI store (more reliable than DOM parsing)
+        // The text box is inside a container with CSS transform: scale(zoomLevel)
+        // Screen pixels are in viewport coordinates, but text box is in transformed space
+        // So we need to divide by zoomLevel to get display pixel deltas
+        
+        // Convert screen pixels to PDF coordinates
+        // Text box position: canvasPos = pdfToCanvas(annot.x, annot.y) / devicePixelRatio
+        // pdfToCanvas: (pdfX * BASE_SCALE, (pageHeight - pdfY) * BASE_SCALE) → (canvasX, canvasY)
+        // So: canvasPos = (annot.x * BASE_SCALE / devicePixelRatio, (pageHeight - annot.y) * BASE_SCALE / devicePixelRatio)
+        // The text box is inside a container with transform: scale(zoomLevel)
+        // So screen position: screenPos = canvasPos * zoomLevel
+        // When we drag, screenDeltaX = change in screenPos.x
+        // screenDeltaX = (pdfDeltaX * BASE_SCALE * zoomLevel) / devicePixelRatio
+        // Therefore: pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel)
+        // For Y: screenDeltaY = change in screenPos.y
+        // Since pdfToCanvas flips Y: canvasY = (pageHeight - pdfY) * BASE_SCALE / devicePixelRatio
+        // screenY = canvasY * zoomLevel = (pageHeight - pdfY) * BASE_SCALE * zoomLevel / devicePixelRatio
+        // screenDeltaY = -pdfDeltaY * BASE_SCALE * zoomLevel / devicePixelRatio
+        // Therefore: pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * zoomLevel)
+        // The text box is positioned at: canvasPos = pdfToCanvas(annot.x, annot.y) / devicePixelRatio
+        // This is in display pixels, inside a container with scale(zoomLevel)
+        // So screen position: screenPos = canvasPos * zoomLevel
+        // When we drag: screenDeltaX = change in screenPos.x = canvasDeltaX * zoomLevel
+        // Where canvasDeltaX = change in canvasPos.x = pdfDeltaX * BASE_SCALE / devicePixelRatio
+        // So: screenDeltaX = (pdfDeltaX * BASE_SCALE / devicePixelRatio) * zoomLevel
+        // Therefore: pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel)
+        // For Y: same but negated because pdfToCanvas flips Y
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        const BASE_SCALE = 2.0;
+        
+        const pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel);
+        const pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * zoomLevel); // Negate Y because pdfToCanvas flips Y
+        
         if (onMove) {
-          onMove(deltaX, -deltaY);
+          onMove(pdfDeltaX, pdfDeltaY);
         }
         
-        setDragStart({ x: e.clientX, y: e.clientY });
+        // Update dragStartRef to current mouse position for next incremental delta calculation (synchronous update)
+        dragStartRef.current = { x: e.clientX, y: e.clientY };
       }
     };
 
@@ -440,7 +493,7 @@ export function RichTextEditor({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging, isEditing, dragStart, scale, onMove, onDragEnd]);
+  }, [isDragging, isEditing, scale, onMove, onDragEnd]);
 
   // Prevent blur when clicking outside (like on toolbar)
   const handleBlur = useCallback((e: React.FocusEvent) => {
@@ -706,7 +759,7 @@ export function RichTextEditor({
           
           // Start dragging immediately - double-click will cancel it
           setIsDragging(true);
-          setDragStart({ x: e.clientX, y: e.clientY });
+          dragStartRef.current = { x: e.clientX, y: e.clientY };
         }}
         onClick={(e) => {
           // Single click: stop propagation to prevent container drag handler
@@ -743,6 +796,7 @@ export function RichTextEditor({
         }}
         suppressContentEditableWarning
         data-rich-text-editor="true"
+        data-annotation-id={annotation.id}
       />
       
       {/* Corner handles for resizing */}
@@ -923,6 +977,7 @@ export function RichTextEditor({
     </div>
   );
 }
+
 
 
 

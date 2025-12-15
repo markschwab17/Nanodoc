@@ -26,13 +26,14 @@ export const RedactTool: ToolHandler = {
 
     // Create redaction from selection box
     // Note: PDF coordinates have Y=0 at bottom, so larger Y = higher up
+    // getPDFCoordinates now correctly flips Y, so selectionStart/End are in correct PDF coordinates
     const minX = Math.min(selectionStart.x, selectionEnd.x);
-    const minY = Math.min(selectionStart.y, selectionEnd.y); // Bottom edge
+    const minY = Math.min(selectionStart.y, selectionEnd.y); // Bottom edge (smaller Y in PDF)
     const maxX = Math.max(selectionStart.x, selectionEnd.x);
-    const maxY = Math.max(selectionStart.y, selectionEnd.y); // Top edge
+    const maxY = Math.max(selectionStart.y, selectionEnd.y); // Top edge (larger Y in PDF)
     const width = maxX - minX;
     const height = maxY - minY;
-
+    
     // Only create if box is large enough
     if (width > 10 && height > 10) {
       // Store bottom-left corner (minX, minY) for PDF rect

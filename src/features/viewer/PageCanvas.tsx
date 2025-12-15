@@ -123,6 +123,30 @@ export function PageCanvas({
     // This effect ensures component re-renders when annotations are added/updated
   }, [allAnnotations.length, annotations.length]);
 
+  // Ensure only one text box is in edit mode at a time
+  // When editingAnnotation changes, ensure all other text boxes exit edit mode
+  useEffect(() => {
+    if (!editingAnnotation || editingAnnotation.type !== "text") {
+      // If no annotation is being edited, ensure edit mode is off
+      if (isEditingMode) {
+        setIsEditingMode(false);
+      }
+      return;
+    }
+
+    // Ensure all text box editors that are not the current one are not contentEditable
+    const allEditors = window.document.querySelectorAll('[data-rich-text-editor="true"]') as NodeListOf<HTMLElement>;
+    allEditors.forEach((editor) => {
+      const editorAnnotationId = editor.getAttribute("data-annotation-id");
+      if (editorAnnotationId && editorAnnotationId !== editingAnnotation.id) {
+        // This editor is not the current one - ensure it's not contentEditable
+        if (editor.isContentEditable) {
+          editor.contentEditable = "false";
+        }
+      }
+    });
+  }, [editingAnnotation?.id, isEditingMode]);
+
   // Load all text spans for the current page when document/page changes (for hover detection)
   useEffect(() => {
     if (currentDocument) {
@@ -594,19 +618,17 @@ export function PageCanvas({
     const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
     
     // Step 4: Convert canvas pixels to PDF coordinates
-    // CRITICAL: According to PDFTextExtractor comment, mupdf's toPixmap() does NOT flip Y-axis
-    // This means: canvas y=0 (top) maps to PDF y=0 (bottom), canvas y=height*BASE_SCALE (bottom) maps to PDF y=height (top)
-    // So we should NOT flip Y - canvas coordinates match PDF coordinates directly
+    // PDF Y=0 is at bottom, canvas Y=0 is at top - we need to flip Y-axis
     const pdfX = canvasPixelX / BASE_SCALE;
-    const pdfY = canvasPixelY / BASE_SCALE;  // NO FLIP - mupdf renders without Y flip
+    const pdfY = pageMetadata.height - (canvasPixelY / BASE_SCALE);  // Flip Y: PDF Y=0 is at bottom
     
     return { x: pdfX, y: pdfY };
   };
 
   // Helper function to convert PDF coordinates to canvas coordinates for rendering overlays
-  // CRITICAL: Must match getPDFCoordinates - no Y flip because mupdf renders without Y flip
-  // getPDFCoordinates: canvasPixelY / BASE_SCALE → pdfY (no flip)
-  // pdfToCanvas: pdfY * BASE_SCALE → canvasY (no flip, to match)
+  // Must match getPDFCoordinates - both flip Y-axis since PDF Y=0 is at bottom, canvas Y=0 is at top
+  // getPDFCoordinates: pageHeight - (canvasPixelY / BASE_SCALE) → pdfY (flipped)
+  // pdfToCanvas: (pageHeight - pdfY) * BASE_SCALE → canvasY (flipped, to match)
   const pdfToCanvas = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
     const pageMetadata = document.getPageMetadata(pageNumber);
     
@@ -614,11 +636,12 @@ export function PageCanvas({
       return { x: pdfX * BASE_SCALE, y: pdfY * BASE_SCALE };
     }
     
-    // CRITICAL: No Y flip - must match getPDFCoordinates which also doesn't flip Y
-    // mupdf renders PDF content without Y flip, so canvas and PDF coordinates map 1:1
+    // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis
+    const flippedY = pageMetadata.height - pdfY;
+    
     return {
       x: pdfX * BASE_SCALE,
-      y: pdfY * BASE_SCALE,  // NO FLIP - matches getPDFCoordinates
+      y: flippedY * BASE_SCALE,  // Flip Y to match getPDFCoordinates
     };
   };
 
@@ -2067,10 +2090,18 @@ export function PageCanvas({
               const redactWidth = annot.width || 100;
               const redactHeight = annot.height || 50;
               
-              // Convert PDF coordinates to container coordinates
-              // annot.y is the BOTTOM edge, we need TOP edge for canvas rendering
+              // Convert PDF coordinates to canvas display coordinates (same as text annotations)
+              // annot.y is the BOTTOM edge in PDF coordinates (Y=0 at bottom, Y increases upward)
+              // For CSS positioning, we need the TOP edge (top-left corner)
+              // pdfToCanvas expects PDF coordinates and flips Y internally
+              // So we pass the top edge: annot.y + redactHeight
               const pdfTopY = annot.y + redactHeight;
-              const redactContainer = pdfToContainer(annot.x, pdfTopY);
+              const canvasPixel = pdfToCanvas(annot.x, pdfTopY);
+              const devicePixelRatio = window.devicePixelRatio || 1;
+              const redactContainer = { 
+                x: canvasPixel.x / devicePixelRatio, 
+                y: canvasPixel.y / devicePixelRatio 
+              };
               const redactContainerWidth = redactWidth * currentZoom;
               const redactContainerHeight = redactHeight * currentZoom;
               
@@ -2146,11 +2177,19 @@ export function PageCanvas({
                 isEditing={isEditing}
                 onEditModeChange={(editing) => {
                   if (editing) {
+                    // When entering edit mode, ensure only this annotation is in edit mode
+                    // Exit edit mode for any previously editing annotation
+                    if (editingAnnotation && editingAnnotation.id !== annot.id) {
+                      setIsEditingMode(false);
+                    }
                     setEditingAnnotation(annot);
                     setAnnotationText(annot.content || "");
                     setIsEditingMode(true);
                   } else {
-                    setIsEditingMode(false);
+                    // Only exit edit mode if this is the currently editing annotation
+                    if (editingAnnotation?.id === annot.id) {
+                      setIsEditingMode(false);
+                    }
                   }
                 }}
                 onChange={async (html) => {

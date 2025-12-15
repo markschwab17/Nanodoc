@@ -36,37 +36,34 @@ function App() {
   
   // Get current editing annotation for formatting toolbar
   const currentDocument = usePDFStore.getState().getCurrentDocument();
-  const currentPage = usePDFStore.getState().currentPage;
   
   // Helper to find the currently editing annotation by finding the active editor
   const getEditingAnnotation = () => {
     if (!currentDocument) return null;
     
-    // Find the active contentEditable editor
+    // Find the active contentEditable editor (must be focused, not just contentEditable)
     const activeElement = document.activeElement as HTMLElement;
     let activeEditor: HTMLElement | null = null;
     
+    // Only consider the editor if it's both contentEditable AND currently focused
     if (activeElement && activeElement.hasAttribute("contenteditable") && 
-        activeElement.getAttribute("data-rich-text-editor") === "true") {
+        activeElement.getAttribute("data-rich-text-editor") === "true" &&
+        activeElement.isContentEditable) {
       activeEditor = activeElement;
-    } else {
-      // Find any editor that is contentEditable (in edit mode)
-      const allEditors = document.querySelectorAll('[data-rich-text-editor="true"]') as NodeListOf<HTMLElement>;
-      for (const ed of Array.from(allEditors)) {
-        if (ed.isContentEditable) {
-          activeEditor = ed;
-          break;
-        }
-      }
     }
     
+    // If no focused editor, don't return any annotation
+    // This ensures we only style the actively focused text box
     if (!activeEditor) return null;
     
-    // Find annotation by matching content or position
-    // For now, just get the first text annotation on current page as fallback
+    // Get annotation ID from the editor's data attribute
+    const annotationId = activeEditor.getAttribute("data-annotation-id");
+    if (!annotationId) return null;
+    
+    // Find the annotation by ID
     const annotations = usePDFStore.getState().getAnnotations(currentDocument.getId());
     return annotations.find(
-      (a) => a.pageNumber === currentPage && a.type === "text"
+      (a) => a.id === annotationId && a.type === "text"
     ) || null;
   };
   
@@ -298,20 +295,22 @@ function App() {
               }}
               onBackgroundToggle={(enabled) => {
                 // Update annotation background
-                if (editingAnnotation && currentDocument) {
+                const annot = getEditingAnnotation();
+                if (annot && currentDocument) {
                   usePDFStore.getState().updateAnnotation(
                     currentDocument.getId(),
-                    editingAnnotation.id,
+                    annot.id,
                     { hasBackground: enabled }
                   );
                 }
               }}
               onBackgroundColorChange={(color) => {
                 // Update annotation background color
-                if (editingAnnotation && currentDocument) {
+                const annot = getEditingAnnotation();
+                if (annot && currentDocument) {
                   usePDFStore.getState().updateAnnotation(
                     currentDocument.getId(),
-                    editingAnnotation.id,
+                    annot.id,
                     { backgroundColor: color }
                   );
                 }

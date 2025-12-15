@@ -91,28 +91,15 @@ export function TextFormattingToolbar({
     const activeElement = document.activeElement as HTMLElement;
     let editor: HTMLElement | null = null;
     
-    // First check if the active element is a rich text editor
-    if (activeElement && activeElement.hasAttribute("contenteditable") && activeElement.getAttribute("data-rich-text-editor") === "true") {
+    // Only use the editor if it's both contentEditable AND currently focused
+    // This ensures we only style the actively focused text box
+    if (activeElement && activeElement.hasAttribute("contenteditable") && 
+        activeElement.getAttribute("data-rich-text-editor") === "true" &&
+        activeElement.isContentEditable) {
       editor = activeElement;
-    } else {
-      // Fallback: find any rich text editor that is contentEditable
-      // Prefer one that is currently focused or in edit mode
-      const allEditors = document.querySelectorAll('[data-rich-text-editor="true"]') as NodeListOf<HTMLElement>;
-      
-      // Find the one that is contentEditable (in edit mode)
-      for (const ed of Array.from(allEditors)) {
-        if (ed.isContentEditable) {
-          editor = ed;
-          break;
-        }
-      }
-      
-      // If none are in edit mode, use the first one found
-      if (!editor && allEditors.length > 0) {
-        editor = allEditors[0];
-      }
     }
     
+    // Don't fallback to other editors - only style the focused one
     const selection = window.getSelection();
     return { editor, selection };
   };
@@ -120,6 +107,7 @@ export function TextFormattingToolbar({
   const handleFontSizeChange = (value: number[]) => {
     const newSize = value[0];
     setFontSize(newSize);
+    // Only update annotation through callback - don't manipulate DOM directly
     onFontSizeChange(newSize);
     
     const { editor, selection } = getActiveEditor();
@@ -131,7 +119,7 @@ export function TextFormattingToolbar({
     // Focus the editor first
     editor.focus();
     
-    // Apply font size using CSS
+    // Apply font size to selected text only (if there's a selection)
     if (selection && selection.rangeCount > 0) {
       const range = selection.getRangeAt(0);
       if (!range.collapsed) {
@@ -154,59 +142,44 @@ export function TextFormattingToolbar({
           newSelection.removeAllRanges();
           newSelection.addRange(newRange);
         }
-      } else {
-        // No selection - apply to the editor's default style for future text
-        editor.style.fontSize = `${newSize}px`;
       }
-    } else {
-      // No selection - apply to the editor's default style
-      editor.style.fontSize = `${newSize}px`;
+      // If no selection, the annotation update will handle the base font size
     }
+    // Base font size is handled by RichTextEditor from annotation prop
   };
 
   const handleFontChange = (font: string) => {
     setFontFamily(font);
+    // Only update annotation through callback - don't manipulate DOM directly
     onFontChange(font);
     
-    const { editor } = getActiveEditor();
+    const { editor, selection } = getActiveEditor();
     if (!editor) {
       // If no editor is active, the change will apply to new annotations
       return;
     }
     
-    // Apply font change without focusing (to keep dropdown open)
-    // Use execCommand for font name
-    const success = document.execCommand("fontName", false, font);
-    if (!success) {
-      // Fallback: apply via CSS
-      // Get selection from the editor's window
-      const selection = window.getSelection();
-      if (selection && selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        // Only apply to selection if it's within our editor
-        if (editor.contains(range.commonAncestorContainer)) {
-          if (!range.collapsed) {
-            const span = document.createElement("span");
-            span.style.fontFamily = font;
-            try {
-              range.surroundContents(span);
-            } catch (e) {
-              const contents = range.extractContents();
-              span.appendChild(contents);
-              range.insertNode(span);
-            }
-          } else {
-            // Apply to editor's default style for future text
-            editor.style.fontFamily = font;
+    // Apply font change to selected text only (if there's a selection)
+    // Use execCommand for font name on selection
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      // Only apply to selection if it's within our editor
+      if (editor.contains(range.commonAncestorContainer) && !range.collapsed) {
+        const success = document.execCommand("fontName", false, font);
+        if (!success) {
+          // Fallback: apply via CSS span
+          const span = document.createElement("span");
+          span.style.fontFamily = font;
+          try {
+            range.surroundContents(span);
+          } catch (e) {
+            const contents = range.extractContents();
+            span.appendChild(contents);
+            range.insertNode(span);
           }
-        } else {
-          // Apply to editor's default style
-          editor.style.fontFamily = font;
         }
-      } else {
-        // Apply to editor's default style
-        editor.style.fontFamily = font;
       }
+      // If no selection, the annotation update will handle the base font family
     }
     
     // Focus editor after a short delay (after dropdown closes)
@@ -219,9 +192,10 @@ export function TextFormattingToolbar({
 
   const handleColorChange = (newColor: string) => {
     setColor(newColor);
+    // Only update annotation through callback - don't manipulate DOM directly
     onColorChange(newColor);
     
-    const { editor } = getActiveEditor();
+    const { editor, selection } = getActiveEditor();
     if (!editor) {
       // If no editor is active, the change will apply to new annotations
       return;
@@ -229,14 +203,14 @@ export function TextFormattingToolbar({
     
     editor.focus();
     
-    // Use execCommand for color
-    const success = document.execCommand("foreColor", false, newColor);
-    if (!success) {
-      // Fallback: apply via CSS
-      const selection = window.getSelection();
-      if (selection && selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        if (!range.collapsed) {
+    // Apply color to selected text only (if there's a selection)
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (!range.collapsed) {
+        // Use execCommand for color on selection
+        const success = document.execCommand("foreColor", false, newColor);
+        if (!success) {
+          // Fallback: apply via CSS span
           const span = document.createElement("span");
           span.style.color = newColor;
           try {
@@ -246,13 +220,11 @@ export function TextFormattingToolbar({
             span.appendChild(contents);
             range.insertNode(span);
           }
-        } else {
-          editor.style.color = newColor;
         }
-      } else {
-        editor.style.color = newColor;
       }
+      // If no selection, the annotation update will handle the base color
     }
+    // Base color is handled by RichTextEditor from annotation prop
   };
 
   const handleFormat = (command: string, value?: string) => {
@@ -482,6 +454,7 @@ export function TextFormattingToolbar({
     </div>
   );
 }
+
 
 
 

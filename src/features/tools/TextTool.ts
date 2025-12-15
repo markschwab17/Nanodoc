@@ -49,12 +49,12 @@ export const TextTool: ToolHandler = {
     });
 
     if (clickedAnnotation) {
-      // Single click: select annotation
+      // Single click: enter edit mode for the clicked annotation
       e.preventDefault();
       e.stopPropagation();
       setEditingAnnotation(clickedAnnotation);
       setAnnotationText(clickedAnnotation.content || "");
-      setIsEditingMode(false); // Start in selection mode, not edit mode
+      setIsEditingMode(true); // Enter edit mode directly
       return;
     }
 
@@ -119,7 +119,7 @@ export const TextTool: ToolHandler = {
       height,
       autoFit, // Flag to indicate auto-fit mode
     };
-
+    
     setEditingAnnotation(tempAnnotation);
     setAnnotationText("");
     setIsEditingMode(true);
