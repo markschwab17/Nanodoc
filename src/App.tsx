@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useDragDrop } from "@/shared/hooks/useDragDrop";
@@ -36,38 +36,183 @@ function App() {
   
   // Get current editing annotation for formatting toolbar
   const currentDocument = usePDFStore.getState().getCurrentDocument();
+  const [editorFocusKey, setEditorFocusKey] = useState(0);
   
   // Helper to find the currently editing annotation by finding the active editor
   const getEditingAnnotation = () => {
     if (!currentDocument) return null;
     
-    // Find the active contentEditable editor (must be focused, not just contentEditable)
+    const annotations = usePDFStore.getState().getAnnotations(currentDocument.getId());
+    
+    // First, try to find a focused editor
     const activeElement = document.activeElement as HTMLElement;
     let activeEditor: HTMLElement | null = null;
     
-    // Only consider the editor if it's both contentEditable AND currently focused
     if (activeElement && activeElement.hasAttribute("contenteditable") && 
         activeElement.getAttribute("data-rich-text-editor") === "true" &&
         activeElement.isContentEditable) {
       activeEditor = activeElement;
     }
     
-    // If no focused editor, don't return any annotation
-    // This ensures we only style the actively focused text box
-    if (!activeEditor) return null;
+    // If no focused editor, look for any editor that's in edit mode (contentEditable="true")
+    // This handles the case when you first open a text box but it's not focused yet
+    if (!activeEditor) {
+      const editorsInEditMode = document.querySelectorAll(
+        '[data-rich-text-editor="true"][contenteditable="true"]'
+      );
+      if (editorsInEditMode.length > 0) {
+        activeEditor = editorsInEditMode[0] as HTMLElement;
+      }
+    }
     
-    // Get annotation ID from the editor's data attribute
-    const annotationId = activeEditor.getAttribute("data-annotation-id");
-    if (!annotationId) return null;
+    // If we found an editor, get its annotation
+    if (activeEditor) {
+      const annotationId = activeEditor.getAttribute("data-annotation-id");
+      if (annotationId) {
+        const annotation = annotations.find(
+          (a) => a.id === annotationId && a.type === "text"
+        );
+        if (annotation) return annotation;
+      }
+    }
     
-    // Find the annotation by ID
-    const annotations = usePDFStore.getState().getAnnotations(currentDocument.getId());
-    return annotations.find(
-      (a) => a.id === annotationId && a.type === "text"
-    ) || null;
+    // Check for selected editors (those with data-is-selected="true")
+    // This prioritizes the selected text box over just any visible one
+    const selectedEditors = document.querySelectorAll('[data-rich-text-editor="true"][data-is-selected="true"]');
+    if (selectedEditors.length > 0) {
+      // Use the first selected editor (there should typically only be one)
+      const selectedEditor = selectedEditors[0] as HTMLElement;
+      const annotationId = selectedEditor.getAttribute("data-annotation-id");
+      if (annotationId) {
+        const annotation = annotations.find(
+          (a) => a.id === annotationId && a.type === "text"
+        );
+        if (annotation) return annotation;
+      }
+    }
+    
+    // Last resort: check for any visible editor element (selected but not in edit mode)
+    // This handles the case when a text box is selected but not yet in edit mode
+    const allEditors = document.querySelectorAll('[data-rich-text-editor="true"]');
+    for (const editorEl of Array.from(allEditors)) {
+      const element = editorEl as HTMLElement;
+      // Check if element is visible (has offsetParent)
+      if (element.offsetParent !== null) {
+        const annotationId = element.getAttribute("data-annotation-id");
+        if (annotationId) {
+          const annotation = annotations.find(
+            (a) => a.id === annotationId && a.type === "text"
+          );
+          if (annotation) return annotation;
+        }
+      }
+    }
+    
+    // Check for selected highlights - look for highlight elements with data-selected attribute
+    // or check if there's a highlight with a border (selected state)
+    const selectedHighlights = document.querySelectorAll('[data-highlight-selected="true"]');
+    if (selectedHighlights.length > 0) {
+      const selectedHighlight = selectedHighlights[0] as HTMLElement;
+      const annotationId = selectedHighlight.getAttribute("data-annotation-id");
+      if (annotationId) {
+        const annotation = annotations.find(
+          (a) => a.id === annotationId && a.type === "highlight"
+        );
+        if (annotation) return annotation;
+      }
+    }
+    
+    // Also check annotations store for any highlight that might be selected
+    // This is a fallback - we'll use a more direct approach by checking PageCanvas state
+    // For now, return null and we'll handle highlights differently
+    
+    return null;
   };
   
-  const editingAnnotation = getEditingAnnotation();
+  // Listen for focus events to update when entering edit mode
+  useEffect(() => {
+    const handleFocus = (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && target.hasAttribute("data-rich-text-editor")) {
+        // Force re-render to update editingAnnotation
+        setEditorFocusKey(prev => prev + 1);
+      }
+    };
+    
+    document.addEventListener('focusin', handleFocus);
+    
+    return () => {
+      document.removeEventListener('focusin', handleFocus);
+    };
+  }, []);
+  
+  // Re-compute editingAnnotation when editor focus changes or document changes
+  const [annotationSelectionKey, setAnnotationSelectionKey] = useState(0);
+  // Force re-computation when annotationSelectionKey changes
+  const editingAnnotation = React.useMemo(() => {
+    return getEditingAnnotation();
+  }, [annotationSelectionKey, editorFocusKey, currentDocument]);
+  
+  // Listen for annotation selection events from PageCanvas
+  useEffect(() => {
+    const handleAnnotationSelected = () => {
+      // Wait for DOM to update, then force re-computation of editingAnnotation
+      requestAnimationFrame(() => {
+        setAnnotationSelectionKey(prev => prev + 1);
+      });
+    };
+    
+    window.addEventListener("annotationSelected", handleAnnotationSelected);
+    
+    return () => {
+      window.removeEventListener("annotationSelected", handleAnnotationSelected);
+    };
+  }, []);
+  
+  // Track edit mode state
+  const [isEditing, setIsEditing] = useState(false);
+  
+  // Check if we're in edit mode (any editor has contentEditable="true")
+  useEffect(() => {
+    const checkEditMode = () => {
+      const editorsInEditMode = document.querySelectorAll(
+        '[data-rich-text-editor="true"][contenteditable="true"]'
+      );
+      setIsEditing(editorsInEditMode.length > 0);
+    };
+    
+    // Check initially
+    checkEditMode();
+    
+    // Listen for focus/blur events on editors
+    const handleFocus = () => {
+      setTimeout(checkEditMode, 0);
+    };
+    
+    const handleBlur = () => {
+      setTimeout(checkEditMode, 0);
+    };
+    
+    // Listen for attribute changes (contentEditable changes)
+    const observer = new MutationObserver(() => {
+      checkEditMode();
+    });
+    
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['contenteditable'],
+      subtree: true,
+    });
+    
+    document.addEventListener('focusin', handleFocus);
+    document.addEventListener('focusout', handleBlur);
+    
+    return () => {
+      observer.disconnect();
+      document.removeEventListener('focusin', handleFocus);
+      document.removeEventListener('focusout', handleBlur);
+    };
+  }, [editorFocusKey]);
 
   // Handler for drag-and-drop area button
   const handleOpenFileFromButton = async () => {
@@ -253,7 +398,7 @@ function App() {
       )}
 
       {/* Floating Text Formatting Toolbar with Tabs - only when PDF is loaded and not in read mode */}
-      {currentDocument && !readMode && activeTool !== "highlight" && (
+      {currentDocument && !readMode && editingAnnotation && (editingAnnotation.type === "text" || editingAnnotation.type === "highlight") && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
           <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg flex flex-col">
             <TextFormattingToolbar
@@ -317,9 +462,55 @@ function App() {
               }}
               defaultFont={editingAnnotation?.fontFamily || "Arial"}
               defaultFontSize={editingAnnotation?.fontSize || 12}
-              defaultColor={editingAnnotation?.color || "#000000"}
-              defaultHasBackground={editingAnnotation?.hasBackground || false}
-              defaultBackgroundColor={editingAnnotation?.backgroundColor || "#ffffff"}
+              defaultColor={editingAnnotation?.color || "rgba(0, 0, 0, 1)"}
+              defaultHasBackground={editingAnnotation?.hasBackground !== undefined ? editingAnnotation.hasBackground : true}
+              defaultBackgroundColor={editingAnnotation?.backgroundColor || "rgba(255, 255, 255, 0)"}
+              isEditing={isEditing}
+              hasSelection={!!editingAnnotation}
+              onDelete={async () => {
+                const annot = getEditingAnnotation();
+                if (!annot || !currentDocument) return;
+                
+                try {
+                  // Import mupdf and create editor instance
+                  const mupdfModule = await import("mupdf");
+                  const { PDFEditor } = await import("@/core/pdf/PDFEditor");
+                  const editor = new PDFEditor(mupdfModule.default);
+                  
+                  // Delete from PDF
+                  await editor.deleteAnnotation(currentDocument, annot);
+                  
+                  // Delete from state with undo/redo support
+                  const { wrapAnnotationOperation } = await import("@/shared/stores/undoHelpers");
+                  wrapAnnotationOperation(
+                    () => {
+                      usePDFStore.getState().removeAnnotation(
+                        currentDocument.getId(),
+                        annot.id
+                      );
+                      // Clear editing annotation - handle both text boxes and highlights
+                      const activeElement = document.activeElement as HTMLElement;
+                      if (activeElement && activeElement.hasAttribute("data-rich-text-editor")) {
+                        activeElement.blur();
+                      }
+                      // Clear highlight selection by removing data attribute
+                      const selectedHighlights = document.querySelectorAll('[data-highlight-selected="true"]');
+                      selectedHighlights.forEach((el) => {
+                        el.setAttribute("data-highlight-selected", "false");
+                      });
+                      // Dispatch a custom event to notify PageCanvas to clear editingAnnotation
+                      window.dispatchEvent(new CustomEvent("clearEditingAnnotation", { detail: { annotationId: annot.id } }));
+                    },
+                    "removeAnnotation",
+                    currentDocument.getId(),
+                    annot.id,
+                    undefined,
+                    annot
+                  );
+                } catch (error) {
+                  console.error("Error deleting annotation:", error);
+                }
+              }}
             />
             {/* Tabs in separate row at bottom edge */}
             <div className="border-t border-border">

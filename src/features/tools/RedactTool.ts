@@ -7,6 +7,7 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { normalizeSelectionToRect, validatePDFRect } from "./coordinateHelpers";
 
 export const RedactTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -25,26 +26,77 @@ export const RedactTool: ToolHandler = {
     const currentDocument = document;
 
     // Create redaction from selection box
-    // Note: PDF coordinates have Y=0 at bottom, so larger Y = higher up
-    // getPDFCoordinates now correctly flips Y, so selectionStart/End are in correct PDF coordinates
-    const minX = Math.min(selectionStart.x, selectionEnd.x);
-    const minY = Math.min(selectionStart.y, selectionEnd.y); // Bottom edge (smaller Y in PDF)
-    const maxX = Math.max(selectionStart.x, selectionEnd.x);
-    const maxY = Math.max(selectionStart.y, selectionEnd.y); // Top edge (larger Y in PDF)
-    const width = maxX - minX;
-    const height = maxY - minY;
+    // Use standardized coordinate normalization to prevent Y-axis flipping issues
+    const rect = normalizeSelectionToRect(selectionStart, selectionEnd);
     
     // Only create if box is large enough
-    if (width > 10 && height > 10) {
-      // Store bottom-left corner (minX, minY) for PDF rect
+    if (rect.width > 10 && rect.height > 10) {
+      // Validate coordinates before creating annotation
+      const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+      if (!pageMetadata) {
+        context.setIsSelecting(false);
+        context.setSelectionStart(null);
+        context.setSelectionEnd(null);
+        return;
+      }
+
+      // CRITICAL: Use original mediabox height (not swapped display height) for coordinate conversion
+      // This must match getPDFCoordinates() which uses the same calculation
+      // When page is rotated 90°/270°, display dimensions are swapped, but mediabox dimensions don't change
+      let mediaboxHeight: number;
+      if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
+        // Display dimensions are swapped, so mediaboxHeight = displayWidth (original height)
+        mediaboxHeight = pageMetadata.width;
+      } else {
+        // Display dimensions match mediabox dimensions
+        mediaboxHeight = pageMetadata.height;
+      }
+
+
+      const validation = validatePDFRect(rect, mediaboxHeight);
+      if (!validation.isValid) {
+        console.error("Invalid redaction coordinates:", validation.error);
+        useNotificationStore.getState().showNotification(
+          "Invalid redaction coordinates - please try again",
+          "error"
+        );
+        context.setIsSelecting(false);
+        context.setSelectionStart(null);
+        context.setSelectionEnd(null);
+        return;
+      }
+      
+      // CRITICAL COORDINATE SYSTEM CONVERSION FOR REDACT TOOL:
+      // ============================================================
+      // getPDFCoordinates() returns coordinates in PDF format: Y=0 at BOTTOM, increases UPWARD
+      // normalizeSelectionToRect() preserves this format: rect.y is bottom edge (small Y), rect.y + height is top edge (large Y)
+      //
+      // However, mupdf's setRect() method expects coordinates where Y=0 is at the TOP (screen-like coordinates)
+      // This is different from the standard PDF coordinate system!
+      //
+      // Conversion formula:
+      // - PDF bottom edge (rect.y) → mupdf top edge: mediaboxHeight - (rect.y + rect.height)
+      // - PDF top edge (rect.y + rect.height) → mupdf bottom edge: mediaboxHeight - rect.y
+      //
+      // Since annotation format uses (x, y) as bottom-left corner:
+      // - mupdfY = mediaboxHeight - (rect.y + rect.height)  (this is the top edge in mupdf, but we store as y)
+      // - height stays the same
+      //
+      // IMPORTANT: Use mediaboxHeight (original page height) not pageMetadata.height (display height)
+      // This ensures consistency with getPDFCoordinates() which uses the same calculation
+      // ============================================================
+      const flippedY = mediaboxHeight - (rect.y + rect.height);
+      
+      
+      // Create annotation with flipped Y coordinates for mupdf compatibility
       const annotation: Annotation = {
         id: `redact_${Date.now()}`,
         type: "redact",
         pageNumber,
-        x: minX,        // Left edge
-        y: minY,        // Bottom edge
-        width: width,
-        height: height,
+        x: rect.x,        // Left edge (X coordinate unchanged)
+        y: flippedY,     // Top edge in mupdf coordinates (Y=0 at top) - converted from PDF coords
+        width: rect.width,
+        height: rect.height, // Height stays the same
       };
 
       // Add to app state first (so it renders immediately)
@@ -59,22 +111,16 @@ export const RedactTool: ToolHandler = {
         );
       } else {
         try {
-          console.log("🔄 Starting redaction process...");
-          
           // Apply redaction to PDF (this modifies the PDF content stream)
           await editor.addRedactionAnnotation(currentDocument, annotation);
-          
-          console.log("✓ Redaction applied to PDF");
           
           // CRITICAL: Clear all caches to force fresh render
           // 1. Clear renderer cache (image data cache)
           renderer.clearCache();
-          console.log("✓ Renderer cache cleared");
           
           // 2. Force document to refresh its page metadata cache
           // This ensures the PDFDocument object has the latest page information
           currentDocument.refreshPageMetadata();
-          console.log("✓ Document metadata refreshed");
           
           // 3. Reload the page in mupdf to get fresh content
           // This is critical - mupdf caches page objects internally
@@ -84,14 +130,11 @@ export const RedactTool: ToolHandler = {
             // Force reload by loading the page again
             // This clears mupdf's internal page cache
             pdfDoc.loadPage(pageNumber);
-            console.log("✓ Page reloaded in mupdf");
           }
           
           // 4. Force immediate re-render to show the redacted (white) area
           const canvas = canvasRef.current;
           if (canvas && currentDocument) {
-            console.log("🎨 Re-rendering page to show redaction...");
-            
             const renderPage = async () => {
               try {
                 // Get fresh mupdf document reference
@@ -131,10 +174,9 @@ export const RedactTool: ToolHandler = {
                   
                   // Draw the rendered image data
                   ctx.putImageData(rendered.imageData, 0, 0);
-                  console.log("✅ Page re-rendered successfully - redacted area should now show as white");
                 }
               } catch (err) {
-                console.error("❌ Error re-rendering after redaction:", err);
+                console.error("Error re-rendering after redaction:", err);
                 useNotificationStore.getState().showNotification(
                   "Failed to re-render page after redaction",
                   "error"
@@ -146,8 +188,6 @@ export const RedactTool: ToolHandler = {
             await renderPage();
           }
           
-          console.log("✅ Redaction complete - content permanently removed");
-          
           // Show success notification
           useNotificationStore.getState().showNotification(
             "Content redacted - permanently removed from PDF",
@@ -155,7 +195,7 @@ export const RedactTool: ToolHandler = {
           );
           
         } catch (err) {
-          console.error("❌ Error during redaction:", err);
+          console.error("Error during redaction:", err);
           console.error("Failed annotation:", annotation);
           
           // Show error notification to user

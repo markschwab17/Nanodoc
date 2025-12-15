@@ -11,6 +11,7 @@ export interface Tab {
   documentId: string;
   name: string;
   isModified: boolean;
+  lastSaved: number | null; // timestamp in milliseconds, null if never saved
   order: number;
 }
 
@@ -27,6 +28,7 @@ export interface TabStoreState {
   getActiveTab: () => Tab | null;
   getTabByDocumentId: (documentId: string) => Tab | null;
   setTabModified: (id: string, modified: boolean) => void;
+  setTabLastSaved: (id: string, timestamp: number) => void;
 }
 
 export const useTabStore = create<TabStoreState>((set, get) => ({
@@ -110,6 +112,13 @@ export const useTabStore = create<TabStoreState>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((t) =>
         t.id === id ? { ...t, isModified: modified } : t
+      ),
+    })),
+
+  setTabLastSaved: (id, timestamp) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) =>
+        t.id === id ? { ...t, lastSaved: timestamp, isModified: false } : t
       ),
     })),
 }));

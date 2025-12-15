@@ -50,6 +50,16 @@ export const TextTool: ToolHandler = {
 
     if (clickedAnnotation) {
       // Single click: enter edit mode for the clicked annotation
+      // But if CTRL/Cmd is held, just select it without editing (for copy)
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        setEditingAnnotation(clickedAnnotation);
+        setAnnotationText(clickedAnnotation.content || "");
+        setIsEditingMode(false); // Select but don't edit
+        return;
+      }
+      
       e.preventDefault();
       e.stopPropagation();
       setEditingAnnotation(clickedAnnotation);
@@ -114,10 +124,12 @@ export const TextTool: ToolHandler = {
       content: "",
       fontSize: defaultFontSize,
       fontFamily: "Arial",
-      color: "#000000",
+      color: "rgba(0, 0, 0, 1)",
       width,
       height,
       autoFit, // Flag to indicate auto-fit mode
+      hasBackground: true,
+      backgroundColor: "rgba(255, 255, 255, 0)",
     };
     
     setEditingAnnotation(tempAnnotation);

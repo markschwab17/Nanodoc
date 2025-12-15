@@ -77,7 +77,6 @@ export class PDFBookmarks {
     // Note: mupdf may not have direct bookmark creation API
     // This would need to be implemented using PDF outline manipulation
     // For now, we'll store in app state only
-    console.log("PDF native bookmark creation not yet implemented");
   }
 }
 

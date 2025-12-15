@@ -71,6 +71,7 @@ export function usePDF() {
           documentId,
           name,
           isModified: false,
+          lastSaved: filePath ? Date.now() : null, // If loaded from file, consider it "saved"
           order: tabStore.tabs.length,
         });
 
@@ -98,12 +99,18 @@ export function usePDF() {
   const closeCurrentDocument = useCallback(() => {
     if (!currentDocument) return;
     
-    const tab = tabStore.getTabByDocumentId(currentDocument.getId());
+    const documentId = currentDocument.getId();
+    const tab = tabStore.getTabByDocumentId(documentId);
     if (tab) {
       tabStore.removeTab(tab.id);
     }
     
-    pdfStore.removeDocument(currentDocument.getId());
+    // Clean up print settings for this document
+    import("@/shared/stores/printStore").then(({ usePrintStore }) => {
+      usePrintStore.getState().removeDocumentSettings(documentId);
+    });
+    
+    pdfStore.removeDocument(documentId);
   }, [currentDocument, pdfStore, tabStore]);
 
   return {

@@ -18,10 +18,13 @@ import {
 } from "@/components/ui/dialog";
 import { Trash2, Plus } from "lucide-react";
 import { usePDF } from "@/shared/hooks/usePDF";
+import { useTabStore } from "@/shared/stores/tabStore";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 
 export function PageTools() {
   const { currentDocument } = usePDF();
   const { currentPage, setCurrentPage } = usePDFStore();
+  const { showNotification } = useNotificationStore();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showInsertDialog, setShowInsertDialog] = useState(false);
   const [editor, setEditor] = useState<PDFEditor | null>(null);
@@ -44,10 +47,20 @@ export function PageTools() {
 
     try {
       await editor.deletePages(currentDocument, [currentPage]);
+      
+      // Refresh document metadata to update page count and page info
+      currentDocument.refreshPageMetadata();
+      
+      // Mark tab as modified
+      const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
+      if (tab) {
+        useTabStore.getState().setTabModified(tab.id, true);
+      }
+      
       setShowDeleteDialog(false);
       
       // Adjust current page if needed
-      const newPageCount = currentDocument.getPageCount() - 1;
+      const newPageCount = currentDocument.getPageCount();
       if (currentPage >= newPageCount && newPageCount > 0) {
         setCurrentPage(newPageCount - 1);
       } else if (newPageCount === 0) {
@@ -59,14 +72,43 @@ export function PageTools() {
   };
 
   const handleInsertBlankPage = async () => {
-    if (!currentDocument || !editor) return;
+    if (!currentDocument) {
+      showNotification("No document is open", "error");
+      return;
+    }
+
+    if (!editor) {
+      showNotification("PDF editor is not initialized. Please try again.", "error");
+      console.error("Editor is not initialized");
+      return;
+    }
 
     try {
-      await editor.insertBlankPage(currentDocument, currentPage + 1);
+      const insertIndex = currentPage + 1;
+      console.log(`Inserting blank page at index ${insertIndex}`);
+      
+      await editor.insertBlankPage(currentDocument, insertIndex);
+      
+      // Refresh document metadata to update page count and page info
+      currentDocument.refreshPageMetadata();
+      
+      // Mark tab as modified
+      const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
+      if (tab) {
+        useTabStore.getState().setTabModified(tab.id, true);
+      }
+      
+      // Force store update to trigger re-render
+      usePDFStore.getState().setCurrentPage(insertIndex);
+      
       setShowInsertDialog(false);
-      setCurrentPage(currentPage + 1);
+      showNotification(`Blank page inserted after page ${currentPage + 1}`, "success");
+      
+      console.log(`Successfully inserted page. New page count: ${currentDocument.getPageCount()}`);
     } catch (error) {
       console.error("Error inserting page:", error);
+      const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+      showNotification(`Failed to insert page: ${errorMessage}`, "error");
     }
   };
 

@@ -21,6 +21,7 @@ import { PDFDocument as PDFDocumentClass } from "@/core/pdf/PDFDocument";
 import { toolHandlers } from "@/features/tools";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 
 interface PageCanvasProps {
   document: PDFDocument;
@@ -46,9 +47,10 @@ export function PageCanvas({
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
   const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
-  const { getCurrentDocument, getAnnotations, addAnnotation, getSearchResults, updateAnnotation, setCurrentPage } = usePDFStore();
+  const { getCurrentDocument, getAnnotations, addAnnotation, getSearchResults, updateAnnotation, setCurrentPage, currentPage } = usePDFStore();
   const { showRulers } = useDocumentSettingsStore();
   const { showNotification } = useNotificationStore();
+  const { copyTextAnnotation, pasteTextAnnotation, hasTextAnnotation, clear: clearTextAnnotationClipboard } = useTextAnnotationClipboardStore();
   const currentDocument = getCurrentDocument();
   
   const searchResults = currentDocument
@@ -96,6 +98,8 @@ export function PageCanvas({
   const draggingAnnotationRef = useRef<{ id: string; initialX: number; initialY: number } | null>(null);
   const resizingAnnotationRef = useRef<{ id: string; initialWidth: number; initialHeight: number } | null>(null);
   const rotatingAnnotationRef = useRef<{ id: string; initialRotation: number } | null>(null);
+  // Track if we're duplicating and dragging a new annotation
+  const duplicatingAnnotationRef = useRef<{ duplicateId: string; startX: number; startY: number; mouseStartX: number; mouseStartY: number } | null>(null);
   // Text selection state
   const [selectedTextSpans, setSelectedTextSpans] = useState<TextSpan[]>([]);
   const selectedTextRef = useRef<string>("");
@@ -103,12 +107,17 @@ export function PageCanvas({
   const [isHoveringOverText, setIsHoveringOverText] = useState(false);
   // Overlay highlight path for preview
   const [overlayHighlightPath, setOverlayHighlightPath] = useState<Array<{ x: number; y: number }>>([]);
-  // Mouse position for cursor preview
+  // Mouse position for cursor preview and paste location
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
+  const mousePositionRef = useRef<{ x: number; y: number } | null>(null);
+  // Global mouse position tracker - tracks mouse position even when not over the page
+  const globalMousePositionRef = useRef<{ clientX: number; clientY: number } | null>(null);
   // Track if shift is pressed for locked line preview
   const [isShiftPressed, setIsShiftPressed] = useState(false);
   // Cache all text spans for the current page for hover detection
   const allTextSpansRef = useRef<TextSpan[]>([]);
+  // Track which annotation is being hovered (for visual feedback when select tool is active)
+  const [hoveredAnnotationId, setHoveredAnnotationId] = useState<string | null>(null);
 
   // Get annotations for current page - force re-render when annotations change
   const allAnnotations = currentDocument
@@ -122,6 +131,33 @@ export function PageCanvas({
   useEffect(() => {
     // This effect ensures component re-renders when annotations are added/updated
   }, [allAnnotations.length, annotations.length]);
+  
+  // Dispatch event when editingAnnotation changes (so App.tsx can update styling bar)
+  useEffect(() => {
+    if (editingAnnotation) {
+      // Wait for DOM to update, then notify App.tsx
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent("annotationSelected", { detail: { annotationId: editingAnnotation.id } }));
+      });
+    }
+  }, [editingAnnotation?.id]);
+  
+  // Listen for clearEditingAnnotation event (from delete handler)
+  useEffect(() => {
+    const handleClearEditingAnnotation = (e: CustomEvent) => {
+      if (editingAnnotation && editingAnnotation.id === e.detail.annotationId) {
+        setEditingAnnotation(null);
+        setAnnotationText("");
+        setIsEditingMode(false);
+      }
+    };
+    
+    window.addEventListener("clearEditingAnnotation", handleClearEditingAnnotation as EventListener);
+    
+    return () => {
+      window.removeEventListener("clearEditingAnnotation", handleClearEditingAnnotation as EventListener);
+    };
+  }, [editingAnnotation]);
 
   // Ensure only one text box is in edit mode at a time
   // When editingAnnotation changes, ensure all other text boxes exit edit mode
@@ -234,32 +270,286 @@ export function PageCanvas({
   // Keyboard handler for copy (Ctrl+C / Cmd+C)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Only handle copy when selectText tool is active and text is selected
-      if (activeTool !== "selectText" || selectedTextSpans.length === 0) {
-        return;
-      }
-
-      // Don't handle if typing in inputs or contenteditable
-      if (
-        e.target instanceof HTMLInputElement ||
+      // Don't handle if typing in inputs or contenteditable (unless it's a text box we want to copy)
+      const isInInput = e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
-        (e.target instanceof HTMLElement && e.target.isContentEditable)
-      ) {
-        return;
-      }
-
-      // Copy: Cmd/Ctrl + C
+        (e.target instanceof HTMLElement && e.target.isContentEditable);
+      
+      // Handle copy for text box annotations (when not in edit mode)
       if ((e.metaKey || e.ctrlKey) && e.key === "c") {
-        e.preventDefault();
+        // Check if a text annotation is selected (but not being edited)
+        // Also check if we're in text tool and there's a selected annotation
+        const hasSelectedTextBox = editingAnnotation && 
+          editingAnnotation.type === "text" && 
+          !isEditingMode && 
+          !isInInput;
         
-        const textToCopy = selectedTextRef.current;
-        if (textToCopy) {
-          navigator.clipboard.writeText(textToCopy).then(() => {
-            showNotification("Text copied to clipboard", "success");
-          }).catch((error) => {
-            console.error("Error copying text:", error);
-            showNotification("Failed to copy text", "error");
-          });
+        // Also check if there's a focused text editor (even if not in edit mode, it means a text box is selected)
+        const activeElement = window.document.activeElement as HTMLElement;
+        const hasFocusedTextBox = activeElement && 
+          activeElement.hasAttribute("data-rich-text-editor") &&
+          !isEditingMode;
+        
+        if (hasSelectedTextBox || (hasFocusedTextBox && activeTool === "text")) {
+          // Get the annotation to copy
+          let annotationToCopy = editingAnnotation;
+          
+          // If we don't have editingAnnotation but have a focused editor, find the annotation
+          if (!annotationToCopy && hasFocusedTextBox) {
+            const annotationId = activeElement.getAttribute("data-annotation-id");
+            if (annotationId && currentDocument) {
+              const annotations = getAnnotations(currentDocument.getId());
+              annotationToCopy = annotations.find(a => a.id === annotationId && a.type === "text") || null;
+            }
+          }
+          
+          if (annotationToCopy && annotationToCopy.type === "text") {
+            e.preventDefault();
+            e.stopPropagation();
+            copyTextAnnotation(annotationToCopy);
+            showNotification("Text box copied", "success");
+            return;
+          }
+        }
+        
+        // Handle copy for selectText tool
+        if (activeTool === "selectText" && selectedTextSpans.length > 0 && !isInInput) {
+          e.preventDefault();
+          
+          const textToCopy = selectedTextRef.current;
+          if (textToCopy) {
+            navigator.clipboard.writeText(textToCopy).then(() => {
+              showNotification("Text copied to clipboard", "success");
+            }).catch((error) => {
+              console.error("Error copying text:", error);
+              showNotification("Failed to copy text", "error");
+            });
+          }
+          return;
+        }
+      }
+      
+      // Handle paste for text box annotations
+      // Only handle paste on the currently visible page to avoid pasting on wrong page
+      if ((e.metaKey || e.ctrlKey) && e.key === "v") {
+        // Only handle if we have a text annotation in clipboard and not in a text input
+        // Only paste on the current page (the one the user is viewing)
+        if (hasTextAnnotation() && !isInInput && currentDocument && pageNumber === currentPage) {
+          // Prevent default and stop propagation to prevent other handlers from firing
+          e.preventDefault();
+          e.stopPropagation();
+          
+          const clipboardData = pasteTextAnnotation();
+          if (clipboardData) {
+            // Don't clear clipboard - allow multiple pastes of the same text box
+            // The pageNumber === currentPage check ensures only the current page's PageCanvas handles paste
+                  
+                  // Use mouse position if available, otherwise use center of viewport
+                  let pasteX = 0;
+                  let pasteY = 0;
+            
+            // Try to get current mouse position from the browser
+            // Since keyboard events don't have mouse coordinates, we'll try to get it from the last known position
+            // or calculate from viewport center
+            let currentMouseCoords: { x: number; y: number } | null = null;
+            
+            // First, try the tracked mouse position (most reliable if mouse was recently over the page)
+            if (mousePositionRef.current && pageNumber === currentPage) {
+              currentMouseCoords = mousePositionRef.current;
+            }
+            
+            // If we don't have a tracked position, try to get it from the global mouse position
+            // Convert global mouse position to PDF coordinates if mouse is over the page
+            if (!currentMouseCoords && globalMousePositionRef.current && canvasRef.current) {
+              // Always try to convert the global mouse position directly
+              // getPDFCoordinates will return null if canvas isn't ready, but we should still try
+              let coords = getPDFCoordinates({ 
+                clientX: globalMousePositionRef.current.clientX, 
+                clientY: globalMousePositionRef.current.clientY 
+              } as React.MouseEvent);
+              
+              // If conversion failed due to zero display dimensions, try using canvas pixel dimensions directly
+              if (!coords && canvasRef.current) {
+                const canvasElement = canvasRef.current;
+                const canvasRect = canvasElement.getBoundingClientRect();
+                const pageMetadata = document.getPageMetadata(pageNumber);
+                
+                
+                // If canvas has pixel dimensions but zero display size, calculate directly
+                if (canvasElement.width > 0 && canvasElement.height > 0 && pageMetadata && 
+                    (canvasRect.width === 0 || canvasRect.height === 0)) {
+                  let canvasScreenX = globalMousePositionRef.current.clientX;
+                  let canvasScreenY = globalMousePositionRef.current.clientY;
+                  
+                  // Try container first
+                  if (containerRef.current) {
+                    const containerRect = containerRef.current.getBoundingClientRect();
+                    if (containerRect.width > 0 && containerRect.height > 0) {
+                      // Clamp mouse to container bounds
+                      canvasScreenX = Math.max(containerRect.left, Math.min(containerRect.right, canvasScreenX));
+                      canvasScreenY = Math.max(containerRect.top, Math.min(containerRect.bottom, canvasScreenY));
+                      // Calculate relative to container
+                      const relativeX = (canvasScreenX - containerRect.left) / containerRect.width;
+                      const relativeY = (canvasScreenY - containerRect.top) / containerRect.height;
+                      // Convert to PDF coordinates
+                      const pdfX = (relativeX * pageMetadata.width);
+                      const pdfY = pageMetadata.height - (relativeY * pageMetadata.height); // Flip Y
+                      coords = { x: pdfX, y: pdfY };
+                    }
+                  }
+                  
+                  // If container also has zero dimensions, try parent container or viewport as last resort
+                  if (!coords) {
+                    // Try to find a parent container with valid dimensions
+                    let parentElement: HTMLElement | null = canvasElement.parentElement;
+                    let foundParent = false;
+                    
+                    while (parentElement && !foundParent) {
+                      const parentRect = parentElement.getBoundingClientRect();
+                      if (parentRect.width > 0 && parentRect.height > 0) {
+                        // Found a parent with valid dimensions
+                        const relativeX = (canvasScreenX - parentRect.left) / parentRect.width;
+                        const relativeY = (canvasScreenY - parentRect.top) / parentRect.height;
+                        const pdfX = (relativeX * pageMetadata.width);
+                        const pdfY = pageMetadata.height - (relativeY * pageMetadata.height); // Flip Y
+                        coords = { x: pdfX, y: pdfY };
+                        foundParent = true;
+                      } else {
+                        parentElement = parentElement.parentElement;
+                      }
+                    }
+                    
+                    // If no parent found, use window viewport dimensions as last resort
+                    if (!coords) {
+                      const viewportWidth = window.innerWidth;
+                      const viewportHeight = window.innerHeight;
+                      if (viewportWidth > 0 && viewportHeight > 0) {
+                        // Calculate relative to viewport center (rough estimate)
+                        // This is less accurate but better than page center
+                        const relativeX = Math.max(0, Math.min(1, canvasScreenX / viewportWidth));
+                        const relativeY = Math.max(0, Math.min(1, canvasScreenY / viewportHeight));
+                        const pdfX = (relativeX * pageMetadata.width);
+                        const pdfY = pageMetadata.height - (relativeY * pageMetadata.height); // Flip Y
+                        coords = { x: pdfX, y: pdfY };
+                      }
+                    }
+                  }
+                }
+              }
+              
+              if (coords && coords.x != null && coords.y != null) {
+                currentMouseCoords = coords;
+              }
+            }
+            
+            // If we still don't have coordinates, try to get it from the viewport center
+            // This is better than page center because it uses the visible area
+            if (!currentMouseCoords && containerRef.current) {
+              const containerRect = containerRef.current.getBoundingClientRect();
+              if (containerRect.width > 0 && containerRect.height > 0) {
+                // Use viewport center (what the user is currently looking at)
+                const viewportCenterX = containerRect.left + containerRect.width / 2;
+                const viewportCenterY = containerRect.top + containerRect.height / 2;
+                const coords = getPDFCoordinates({ clientX: viewportCenterX, clientY: viewportCenterY } as React.MouseEvent);
+                if (coords && coords.x != null && coords.y != null) {
+                  currentMouseCoords = coords;
+                }
+              }
+            }
+            
+            
+            // Use the current mouse coordinates if we have them
+            if (currentMouseCoords && pageNumber === currentPage) {
+              pasteX = currentMouseCoords.x;
+              pasteY = currentMouseCoords.y;
+            } else {
+              // Fallback: try to use canvas element if container has zero dimensions
+              // This can happen during initial render or when the page is not fully loaded
+              let fallbackCoords: { x: number; y: number } | null = null;
+              
+              if (containerRef.current) {
+                const containerRect = containerRef.current.getBoundingClientRect();
+                if (containerRect.width > 0 && containerRect.height > 0) {
+                  // Use viewport center
+                  const centerX = containerRect.left + containerRect.width / 2;
+                  const centerY = containerRect.top + containerRect.height / 2;
+                  const coords = getPDFCoordinates({ clientX: centerX, clientY: centerY } as React.MouseEvent);
+                  if (coords && coords.x != null && coords.y != null) {
+                    fallbackCoords = coords;
+                  }
+                }
+              }
+              
+              // If container method failed, try using canvas element directly
+              if (!fallbackCoords && canvasRef.current) {
+                const canvasRect = canvasRef.current.getBoundingClientRect();
+                if (canvasRect.width > 0 && canvasRect.height > 0) {
+                  const centerX = canvasRect.left + canvasRect.width / 2;
+                  const centerY = canvasRect.top + canvasRect.height / 2;
+                  const coords = getPDFCoordinates({ clientX: centerX, clientY: centerY } as React.MouseEvent);
+                  if (coords && coords.x != null && coords.y != null) {
+                    fallbackCoords = coords;
+                  }
+                }
+              }
+              
+              if (fallbackCoords) {
+                pasteX = fallbackCoords.x;
+                pasteY = fallbackCoords.y;
+              } else {
+                // Last resort: use page center
+                const pageMetadata = document.getPageMetadata(currentPage);
+                if (pageMetadata) {
+                  pasteX = pageMetadata.width / 2;
+                  pasteY = pageMetadata.height / 2;
+                }
+              }
+            }
+            
+            
+            // Ensure we have valid coordinates and they're within page bounds
+            const pageMetadata = document.getPageMetadata(currentPage);
+            if (pageMetadata) {
+              // Validate coordinates - check for null, undefined, NaN, or zero values
+              const isInvalid = pasteX == null || pasteY == null || isNaN(pasteX) || isNaN(pasteY) || (pasteX === 0 && pasteY === 0);
+              if (isInvalid) {
+                // Use page center as fallback
+                pasteX = pageMetadata.width / 2;
+                pasteY = pageMetadata.height / 2;
+              } else {
+                // Clamp coordinates to page bounds
+                pasteX = Math.max(0, Math.min(pageMetadata.width, pasteX));
+                pasteY = Math.max(0, Math.min(pageMetadata.height, pasteY));
+              }
+            } else {
+              // No page metadata - use default coordinates
+              pasteX = 100;
+              pasteY = 100;
+            }
+            
+            const pastedAnnotation: Annotation = {
+              ...clipboardData.annotation,
+              id: `text_annot_${Date.now()}`,
+              pageNumber: currentPage, // Use currentPage from store, not pageNumber prop
+              x: pasteX,
+              y: pasteY,
+              // Ensure all required properties are preserved
+              content: clipboardData.annotation.content || "",
+              fontSize: clipboardData.annotation.fontSize || 12,
+              fontFamily: clipboardData.annotation.fontFamily || "Arial",
+              color: clipboardData.annotation.color || "#000000",
+              width: clipboardData.annotation.width,
+              height: clipboardData.annotation.height,
+              autoFit: clipboardData.annotation.autoFit,
+            };
+            
+            // Add the annotation
+            addAnnotation(currentDocument.getId(), pastedAnnotation);
+            // Select the pasted annotation so it's visible and can be moved
+            setEditingAnnotation(pastedAnnotation);
+            showNotification("Text box pasted", "success");
+          }
+          return;
         }
       }
     };
@@ -268,7 +558,20 @@ export function PageCanvas({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeTool, selectedTextSpans, showNotification]);
+  }, [activeTool, selectedTextSpans, showNotification, editingAnnotation, isEditingMode, currentDocument, pageNumber, currentPage, copyTextAnnotation, pasteTextAnnotation, hasTextAnnotation, addAnnotation, clearTextAnnotationClipboard]);
+
+  // Global mouse position tracker - tracks mouse position across the entire window
+  // This helps us get the mouse position when paste happens, even if mouse hasn't moved over the page recently
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      globalMousePositionRef.current = { clientX: e.clientX, clientY: e.clientY };
+    };
+    
+    window.addEventListener("mousemove", handleGlobalMouseMove, { passive: true });
+    return () => {
+      window.removeEventListener("mousemove", handleGlobalMouseMove);
+    };
+  }, []);
 
   // Handle keyboard for space+drag pan
   useEffect(() => {
@@ -527,9 +830,45 @@ export function PageCanvas({
   const pageWidth = pageMetadata?.width ?? 0;
   const pageHeight = pageMetadata?.height ?? 0;
   
+  // State to track metadata changes and force re-render
+  const [metadataVersion, setMetadataVersion] = useState(0);
+  
+  // Ref to track previous metadata values for change detection
+  const previousMetadataRef = useRef({ rotation: pageRotation, width: pageWidth, height: pageHeight });
+  
+  // Effect to watch for metadata changes and update state
+  useEffect(() => {
+    const checkMetadata = () => {
+      const currentMetadata = document?.getPageMetadata(pageNumber);
+      const currentRotation = currentMetadata?.rotation ?? 0;
+      const currentWidth = currentMetadata?.width ?? 0;
+      const currentHeight = currentMetadata?.height ?? 0;
+      
+      const prevRotation = previousMetadataRef.current.rotation;
+      const prevWidth = previousMetadataRef.current.width;
+      const prevHeight = previousMetadataRef.current.height;
+      
+      
+      // If rotation or dimensions changed, update state to force re-render
+      if (currentRotation !== prevRotation || currentWidth !== prevWidth || currentHeight !== prevHeight) {
+        previousMetadataRef.current = { rotation: currentRotation, width: currentWidth, height: currentHeight };
+        setMetadataVersion(prev => prev + 1);
+      }
+    };
+    
+    // Check immediately
+    checkMetadata();
+    
+    // Check periodically to catch metadata changes
+    const intervalId = setInterval(checkMetadata, 100);
+    
+    return () => clearInterval(intervalId);
+  }, [document, pageNumber]);
+  
   // Effect to force re-render when rotation or dimensions change
   // This ensures the page re-renders with updated dimensions after rotation
   useEffect(() => {
+    
     if (!document.isDocumentLoaded() || !renderer || !canvasRef.current) return;
     
     // Clear cache when rotation or dimensions change
@@ -580,6 +919,7 @@ export function PageCanvas({
             
             // Draw the rendered image data
             ctx.putImageData(rendered.imageData, 0, 0);
+            
           }
         }
       } catch (err) {
@@ -593,12 +933,12 @@ export function PageCanvas({
     }, 50);
     
     return () => clearTimeout(timeoutId);
-  }, [document, pageNumber, renderer, pageRotation, pageWidth, pageHeight]);
+  }, [document, pageNumber, renderer, pageRotation, pageWidth, pageHeight, metadataVersion]);
 
   // Helper function to convert mouse coordinates to PDF coordinates
   // PDF uses bottom-up Y coordinate system, canvas uses top-down
   const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null => {
-    if (!containerRef.current || !canvasRef.current) return null;
+    if (!canvasRef.current) return null;
     
     const canvasElement = canvasRef.current;
     const pageMetadata = document.getPageMetadata(pageNumber);
@@ -607,6 +947,11 @@ export function PageCanvas({
     
     // Step 1: Get canvas position on screen (accounts for ALL CSS transforms automatically)
     const canvasRect = canvasElement.getBoundingClientRect();
+    
+    // Check if canvas has valid dimensions
+    if (canvasRect.width === 0 || canvasRect.height === 0 || canvasElement.width === 0 || canvasElement.height === 0) {
+      return null;
+    }
     
     // Step 2: Calculate mouse position relative to canvas element
     const canvasRelativeX = e.clientX - canvasRect.left;
@@ -619,8 +964,19 @@ export function PageCanvas({
     
     // Step 4: Convert canvas pixels to PDF coordinates
     // PDF Y=0 is at bottom, canvas Y=0 is at top - we need to flip Y-axis
+    // IMPORTANT: Use original mediabox dimensions (not swapped display dimensions) for coordinate conversion
+    // because annotations are stored in mediabox coordinate space
+    let mediaboxHeight: number;
+    if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
+      // Display dimensions are swapped, so mediaboxHeight = displayWidth
+      mediaboxHeight = pageMetadata.width;
+    } else {
+      // Display dimensions match mediabox dimensions
+      mediaboxHeight = pageMetadata.height;
+    }
+    
     const pdfX = canvasPixelX / BASE_SCALE;
-    const pdfY = pageMetadata.height - (canvasPixelY / BASE_SCALE);  // Flip Y: PDF Y=0 is at bottom
+    const pdfY = mediaboxHeight - (canvasPixelY / BASE_SCALE);  // Flip Y: PDF Y=0 is at bottom
     
     return { x: pdfX, y: pdfY };
   };
@@ -629,6 +985,8 @@ export function PageCanvas({
   // Must match getPDFCoordinates - both flip Y-axis since PDF Y=0 is at bottom, canvas Y=0 is at top
   // getPDFCoordinates: pageHeight - (canvasPixelY / BASE_SCALE) → pdfY (flipped)
   // pdfToCanvas: (pageHeight - pdfY) * BASE_SCALE → canvasY (flipped, to match)
+  // IMPORTANT: Use original mediabox dimensions (not swapped display dimensions) for coordinate conversion
+  // because annotations are stored in mediabox coordinate space
   const pdfToCanvas = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
     const pageMetadata = document.getPageMetadata(pageNumber);
     
@@ -636,8 +994,34 @@ export function PageCanvas({
       return { x: pdfX * BASE_SCALE, y: pdfY * BASE_SCALE };
     }
     
-    // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis
-    const flippedY = pageMetadata.height - pdfY;
+    // Get original mediabox dimensions for Y-axis flipping
+    // CRITICAL: After rotation, annotation coordinates are transformed to the rotated coordinate system.
+    // The rotated coordinate system has:
+    // - X range: 0 to originalHeight (1735) when rotated 90/270
+    // - Y range: 0 to originalWidth (2592) when rotated 90/270
+    // For Y-axis flipping, we need to use the Y-axis range of the rotated coordinate system,
+    // which is originalWidth (2592) when rotated 90/270, or originalHeight (1735) when rotated 0/180.
+    const currentRotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
+    let mediaboxHeight: number;
+    
+    // If the annotation's Y coordinate is greater than the original height, it's likely in the rotated coordinate system
+    // This handles the case where pageMetadata.rotation hasn't updated yet but annotations have been transformed
+    // After 90° rotation, Y range becomes 0 to originalWidth (2592), so pdfY > originalHeight (1735) indicates rotated coords
+    const isLikelyRotated = pdfY > pageMetadata.height && pageMetadata.width > pageMetadata.height;
+    
+    if (currentRotation === 90 || currentRotation === 270 || isLikelyRotated) {
+      // After 90° rotation, the rotated coordinate system's Y-axis is the original width
+      // So we use pageMetadata.width (which is the original width = 2592) for Y-axis flipping
+      mediaboxHeight = pageMetadata.width;
+    } else {
+      // Display dimensions match mediabox dimensions
+      // Y-axis range is the original height
+      mediaboxHeight = pageMetadata.height;
+    }
+    
+    // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
+    const flippedY = mediaboxHeight - pdfY;
+    
     
     return {
       x: pdfX * BASE_SCALE,
@@ -747,9 +1131,19 @@ export function PageCanvas({
   // Note: Focus is now handled by RichTextEditor component
 
   const handleMouseDown = async (e: React.MouseEvent) => {
+    // Update mouse position for paste location
+    const coords = getPDFCoordinates(e);
+    if (coords) {
+      mousePositionRef.current = coords;
+    }
+    
     // Middle mouse button or space+drag for pan
     if (e.button === 1 || (e.button === 0 && (isSpacePressed || activeTool === "pan"))) {
       e.preventDefault();
+      e.stopPropagation();
+      if (e.nativeEvent && 'stopImmediatePropagation' in e.nativeEvent) {
+        e.nativeEvent.stopImmediatePropagation();
+      }
       setIsDragging(true);
       // Use ref value in custom mode to avoid stale state
       const currentPanForDrag = fitMode === "custom" ? panOffsetRef.current : panOffset;
@@ -877,6 +1271,28 @@ export function PageCanvas({
       }
     }
 
+    // Handle select tool - deselect annotation when clicking empty space
+    if (activeTool === "select" && editingAnnotation) {
+      // Check if click target is the text editor or its children - if so, don't deselect
+      const target = e.target as HTMLElement;
+      const isClickingOnEditor = target.closest('[data-rich-text-editor]') || 
+                                 target.closest('[data-annotation-id]') ||
+                                 target.closest('[data-corner-handle]') ||
+                                 target.closest('[data-rotation-handle]');
+      
+      // Don't deselect if clicking on the formatting toolbar or popover
+      const isClickingOnToolbar = target.closest('[data-formatting-toolbar]') ||
+                                  target.closest('[role="dialog"]') ||
+                                  target.closest('[data-radix-portal]');
+      
+      // If not clicking on the editor or toolbar, completely deselect the annotation
+      if (!isClickingOnEditor && !isClickingOnToolbar) {
+        setIsEditingMode(false);
+        setEditingAnnotation(null);
+        setAnnotationText("");
+      }
+    }
+
     // Fallback to page click handler
     if (onPageClick) {
       const coords = getPDFCoordinates(e);
@@ -890,23 +1306,68 @@ export function PageCanvas({
     // Track shift key state
     setIsShiftPressed(e.shiftKey);
     
+    // Always track mouse position in PDF coordinates for paste operations
+    // This ensures we know where to paste even when not using highlight tool
+    const coords = getPDFCoordinates(e);
+    if (coords) {
+      mousePositionRef.current = coords;
+    }
+    
     // Track mouse position for cursor preview (when highlight tool is active)
     if (activeTool === "highlight" && !isDragging && !isSelecting) {
-      const coords = getPDFCoordinates(e);
       if (coords) {
         const canvasPos = pdfToCanvas(coords.x, coords.y);
         // Convert to display coordinates for positioning
         const devicePixelRatio = window.devicePixelRatio || 1;
-        setMousePosition({ 
+        const displayPos = { 
           x: canvasPos.x / devicePixelRatio, 
           y: canvasPos.y / devicePixelRatio 
-        });
+        };
+        setMousePosition(displayPos);
       }
     } else if (activeTool !== "highlight" || isSelecting) {
       setMousePosition(null);
     }
 
-    if (isDragging) {
+    // Handle duplicate drag if active
+    if (duplicatingAnnotationRef.current && currentDocument) {
+      const dupInfo = duplicatingAnnotationRef.current;
+      const annotations = getAnnotations(currentDocument.getId());
+      const duplicateAnnotation = annotations.find(a => a.id === dupInfo.duplicateId);
+      
+      if (duplicateAnnotation) {
+        // Calculate mouse delta in screen coordinates
+        const screenDeltaX = e.clientX - dupInfo.mouseStartX;
+        const screenDeltaY = e.clientY - dupInfo.mouseStartY;
+        
+        // Convert screen pixels to PDF coordinates (same logic as RichTextEditor)
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        const BASE_SCALE = 2.0;
+        const currentZoomLevel = zoomLevelRef.current;
+        
+        const pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * currentZoomLevel);
+        const pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * currentZoomLevel); // Negate Y
+        
+        // Update duplicate position
+        const newX = dupInfo.startX + pdfDeltaX;
+        const newY = dupInfo.startY + pdfDeltaY;
+        
+        updateAnnotation(
+          currentDocument.getId(),
+          dupInfo.duplicateId,
+          { x: newX, y: newY }
+        );
+        
+        // Update editing annotation if it's the duplicate
+        if (editingAnnotation && editingAnnotation.id === dupInfo.duplicateId) {
+          setEditingAnnotation({
+            ...editingAnnotation,
+            x: newX,
+            y: newY,
+          });
+        }
+      }
+    } else if (isDragging) {
       setPanOffset({
         x: e.clientX - dragStart.x,
         y: e.clientY - dragStart.y,
@@ -965,6 +1426,96 @@ export function PageCanvas({
       }
     } else if (activeTool !== "selectText") {
       setIsHoveringOverText(false);
+    }
+    
+    // For select tool, detect hover over annotations (text boxes and highlights)
+    if (activeTool === "select" && !isDragging && !isSelecting && coords) {
+      let foundHover = false;
+      
+      // Check if hovering over any annotation
+      for (const annot of annotations) {
+        if (annot.type === "text") {
+          // Check if mouse is over text box
+          const canvasPos = pdfToCanvas(annot.x, annot.y);
+          const devicePixelRatio = window.devicePixelRatio || 1;
+          const displayX = canvasPos.x / devicePixelRatio;
+          const displayY = canvasPos.y / devicePixelRatio;
+          const width = annot.width || 200;
+          const height = annot.height || 100;
+          
+          // Get mouse position in display coordinates
+          const mouseCanvasPos = pdfToCanvas(coords.x, coords.y);
+          const mouseDisplayX = mouseCanvasPos.x / devicePixelRatio;
+          const mouseDisplayY = mouseCanvasPos.y / devicePixelRatio;
+          
+          if (
+            mouseDisplayX >= displayX &&
+            mouseDisplayX <= displayX + width &&
+            mouseDisplayY >= displayY &&
+            mouseDisplayY <= displayY + height
+          ) {
+            setHoveredAnnotationId(annot.id);
+            foundHover = true;
+            break;
+          }
+        } else if (annot.type === "highlight") {
+          // Check if mouse is over highlight
+          if (annot.highlightMode === "overlay" && annot.path && annot.path.length > 0) {
+            // For overlay highlights, use bounding box approach for reliable hover detection
+            const strokeWidth = annot.strokeWidth || 15;
+            const padding = strokeWidth / 2 + 10; // Half stroke width plus padding for easier selection
+            
+            // Calculate bounding box from path points
+            const allX = annot.path.map((p: { x: number; y: number }) => p.x);
+            const allY = annot.path.map((p: { x: number; y: number }) => p.y);
+            const minX = Math.min(...allX) - padding;
+            const maxX = Math.max(...allX) + padding;
+            const minY = Math.min(...allY) - padding;
+            const maxY = Math.max(...allY) + padding;
+            
+            // Check if mouse is within the expanded bounding box
+            if (
+              coords.x >= minX &&
+              coords.x <= maxX &&
+              coords.y >= minY &&
+              coords.y <= maxY
+            ) {
+              setHoveredAnnotationId(annot.id);
+              foundHover = true;
+              break;
+            }
+          } else if (annot.quads && annot.quads.length > 0) {
+            // For text selection highlights, check if mouse is over any quad
+            const isOverQuad = annot.quads.some((quad: number[]) => {
+              if (!Array.isArray(quad) || quad.length < 8) return false;
+              
+              const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+              const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+              const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+              const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+              
+              return (
+                coords.x >= minX &&
+                coords.x <= maxX &&
+                coords.y >= minY &&
+                coords.y <= maxY
+              );
+            });
+            
+            if (isOverQuad) {
+              setHoveredAnnotationId(annot.id);
+              foundHover = true;
+              break;
+            }
+          }
+        }
+      }
+      
+      if (!foundHover) {
+        setHoveredAnnotationId(null);
+      }
+    } else if (activeTool !== "select") {
+      setHoveredAnnotationId(null);
     }
     
     // For selectText tool, also handle mouseMove when selectionStart exists (even if isSelecting is false)
@@ -1117,17 +1668,13 @@ export function PageCanvas({
     }
 
     const container = containerRef.current;
-    console.log("PageCanvas: Attaching drag and drop listeners", { pageNumber, hasContainer: !!container, hasDocument: !!currentDocument });
     let dragOverTimeout: NodeJS.Timeout | null = null;
 
     const handleDragOver = (e: DragEvent) => {
-      console.log("PageCanvas: dragover event", { pageNumber, hasDataTransfer: !!e.dataTransfer });
       // Check if dragging a PDF file
       const hasPdf = Array.from(e.dataTransfer?.items || []).some(
         (item) => item.type === "application/pdf" || (item.type === "" && item.kind === "file")
       );
-      
-      console.log("PageCanvas: hasPdf", hasPdf);
       
       if (hasPdf) {
         e.preventDefault();
@@ -1141,7 +1688,6 @@ export function PageCanvas({
         
         // Use requestAnimationFrame to ensure state update happens
         requestAnimationFrame(() => {
-          console.log("PageCanvas: Setting isDragOverPage to true");
           setIsDragOverPage(true);
         });
       }
@@ -1166,18 +1712,9 @@ export function PageCanvas({
     };
 
     const handleDrop = async (e: DragEvent) => {
-      console.log("PageCanvas: drop event fired - opening as new tab!", { 
-        pageNumber, 
-        hasFiles: !!e.dataTransfer?.files,
-        target: e.target,
-        currentTarget: e.currentTarget,
-        container: container
-      });
-      
       // Check if drop is actually on this page canvas
       const target = e.target as HTMLElement;
       if (target && !container.contains(target) && target !== container) {
-        console.log("PageCanvas: Drop not on this canvas, ignoring");
         return;
       }
       
@@ -1199,8 +1736,6 @@ export function PageCanvas({
         console.warn("No PDF file found in drop");
         return;
       }
-
-      console.log("PageCanvas: Opening dropped PDF as new tab");
 
       try {
         // Load the dropped PDF as a new document/tab
@@ -1241,10 +1776,9 @@ export function PageCanvas({
           documentId,
           name: pdfFile.name,
           isModified: false,
+          lastSaved: null, // New document, never saved
           order: tabStore.tabs.length,
         });
-        
-        console.log("PageCanvas: PDF opened as new tab successfully");
       } catch (error) {
         console.error("Error opening PDF as new tab:", error);
       }
@@ -1254,14 +1788,6 @@ export function PageCanvas({
     container.addEventListener('dragover', handleDragOver, true);
     container.addEventListener('dragleave', handleDragLeave, true);
     container.addEventListener('drop', handleDrop, true);
-
-    console.log("PageCanvas: Event listeners attached", { 
-      pageNumber, 
-      container: container,
-      hasContainer: !!container,
-      containerId: container.id || 'no-id',
-      containerClasses: container.className
-    });
 
     return () => {
       if (dragOverTimeout) {
@@ -1275,13 +1801,36 @@ export function PageCanvas({
 
 
   const handleMouseUp = async (e: React.MouseEvent) => {
-    if (isDragging) {
+    // Handle duplicate drag end
+    if (duplicatingAnnotationRef.current && currentDocument) {
+      const dupInfo = duplicatingAnnotationRef.current;
+      const annotations = getAnnotations(currentDocument.getId());
+      const duplicateAnnotation = annotations.find(a => a.id === dupInfo.duplicateId);
+      
+      if (duplicateAnnotation) {
+        // Record undo for the duplicate position change
+        const initialPos = { x: dupInfo.startX, y: dupInfo.startY };
+        const finalPos = { x: duplicateAnnotation.x, y: duplicateAnnotation.y };
+        
+        // Only record undo if position actually changed
+        if (initialPos.x !== finalPos.x || initialPos.y !== finalPos.y) {
+          wrapAnnotationUpdate(
+            currentDocument.getId(),
+            dupInfo.duplicateId,
+            finalPos
+          );
+        }
+      }
+      
+      // Clear duplicate drag tracking
+      duplicatingAnnotationRef.current = null;
+      draggingAnnotationRef.current = null;
+    } else if (isDragging) {
       setIsDragging(false);
     } else if (currentDocument && activeTool === "selectText" && selectionStart && selectionEnd) {
       // Handle text selection using mupdf's highlight method
       try {
         const isClick = Math.abs(selectionStart.x - selectionEnd.x) < 1 && Math.abs(selectionStart.y - selectionEnd.y) < 1;
-        console.log("Extracting text selection:", { selectionStart, selectionEnd, pageNumber });
         
         let result: { spans: TextSpan[]; text: string };
         
@@ -1319,9 +1868,7 @@ export function PageCanvas({
           setSelectionEnd(null);
         }
         
-        if (result.text) {
-          console.log("Selected text:", result.text);
-        } else {
+        if (!result.text) {
           console.warn("No text selected");
           // Clear selection state if no text found (for clicks)
           setSelectionStart(null);
@@ -1378,18 +1925,10 @@ export function PageCanvas({
           if (!finalSelectionEnd && selectionStart && overlayHighlightPath.length > 0) {
             // Use the last point in the path as selectionEnd
             finalSelectionEnd = overlayHighlightPath[overlayHighlightPath.length - 1];
-            console.log("PageCanvas: Using last path point as selectionEnd", finalSelectionEnd);
           } else if (!finalSelectionEnd && selectionStart) {
             // Fallback: use selectionStart if no end point
             finalSelectionEnd = selectionStart;
-            console.log("PageCanvas: Using selectionStart as selectionEnd (fallback)");
           }
-          console.log("PageCanvas: Calling highlight tool handleMouseUp", {
-            selectionStart,
-            selectionEnd,
-            finalSelectionEnd,
-            pathLength: overlayHighlightPath.length
-          });
         }
         
         await toolHandler.handleMouseUp(e, toolContext, selectionStart, finalSelectionEnd || selectionStart, textBoxStart);
@@ -1400,6 +1939,7 @@ export function PageCanvas({
     if (isCreatingTextBox) {
       setIsCreatingTextBox(false);
       setTextBoxStart(null);
+      setSelectionEnd(null);
     }
     
     // Clean up overlay highlight path - but only after highlight is committed
@@ -1452,7 +1992,7 @@ export function PageCanvas({
   return (
     <div
       ref={containerRef}
-      data-page-canvas="true"
+      data-page-canvas={pageNumber}
       className={cn(
         "relative bg-muted transition-all duration-200",
         readMode ? "" : "w-full",
@@ -1858,9 +2398,9 @@ export function PageCanvas({
         {annotations.length > 0 && (
           <div className="absolute inset-0" style={{ zIndex: 20, pointerEvents: "auto" }}>
             {annotations.map((annot) => {
-              // Don't render if it's selected (RichTextEditor will show it instead)
-              // This prevents double rendering
-              if (editingAnnotation?.id === annot.id) {
+              // Don't render text annotations if they're selected (RichTextEditor will show it instead)
+              // This prevents double rendering. Highlights should always render even when selected.
+              if (editingAnnotation?.id === annot.id && annot.type === "text") {
                 return null;
               }
               
@@ -1926,9 +2466,14 @@ export function PageCanvas({
                 return `${canvasDisplay.x - boxX},${canvasDisplay.y - boxY}`;
               }).join(" ");
               
+              const isHovered = hoveredAnnotationId === annot.id && activeTool === "select";
+              const isSelected = editingAnnotation?.id === annot.id;
+              
               return (
                 <div 
                   key={annot.id} 
+                  data-annotation-id={annot.id}
+                  data-highlight-selected={isSelected ? "true" : "false"}
                   className={cn(
                     "absolute",
                     activeTool === "select" ? "cursor-pointer" : ""
@@ -1938,14 +2483,44 @@ export function PageCanvas({
                     zIndex: 30,
                     left: `${boxX}px`,
                     top: `${boxY}px`,
+                    width: `${boxWidth}px`,
+                    height: `${boxHeight}px`,
                   }}
-                  onClick={() => {
+                  onClick={(e) => {
                     if (activeTool === "select") {
+                      e.stopPropagation();
                       setEditingAnnotation(annot);
                       setAnnotationText(annot.content || "");
+                      // Keep hover state when selected
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseEnter={() => {
+                    if (activeTool === "select") {
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    if (activeTool === "select" && !isSelected) {
+                      setHoveredAnnotationId(null);
                     }
                   }}
                 >
+                  {/* Hover/Selection border overlay */}
+                  {(isHovered || isSelected) && (
+                    <div
+                      className="absolute border-2 border-primary pointer-events-none"
+                      style={{
+                        left: `-4px`,
+                        top: `-4px`,
+                        width: `${boxWidth + 8}px`,
+                        height: `${boxHeight + 8}px`,
+                        borderRadius: "4px",
+                        zIndex: 31,
+                        boxShadow: "0 0 0 2px rgba(59, 130, 246, 0.3)",
+                      }}
+                    />
+                  )}
                   <svg
                     className="absolute"
                     style={{
@@ -1973,21 +2548,77 @@ export function PageCanvas({
             
             // Render text selection highlights (quads)
             if (annot.quads && annot.quads.length > 0) {
+              const isHovered = hoveredAnnotationId === annot.id && activeTool === "select";
+              const isSelected = editingAnnotation?.id === annot.id;
+              
+              // Calculate bounding box for all quads for hover border
+              let minQuadX = Infinity, minQuadY = Infinity, maxQuadX = -Infinity, maxQuadY = -Infinity;
+              annot.quads.forEach((quad: number[]) => {
+                if (Array.isArray(quad) && quad.length >= 8) {
+                  const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+                  const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+                  const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+                  const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+                  minQuadX = Math.min(minQuadX, minX);
+                  minQuadY = Math.min(minQuadY, minY);
+                  maxQuadX = Math.max(maxQuadX, maxX);
+                  maxQuadY = Math.max(maxQuadY, maxY);
+                }
+              });
+              
+              const minCanvas = pdfToCanvas(minQuadX, minQuadY);
+              const maxCanvas = pdfToCanvas(maxQuadX, maxQuadY);
+              const devicePixelRatio = window.devicePixelRatio || 1;
+              const hoverBoxX = minCanvas.x / devicePixelRatio;
+              const hoverBoxY = minCanvas.y / devicePixelRatio;
+              const hoverBoxWidth = (maxCanvas.x - minCanvas.x) / devicePixelRatio;
+              const hoverBoxHeight = (maxCanvas.y - minCanvas.y) / devicePixelRatio;
+              
               return (
                 <div 
                   key={annot.id} 
+                  data-annotation-id={annot.id}
+                  data-highlight-selected={isSelected ? "true" : "false"}
                   className={cn(
                     "absolute",
                     activeTool === "select" ? "cursor-pointer" : ""
                   )}
                   style={{ pointerEvents: activeTool === "select" ? "auto" : "none", zIndex: 30 }}
-                  onClick={() => {
+                  onClick={(e) => {
                     if (activeTool === "select") {
+                      e.stopPropagation();
                       setEditingAnnotation(annot);
                       setAnnotationText(annot.content || "");
+                      // Keep hover state when selected
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseEnter={() => {
+                    if (activeTool === "select") {
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    if (activeTool === "select" && !isSelected) {
+                      setHoveredAnnotationId(null);
                     }
                   }}
                 >
+                  {/* Hover/Selection border overlay */}
+                  {(isHovered || isSelected) && (
+                    <div
+                      className="absolute border-2 border-primary pointer-events-none"
+                      style={{
+                        left: `${hoverBoxX - 4}px`,
+                        top: `${hoverBoxY - 4}px`,
+                        width: `${hoverBoxWidth + 8}px`,
+                        height: `${hoverBoxHeight + 8}px`,
+                        borderRadius: "4px",
+                        zIndex: 31,
+                        boxShadow: "0 0 0 2px rgba(59, 130, 246, 0.3)",
+                      }}
+                    />
+                  )}
                   {annot.quads.map((quad, idx) => {
                     // Quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
                     if (!Array.isArray(quad) || quad.length < 8) return null;
@@ -2148,10 +2779,14 @@ export function PageCanvas({
             }
           }
           
-          return allTextAnnotations.map((annot) => {
+          const filteredAnnotations = allTextAnnotations.filter(annot => annot.pageNumber === pageNumber);
+          return filteredAnnotations
+            .filter(annot => annot.x != null && annot.y != null) // Filter out annotations with null coordinates
+            .map((annot) => {
             // Always show all text annotations - they're always visible
             // Check if this is the currently editing annotation for edit mode
             const isCurrentlyEditing = editingAnnotation?.id === annot.id;
+            const isHovered = hoveredAnnotationId === annot.id && activeTool === "select" && !isCurrentlyEditing;
           
           return (() => {
             // Get current viewport transform values (use refs for real-time updates during zoom)
@@ -2161,20 +2796,33 @@ export function PageCanvas({
             if (currentZoom <= 0) return null;
             
             // Since RichTextEditor is inside the transformed div, use canvas display coordinates
+            // Ensure coordinates are valid numbers
+            if (annot.x == null || annot.y == null || isNaN(annot.x) || isNaN(annot.y)) {
+              return null;
+            }
             const canvasPixel = pdfToCanvas(annot.x, annot.y);
             const devicePixelRatio = window.devicePixelRatio || 1;
             const canvasPos = { x: canvasPixel.x / devicePixelRatio, y: canvasPixel.y / devicePixelRatio };
             
+            
             // Determine if this annotation is being edited
             const isEditing = isCurrentlyEditing && isEditingMode;
-            const content = isCurrentlyEditing ? annotationText : (annot.content || "");
+            // Use annotationText if this is the currently editing annotation (has latest changes including font-size),
+            // otherwise fall back to annot.content
+            // This ensures font-size changes are preserved even when transitioning out of edit mode
+            const content = (isCurrentlyEditing && annotationText) ? annotationText : (annot.content || "");
           
             return (
               <RichTextEditor
                 key={annot.id}
                 annotation={annot}
+                pageRotation={pageRotation}
                 content={content}
                 isEditing={isEditing}
+                isSelected={isCurrentlyEditing}
+                isHovered={isHovered}
+                activeTool={activeTool}
+                isSpacePressed={isSpacePressed}
                 onEditModeChange={(editing) => {
                   if (editing) {
                     // When entering edit mode, ensure only this annotation is in edit mode
@@ -2182,6 +2830,7 @@ export function PageCanvas({
                     if (editingAnnotation && editingAnnotation.id !== annot.id) {
                       setIsEditingMode(false);
                     }
+                    // Update state immediately for instant visual feedback
                     setEditingAnnotation(annot);
                     setAnnotationText(annot.content || "");
                     setIsEditingMode(true);
@@ -2216,7 +2865,6 @@ export function PageCanvas({
                     if (editor) {
                       try {
                         await editor.addTextAnnotation(currentDocument, newAnnotation);
-                        console.log("Text annotation saved to PDF");
                       } catch (err) {
                         console.error("Error creating text annotation in PDF:", err);
                       }
@@ -2250,70 +2898,102 @@ export function PageCanvas({
                 onBlur={async () => {
                   if (!isCurrentlyEditing) return;
                   
-                  // Don't close on blur if ESC was pressed (that's handled separately)
-                  // Only close if clicking outside
-                  if (isEditingMode) {
-                    // Exit edit mode but keep annotation selected
-                    setIsEditingMode(false);
-                    return;
-                  }
-                  
-                  if (currentDocument && annot) {
-                    // If it's a temp annotation with no text, just discard it
-                    if (annot.id.startsWith("temp_") && (!annot.content || annot.content.trim().length === 0)) {
-                      setEditingAnnotation(null);
-                      setAnnotationText("");
+                  // Check if blur was caused by clicking on toolbar or popover
+                  // Use setTimeout to check activeElement after blur event completes
+                  setTimeout(async () => {
+                    const activeElement = window.document.activeElement as HTMLElement;
+                    if (activeElement) {
+                      // Don't exit edit mode if clicking on toolbar elements or popover
+                      if (
+                        activeElement.closest('[data-formatting-toolbar]') ||
+                        activeElement.closest('[role="dialog"]') ||
+                        activeElement.closest('[data-radix-portal]') ||
+                        activeElement.closest('button') ||
+                        activeElement.closest('select') ||
+                        activeElement.closest('input[type="color"]') ||
+                        activeElement.tagName === 'BUTTON' ||
+                        activeElement.tagName === 'SELECT'
+                      ) {
+                        // Keep edit mode active, just refocus the editor
+                        const editorElement = window.document.querySelector(`[data-rich-text-editor="true"][data-annotation-id="${annot.id}"]`) as HTMLElement;
+                        if (editorElement) {
+                          editorElement.focus();
+                        }
+                        return;
+                      }
+                    }
+                    
+                    // Get the editor element directly from DOM to read the latest HTML (including font-size changes)
+                    const editorElement = window.document.querySelector(`[data-rich-text-editor="true"][data-annotation-id="${annot.id}"]`) as HTMLElement;
+                    const htmlFromEditor = editorElement?.innerHTML || "";
+                    
+                    // Don't close on blur if ESC was pressed (that's handled separately)
+                    // Only close if clicking outside
+                    if (isEditingMode) {
+                      // Exit edit mode but keep annotation selected
                       setIsEditingMode(false);
                       return;
                     }
                     
-                    // If it's a temp annotation with text, it should already be created in onChange
-                    // Just finalize it
-                    if (annot.id.startsWith("temp_") && annot.content && annot.content.trim().length > 0) {
-                      // Should have been created in onChange, but handle edge case
-                      const finalAnnotation: Annotation = {
-                        ...annot,
-                        id: `annot_${Date.now()}`,
-                        content: annot.content,
-                      };
-                      
-                      addAnnotation(currentDocument.getId(), finalAnnotation);
-                      
-                      if (editor) {
-                        try {
-                          await editor.addTextAnnotation(currentDocument, finalAnnotation);
-                          console.log("Text annotation saved to PDF");
-                        } catch (err) {
-                          console.error("Error creating text annotation in PDF:", err);
-                        }
-                      } else {
-                        console.warn("PDF editor not initialized, text annotation not saved to PDF");
+                    if (currentDocument && annot) {
+                      // If it's a temp annotation with no text, just discard it
+                      if (annot.id.startsWith("temp_") && (!htmlFromEditor || htmlFromEditor.trim().length === 0)) {
+                        setEditingAnnotation(null);
+                        setAnnotationText("");
+                        setIsEditingMode(false);
+                        return;
                       }
-                    } else if (!annot.id.startsWith("temp_")) {
-                      // Update existing annotation - wrap with undo/redo
-                      wrapAnnotationUpdate(
-                        currentDocument.getId(),
-                        annot.id,
-                        { content: annot.content || "" }
-                      );
                       
-                      // Update in PDF document
-                      if (editor && annot.pdfAnnotation) {
-                        try {
-                          await editor.updateAnnotationInPdf(
-                            currentDocument,
-                            annot.pdfAnnotation,
-                            { content: annot.content || "" }
-                          );
-                        } catch (err) {
-                          console.error("Error updating annotation in PDF:", err);
+                      // If it's a temp annotation with text, it should already be created in onChange
+                      // Just finalize it
+                      if (annot.id.startsWith("temp_") && htmlFromEditor && htmlFromEditor.trim().length > 0) {
+                        // Should have been created in onChange, but handle edge case
+                        const finalAnnotation: Annotation = {
+                          ...annot,
+                          id: `annot_${Date.now()}`,
+                          content: htmlFromEditor,
+                        };
+                        
+                        addAnnotation(currentDocument.getId(), finalAnnotation);
+                        
+                        if (editor) {
+                          try {
+                            await editor.addTextAnnotation(currentDocument, finalAnnotation);
+                          } catch (err) {
+                            console.error("Error creating text annotation in PDF:", err);
+                          }
+                        } else {
+                          console.warn("PDF editor not initialized, text annotation not saved to PDF");
+                        }
+                      } else if (!annot.id.startsWith("temp_")) {
+                        // Update existing annotation - wrap with undo/redo
+                        // Read HTML directly from editor DOM to get the latest content including font-size changes
+                        // This is more reliable than annotationText state which might not be updated
+                        const contentToSave = htmlFromEditor || annotationText || annot.content || "";
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          { content: contentToSave }
+                        );
+                        
+                        // Update in PDF document
+                        if (editor && annot.pdfAnnotation) {
+                          try {
+                            await editor.updateAnnotationInPdf(
+                              currentDocument,
+                              annot.pdfAnnotation,
+                              { content: contentToSave }
+                            );
+                          } catch (err) {
+                            console.error("Error updating annotation in PDF:", err);
+                          }
                         }
                       }
                     }
-                  }
-                  setEditingAnnotation(null);
-                  setAnnotationText("");
-                  setIsEditingMode(false);
+                    setEditingAnnotation(null);
+                    setAnnotationText("");
+                    setIsEditingMode(false);
+                  }, 100); // Small delay to allow focus to settle
                 }}
                 style={{
                   position: "absolute",
@@ -2457,6 +3137,44 @@ export function PageCanvas({
                     
                     // Clear drag tracking
                     draggingAnnotationRef.current = null;
+                  }
+                }}
+                onDuplicate={(e: React.MouseEvent) => {
+                  // Create a duplicate of the annotation when CTRL+drag is detected
+                  if (currentDocument) {
+                    // Create duplicate with new ID at the same position (will be moved by drag)
+                    const duplicateAnnotation: Annotation = {
+                      ...annot,
+                      id: `text_annot_${Date.now()}`,
+                      x: annot.x,
+                      y: annot.y,
+                    };
+                    
+                    // Add the duplicate to the document
+                    addAnnotation(currentDocument.getId(), duplicateAnnotation);
+                    
+                    // Set the duplicate as the editing annotation so it can be dragged
+                    setEditingAnnotation(duplicateAnnotation);
+                    setAnnotationText(duplicateAnnotation.content || "");
+                    
+                    // Initialize drag tracking for the duplicate
+                    draggingAnnotationRef.current = {
+                      id: duplicateAnnotation.id,
+                      initialX: duplicateAnnotation.x,
+                      initialY: duplicateAnnotation.y,
+                    };
+                    
+                    // Store duplicate info for drag handling
+                    duplicatingAnnotationRef.current = {
+                      duplicateId: duplicateAnnotation.id,
+                      startX: duplicateAnnotation.x,
+                      startY: duplicateAnnotation.y,
+                      mouseStartX: e.clientX,
+                      mouseStartY: e.clientY,
+                    };
+                    
+                    // Show notification
+                    showNotification("Text box duplicated - drag to position", "success");
                   }
                 }}
               />

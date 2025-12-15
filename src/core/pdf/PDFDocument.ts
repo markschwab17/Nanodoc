@@ -149,6 +149,7 @@ export class PDFDocument {
           // Normalize rotation to 0-360 range
           rotation = ((rotation % 360) + 360) % 360;
           
+          
           // Get the mediabox dimensions (these are the original page dimensions)
           let mediaboxWidth = bounds[2] - bounds[0];
           let mediaboxHeight = bounds[3] - bounds[1];
@@ -165,15 +166,13 @@ export class PDFDocument {
             displayHeight = mediaboxWidth;
           }
           
-          // Log dimensions for debugging rotation
-          console.log(`Page ${i} metadata: mediabox=${mediaboxWidth}x${mediaboxHeight}, rotation=${rotation}°, display=${displayWidth}x${displayHeight}`);
-          
           this.metadata.pages.push({
             pageNumber: i,
             width: displayWidth,
             height: displayHeight,
             rotation: rotation,
           });
+          
         } catch (error) {
           console.error(`Error loading metadata for page ${i}:`, error);
         }

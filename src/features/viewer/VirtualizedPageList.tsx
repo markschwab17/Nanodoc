@@ -199,6 +199,7 @@ export function VirtualizedPageList({
             }
           }}
           data-page-number={i}
+          data-page-canvas={i}
           className="flex justify-center"
           style={{
             position: "absolute",

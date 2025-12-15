@@ -1,4 +1,4 @@
-# CivilPDF.app
+# Nanodoc
 
 A hybrid PDF Editor that works as both a Web App and a downloadable Desktop App (Tauri).
 
@@ -56,6 +56,16 @@ npm run build
 # Tauri build
 npm run tauri build
 ```
+
+## Deployment
+
+### Web App
+The web version is hosted at: **https://Nanodoc.app**
+
+To deploy:
+1. Run `npm run build` to create the production build in `dist/`
+2. Deploy the contents of the `dist/` directory to your hosting provider
+3. Ensure the server is configured to serve `index.html` for all routes (SPA routing)
 
 ## Architecture
 

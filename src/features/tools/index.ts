@@ -20,5 +20,6 @@ export const toolHandlers: Record<string, ToolHandler> = {
 };
 
 export { TextTool, HighlightTool, CalloutTool, RedactTool, SelectTextTool };
+export { normalizeSelectionToRect, validatePDFRect } from "./coordinateHelpers";
 export type { ToolHandler, ToolContext } from "./types";
 

@@ -195,7 +195,7 @@ export const HighlightTool: ToolHandler = {
     }
   },
 
-  handleMouseUp: async (e: React.MouseEvent, context: ToolContext, selectionStart, selectionEnd) => {
+  handleMouseUp: async (_e: React.MouseEvent, context: ToolContext, selectionStart, selectionEnd) => {
     // Ensure we have valid start point - always commit something if we started
     if (!selectionStart) {
       context.setIsSelecting(false);
@@ -215,19 +215,15 @@ export const HighlightTool: ToolHandler = {
     
     if (lockedEndPoint) {
       // Use locked end point if available (from shift+drag) - this is the most reliable
-      console.log("Using lockedEndPoint for finalSelectionEnd", lockedEndPoint);
       finalSelectionEnd = lockedEndPoint;
     } else if (selectionEnd) {
       // Use selectionEnd from context
-      console.log("Using selectionEnd from context", selectionEnd);
       finalSelectionEnd = selectionEnd;
     } else if (context.overlayHighlightPath && context.overlayHighlightPath.length > 0) {
       // Use last point from path
-      console.log("Using last point from overlayHighlightPath", context.overlayHighlightPath[context.overlayHighlightPath.length - 1]);
       finalSelectionEnd = context.overlayHighlightPath[context.overlayHighlightPath.length - 1];
     } else if (overlayPath.length > 0) {
       // Use last point from internal path
-      console.log("Using last point from overlayPath", overlayPath[overlayPath.length - 1]);
       finalSelectionEnd = overlayPath[overlayPath.length - 1];
     } else {
       // Fallback to selectionStart (will create a small highlight)
@@ -246,7 +242,6 @@ export const HighlightTool: ToolHandler = {
     const isClick = !hasLockedPoint && !hasPath && distance < 2;
     
     if (isClick) {
-      console.log("Detected click, not creating highlight");
       context.setIsSelecting(false);
       context.setSelectionStart(null);
       context.setSelectionEnd(null);
@@ -257,25 +252,6 @@ export const HighlightTool: ToolHandler = {
       lockedEndPoint = null;
       return;
     }
-    
-    console.log("Not a click, proceeding with highlight creation", {
-      hasLockedPoint,
-      hasPath,
-      distance,
-      pathLength: context.overlayHighlightPath?.length || overlayPath.length
-    });
-    
-    console.log("HighlightTool handleMouseUp:", {
-      selectionStart,
-      selectionEnd,
-      finalSelectionEnd,
-      lockedEndPoint,
-      dragStartCoords,
-      lockedDirection,
-      pathLength: context.overlayHighlightPath?.length || overlayPath.length,
-      isClick,
-      overlayPathLength: overlayPath.length
-    });
 
     const { document, pageNumber, addAnnotation, editor } = context;
     const currentDocument = document;
@@ -336,7 +312,6 @@ export const HighlightTool: ToolHandler = {
         
         if (quads && quads.length > 0) {
           isOverlayMode = false;
-          console.log("Text detected in highlight selection, using text mode", { quadsCount: quads.length });
           // Try to extract text from the quads
           try {
             selectedText = structuredText.asText();
@@ -345,7 +320,6 @@ export const HighlightTool: ToolHandler = {
           }
         } else {
           isOverlayMode = true;
-          console.log("No text detected in highlight selection, using overlay mode");
         }
       } catch (error) {
         console.warn("Error detecting text in highlight selection:", error);
@@ -392,20 +366,16 @@ export const HighlightTool: ToolHandler = {
         // Priority: lockedEndPoint > shift-locked > tracked path > start/end fallback
         if (lockedEndPoint && dragStartCoords) {
           // We have a locked end point (from shift+drag) - use it even if shift is now released
-          console.log("Using locked end point for overlay highlight", { dragStartCoords, lockedEndPoint, lockedDirection });
           finalPath = [dragStartCoords, lockedEndPoint];
         } else if (isShiftPressed && dragStartCoords && lockedDirection) {
           // Shift is still pressed, create straight line from start to end (locked coordinates)
           const lockedPoint = calculateLockedEndPoint(dragStartCoords, finalSelectionEnd, lockedDirection);
-          console.log("Using shift-locked coordinates for overlay highlight", { dragStartCoords, lockedPoint, lockedDirection });
           finalPath = [dragStartCoords, lockedPoint];
         } else if (pathToUse.length > 1) {
           // Use the tracked path (only if we have multiple points)
-          console.log("Using tracked path for overlay highlight", { pathLength: pathToUse.length });
           finalPath = pathToUse;
         } else {
           // Fallback: if no path or only one point, use start and end points to create a simple line
-          console.log("Using start/end points for overlay highlight", { selectionStart, finalSelectionEnd });
           finalPath = [selectionStart, finalSelectionEnd];
         }
         
@@ -421,11 +391,8 @@ export const HighlightTool: ToolHandler = {
           finalPath = [selectionStart, finalSelectionEnd];
         }
         
-        console.log("Final path for overlay highlight:", finalPath);
-        
         // Convert path to quads
         const pathQuads = pathToQuads(finalPath, highlightStrokeWidth);
-        console.log("Generated quads from path:", { pathLength: finalPath.length, quadsCount: pathQuads.length });
         
         // Ensure we have quads (pathToQuads should always return something for a valid path)
         if (pathQuads.length === 0 && finalPath.length >= 2) {
@@ -467,37 +434,12 @@ export const HighlightTool: ToolHandler = {
           opacity: highlightOpacity,
           highlightMode: "overlay",
         };
-        
-        console.log("Created overlay highlight annotation:", {
-          id: annotation.id,
-          pathLength: finalPath.length,
-          quadsCount: pathQuads.length,
-          bounds: { x: minX, y: minY, width, height }
-        });
       }
 
       // Always commit the highlight (don't cancel) - even if there was an error
-      console.log("Committing highlight annotation:", {
-        id: annotation.id,
-        type: annotation.type,
-        highlightMode: annotation.highlightMode,
-        hasQuads: !!annotation.quads && annotation.quads.length > 0,
-        quadsCount: annotation.quads?.length || 0,
-        hasPath: !!annotation.path && annotation.path.length > 0,
-        pathLength: annotation.path?.length || 0,
-        documentId: currentDocument.getId(),
-        pageNumber: annotation.pageNumber
-      });
-      
       // Add to app state first (so it renders immediately)
       try {
-        console.log("Adding annotation to store...");
         addAnnotation(currentDocument.getId(), annotation);
-        console.log("Highlight annotation added to store successfully");
-        
-        // Verify it was added
-        const addedAnnotations = context.annotations.filter(a => a.id === annotation.id);
-        console.log("Verification - annotation in context:", addedAnnotations.length > 0);
 
         // Write to PDF document
         if (!editor) {
@@ -505,7 +447,6 @@ export const HighlightTool: ToolHandler = {
         } else {
           try {
             await editor.addHighlightAnnotation(currentDocument, annotation);
-            console.log("Highlight annotation saved to PDF successfully");
           } catch (err) {
             console.error("Error writing highlight to PDF:", err);
             // Still keep the annotation in the UI even if PDF save fails
@@ -531,7 +472,6 @@ export const HighlightTool: ToolHandler = {
             highlightMode: "overlay",
           };
           addAnnotation(currentDocument.getId(), fallbackAnnotation);
-          console.log("Fallback highlight annotation created");
         } catch (fallbackError) {
           console.error("Error creating fallback highlight:", fallbackError);
         }

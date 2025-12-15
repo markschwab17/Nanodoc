@@ -52,8 +52,14 @@ interface RichTextEditorProps {
   onRotateEnd?: () => void;
   onMove?: (x: number, y: number) => void;
   onDragEnd?: () => void;
+  onDuplicate?: (e: React.MouseEvent) => void; // Called when CTRL+drag is detected
   isEditing?: boolean;
   onEditModeChange?: (editing: boolean) => void;
+  isSelected?: boolean;
+  isHovered?: boolean; // Whether the annotation is being hovered (for visual feedback)
+  pageRotation?: number; // Page rotation in degrees (0, 90, 180, 270)
+  activeTool?: string; // Current active tool - prevents dragging when pan tool is active
+  isSpacePressed?: boolean; // Whether space bar is pressed - prevents dragging when space is held
 }
 
 export function RichTextEditor({
@@ -70,8 +76,14 @@ export function RichTextEditor({
   onRotateEnd,
   onMove,
   onDragEnd,
+  onDuplicate,
   isEditing = false,
   onEditModeChange,
+  isSelected = false,
+  isHovered = false,
+  pageRotation = 0,
+  activeTool,
+  isSpacePressed = false,
 }: RichTextEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -100,8 +112,8 @@ export function RichTextEditor({
     height: annotation.height || (isEditing ? defaultSize.height : defaultSize.height),
   });
   const [rotation, setRotation] = useState(annotation.rotation || 0);
-  const [hasBackground, setHasBackground] = useState(annotation.hasBackground || false);
-  const [backgroundColor, setBackgroundColor] = useState(annotation.backgroundColor || "#ffffff");
+  const [hasBackground, setHasBackground] = useState(annotation.hasBackground !== undefined ? annotation.hasBackground : true);
+  const [backgroundColor, setBackgroundColor] = useState(annotation.backgroundColor || "rgba(255, 255, 255, 0)");
   // Use annotation.fontSize directly instead of state to ensure it updates immediately
   const fontSize = annotation.fontSize || 12;
   const initialSizeRef = useRef({ 
@@ -139,22 +151,38 @@ export function RichTextEditor({
     if (annotation.hasBackground !== undefined && annotation.hasBackground !== hasBackground) {
       setHasBackground(annotation.hasBackground);
     }
-    if (annotation.backgroundColor && annotation.backgroundColor !== backgroundColor) {
-      setBackgroundColor(annotation.backgroundColor);
+    // Always sync backgroundColor from annotation prop
+    // If annotation has backgroundColor, use it; otherwise keep current state or use default
+    if (annotation.backgroundColor !== undefined) {
+      // Annotation has explicit backgroundColor - always sync it
+      if (annotation.backgroundColor !== backgroundColor) {
+        setBackgroundColor(annotation.backgroundColor);
+      }
+    } else if (annotation.hasBackground && !annotation.backgroundColor) {
+      // hasBackground is true but no backgroundColor in annotation - use default
+      if (backgroundColor !== "rgba(255, 255, 255, 0)") {
+        setBackgroundColor("rgba(255, 255, 255, 0)");
+      }
     }
   }, [annotation.width, annotation.height, annotation.fontSize, annotation.hasBackground, annotation.backgroundColor, size.width, size.height, hasBackground, backgroundColor]);
 
-  // Clear inline styles and ensure annotation prop is the single source of truth
+  // Ensure styles are applied correctly - set styles directly to ensure they're not overridden
+  // Use annotation prop directly to ensure we always have the latest values
   useEffect(() => {
     if (!editorRef.current) return;
     
-    // Clear any inline styles that might have been set by the toolbar
-    // The annotation prop values will be applied via the style prop below
-    editorRef.current.style.fontSize = '';
-    editorRef.current.style.color = '';
-    editorRef.current.style.fontFamily = '';
-    // Note: We don't clear backgroundColor here as it's handled conditionally in the style prop
-  }, [annotation.id, annotation.fontSize, annotation.fontFamily, annotation.color]);
+    // Apply color and background color directly - use annotation prop values directly
+    const currentColor = annotation.color || "rgba(0, 0, 0, 1)";
+    // Use annotation.backgroundColor if available, otherwise use state, otherwise use default
+    const annotationBgColor = annotation.backgroundColor !== undefined 
+      ? annotation.backgroundColor 
+      : (hasBackground ? (backgroundColor || "rgba(255, 255, 255, 0)") : "rgba(255, 255, 255, 0)");
+    const currentBackgroundColor = hasBackground ? annotationBgColor : "rgba(255, 255, 255, 0)";
+    
+    // Set styles directly with !important to ensure they override any CSS classes
+    editorRef.current.style.setProperty('color', currentColor, 'important');
+    editorRef.current.style.setProperty('background-color', currentBackgroundColor, 'important');
+  }, [annotation.color, annotation.backgroundColor, annotation.hasBackground, hasBackground, backgroundColor]);
   
   // Track previous content to prevent unnecessary updates
   const previousContentRef = useRef<string>("");
@@ -295,24 +323,130 @@ export function RichTextEditor({
     }
   }, [isEditing, scale, onResize, annotation.fontSize, annotation.fontFamily]);
 
-  // Handle ESC key to exit edit mode
+  // Handle keyboard shortcuts and ESC key
   useEffect(() => {
-    if (!isEditing) return;
+    // Only handle shortcuts when text box is selected or in edit mode
+    if (!isEditing && !isSelected) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      // Check if the event is related to this editor
+      const isInEditor = editorRef.current && (
+        document.activeElement === editorRef.current ||
+        editorRef.current.contains(document.activeElement as Node) ||
+        editorRef.current.contains(e.target as Node)
+      );
+      
+      // Check if there's a text selection in this editor
+      const selection = window.getSelection();
+      const hasSelectionInEditor = selection && selection.rangeCount > 0 && 
+        editorRef.current && editorRef.current.contains(selection.getRangeAt(0).commonAncestorContainer);
+      
+      // Only handle shortcuts if:
+      // 1. Editor is focused, OR
+      // 2. Text box is selected (isSelected) and shortcut is pressed, OR
+      // 3. There's a text selection in this editor
+      if (!isInEditor && !isSelected && !hasSelectionInEditor) {
+        return;
+      }
+      
+      // Don't handle shortcuts when typing in other inputs (unless it's our editor)
+      if (!isInEditor && (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable && e.target !== editorRef.current)
+      )) {
+        return;
+      }
+
+      // ESC key to exit edit mode
+      if (e.key === "Escape" && isEditing) {
         e.preventDefault();
         e.stopPropagation();
         if (onEditModeChange) {
           onEditModeChange(false);
         }
         editorRef.current?.blur();
+        return;
+      }
+
+      // Formatting shortcuts (only when text box is selected or in edit mode or text is selected)
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        // Focus editor if not already focused but text box is selected
+        if (!isInEditor && editorRef.current && (isSelected || hasSelectionInEditor)) {
+          editorRef.current.focus();
+          // If there was a selection, restore it
+          if (hasSelectionInEditor && selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        }
+
+        switch (e.key.toLowerCase()) {
+          case "a": // Select All
+            // Only select all when in edit mode
+            if (isEditing && editorRef.current) {
+              e.preventDefault();
+              e.stopPropagation();
+              // Select all text in the editor
+              const range = document.createRange();
+              range.selectNodeContents(editorRef.current);
+              const sel = window.getSelection();
+              if (sel) {
+                sel.removeAllRanges();
+                sel.addRange(range);
+              }
+            }
+            break;
+          case "b": // Bold
+            e.preventDefault();
+            e.stopPropagation();
+            if (editorRef.current) {
+              document.execCommand("bold", false);
+            }
+            break;
+          case "i": // Italic
+            e.preventDefault();
+            e.stopPropagation();
+            if (editorRef.current) {
+              document.execCommand("italic", false);
+            }
+            break;
+          case "u": // Underline
+            e.preventDefault();
+            e.stopPropagation();
+            if (editorRef.current) {
+              document.execCommand("underline", false);
+            }
+            break;
+          case "l": // Align Left
+            e.preventDefault();
+            e.stopPropagation();
+            if (editorRef.current) {
+              document.execCommand("justifyLeft", false);
+            }
+            break;
+          case "r": // Align Right
+            e.preventDefault();
+            e.stopPropagation();
+            if (editorRef.current) {
+              document.execCommand("justifyRight", false);
+            }
+            break;
+          case "m": // Center Align
+            e.preventDefault();
+            e.stopPropagation();
+            if (editorRef.current) {
+              document.execCommand("justifyCenter", false);
+            }
+            break;
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isEditing, onEditModeChange]);
+  }, [isEditing, isSelected, onEditModeChange]);
 
   // Initialize content and focus when entering edit mode
   useEffect(() => {
@@ -322,15 +456,20 @@ export function RichTextEditor({
         if (content !== editorRef.current.innerHTML) {
           editorRef.current.innerHTML = content || "";
         }
-        // Focus and move cursor to end
+        // Focus but preserve existing cursor position or place at end if no selection
         setTimeout(() => {
           editorRef.current?.focus();
-          const range = document.createRange();
-          range.selectNodeContents(editorRef.current!);
-          range.collapse(false);
           const selection = window.getSelection();
-          selection?.removeAllRanges();
-          selection?.addRange(range);
+          // Only move cursor to end if there's no existing selection
+          if (!selection || selection.rangeCount === 0 || selection.getRangeAt(0).collapsed) {
+            const range = document.createRange();
+            range.selectNodeContents(editorRef.current!);
+            range.collapse(false);
+            if (selection) {
+              selection.removeAllRanges();
+              selection.addRange(range);
+            }
+          }
         }, 0);
       } else {
         // When not editing, always ensure content is set for display
@@ -341,7 +480,7 @@ export function RichTextEditor({
         }
       }
     }
-  }, [isEditing, content]);
+  }, [isEditing, content, annotation.id]);
 
   // Handle content changes
   const handleInput = useCallback(() => {
@@ -361,6 +500,11 @@ export function RichTextEditor({
   // Handle drag on entire box or handle - allow double-click to work
   const handleDragMouseDown = useCallback((e: React.MouseEvent) => {
     if (isEditing) return; // Don't drag when in edit mode
+    if (activeTool === "pan" || isSpacePressed) {
+      // Don't drag when pan tool is active or space bar is pressed (space = pan shortcut)
+      e.stopPropagation();
+      return;
+    }
     
     const target = e.target as HTMLElement;
     
@@ -382,8 +526,15 @@ export function RichTextEditor({
       if (target.closest('[data-drag-handle]')) {
         e.preventDefault();
         e.stopPropagation();
-        setIsDragging(true);
-        dragStartRef.current = { x: e.clientX, y: e.clientY };
+        // Check for CTRL key for duplication
+        if (e.ctrlKey || e.metaKey) {
+          if (onDuplicate) {
+            onDuplicate(e);
+          }
+        } else {
+          setIsDragging(true);
+          dragStartRef.current = { x: e.clientX, y: e.clientY };
+        }
       }
       // If clicking on rotation handle, handle rotation
       if (target.closest('[data-rotation-handle]')) {
@@ -405,15 +556,23 @@ export function RichTextEditor({
       return;
     }
     
+    // Check for CTRL key for duplication
+    if (e.ctrlKey || e.metaKey) {
+      if (onDuplicate) {
+        onDuplicate(e);
+      }
+      return; // Don't start normal drag when duplicating
+    }
+    
     // Don't prevent default or stop propagation - allow double-click to work
     // Only track the mouse position for potential drag
     setIsDragging(true);
     dragStartRef.current = { x: e.clientX, y: e.clientY };
-  }, [isEditing]);
+  }, [isEditing, onDuplicate, rotation, activeTool, isSpacePressed]);
 
   // Handle drag to move
   useEffect(() => {
-    if (!isDragging || isEditing) return;
+    if (!isDragging || isEditing || activeTool === "pan" || isSpacePressed) return;
 
     const handleMouseMove = (e: MouseEvent) => {
       // Calculate delta in screen coordinates (pixels)
@@ -493,7 +652,7 @@ export function RichTextEditor({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging, isEditing, scale, onMove, onDragEnd]);
+  }, [isDragging, isEditing, scale, onMove, onDragEnd, activeTool, isSpacePressed]);
 
   // Prevent blur when clicking outside (like on toolbar)
   const handleBlur = useCallback((e: React.FocusEvent) => {
@@ -523,7 +682,16 @@ export function RichTextEditor({
 
   // Handle corner interaction - only resize now
   const handleCornerMouseDown = useCallback((e: React.MouseEvent, corner: string) => {
-    if (isEditing) return; // Don't interact when in edit mode
+    if (activeTool === "pan" || isSpacePressed) {
+      // Don't resize when pan tool is active or space bar is pressed (space = pan shortcut)
+      e.stopPropagation();
+      return;
+    }
+    
+    // Exit edit mode when starting to resize
+    if (isEditing && onEditModeChange) {
+      onEditModeChange(false);
+    }
     
     e.preventDefault();
     e.stopPropagation();
@@ -543,11 +711,11 @@ export function RichTextEditor({
     resizeStartRef.current = { x: e.clientX, y: e.clientY };
     setIsResizing(true);
     setResizeCorner(corner);
-  }, [isEditing]);
+  }, [isEditing, activeTool, isSpacePressed]);
   
   // Handle resize - smooth updates using requestAnimationFrame
   useEffect(() => {
-    if (!isResizing || !resizeCorner || !containerRef.current) return;
+    if (!isResizing || !resizeCorner || !containerRef.current || activeTool === "pan" || isSpacePressed) return;
 
     let rafId: number;
     let pendingUpdate: { width: number; height: number } | null = null;
@@ -644,11 +812,11 @@ export function RichTextEditor({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizing, resizeCorner, scale, onResize, rotation]);
+  }, [isResizing, resizeCorner, scale, onResize, rotation, activeTool, isSpacePressed]);
 
   // Handle rotation - up/down movement
   useEffect(() => {
-    if (!isRotating) return;
+    if (!isRotating || activeTool === "pan" || isSpacePressed) return;
 
     const handleMouseMove = (e: MouseEvent) => {
       // Calculate angle from center to current mouse position
@@ -694,24 +862,43 @@ export function RichTextEditor({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isRotating, rotationStart, onRotate, onRotateEnd]);
+  }, [isRotating, rotationStart, onRotate, onRotateEnd, activeTool, isSpacePressed]);
 
   const handleSize = 8 * scale;
   const rotationHandleSize = 12 * scale; // Size of the rotation handle circle
   const rotationHandleOffset = rotationHandleSize * 1.5; // Distance above the text box
   const [hoveredCorner, setHoveredCorner] = useState<string | null>(null);
 
+  // Calculate total rotation: annotation rotation (relative to page) + page rotation
+  const totalRotation = rotation + pageRotation;
+
   return (
     <div
       ref={containerRef}
       className={cn("relative", className)}
-      style={{
+        style={{
         ...style,
-        transform: `rotate(${rotation}deg)`,
+        transform: `rotate(${totalRotation}deg)`,
         transformOrigin: "center center",
+        pointerEvents: (activeTool === "pan" || isSpacePressed) ? "none" : "auto",
       }}
-      onMouseDown={!isEditing ? handleDragMouseDown : undefined}
+      onMouseDown={!isEditing && activeTool !== "pan" && !isSpacePressed ? handleDragMouseDown : undefined}
     >
+      {/* Hover border overlay - only show when select tool is active and not selected */}
+      {isHovered && activeTool === "select" && !isSelected && !isEditing && (
+        <div
+          className="absolute border-2 border-primary pointer-events-none"
+          style={{
+            left: `-4px`,
+            top: `-4px`,
+            width: `${(size.width * scale) + 8}px`,
+            height: `${(size.height * scale) + 8}px`,
+            borderRadius: "4px",
+            zIndex: 31,
+            boxShadow: "0 0 0 2px rgba(59, 130, 246, 0.3)",
+          }}
+        />
+      )}
       <div
         ref={editorRef}
         contentEditable={isEditing}
@@ -730,21 +917,30 @@ export function RichTextEditor({
             // Cancel any active drag
             setIsDragging(false);
             
+            // Enter edit mode immediately
             onEditModeChange(true);
-            // Focus the editor immediately
-            setTimeout(() => {
+            
+            // Focus and place cursor at click position, not select all
+            // This preserves the text position instead of centering it
+            requestAnimationFrame(() => {
               editorRef.current?.focus();
-              // Select all text on double-click (common UX pattern)
+              // Don't select all - just place cursor at the end to preserve text position
               const range = document.createRange();
               range.selectNodeContents(editorRef.current!);
+              range.collapse(false); // Collapse to end (don't select)
               const selection = window.getSelection();
               selection?.removeAllRanges();
               selection?.addRange(range);
-            }, 0);
+            });
           }
         }}
         onMouseDown={(e) => {
           if (isEditing) return; // In edit mode, allow normal text selection
+          if (activeTool === "pan" || isSpacePressed) {
+            // Don't drag when pan tool is active or space bar is pressed (space = pan shortcut)
+            e.stopPropagation();
+            return;
+          }
           
           // Don't start drag if clicking on interactive elements
           const target = e.target as HTMLElement;
@@ -755,6 +951,14 @@ export function RichTextEditor({
             target.closest('input[type="color"]')
           ) {
             return;
+          }
+          
+          // Check for CTRL key for duplication
+          if (e.ctrlKey || e.metaKey) {
+            if (onDuplicate) {
+              onDuplicate(e);
+            }
+            return; // Don't start normal drag when duplicating
           }
           
           // Start dragging immediately - double-click will cancel it
@@ -772,10 +976,9 @@ export function RichTextEditor({
         }}
         className={cn(
           "px-3 py-2 outline-none rounded-lg transition-all duration-200",
-          "border border-primary/30 hover:border-primary/60 focus:border-primary",
+          isSelected && "border border-primary/30 hover:border-primary/60 focus:border-primary",
           "resize-none overflow-auto",
-          hasBackground ? "" : "bg-transparent",
-          "shadow-sm hover:shadow-md focus:shadow-lg",
+          isSelected && "shadow-sm hover:shadow-md focus:shadow-lg",
           !isEditing && "cursor-pointer"
         )}
         style={{
@@ -784,23 +987,27 @@ export function RichTextEditor({
           maxWidth: annotation.autoFit ? "none" : `${size.width * scale}px`, // Only constrain width if not auto-fit
           fontSize: `${fontSize * scale}px`,
           fontFamily: annotation.fontFamily || "Arial",
-          color: annotation.color || "#000000",
-          backgroundColor: hasBackground ? backgroundColor : undefined,
+          color: annotation.color || "rgba(0, 0, 0, 1)",
+          // Use annotation.backgroundColor directly if available, otherwise use state
+          backgroundColor: hasBackground 
+            ? (annotation.backgroundColor !== undefined ? annotation.backgroundColor : (backgroundColor || "rgba(255, 255, 255, 0)"))
+            : "rgba(255, 255, 255, 0)",
           userSelect: isEditing ? "text" : "none",
           WebkitUserSelect: isEditing ? "text" : "none",
-          pointerEvents: isEditing ? "auto" : "auto", // Allow pointer events for double-click detection
-          cursor: isEditing ? "text" : "move", // Show move cursor when not editing
+          pointerEvents: (activeTool === "pan" || isSpacePressed) ? "none" : (isEditing ? "auto" : "auto"), // Disable when pan tool is active or space is pressed
+          cursor: isEditing ? "text" : ((activeTool === "pan" || isSpacePressed) ? "default" : "move"), // Show default cursor when pan tool is active or space is pressed
           whiteSpace: annotation.autoFit ? "nowrap" : "pre-wrap", // No wrap for auto-fit, wrap for fixed box
           wordWrap: annotation.autoFit ? "normal" : "break-word", // Break long words only in fixed mode
           overflowWrap: annotation.autoFit ? "normal" : "break-word", // Break words only in fixed mode
-        }}
+        } as React.CSSProperties}
         suppressContentEditableWarning
         data-rich-text-editor="true"
         data-annotation-id={annotation.id}
+        data-is-selected={isSelected ? "true" : "false"}
       />
       
       {/* Corner handles for resizing */}
-      {!isEditing && (
+      {isSelected && (
         <>
           {/* Top-left corner */}
           <div
@@ -931,7 +1138,16 @@ export function RichTextEditor({
             data-rotation-handle="true"
             className="absolute pointer-events-auto"
             onMouseDown={(e) => {
-              if (isEditing) return;
+              if (activeTool === "pan" || isSpacePressed) {
+                // Don't rotate when pan tool is active or space bar is pressed (space = pan shortcut)
+                e.stopPropagation();
+                return;
+              }
+              
+              // Exit edit mode when starting to rotate
+              if (isEditing && onEditModeChange) {
+                onEditModeChange(false);
+              }
               e.preventDefault();
               e.stopPropagation();
               if (!containerRef.current) return;

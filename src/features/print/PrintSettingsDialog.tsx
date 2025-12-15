@@ -35,6 +35,7 @@ import {
   type PagesPerSheet,
   type PageOrder,
   type PrintRange,
+  DEFAULT_SETTINGS,
   // PAGE_SIZES, // Reserved for future use
 } from "@/shared/stores/printStore";
 import { PDFDocument } from "@/core/pdf/PDFDocument";
@@ -57,7 +58,9 @@ export function PrintSettingsDialog({
   onPrint,
   currentPage,
 }: PrintSettingsDialogProps) {
-  const { settings, updateSettings } = usePrintStore();
+  const { getSettings, updateSettings } = usePrintStore();
+  const documentId = document?.getId() || "";
+  const settings = documentId ? getSettings(documentId) : DEFAULT_SETTINGS;
   const [localSettings, setLocalSettings] = useState<PrintSettings>(settings);
   const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
 
@@ -77,10 +80,19 @@ export function PrintSettingsDialog({
     }
   }, [open, renderer]);
 
+  // Update local settings when dialog opens or document changes
+  useEffect(() => {
+    if (open && documentId) {
+      const currentSettings = getSettings(documentId);
+      setLocalSettings(currentSettings);
+    }
+  }, [open, documentId, getSettings]);
+
   // Update local settings when dialog opens
   const handleOpenChange = (newOpen: boolean) => {
-    if (newOpen) {
-      setLocalSettings(settings);
+    if (newOpen && documentId) {
+      const currentSettings = getSettings(documentId);
+      setLocalSettings(currentSettings);
     }
     onOpenChange(newOpen);
   };
@@ -93,8 +105,10 @@ export function PrintSettingsDialog({
   };
 
   const handlePrint = () => {
-    // Save settings to store
-    updateSettings(localSettings);
+    // Save settings to store for this document
+    if (documentId) {
+      updateSettings(documentId, localSettings);
+    }
 
     // Calculate page range
     const totalPages = document?.getPageCount() || 0;

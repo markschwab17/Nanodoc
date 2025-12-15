@@ -14,7 +14,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Palette, Highlighter } from "lucide-react";
+import { Highlighter } from "lucide-react";
 import { HexColorPicker } from "react-colorful";
 
 export function HighlightToolbar() {
@@ -117,3 +117,4 @@ export function HighlightToolbar() {
     </div>
   );
 }
+

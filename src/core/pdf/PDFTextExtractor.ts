@@ -63,13 +63,11 @@ export async function extractStructuredText(
     // 4. Plain text extraction (asText) as fallback
     let structuredText;
     let jsonDataRaw;
-    let extractionMethod = "none";
-    
     // Method 1: Try with preserve-whitespace (most common)
     try {
       structuredText = page.toStructuredText("preserve-whitespace");
       jsonDataRaw = structuredText.asJSON();
-      extractionMethod = "preserve-whitespace";
+      // extractionMethod = "preserve-whitespace"; // Unused
       
       // If we get empty blocks, try without preserve-whitespace
       if (jsonDataRaw) {
@@ -78,7 +76,7 @@ export async function extractStructuredText(
           try {
             structuredText = page.toStructuredText();
             jsonDataRaw = structuredText.asJSON();
-            extractionMethod = "default";
+            // extractionMethod = "default"; // Unused
           } catch (e2) {
             // Ignore error
           }
@@ -89,7 +87,7 @@ export async function extractStructuredText(
       try {
         structuredText = page.toStructuredText();
         jsonDataRaw = structuredText.asJSON();
-        extractionMethod = "default-fallback";
+        // extractionMethod = "default-fallback"; // Unused
       } catch (e2) {
         // Try asText() as last resort (won't have positions but confirms text exists)
         try {
@@ -247,7 +245,6 @@ export async function extractStructuredText(
       }
     }
     
-    console.log(`Extracted ${spans.length} text spans from page ${pageNumber}`);
     return spans;
   } catch (error) {
     console.error(`Error extracting text from page ${pageNumber}:`, error);
@@ -312,8 +309,8 @@ export async function getSpansInSelectionFromPage(
     const mupdfDoc = document.getMupdfDocument();
     const page = mupdfDoc.loadPage(pageNumber);
     
-    // Get page metadata to check bounds
-    const pageMetadata = document.getPageMetadata(pageNumber);
+    // Get page metadata to check bounds (currently unused but may be needed for bounds checking)
+    // const pageMetadata = document.getPageMetadata(pageNumber);
     
     // First, extract all text spans to see what's available
     const allSpans = await extractStructuredText(document, pageNumber);
@@ -494,8 +491,6 @@ export async function getSpansInSelectionFromPage(
     
     // Fallback: manually find spans that intersect with selection area
     if (allSpans.length > 0) {
-      console.log("No quads found for selection, trying manual intersection");
-      
       // CRITICAL: Split ALL spans into characters FIRST, then filter by selection rectangle
       // This allows selecting partial words instead of whole words
       const allCharacterSpans: TextSpan[] = [];
@@ -583,8 +578,6 @@ export async function getSpansInSelectionFromPage(
     // Extract text
     const text = selectedSpans.map(s => s.text).join("");
     
-    console.log(`Found ${selectedSpans.length} spans (${characterSpans.length} characters), text: "${text}"`);
-    
     return { spans: characterSpans, text };
   } catch (error) {
     console.error("Error getting spans from selection:", error);
@@ -663,3 +656,4 @@ export function clearTextCache(documentId: string) {
   });
   keysToDelete.forEach((key) => textCache.delete(key));
 }
+

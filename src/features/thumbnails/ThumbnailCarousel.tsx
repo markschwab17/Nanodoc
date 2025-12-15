@@ -28,6 +28,7 @@ import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, Fl
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 
 type TabType = "pages" | "search";
 
@@ -61,6 +62,7 @@ export function ThumbnailCarousel() {
   const [rangeEnd, setRangeEnd] = useState<number>(0);
   const { copyPages, pastePages, hasPages, getSourceInfo } = useClipboard();
   const { showNotification } = useNotificationStore();
+  const { hasTextAnnotation } = useTextAnnotationClipboardStore();
   
   const results = currentDocument ? getSearchResults(currentDocument.getId()) : [];
   const currentResultIndex = currentSearchResult;
@@ -197,6 +199,11 @@ export function ThumbnailCarousel() {
     };
 
     const handlePastePages = async () => {
+      // Don't paste pages if we have a text box in clipboard (let PageCanvas handle it)
+      if (hasTextAnnotation()) {
+        return;
+      }
+      
       if (!currentDocument || !editor || !hasPages) return;
       
       const clipboardData = pastePages();
@@ -566,8 +573,6 @@ export function ThumbnailCarousel() {
       const sourcePageCount = tempDocument.getPageCount();
       const sourcePageIndices = Array.from({ length: sourcePageCount }, (_, i) => i);
 
-      console.log(`ThumbnailCarousel: Inserting ${sourcePageCount} pages at index ${insertIndex}`);
-
       await editor.insertPagesFromDocument(
         currentDocument,
         tempDocument,
@@ -603,7 +608,6 @@ export function ThumbnailCarousel() {
       setCurrentPage(insertIndex);
       
       showNotification(`Inserted ${sourcePageCount} page(s) at position ${insertIndex + 1}`, "success");
-      console.log("ThumbnailCarousel: PDF pages inserted successfully");
     } catch (error) {
       console.error("Error inserting PDF pages:", error);
       showNotification("Failed to insert PDF pages", "error");
@@ -734,8 +738,6 @@ export function ThumbnailCarousel() {
       vertical: 180,       // Add 180° (flip)
       horizontal: 180,     // Add 180° (flip)
     };
-    
-    console.log(`Rotating with type: ${rotationType}, relative degrees: ${rotationMap[rotationType]}`);
     
     const degrees = rotationMap[rotationType];
     handleRotatePages(pagesToRotateFinal, degrees);

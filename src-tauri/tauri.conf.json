@@ -1,7 +1,7 @@
 {
-  "productName": "CivilPDF",
+  "productName": "Nanodoc",
   "version": "0.1.0",
-  "identifier": "com.civilpdf.app",
+  "identifier": "com.nanodoc.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "CivilPDF",
+        "title": "Nanodoc",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
@@ -79,12 +79,6 @@
     "shell": {
       "open": true
     }
-  }
-  "plugins": {
-    "fs": {
-      "requireLiteralLeadingDot": false
-    },
-    "os": {}
   }
 }
 

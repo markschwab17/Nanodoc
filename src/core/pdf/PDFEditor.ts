@@ -101,10 +101,20 @@ export class PDFEditor {
       throw new Error("Document is not a PDF");
     }
 
-    // Create mediabox rect [x0, y0, x1, y1]
+    // Validate index - should be between 0 and pageCount (inclusive)
+    const pageCount = pdfDoc.countPages();
+    if (index < 0 || index > pageCount) {
+      throw new Error(`Invalid page index: ${index}. Must be between 0 and ${pageCount}`);
+    }
+
+    // Create a temporary blank PDF document with one page
+    const tempPdfDoc = new this.mupdf.PDFDocument();
     const mediabox: [number, number, number, number] = [0, 0, width, height];
-    const pageObj = pdfDoc.addPage(mediabox, 0, null, null);
-    pdfDoc.insertPage(index, pageObj);
+    tempPdfDoc.addPage(mediabox, 0, null, null);
+    
+    // Use graftPage to copy the blank page from temp document to target at the specified index
+    // graftPage(targetIndex, sourceDoc, sourcePageIndex)
+    pdfDoc.graftPage(index, tempPdfDoc, 0);
   }
 
   /**
@@ -172,6 +182,7 @@ export class PDFEditor {
     pageNumber: number,
     degrees: number
   ): Promise<void> {
+    
     const mupdfDoc = document.getMupdfDocument();
     const pdfDoc = mupdfDoc.asPDF();
     
@@ -226,7 +237,6 @@ export class PDFEditor {
       finalRotation = 0;
     }
     
-    console.log(`Rotation: current=${currentRotation}°, add=${degrees}°, new=${newRotation}°, final=${finalRotation}°`);
     
     try {
       // Get page object dictionary using getObject()
@@ -237,6 +247,7 @@ export class PDFEditor {
       
       // Try different methods to set the rotation
       let rotationSet = false;
+      let setMethod = "";
       
       // Method 1: Use put with newNumber (preferred method)
       if (pageObj.put && pdfDoc.newNumber) {
@@ -244,7 +255,7 @@ export class PDFEditor {
           const rotateNumber = pdfDoc.newNumber(finalRotation);
           pageObj.put("Rotate", rotateNumber);
           rotationSet = true;
-          console.log(`Set rotation to ${finalRotation}° using Method 1`);
+          setMethod = "put with newNumber";
         } catch (e) {
           console.warn("Method 1 (put with newNumber) failed:", e);
         }
@@ -255,7 +266,7 @@ export class PDFEditor {
         try {
           pageObj.put("Rotate", finalRotation);
           rotationSet = true;
-          console.log(`Set rotation to ${finalRotation}° using Method 2`);
+          setMethod = "put with number";
         } catch (e) {
           console.warn("Method 2 (put with number) failed:", e);
         }
@@ -266,15 +277,31 @@ export class PDFEditor {
         try {
           pageObj.set("Rotate", finalRotation);
           rotationSet = true;
-          console.log(`Set rotation to ${finalRotation}° using Method 3`);
+          setMethod = "set";
         } catch (e) {
           console.warn("Method 3 (set) failed:", e);
         }
       }
       
+      
       if (!rotationSet) {
         throw new Error("All rotation setting methods failed");
       }
+      
+      // Verify rotation was set by reading it back
+      const verifyRotateValue = pageObj.get("Rotate");
+      let verifiedRotation = 0;
+      if (verifyRotateValue !== null && verifyRotateValue !== undefined) {
+        if (typeof verifyRotateValue === 'number') {
+          verifiedRotation = verifyRotateValue;
+        } else if (verifyRotateValue.valueOf && typeof verifyRotateValue.valueOf === 'function') {
+          verifiedRotation = verifyRotateValue.valueOf();
+        } else if (typeof verifyRotateValue === 'object' && 'value' in verifyRotateValue) {
+          verifiedRotation = verifyRotateValue.value;
+        }
+      }
+      verifiedRotation = ((verifiedRotation % 360) + 360) % 360;
+      
     } catch (e) {
       console.error("Error setting page rotation:", e);
       throw new Error(`Failed to rotate page: ${e}`);
@@ -283,16 +310,13 @@ export class PDFEditor {
     // Update page metadata to reflect new rotation
     // This is important because rotation affects page bounds (width/height swap at 90/270)
     // We need to reload the page to get updated bounds
-    const updatedPage = pdfDoc.loadPage(pageNumber);
-    const updatedBounds = updatedPage.getBounds();
-    const updatedWidth = updatedBounds[2] - updatedBounds[0];
-    const updatedHeight = updatedBounds[3] - updatedBounds[1];
-    console.log(`After rotation: bounds width=${updatedWidth}, height=${updatedHeight}, rotation=${finalRotation}°`);
+    pdfDoc.loadPage(pageNumber);
     
     // Rotate annotations on this page to match the page rotation
     await this.rotatePageAnnotations(document, pageNumber, currentRotation, finalRotation);
     
     document.refreshPageMetadata();
+    
   }
 
   /**
@@ -310,6 +334,7 @@ export class PDFEditor {
   ): Promise<void> {
     // Calculate relative rotation
     const relativeRotation = ((newRotation - oldRotation + 360) % 360);
+    
     
     if (relativeRotation === 0) {
       return; // No rotation change
@@ -332,22 +357,35 @@ export class PDFEditor {
     }
     
     // Get original mediabox dimensions (before rotation swap)
-    const mupdfDoc = document.getMupdfDocument();
-    const pdfDoc = mupdfDoc.asPDF();
-    const page = pdfDoc.loadPage(pageNumber);
-    const bounds = page.getBounds();
-    const pageWidth = bounds[2] - bounds[0];
-    const pageHeight = bounds[3] - bounds[1];
+    // page.getBounds() returns rotated bounds, so we need to reverse the swap based on oldRotation
+    // to get the original mediabox dimensions
+    let mediaboxWidth: number;
+    let mediaboxHeight: number;
+    
+    if (oldRotation === 90 || oldRotation === 270) {
+      // Old rotation was 90° or 270°, so display dimensions are swapped
+      // Original mediabox: width = displayHeight, height = displayWidth
+      mediaboxWidth = pageMetadata.height;
+      mediaboxHeight = pageMetadata.width;
+    } else {
+      // Old rotation was 0° or 180°, so display dimensions match mediabox
+      mediaboxWidth = pageMetadata.width;
+      mediaboxHeight = pageMetadata.height;
+    }
+    
+    const pageWidth = mediaboxWidth;
+    const pageHeight = mediaboxHeight;
+    
     
       // Transform each annotation's coordinates based on rotation
       // Note: PDF coordinates use bottom-left origin, but our annotations use top-left
       // We need to account for this when transforming
       for (const annotation of pageAnnotations) {
+        
         let newX = annotation.x;
         let newY = annotation.y;
         let newWidth = annotation.width;
         let newHeight = annotation.height;
-        let newAnnotationRotation = annotation.rotation || 0;
         
         // Apply rotation transformation
         // For 90° rotation (counter-clockwise): (x, y) -> (pageHeight - y - height, x), swap width/height
@@ -359,7 +397,62 @@ export class PDFEditor {
         
         if (relativeRotation === 90) {
           // Rotate 90° counter-clockwise
-          // Top-left corner: (x, y) -> (pageHeight - y - height, x)
+          // When page rotates 90° CCW, the coordinate system rotates
+          // To keep annotation in same visual position relative to page content:
+          // 
+          // CRITICAL: Annotations are stored with (x, y) as bottom-left corner in PDF coordinates
+          // After 90° CCW rotation, we need to find the new bottom-left corner position
+          //
+          // Original coordinate system: X=0 at left, Y=0 at bottom
+          // Rotated coordinate system: X=0 at left (was bottom), Y=0 at bottom (was right)
+          //
+          // For 90° CCW rotation:
+          // - Old bottom-left (x, y) → New bottom-left position
+          // - newX = oldY (old vertical position becomes new horizontal)
+          // - newY = oldX (old horizontal position becomes new vertical, at bottom)
+          //
+          // After 90° rotation, the rotated coordinate system has:
+          // - X range: 0 to originalHeight (pageHeight = 1735)
+          // - Y range: 0 to originalWidth (pageWidth = 2592)
+          // So the transformed coordinates are in this rotated coordinate system
+          //
+          // CRITICAL: The old left edge (x=0) becomes the new bottom edge (y=0 in rotated system)
+          // So oldX directly maps to newY (the distance from left becomes distance from bottom)
+          // However, we need to account for the fact that the annotation's visual position
+          // should remain the same. The old X coordinate (distance from left) should become
+          // the new Y coordinate (distance from bottom), but we need to flip it because
+          // the coordinate system has rotated.
+          //
+          // Actually, let's think about this more carefully:
+          // - Old left edge (x=0) → New bottom edge (y=0)
+          // - Old right edge (x=pageWidth) → New top edge (y=pageWidth in rotated system)
+          // So for a point at oldX, the distance from left is oldX
+          // After rotation, this becomes the distance from bottom, which is newY
+          // Therefore: newY = oldX
+          // For 90° CCW rotation, transform coordinates to keep annotation in same visual position
+          // CRITICAL: Think about the coordinate system transformation geometrically
+          // When page rotates 90° CCW:
+          // - Old left edge (x=0) → New bottom edge (y=0 in rotated system)
+          // - Old right edge (x=pageWidth) → New top edge (y=pageWidth in rotated system)
+          // - Old bottom edge (y=0) → New left edge (x=0 in rotated system)
+          // - Old top edge (y=pageHeight) → New right edge (x=pageHeight in rotated system)
+          //
+          // For a point at (oldX, oldY) to stay in same visual position:
+          // - newX = oldY (old vertical position becomes new horizontal)
+          // - newY = pageWidth - oldX (old horizontal position, flipped, becomes new vertical)
+          const tempX = newX; // Save oldX
+          newX = newY; // oldY becomes newX
+          newY = pageWidth - tempX; // oldX becomes newY, flipped
+          // Swap width and height
+          const tempWidth = newWidth;
+          newWidth = newHeight;
+          newHeight = tempWidth;
+          
+        } else if (relativeRotation === 270) {
+          // Rotate 270° counter-clockwise (90° clockwise)
+          // For 90° clockwise (270° CCW), the transformation is:
+          // - newX = mediaboxHeight - oldY - annotationHeight
+          // - newY = oldX
           const tempX = newX;
           newX = pageHeight - newY - annHeight;
           newY = tempX;
@@ -367,28 +460,13 @@ export class PDFEditor {
           const tempWidth = newWidth;
           newWidth = newHeight;
           newHeight = tempWidth;
-          // Adjust annotation rotation (add 90°)
-          newAnnotationRotation = ((newAnnotationRotation + 90) % 360);
-        } else if (relativeRotation === 270) {
-          // Rotate 270° counter-clockwise (90° clockwise)
-          // Top-left corner: (x, y) -> (y, pageWidth - x - width)
-          const tempX = newX;
-          newX = newY;
-          newY = pageWidth - tempX - annWidth;
-          // Swap width and height
-          const tempWidth = newWidth;
-          newWidth = newHeight;
-          newHeight = tempWidth;
-          // Adjust annotation rotation (subtract 90°)
-          newAnnotationRotation = ((newAnnotationRotation - 90 + 360) % 360);
         } else if (relativeRotation === 180) {
           // Rotate 180°
           // Top-left corner: (x, y) -> (pageWidth - x - width, pageHeight - y - height)
           newX = pageWidth - newX - annWidth;
           newY = pageHeight - newY - annHeight;
-          // Adjust annotation rotation (add 180°)
-          newAnnotationRotation = ((newAnnotationRotation + 180) % 360);
         }
+        
         
         // Update annotation coordinates
       const updates: Partial<typeof annotation> = {
@@ -398,9 +476,6 @@ export class PDFEditor {
       
       if (newWidth !== undefined) updates.width = newWidth;
       if (newHeight !== undefined) updates.height = newHeight;
-      if (newAnnotationRotation !== (annotation.rotation || 0)) {
-        updates.rotation = newAnnotationRotation;
-      }
       
       // Also transform quads for highlights
       // Quads are arrays of [x0, y0, x1, y1, x2, y2, x3, y3] representing a quadrilateral
@@ -526,7 +601,6 @@ export class PDFEditor {
     try {
       pageObj.put("MediaBox", newMediaBox);
       success = true;
-      console.log(`Set MediaBox to [${newMediaBox}] using Method 1`);
     } catch (e) {
       console.warn("Method 1 (put with array) failed:", e);
     }
@@ -536,7 +610,6 @@ export class PDFEditor {
       try {
         pageObj.set("MediaBox", newMediaBox);
         success = true;
-        console.log(`Set MediaBox to [${newMediaBox}] using Method 2`);
       } catch (e) {
         console.warn("Method 2 (set with array) failed:", e);
       }
@@ -803,19 +876,42 @@ export class PDFEditor {
     const pageHeight = pageBounds[3] - pageBounds[1];
     
     // Create redaction annotation
-    // Rect format: [x0, y0, x1, y1] where (x0, y0) is bottom-left and (x1, y1) is top-right
-    // annotation.x, annotation.y is the bottom-left corner
-    // annotation.x + width, annotation.y + height is the top-right corner
+    // 
+    // CRITICAL COORDINATE SYSTEM REFERENCE (DO NOT MODIFY WITHOUT UNDERSTANDING):
+    // ============================================================================
+    // PDF coordinate system: Y=0 at BOTTOM, Y increases UPWARD
+    // - Smaller Y values = lower on page (closer to bottom)
+    // - Larger Y values = higher on page (closer to top)
+    // 
+    // Rect format: [x0, y0, x1, y1] where:
+    // - (x0, y0) is BOTTOM-LEFT corner (smallest X, smallest Y)
+    // - (x1, y1) is TOP-RIGHT corner (largest X, largest Y)
+    // 
+    // annotation format:
+    // - annotation.x, annotation.y = BOTTOM-LEFT corner (smallest Y)
+    // - annotation.x + width, annotation.y + height = TOP-RIGHT corner (largest Y)
+    // 
+    // VALIDATION: y0 (bottom) MUST be < y1 (top) in PDF coordinates
+    // If y0 >= y1, the coordinates are flipped and will cause incorrect redaction placement
+    // ============================================================================
     
     // CRITICAL: Clamp rect to page bounds - rects outside page bounds are ignored by mupdf!
     const x0 = Math.max(0, Math.min(annotation.x, pageWidth));
-    const y0 = Math.max(0, Math.min(annotation.y, pageHeight));
+    const y0 = Math.max(0, Math.min(annotation.y, pageHeight)); // Bottom edge (smaller Y)
     const x1 = Math.max(0, Math.min(annotation.x + (annotation.width || 100), pageWidth));
-    const y1 = Math.max(0, Math.min(annotation.y + (annotation.height || 50), pageHeight));
+    const y1 = Math.max(0, Math.min(annotation.y + (annotation.height || 50), pageHeight)); // Top edge (larger Y)
     
-    const rect: [number, number, number, number] = [x0, y0, x1, y1];
+    // Safety check: ensure y0 < y1 (bottom < top in PDF coordinates)
+    let finalY0 = y0;
+    let finalY1 = y1;
+    if (y0 >= y1) {
+      console.error(`Invalid redaction coordinates: y0 (${y0}) >= y1 (${y1}). Annotation:`, annotation);
+      // Fix by swapping if needed
+      finalY0 = Math.min(y0, y1);
+      finalY1 = Math.max(y0, y1);
+    }
     
-    console.log(`🔴 Creating redaction annotation at rect: [${rect.join(', ')}]`);
+    const rect: [number, number, number, number] = [x0, finalY0, x1, finalY1];
     
     const annot = page.createAnnotation("Redact");
     annot.setRect(rect);
@@ -827,10 +923,7 @@ export class PDFEditor {
     
     // CRITICAL: Apply the redaction to actually remove content
     // This processes ALL redaction annotations on the page and permanently removes the underlying content
-    console.log("🔄 Calling page.applyRedactions() to permanently remove content...");
-    
     let success = false;
-    let method = "";
     
     try {
       if (typeof page.applyRedactions === 'function') {
@@ -844,30 +937,22 @@ export class PDFEditor {
         try {
           page.applyRedactions(false, 2, 2, 0);  // White fill, remove image pixels, remove line art if touched, remove text
           success = true;
-          method = "4 parameters (false, 2, 2, 0)";
-          console.log("✓ Applied redactions with 4 parameters (aggressive)");
         } catch (e1) {
           // Method 2: Try with 2 parameters (older API)
           // applyRedactions(blackBoxes, imageMethod)
           try {
             page.applyRedactions(false, 0);  // White fill, remove images
             success = true;
-            method = "2 parameters (false, 0)";
-            console.log("✓ Applied redactions with 2 parameters");
           } catch (e2) {
             // Method 3: Try with boolean only
             try {
               page.applyRedactions(false);  // White fill
               success = true;
-              method = "1 parameter (false)";
-              console.log("✓ Applied redactions with 1 parameter");
             } catch (e3) {
               // Method 4: Try with no parameters (oldest API)
               try {
                 page.applyRedactions();
                 success = true;
-                method = "no parameters";
-                console.log("✓ Applied redactions with no parameters");
               } catch (e4) {
                 console.error("All applyRedactions methods failed:", {
                   method1: e1,
@@ -882,12 +967,8 @@ export class PDFEditor {
         }
         
         if (success) {
-          console.log(`✅ Redactions applied successfully using ${method}`);
-          console.log("📄 Content permanently removed from PDF content stream");
-          
           // CRITICAL: Reload the page to get fresh content with redactions applied
           // This clears mupdf's internal page cache and forces it to re-parse the content stream
-          console.log("🔄 Reloading page to refresh content...");
           page = pdfDoc.loadPage(annotation.pageNumber);
           
           // Verify redaction was applied by checking if Redact annotations remain
@@ -903,21 +984,18 @@ export class PDFEditor {
           const hasRedactAnnots = redactAnnotsAfter.length > 0;
           
           if (hasRedactAnnots) {
-            console.warn("⚠️ Warning: Redact annotations still present after applyRedactions()");
+            console.warn("Warning: Redact annotations still present after applyRedactions()");
             console.warn("This may indicate the content was not fully removed");
-          } else {
-            console.log("✓ Verification passed: Redact annotations removed from page");
           }
           
           // Force document metadata refresh to update cached page info
           document.refreshPageMetadata();
-          console.log("✓ Document metadata refreshed");
         }
       } else {
         throw new Error("applyRedactions method not available in this mupdf version");
       }
     } catch (err) {
-      console.error("❌ Error applying redactions:", err);
+      console.error("Error applying redactions:", err);
       console.error("Rect that failed:", rect);
       console.error("Page number:", annotation.pageNumber);
       throw err; // Re-throw so user knows it failed
@@ -1067,6 +1145,100 @@ export class PDFEditor {
     }
     // TODO: Handle other updates like font, bold, italic, underline, quads for highlights
     pdfAnnotation.update();
+  }
+
+  /**
+   * Delete an annotation from the PDF
+   */
+  async deleteAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    
+    // If we have the pdfAnnotation reference, use it directly (most reliable)
+    if (annotation.pdfAnnotation) {
+      try {
+        page.deleteAnnotation(annotation.pdfAnnotation);
+        return;
+      } catch (error) {
+        console.warn("Could not delete annotation using pdfAnnotation reference:", error);
+        // Fall through to try matching by properties
+      }
+    }
+    
+    // Fallback: Find the annotation by matching properties
+    const annotations = page.getAnnotations();
+    
+    for (let i = 0; i < annotations.length; i++) {
+      const annot = annotations[i];
+      const annotType = annot.getType();
+      
+      // Match text annotations
+      if (annotation.type === "text" && annotType === "FreeText") {
+        const rect = annot.getRect();
+        const contents = annot.getContents() || "";
+        
+        // Match by position and content (or just position if content is empty)
+        const matchesPosition = Math.abs(rect[0] - annotation.x) < 1 && 
+                                Math.abs(rect[1] - annotation.y) < 1;
+        const matchesContent = !annotation.content || contents === annotation.content;
+        
+        if (matchesPosition && matchesContent) {
+          page.deleteAnnotation(annot);
+          return;
+        }
+      }
+      
+      // Match highlight annotations
+      if (annotation.type === "highlight" && annotType === "Highlight") {
+        // For highlights, try to match by quads if available
+        if (annotation.quads && annotation.quads.length > 0) {
+          const annotQuads = annot.getQuadPoints();
+          if (annotQuads && annotQuads.length === annotation.quads.length) {
+            // Compare quads - if they match, it's the same annotation
+            let quadsMatch = true;
+            for (let j = 0; j < annotQuads.length; j++) {
+              const annotQuad = annotQuads[j];
+              const annotationQuad = annotation.quads[j];
+              if (annotQuad.length >= 8 && annotationQuad.length >= 8) {
+                // Compare all 8 coordinates
+                for (let k = 0; k < 8; k++) {
+                  if (Math.abs(annotQuad[k] - annotationQuad[k]) > 0.1) {
+                    quadsMatch = false;
+                    break;
+                  }
+                }
+                if (!quadsMatch) break;
+              }
+            }
+            if (quadsMatch) {
+              page.deleteAnnotation(annot);
+              return;
+            }
+          }
+        }
+        
+        // Fallback: try to match by approximate position
+        const rect = annot.getRect();
+        const matchesPosition = Math.abs(rect[0] - (annotation.x || 0)) < 10 && 
+                                Math.abs(rect[1] - (annotation.y || 0)) < 10;
+        
+        if (matchesPosition) {
+          page.deleteAnnotation(annot);
+          return;
+        }
+      }
+    }
+    
+    console.warn("Could not find annotation to delete in PDF - it may have already been deleted");
   }
 
   /**

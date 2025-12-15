@@ -51,15 +51,20 @@ export class BrowserFileSystem implements FileSystemInterface {
    * Saves a file by triggering a download in the browser.
    */
   async saveFile(data: Uint8Array, name: string): Promise<void> {
+    // Ensure the filename has .pdf extension
+    const fileName = name.endsWith('.pdf') ? name : `${name}.pdf`;
+    
     // Create a new ArrayBuffer to avoid SharedArrayBuffer issues
     const arrayBuffer = new ArrayBuffer(data.length);
     const view = new Uint8Array(arrayBuffer);
     view.set(data);
-    const blob = new Blob([arrayBuffer], { type: "application/octet-stream" });
+    
+    // Use application/pdf MIME type so browsers recognize it as a PDF
+    const blob = new Blob([arrayBuffer], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = name;
+    link.download = fileName;
     link.style.display = "none";
 
     document.body.appendChild(link);

@@ -28,7 +28,8 @@ import {
   Maximize2,
   Settings,
   Ruler,
-  TextSelect
+  TextSelect,
+  Circle
 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
@@ -69,6 +70,36 @@ export function Toolbar() {
   const [pageWidth, setPageWidth] = useState("8.5");
   const [pageHeight, setPageHeight] = useState("11");
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
+  
+  // Get current tab for save state
+  const activeTab = useTabStore.getState().getActiveTab();
+  
+  // Format last saved time
+  const formatLastSaved = (timestamp: number | null): string => {
+    if (!timestamp) return "Never saved";
+    const now = Date.now();
+    const diff = now - timestamp;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    
+    if (seconds < 60) return "Just now";
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    
+    const date = new Date(timestamp);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    if (date.toDateString() === today.toDateString()) {
+      return `Today ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    } else if (date.toDateString() === yesterday.toDateString()) {
+      return `Yesterday ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    } else {
+      return date.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+  };
 
   const handleOpenFile = async () => {
     const result = await fileSystem.openFile();
@@ -101,10 +132,10 @@ export function Toolbar() {
       // Call the provided save function
       await saveFunction(pdfData);
       
-      // Mark tab as unmodified
+      // Mark tab as saved
       const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
       if (tab) {
-        useTabStore.getState().setTabModified(tab.id, false);
+        useTabStore.getState().setTabLastSaved(tab.id, Date.now());
       }
     } catch (error) {
       console.error("Error saving PDF:", error);
@@ -192,6 +223,16 @@ export function Toolbar() {
       
       // Rotate current page 90 degrees clockwise
       await editor.rotatePage(currentDoc, currentPage, 90);
+      
+      // Refresh document metadata after rotation
+      // Rotation affects page dimensions (width/height swap at 90/270 degrees)
+      currentDoc.refreshPageMetadata();
+      
+      // Small delay to ensure PDF is updated
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
+      // Refresh again to get updated bounds
+      currentDoc.refreshPageMetadata();
       
       // Mark tab as modified
       const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
@@ -322,6 +363,30 @@ export function Toolbar() {
 
   return (
     <div className="flex flex-col items-center gap-2 p-2 h-full">
+      {/* Save State Indicator */}
+      {currentDocument && activeTab && (
+        <div className="w-full px-2 py-1.5 mb-1 bg-muted/50 rounded-md border border-border/50">
+          <div className="flex items-center gap-2 text-xs">
+            {activeTab.isModified ? (
+              <>
+                <Circle className="h-2 w-2 fill-orange-500 text-orange-500" />
+                <span className="text-orange-600 dark:text-orange-400 font-medium">Unsaved changes</span>
+              </>
+            ) : (
+              <>
+                <Circle className="h-2 w-2 fill-green-500 text-green-500" />
+                <span className="text-muted-foreground">Saved</span>
+              </>
+            )}
+          </div>
+          {activeTab.lastSaved && (
+            <div className="text-[10px] text-muted-foreground mt-0.5 ml-4">
+              {formatLastSaved(activeTab.lastSaved)}
+            </div>
+          )}
+        </div>
+      )}
+      
       {/* File Actions */}
       <div className="flex flex-col gap-1">
         <Button

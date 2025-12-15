@@ -245,21 +245,20 @@ export function PrintPreview({ settings, totalPages, document, renderer }: Print
               const cellHeight = (displayHeight - (margins.top + margins.bottom) * displayScale) / rows;
 
               // Calculate PDF page scale based on scaling mode
-              // Reserved for future use - will be used when implementing actual scaling
-              // let pdfScale = 1;
-              // if (pageDims && scalingMode === "fit") {
-              //   const scaleX = cellWidth / (pageDims.width * displayScale / 72);
-              //   const scaleY = cellHeight / (pageDims.height * displayScale / 72);
-              //   pdfScale = Math.min(scaleX, scaleY, 1);
-              // } else if (scalingMode === "custom") {
-              //   pdfScale = customScale / 100;
-              // }
-              // Currently using default scale (1) for all modes
-              void scalingMode; // Mark as intentionally unused for now
-              void customScale; // Mark as intentionally unused for now
-              void pageDims; // Mark as intentionally unused for now
-              void cellWidth; // Mark as intentionally unused for now
-              void cellHeight; // Mark as intentionally unused for now
+              let pdfScale = 1;
+              if (pageDims && scalingMode === "fit") {
+                // Convert PDF dimensions from points (72 DPI) to display pixels
+                const pdfWidthInDisplay = (pageDims.width / 72) * displayScale;
+                const pdfHeightInDisplay = (pageDims.height / 72) * displayScale;
+                // Calculate scale to fit within cell while maintaining aspect ratio
+                const scaleX = cellWidth / pdfWidthInDisplay;
+                const scaleY = cellHeight / pdfHeightInDisplay;
+                pdfScale = Math.min(scaleX, scaleY, 1); // Don't scale up beyond 100%
+              } else if (scalingMode === "actual") {
+                pdfScale = 1; // Actual size (100%)
+              } else if (scalingMode === "custom") {
+                pdfScale = customScale / 100;
+              }
 
               return (
                 <div
@@ -272,11 +271,44 @@ export function PrintPreview({ settings, totalPages, document, renderer }: Print
                 >
                   {pageImage ? (
                     <div className="relative w-full h-full flex items-center justify-center p-1">
-                      <img
-                        src={pageImage}
-                        alt={`Page ${pageNum + 1}`}
-                        className="max-w-full max-h-full object-contain"
-                      />
+                      {pageDims ? (() => {
+                        // Calculate target display size: PDF dimensions in inches * displayScale * user's pdfScale
+                        // PDF dimensions are in points (72 DPI), so divide by 72 to get inches
+                        const targetWidthInches = (pageDims.width / 72) * pdfScale;
+                        const targetHeightInches = (pageDims.height / 72) * pdfScale;
+                        
+                        // Convert to display pixels
+                        const targetWidthPx = targetWidthInches * displayScale;
+                        const targetHeightPx = targetHeightInches * displayScale;
+                        
+                        // Constrain to cell bounds while maintaining aspect ratio
+                        const aspectRatio = targetWidthPx / targetHeightPx;
+                        let finalWidth = Math.min(targetWidthPx, cellWidth);
+                        let finalHeight = finalWidth / aspectRatio;
+                        
+                        if (finalHeight > cellHeight) {
+                          finalHeight = cellHeight;
+                          finalWidth = finalHeight * aspectRatio;
+                        }
+                        
+                        return (
+                          <img
+                            src={pageImage}
+                            alt={`Page ${pageNum + 1}`}
+                            style={{
+                              width: `${finalWidth}px`,
+                              height: `${finalHeight}px`,
+                              objectFit: 'contain',
+                            }}
+                          />
+                        );
+                      })() : (
+                        <img
+                          src={pageImage}
+                          alt={`Page ${pageNum + 1}`}
+                          className="max-w-full max-h-full object-contain"
+                        />
+                      )}
                       <div className="absolute bottom-1 right-1 bg-black/70 text-white text-[8px] px-1 rounded">
                         {pageNum + 1}
                       </div>

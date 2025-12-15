@@ -1,5 +1,5 @@
 [package]
-name = "civilpdf"
+name = "nanodoc"
 version = "0.1.0"
 description = "A hybrid PDF Editor"
 authors = ["you"]

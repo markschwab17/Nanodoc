@@ -32,6 +32,17 @@ export function TabBar() {
   };
 
   const handleTabClose = (tabId: string) => {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (tab) {
+      // Clean up print settings for this document
+      import("@/shared/stores/printStore").then(({ usePrintStore }) => {
+        usePrintStore.getState().removeDocumentSettings(tab.documentId);
+      });
+      
+      // Remove the document from PDF store
+      const { removeDocument } = usePDFStore.getState();
+      removeDocument(tab.documentId);
+    }
     removeTab(tabId);
   };
 

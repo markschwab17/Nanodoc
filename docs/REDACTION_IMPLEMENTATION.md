@@ -78,7 +78,7 @@ The saved PDF will have the content permanently removed.
 
 ---
 
-## Implementation in CivilPDF
+## Implementation in Nanodoc
 
 ### File: `src/core/pdf/PDFEditor.ts`
 
@@ -148,7 +148,7 @@ async addRedactionAnnotation(
 
 ### How to Verify Content is Truly Deleted
 
-1. **Apply redaction in CivilPDF**
+1. **Apply redaction in Nanodoc**
 2. **Save the PDF**
 3. **Open in another PDF viewer** (Adobe Acrobat, Preview, etc.)
 4. **Try to select/copy text** from redacted area

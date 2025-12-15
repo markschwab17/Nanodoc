@@ -9,13 +9,15 @@ import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDF } from "./usePDF";
 import { useUndoRedo } from "./useUndoRedo";
+import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 
 export function useKeyboard() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
-  const { setZoomLevel, zoomLevel, toggleReadMode } = useUIStore();
+  const { setZoomLevel, zoomLevel, toggleReadMode, activeTool, setActiveTool } = useUIStore();
   const { closeCurrentDocument } = usePDF();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
+  const { hasTextAnnotation } = useTextAnnotationClipboardStore();
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -81,8 +83,24 @@ export function useKeyboard() {
         return;
       }
 
-      // Copy pages: Cmd/Ctrl + C (only when not in text input)
+      // Copy pages: Cmd/Ctrl + C (only when not in text input and not copying text box)
       if ((e.metaKey || e.ctrlKey) && e.key === "c") {
+        // Check if a text box is selected (check for focused text editor or active text annotation)
+        const activeElement = document.activeElement as HTMLElement;
+        const isTextEditorFocused = activeElement && 
+          activeElement.hasAttribute("contenteditable") && 
+          activeElement.getAttribute("data-rich-text-editor") === "true";
+        
+        // Check if we're in text tool mode or select mode (where text boxes can be selected)
+        const isTextToolActive = activeTool === "text" || activeTool === "select";
+        
+        // If text editor is focused or we're in a tool mode where text boxes can be selected, don't copy pages
+        // Let the PageCanvas handler deal with text box copy
+        if (isTextEditorFocused || isTextToolActive) {
+          // Don't prevent default - let PageCanvas handle it
+          return;
+        }
+        
         // Trigger copy event - will be handled by ThumbnailCarousel
         const copyEvent = new CustomEvent("copyPages");
         window.dispatchEvent(copyEvent);
@@ -90,12 +108,64 @@ export function useKeyboard() {
         return;
       }
 
-      // Paste pages: Cmd/Ctrl + V (only when not in text input)
+      // Paste pages: Cmd/Ctrl + V (only when not in text input and not pasting text box)
       if ((e.metaKey || e.ctrlKey) && e.key === "v") {
+        // Check if we have a text box in clipboard - if so, let PageCanvas handle it
+        // Don't dispatch pastePages event for text boxes
+        if (hasTextAnnotation()) {
+          // Don't prevent default - let PageCanvas handle text box paste
+          // But don't dispatch pastePages event
+          return;
+        }
+        
+        // Only trigger paste event for pages if we don't have a text box in clipboard
         // Trigger paste event - will be handled by ThumbnailCarousel
         const pasteEvent = new CustomEvent("pastePages");
         window.dispatchEvent(pasteEvent);
         // Don't prevent default - allow normal paste for text
+        return;
+      }
+
+      // Tool switching shortcuts
+      // Select tool: Cmd/Ctrl + A (only when not in edit mode)
+      // Note: When in edit mode, CTRL+A is handled by RichTextEditor to select all text
+      if ((e.metaKey || e.ctrlKey) && e.key === "a") {
+        e.preventDefault();
+        setActiveTool("select");
+        return;
+      }
+
+      // Text tool: Cmd/Ctrl + T
+      if ((e.metaKey || e.ctrlKey) && e.key === "t") {
+        e.preventDefault();
+        setActiveTool("text");
+        return;
+      }
+
+      // Redact tool: Cmd/Ctrl + R
+      if ((e.metaKey || e.ctrlKey) && e.key === "r") {
+        e.preventDefault();
+        setActiveTool("redact");
+        return;
+      }
+
+      // Highlight tool: Cmd/Ctrl + H
+      if ((e.metaKey || e.ctrlKey) && e.key === "h") {
+        e.preventDefault();
+        setActiveTool("highlight");
+        return;
+      }
+
+      // Print: Cmd/Ctrl + P
+      if ((e.metaKey || e.ctrlKey) && e.key === "p") {
+        e.preventDefault();
+        // Find and click the print button
+        const printButton = document.querySelector(
+          'button[title="Print PDF"]'
+        ) as HTMLButtonElement;
+        if (printButton && !printButton.disabled) {
+          printButton.click();
+        }
         return;
       }
 
@@ -152,8 +222,8 @@ export function useKeyboard() {
         return;
       }
 
-      // Toggle read mode: R key
-      if (e.key === "r" || e.key === "R") {
+      // Toggle read mode: R key (only when not using Ctrl/Cmd)
+      if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         toggleReadMode();
         return;
@@ -176,6 +246,9 @@ export function useKeyboard() {
     canUndo,
     canRedo,
     toggleReadMode,
+    activeTool,
+    hasTextAnnotation,
+    setActiveTool,
   ]);
 }
 

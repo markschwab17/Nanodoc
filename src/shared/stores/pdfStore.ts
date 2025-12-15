@@ -127,6 +127,7 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
       const newAnnotations = new Map(state.annotations);
       const docAnnotations = newAnnotations.get(documentId) || [];
       newAnnotations.set(documentId, [...docAnnotations, annotation]);
+      const updatedAnnotations = newAnnotations.get(documentId) || [];
       return { annotations: newAnnotations };
     }),
 
