@@ -34,7 +34,9 @@
             "dialog:allow-save",
             "fs:allow-read-file",
             "fs:allow-write-file",
-            "fs:scope-app"
+            "fs:scope-app",
+            "updater:default",
+            "process:allow-restart"
           ]
         }
       ]
@@ -78,6 +80,15 @@
     "os": {},
     "shell": {
       "open": true
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhCMjA1NUY1RDg3RDAzQ0QKUldUTkEzM1k5VlVnaTU0UFlaWW1XQWplL1hsUGw3OGJqazlidWJFUE1VdEQzUzhkTUQvZzVnZ20K",
+      "endpoints": [
+        "https://github.com/markschwab17/nanodoc/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

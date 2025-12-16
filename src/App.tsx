@@ -21,6 +21,7 @@ import { FileText, Upload, File } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
+import { UpdateChecker } from "@/features/updater/UpdateChecker";
 
 function App() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
@@ -300,6 +301,9 @@ function App() {
       
       {/* Notification Toast */}
       <NotificationToast />
+      
+      {/* Auto-Update Checker (Tauri only) */}
+      <UpdateChecker />
       
       {/* Large drag and drop area when no PDF is loaded */}
       {!currentDocument && (
