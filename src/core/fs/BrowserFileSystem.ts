@@ -165,5 +165,15 @@ export class BrowserFileSystem implements FileSystemInterface {
       URL.revokeObjectURL(url);
     }, 100);
   }
+
+  /**
+   * Saves a file directly to the specified path.
+   * Not available in browser environment - throws an error.
+   */
+  async saveFileToPath(_data: Uint8Array, _filePath: string): Promise<void> {
+    throw new Error(
+      "saveFileToPath is not available in browser environment. Use saveFile() instead."
+    );
+  }
 }
 

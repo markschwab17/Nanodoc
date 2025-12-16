@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { flushSync } from "react-dom";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
@@ -44,12 +45,12 @@ export function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [actualScale, setActualScale] = useState<number>(2.0); // Store the actual scale used for rendering
-  const BASE_SCALE = 2.0; // Fixed base scale for PDF rendering (2x resolution for crisp text and vectors)
+  const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
+  const BASE_SCALE = 1.0; // Fixed base scale for PDF rendering (1:1 mapping - canvas size = PDF size)
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
   const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
-  const { getCurrentDocument, getAnnotations, addAnnotation, getSearchResults, updateAnnotation, setCurrentPage, currentPage } = usePDFStore();
+  const { getCurrentDocument, getAnnotations, addAnnotation, removeAnnotation, getSearchResults, updateAnnotation, setCurrentPage, currentPage } = usePDFStore();
   const { showRulers } = useDocumentSettingsStore();
   const { showNotification } = useNotificationStore();
   const { copyTextAnnotation, pasteTextAnnotation, hasTextAnnotation, clear: clearTextAnnotationClipboard } = useTextAnnotationClipboardStore();
@@ -70,6 +71,7 @@ export function PageCanvas({
   const actualScaleRef = useRef(actualScale);
   const zoomLevelRef = useRef(zoomLevel);
   const fitModeRef = useRef(fitMode);
+  const isMiddleMouseDownRef = useRef(false); // Track middle mouse button for horizontal scroll
   
   // Keep refs in sync with state
   useEffect(() => {
@@ -203,7 +205,7 @@ export function PageCanvas({
 
   // Reset hover state when tool changes
   useEffect(() => {
-    if (activeTool !== "selectText") {
+    if (activeTool !== "selectText" && activeTool !== "highlight") {
       setIsHoveringOverText(false);
     }
   }, [activeTool]);
@@ -221,10 +223,47 @@ export function PageCanvas({
     initEditor();
   }, []);
 
-  // Reset pan when page changes
+  // Reset and center page when page changes or when entering fit modes
+  // DON'T touch panOffset in custom mode - zoom/pan handlers manage it directly
   useEffect(() => {
+    if (readMode) return; // In read mode, VirtualizedPageList handles positioning
+    if (fitMode === "custom") return; // In custom mode, panOffset is managed by zoom/pan handlers
+    
+    // Calculate centered position for the new page
+    if (containerRef.current && document.isDocumentLoaded()) {
+      const pageMetadata = document.getPageMetadata(pageNumber);
+      if (pageMetadata) {
+        const container = containerRef.current;
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+        
+        if (containerWidth > 0 && containerHeight > 0) {
+          let viewportScale = zoomLevel;
+          
+          // Calculate appropriate scale based on fitMode
+          if (fitMode === "width") {
+            viewportScale = containerWidth / pageMetadata.width;
+          } else if (fitMode === "page") {
+            const scaleX = containerWidth / pageMetadata.width;
+            const scaleY = containerHeight / pageMetadata.height;
+            viewportScale = Math.min(scaleX, scaleY);
+          }
+          
+          const scaledWidth = pageMetadata.width * viewportScale;
+          const scaledHeight = pageMetadata.height * viewportScale;
+          
+          const centerX = (containerWidth - scaledWidth) / 2;
+          const centerY = (containerHeight - scaledHeight) / 2;
+          
+          setPanOffset({ x: centerX, y: centerY });
+          return;
+        }
+      }
+    }
+    
+    // Fallback to (0, 0) if we can't calculate centering
     setPanOffset({ x: 0, y: 0 });
-  }, [pageNumber]);
+  }, [pageNumber, readMode, document, fitMode, zoomLevel]);
 
   // Clear text selection when page changes or tool changes
   useEffect(() => {
@@ -237,6 +276,11 @@ export function PageCanvas({
   // Global mouseup listener to catch mouse release outside browser window
   useEffect(() => {
     const handleGlobalMouseUp = (e: MouseEvent) => {
+      // Clear middle mouse button tracking on any mouseup
+      if (e.button === 1) {
+        isMiddleMouseDownRef.current = false;
+      }
+      
       // Only handle if we're in the middle of a highlight drag
       if (activeTool === "highlight" && isSelecting && selectionStart && overlayHighlightPath.length > 0 && !selectionEnd) {
         // Use the last point in the path as selectionEnd
@@ -613,89 +657,97 @@ export function PageCanvas({
     if (!container || readMode) return; // Don't handle wheel zoom in read mode at page level
 
     const handleWheelNative = (e: WheelEvent) => {
-      // Only handle zoom if ctrl/meta is pressed
-      if (!(e.ctrlKey || e.metaKey)) {
-        return; // Allow normal scroll
+      // Get current values from refs
+      const currentZoomLevel = zoomLevelRef.current;
+      const currentFitMode = fitModeRef.current;
+      const currentPanOffset = panOffsetRef.current;
+      
+      // Handle zoom if ctrl/meta is pressed
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        const currentScale = currentZoomLevel;
+        const newZoom = Math.max(0.25, Math.min(5, currentScale * delta));
+
+        if (Math.abs(newZoom - currentScale) > 0.001) {
+          // Get canvas bounds - use the actual canvas element position
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          
+          const canvasRect = canvas.getBoundingClientRect();
+          
+          // Mouse position relative to the visible canvas
+          const mouseRelativeToCanvasX = e.clientX - canvasRect.left;
+          const mouseRelativeToCanvasY = e.clientY - canvasRect.top;
+          
+          // The canvas is scaled by zoomLevel, so divide to get unscaled canvas coordinates
+          const canvasX = mouseRelativeToCanvasX / currentScale;
+          const canvasY = mouseRelativeToCanvasY / currentScale;
+          
+          // Get container bounds for calculating new pan offset
+          const containerRect = container.getBoundingClientRect();
+          const mouseX = e.clientX - containerRect.left;
+          const mouseY = e.clientY - containerRect.top;
+
+          // Calculate new pan offset to place that canvas point at the mouse position
+          const newCanvasRelativeX = canvasX * newZoom;
+          const newCanvasRelativeY = canvasY * newZoom;
+          const newPanX = mouseX - newCanvasRelativeX;
+          const newPanY = mouseY - newCanvasRelativeY;
+
+          // Update refs immediately for smooth operation
+          panOffsetRef.current = { x: newPanX, y: newPanY };
+          zoomLevelRef.current = newZoom;
+          fitModeRef.current = "custom";
+
+          // Use flushSync to force all state updates in a single synchronous render
+          // This prevents the "adjustment" where some values update before others
+          flushSync(() => {
+            setFitMode("custom");
+            setZoomLevel(newZoom);
+            setPanOffset({ x: newPanX, y: newPanY });
+          });
+        }
+        return;
       }
 
-      // Prevent default to stop page scrolling
+      // Handle scroll/pan when no modifier is pressed
       e.preventDefault();
       e.stopPropagation();
 
-      // Get current values from refs for smooth operation
-      const currentPanOffset = panOffsetRef.current;
-      const currentActualScale = actualScaleRef.current;
-      const currentZoomLevel = zoomLevelRef.current;
-      const currentFitMode = fitModeRef.current;
+      // Calculate pan delta
+      // Shift+scroll or middle mouse+scroll = horizontal pan
+      // Normal scroll = vertical pan, deltaX = horizontal pan
+      const scrollSensitivity = 1.0;
+      let panDeltaX = 0;
+      let panDeltaY = 0;
 
-      // When zooming, switch to custom mode (not fit mode)
-      if (currentFitMode !== "custom") {
-        setFitMode("custom");
+      if (e.shiftKey || isMiddleMouseDownRef.current) {
+        // Shift+scroll or middle mouse+scroll = horizontal pan (side scroll)
+        panDeltaX = -e.deltaY * scrollSensitivity;
+      } else {
+        // Normal scroll = vertical pan, also handle deltaX for horizontal wheel tilt
+        panDeltaX = -e.deltaX * scrollSensitivity;
+        panDeltaY = -e.deltaY * scrollSensitivity;
       }
 
-      const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      // Use zoomLevel as the current scale when in custom mode, otherwise use actualScale
-      // This ensures we're using the scale that matches the current zoom state
-      const currentScale = currentFitMode === "custom" 
-        ? currentZoomLevel 
-        : (currentActualScale > 0 ? currentActualScale : currentZoomLevel);
-      const newZoom = Math.max(0.25, Math.min(5, currentScale * delta));
+      const newPanX = currentPanOffset.x + panDeltaX;
+      const newPanY = currentPanOffset.y + panDeltaY;
 
-      if (Math.abs(newZoom - currentScale) > 0.001) {
-        // Get container bounds
-        const containerRect = container.getBoundingClientRect();
-
-        // Mouse position relative to container (where the user is pointing)
-        const mouseX = e.clientX - containerRect.left;
-        const mouseY = e.clientY - containerRect.top;
-
-        // Calculate what point on the PDF (in PDF coordinates) is under the mouse
-        // 1. Remove pan offset to get canvas-relative coordinates
-        // 2. Divide by current zoom to get canvas coordinates (PDF at BASE_SCALE)
-        // 3. Convert to PDF coordinates
-        const canvasRelativeX = mouseX - currentPanOffset.x;
-        const canvasRelativeY = mouseY - currentPanOffset.y;
-        
-        // Divide by zoom to get canvas coordinates (PDF rendered at BASE_SCALE)
-        const canvasX = canvasRelativeX / currentScale;
-        const canvasY = canvasRelativeY / currentScale;
-        
-        // Convert canvas coordinates to PDF coordinates
-        const documentX = canvasX / BASE_SCALE;
-        const documentY = canvasY / BASE_SCALE;
-
-        // After zoom, we want the same PDF point to be at the mouse position
-        // New canvas coordinates for that PDF point = PDF coordinates * BASE_SCALE
-        // Then apply new zoom: newCanvasRelative = canvasCoord * newZoom
-        const newCanvasCoordX = documentX * BASE_SCALE;
-        const newCanvasCoordY = documentY * BASE_SCALE;
-        const newCanvasRelativeX = newCanvasCoordX * newZoom;
-        const newCanvasRelativeY = newCanvasCoordY * newZoom;
-
-        // Calculate new pan offset to place that point at the mouse position
-        // panOffset = mouse position - (canvas coordinate * zoom)
-        const newPanX = mouseX - newCanvasRelativeX;
-        const newPanY = mouseY - newCanvasRelativeY;
-
-        // Update refs immediately to avoid stale values in render effect
-        panOffsetRef.current = { x: newPanX, y: newPanY };
-        zoomLevelRef.current = newZoom;
+      // Update refs immediately
+      panOffsetRef.current = { x: newPanX, y: newPanY };
+      
+      // Switch to custom mode if needed and update pan offset
+      if (currentFitMode !== "custom") {
         fitModeRef.current = "custom";
-
-        // Use requestAnimationFrame to batch state updates in the same frame
-        // This ensures zoomLevel and panOffset update together, preventing render effect from running with stale values
-        requestAnimationFrame(() => {
+        flushSync(() => {
           setFitMode("custom");
-          setZoomLevel(newZoom);
           setPanOffset({ x: newPanX, y: newPanY });
-          
-          // Force update editing annotation position if one is active
-          // This ensures the text box position updates immediately during zoom
-          if (editingAnnotation && editingAnnotation.type === "text") {
-            // The position will be recalculated on next render using the updated scale and pan
-            // The key prop on RichTextEditor will force a re-render with correct position
-          }
         });
+      } else {
+        setPanOffset({ x: newPanX, y: newPanY });
       }
     };
 
@@ -781,18 +833,18 @@ export function PageCanvas({
 
         const canvas = canvasRef.current;
         
-        // Account for device pixel ratio for crisp rendering on high-DPI displays
-        const devicePixelRatio = window.devicePixelRatio || 1;
-        const displayWidth = rendered.width;
-        const displayHeight = rendered.height;
+        // For true 1:1 mapping: canvas internal resolution = rendered size = PDF size (when BASE_SCALE = 1.0)
+        // Note: Not scaling by devicePixelRatio keeps canvas.width === PDF width for exact 1:1
+        const pdfDisplayWidth = pageMetadata.width;
+        const pdfDisplayHeight = pageMetadata.height;
         
-        // Set canvas internal resolution (actual pixels)
-        canvas.width = displayWidth * devicePixelRatio;
-        canvas.height = displayHeight * devicePixelRatio;
+        // Set canvas internal resolution to match rendered size (1:1 with PDF when BASE_SCALE = 1.0)
+        canvas.width = rendered.width;
+        canvas.height = rendered.height;
         
-        // Set canvas display size (CSS pixels)
-        canvas.style.width = `${displayWidth}px`;
-        canvas.style.height = `${displayHeight}px`;
+        // Set canvas display size to match PDF dimensions (true 1:1 mapping)
+        canvas.style.width = `${pdfDisplayWidth}px`;
+        canvas.style.height = `${pdfDisplayHeight}px`;
 
         const ctx = canvas.getContext("2d", {
           willReadFrequently: false,
@@ -800,10 +852,7 @@ export function PageCanvas({
         });
         
         if (ctx && rendered.imageData instanceof ImageData) {
-          // Scale context to account for device pixel ratio
-          ctx.scale(devicePixelRatio, devicePixelRatio);
-          
-          // Disable image smoothing for crisp pixel-perfect rendering
+          // No scaling needed - canvas internal resolution matches rendered size (1:1)
           ctx.imageSmoothingEnabled = false;
           ctx.imageSmoothingQuality = "high";
           
@@ -930,18 +979,17 @@ export function PageCanvas({
         
         const canvas = canvasRef.current;
         if (canvas) {
-          // Account for device pixel ratio for crisp rendering on high-DPI displays
-          const devicePixelRatio = window.devicePixelRatio || 1;
-          const displayWidth = rendered.width;
-          const displayHeight = rendered.height;
+          // For true 1:1 mapping: canvas internal resolution = rendered size = PDF size
+          const pdfDisplayWidth = metadata.width;
+          const pdfDisplayHeight = metadata.height;
           
-          // Set canvas internal resolution (actual pixels)
-          canvas.width = displayWidth * devicePixelRatio;
-          canvas.height = displayHeight * devicePixelRatio;
+          // Set canvas internal resolution to match rendered size (1:1 with PDF)
+          canvas.width = rendered.width;
+          canvas.height = rendered.height;
           
-          // Set canvas display size (CSS pixels)
-          canvas.style.width = `${displayWidth}px`;
-          canvas.style.height = `${displayHeight}px`;
+          // Set canvas display size to match PDF dimensions
+          canvas.style.width = `${pdfDisplayWidth}px`;
+          canvas.style.height = `${pdfDisplayHeight}px`;
           
           const ctx = canvas.getContext("2d", {
             willReadFrequently: false,
@@ -949,10 +997,7 @@ export function PageCanvas({
           });
           
           if (ctx && rendered.imageData instanceof ImageData) {
-            // Scale context to account for device pixel ratio
-            ctx.scale(devicePixelRatio, devicePixelRatio);
-            
-            // Disable image smoothing for crisp pixel-perfect rendering
+            // No scaling needed - canvas internal resolution matches rendered size (1:1)
             ctx.imageSmoothingEnabled = false;
             ctx.imageSmoothingQuality = "high";
             
@@ -1176,6 +1221,11 @@ export function PageCanvas({
       mousePositionRef.current = coords;
     }
     
+    // Track middle mouse button for horizontal scroll
+    if (e.button === 1) {
+      isMiddleMouseDownRef.current = true;
+    }
+    
     // Middle mouse button or space+drag for pan
     if (e.button === 1 || (e.button === 0 && (isSpacePressed || activeTool === "pan"))) {
       e.preventDefault();
@@ -1215,6 +1265,7 @@ export function PageCanvas({
           pdfToCanvas,
           pdfToContainer,
           addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
           setEditingAnnotation,
           setAnnotationText,
           setIsEditingMode,
@@ -1284,6 +1335,7 @@ export function PageCanvas({
           pdfToCanvas,
           pdfToContainer,
           addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
           setEditingAnnotation,
           setAnnotationText,
           setIsEditingMode,
@@ -1356,13 +1408,8 @@ export function PageCanvas({
     if (activeTool === "highlight" && !isDragging && !isSelecting) {
       if (coords) {
         const canvasPos = pdfToCanvas(coords.x, coords.y);
-        // Convert to display coordinates for positioning
-        const devicePixelRatio = window.devicePixelRatio || 1;
-        const displayPos = { 
-          x: canvasPos.x / devicePixelRatio, 
-          y: canvasPos.y / devicePixelRatio 
-        };
-        setMousePosition(displayPos);
+        // Canvas pixel = display coordinates (1:1 mapping)
+        setMousePosition(canvasPos);
       }
     } else if (activeTool !== "highlight" || isSelecting) {
       setMousePosition(null);
@@ -1379,13 +1426,11 @@ export function PageCanvas({
         const screenDeltaX = e.clientX - dupInfo.mouseStartX;
         const screenDeltaY = e.clientY - dupInfo.mouseStartY;
         
-        // Convert screen pixels to PDF coordinates (same logic as RichTextEditor)
-        const devicePixelRatio = window.devicePixelRatio || 1;
-        const BASE_SCALE = 2.0;
+        // Convert screen pixels to PDF coordinates (1:1 mapping with BASE_SCALE = 1.0)
         const currentZoomLevel = zoomLevelRef.current;
         
-        const pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * currentZoomLevel);
-        const pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * currentZoomLevel); // Negate Y
+        const pdfDeltaX = screenDeltaX / currentZoomLevel;
+        const pdfDeltaY = -screenDeltaY / currentZoomLevel; // Negate Y
         
         // Update duplicate position
         const newX = dupInfo.startX + pdfDeltaX;
@@ -1445,8 +1490,8 @@ export function PageCanvas({
       }
     }
     
-    // For selectText tool, check if hovering over text for cursor changes
-    if (activeTool === "selectText" && !isSelecting && !selectionStart) {
+    // For selectText or highlight tool, check if hovering over text for cursor changes
+    if ((activeTool === "selectText" || activeTool === "highlight") && !isSelecting && !selectionStart) {
       const coords = getPDFCoordinates(e);
       if (coords && allTextSpansRef.current.length > 0) {
         // Check if mouse is over any text span
@@ -1463,7 +1508,7 @@ export function PageCanvas({
       } else {
         setIsHoveringOverText(false);
       }
-    } else if (activeTool !== "selectText") {
+    } else if (activeTool !== "selectText" && activeTool !== "highlight") {
       setIsHoveringOverText(false);
     }
     
@@ -1476,16 +1521,16 @@ export function PageCanvas({
         if (annot.type === "text") {
           // Check if mouse is over text box
           const canvasPos = pdfToCanvas(annot.x, annot.y);
-          const devicePixelRatio = window.devicePixelRatio || 1;
-          const displayX = canvasPos.x / devicePixelRatio;
-          const displayY = canvasPos.y / devicePixelRatio;
+          // Canvas pixel = display coordinates (1:1 mapping)
+          const displayX = canvasPos.x;
+          const displayY = canvasPos.y;
           const width = annot.width || 200;
           const height = annot.height || 100;
           
           // Get mouse position in display coordinates
           const mouseCanvasPos = pdfToCanvas(coords.x, coords.y);
-          const mouseDisplayX = mouseCanvasPos.x / devicePixelRatio;
-          const mouseDisplayY = mouseCanvasPos.y / devicePixelRatio;
+          const mouseDisplayX = mouseCanvasPos.x;
+          const mouseDisplayY = mouseCanvasPos.y;
           
           if (
             mouseDisplayX >= displayX &&
@@ -1574,6 +1619,7 @@ export function PageCanvas({
             pdfToCanvas,
             pdfToContainer,
             addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+            removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
             setEditingAnnotation,
             setAnnotationText,
             setIsEditingMode,
@@ -1615,6 +1661,7 @@ export function PageCanvas({
             pdfToCanvas,
             pdfToContainer,
             addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+            removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
             setEditingAnnotation,
             setAnnotationText,
             setIsEditingMode,
@@ -1656,6 +1703,7 @@ export function PageCanvas({
           pdfToCanvas,
           pdfToContainer,
           addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
           setEditingAnnotation,
           setAnnotationText,
           setIsEditingMode,
@@ -1925,8 +1973,7 @@ export function PageCanvas({
           const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
           const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
           
-          // Convert to PDF coordinates
-          const BASE_SCALE = 2.0;
+          // Convert to PDF coordinates (1:1 mapping with BASE_SCALE = 1.0)
           let mediaboxHeight: number;
           if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
             mediaboxHeight = pageMetadata.width;
@@ -1934,8 +1981,8 @@ export function PageCanvas({
             mediaboxHeight = pageMetadata.height;
           }
           
-          const pdfX = canvasPixelX / BASE_SCALE;
-          const pdfY = mediaboxHeight - (canvasPixelY / BASE_SCALE);
+          const pdfX = canvasPixelX;
+          const pdfY = mediaboxHeight - canvasPixelY;
 
           // Calculate initial size (max 300x300 PDF points, maintain aspect ratio)
           const maxSize = 300;
@@ -2020,6 +2067,11 @@ export function PageCanvas({
 
 
   const handleMouseUp = async (e: React.MouseEvent) => {
+    // Clear middle mouse button tracking
+    if (e.button === 1) {
+      isMiddleMouseDownRef.current = false;
+    }
+    
     // Handle duplicate drag end
     if (duplicatingAnnotationRef.current && currentDocument) {
       const dupInfo = duplicatingAnnotationRef.current;
@@ -2115,6 +2167,7 @@ export function PageCanvas({
           pdfToCanvas,
           pdfToContainer,
           addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
           setEditingAnnotation,
           setAnnotationText,
           setIsEditingMode,
@@ -2201,7 +2254,11 @@ export function PageCanvas({
       ? "text"
       : "default"
     : activeTool === "highlight"
-    ? "crosshair"
+    ? isSelecting 
+      ? "text" // Show text cursor while selecting/dragging
+      : isHoveringOverText
+        ? "text" // Show text cursor when hovering over text
+        : "crosshair"
     : activeTool === "callout"
     ? "crosshair"
     : activeTool === "redact"
@@ -2297,9 +2354,10 @@ export function PageCanvas({
         style={{
           // In read mode, no transform - zoom is handled at the pages container level
           // In normal mode, apply viewport transform: scale then translate
+          // Always use panOffset state (not ref) for consistency - refs are for internal calculations
           transform: readMode 
             ? undefined
-            : `scale(${zoomLevel}) translate(${(fitMode === "custom" ? panOffsetRef.current.x : panOffset.x) / zoomLevel}px, ${(fitMode === "custom" ? panOffsetRef.current.y : panOffset.y) / zoomLevel}px)`,
+            : `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
           transformOrigin: "0 0",
           margin: readMode ? '0 auto' : 0,
           padding: 0,
@@ -2333,16 +2391,11 @@ export function PageCanvas({
           (() => {
             const startCanvas = pdfToCanvas(textBoxStart.x, textBoxStart.y);
             const endCanvas = pdfToCanvas(selectionEnd.x, selectionEnd.y);
-            // Convert to display coordinates for positioning
-            const devicePixelRatio = window.devicePixelRatio || 1;
-            const startDisplayX = startCanvas.x / devicePixelRatio;
-            const startDisplayY = startCanvas.y / devicePixelRatio;
-            const endDisplayX = endCanvas.x / devicePixelRatio;
-            const endDisplayY = endCanvas.y / devicePixelRatio;
-            const minX = Math.min(startDisplayX, endDisplayX);
-            const minY = Math.min(startDisplayY, endDisplayY);
-            const width = Math.abs(endDisplayX - startDisplayX);
-            const height = Math.abs(endDisplayY - startDisplayY);
+            // Canvas pixel = display coordinates (1:1 mapping)
+            const minX = Math.min(startCanvas.x, endCanvas.x);
+            const minY = Math.min(startCanvas.y, endCanvas.y);
+            const width = Math.abs(endCanvas.x - startCanvas.x);
+            const height = Math.abs(endCanvas.y - startCanvas.y);
             
             return (
               <div
@@ -2359,7 +2412,7 @@ export function PageCanvas({
           })()
         )}
 
-        {/* Render overlay highlight preview */}
+        {/* Render overlay highlight preview - always show while drawing for visual feedback */}
         {activeTool === "highlight" && overlayHighlightPath.length > 0 && (isSelecting || selectionStart) && (() => {
           const { highlightColor, highlightStrokeWidth, highlightOpacity } = useUIStore.getState();
           
@@ -2376,19 +2429,14 @@ export function PageCanvas({
           }
           
           // Calculate bounding box for SVG positioning with padding for stroke width
-          // CRITICAL: Convert from canvas pixel coordinates to canvas display coordinates
-          // The canvas has both pixel size (internal) and display size (CSS)
-          // Preview must use display coordinates to align with the canvas element
-          const devicePixelRatio = window.devicePixelRatio || 1;
-          const allCanvasPixelX = pathToRender.map(p => pdfToCanvas(p.x, p.y).x);
-          const allCanvasPixelY = pathToRender.map(p => pdfToCanvas(p.x, p.y).y);
-          const allCanvasDisplayX = allCanvasPixelX.map(x => x / devicePixelRatio);
-          const allCanvasDisplayY = allCanvasPixelY.map(y => y / devicePixelRatio);
+          // Canvas pixel = display coordinates (1:1 mapping)
+          const allCanvasX = pathToRender.map(p => pdfToCanvas(p.x, p.y).x);
+          const allCanvasY = pathToRender.map(p => pdfToCanvas(p.x, p.y).y);
           
-          const minCanvasX = Math.min(...allCanvasDisplayX);
-          const minCanvasY = Math.min(...allCanvasDisplayY);
-          const maxCanvasX = Math.max(...allCanvasDisplayX);
-          const maxCanvasY = Math.max(...allCanvasDisplayY);
+          const minCanvasX = Math.min(...allCanvasX);
+          const minCanvasY = Math.min(...allCanvasY);
+          const maxCanvasX = Math.max(...allCanvasX);
+          const maxCanvasY = Math.max(...allCanvasY);
           
           // Add padding for stroke width to ensure full visibility
           const padding = highlightStrokeWidth / 2;
@@ -2402,11 +2450,10 @@ export function PageCanvas({
           const boxHeight = Math.max(rawHeight, minSize) + (padding * 2);
           
           // Convert path points to relative coordinates within bounding box (with padding)
-          // Use display coordinates for positioning
+          // Canvas pixel = display coordinates (1:1 mapping)
           const relativePathPoints = pathToRender.map(p => {
-            const canvasPixel = pdfToCanvas(p.x, p.y);
-            const canvasDisplay = { x: canvasPixel.x / devicePixelRatio, y: canvasPixel.y / devicePixelRatio };
-            return `${canvasDisplay.x - boxX},${canvasDisplay.y - boxY}`;
+            const canvasPos = pdfToCanvas(p.x, p.y);
+            return `${canvasPos.x - boxX},${canvasPos.y - boxY}`;
           }).join(" ");
           
           return (
@@ -2474,19 +2521,11 @@ export function PageCanvas({
             const startCanvas = pdfToCanvas(selectionStart.x, selectionStart.y);
             const endCanvas = pdfToCanvas(selectionEnd.x, selectionEnd.y);
             
-            // CRITICAL: Convert from canvas pixel coordinates to canvas display coordinates
-            // The canvas has both pixel size (internal) and display size (CSS)
-            // Preview box must use display coordinates to align with the canvas element
-            const devicePixelRatio = window.devicePixelRatio || 1;
-            const startDisplayX = startCanvas.x / devicePixelRatio;
-            const startDisplayY = startCanvas.y / devicePixelRatio;
-            const endDisplayX = endCanvas.x / devicePixelRatio;
-            const endDisplayY = endCanvas.y / devicePixelRatio;
-            
-            const minX = Math.min(startDisplayX, endDisplayX);
-            const minY = Math.min(startDisplayY, endDisplayY);
-            const width = Math.abs(endDisplayX - startDisplayX);
-            const height = Math.abs(endDisplayY - startDisplayY);
+            // Canvas pixel = display coordinates (1:1 mapping)
+            const minX = Math.min(startCanvas.x, endCanvas.x);
+            const minY = Math.min(startCanvas.y, endCanvas.y);
+            const width = Math.abs(endCanvas.x - startCanvas.x);
+            const height = Math.abs(endCanvas.y - startCanvas.y);
             
             // Ensure minimum size for visibility
             const minWidth = Math.max(width, 2);
@@ -2518,9 +2557,15 @@ export function PageCanvas({
         {/* Render text selection highlights - show during drag and after release */}
         {(() => {
           // Show highlights if we have spans, whether we're dragging or not
-          const shouldShowHighlights = activeTool === "selectText" && selectedTextSpans.length > 0;
+          // Also show for highlight tool to give live preview of text being selected
+          const shouldShowHighlights = (activeTool === "selectText" || activeTool === "highlight") && selectedTextSpans.length > 0;
           
           if (!shouldShowHighlights) return null;
+          
+          // Get highlight color for preview when using highlight tool
+          const { highlightColor, highlightOpacity } = useUIStore.getState();
+          const previewColor = activeTool === "highlight" ? highlightColor : null;
+          const isHighlightPreview = activeTool === "highlight" && isSelecting;
           
           // Group spans by line (same Y coordinate, within tolerance)
           const lineGroups: { [key: string]: typeof selectedTextSpans } = {};
@@ -2558,21 +2603,34 @@ export function PageCanvas({
                 });
                 
                 // Convert PDF coordinates to canvas coordinates
-                const bottomLeft = pdfToCanvas(minX, minY);
-                const topRight = pdfToCanvas(maxX, maxY);
+                // In PDF space: minY = bottom, maxY = top
+                // pdfToCanvas flips Y, so we need to use the correct corners for CSS positioning
+                // CSS needs top-left corner: (minX, maxY) in PDF space
+                const canvasTopLeft = pdfToCanvas(minX, maxY); // maxY is top in PDF
+                const canvasBottomRight = pdfToCanvas(maxX, minY); // minY is bottom in PDF
                 
-                const width = topRight.x - bottomLeft.x;
-                const height = topRight.y - bottomLeft.y;
+                // After Y flip, canvasTopLeft.y < canvasBottomRight.y
+                const width = canvasBottomRight.x - canvasTopLeft.x;
+                const height = canvasBottomRight.y - canvasTopLeft.y;
                 
                 return (
                   <div
                     key={`text-selection-line-${lineKey}-${lineIdx}`}
-                    className="absolute bg-blue-400/40 pointer-events-none z-50"
+                    className={cn(
+                      "absolute pointer-events-none z-50",
+                      isHighlightPreview && "animate-pulse"
+                    )}
                     style={{
-                      left: `${bottomLeft.x}px`,
-                      top: `${bottomLeft.y}px`,
+                      left: `${canvasTopLeft.x}px`,
+                      top: `${canvasTopLeft.y}px`,
                       width: `${Math.abs(width)}px`,
                       height: `${Math.abs(height)}px`,
+                      backgroundColor: previewColor ? previewColor : 'rgba(96, 165, 250, 0.4)',
+                      opacity: previewColor ? highlightOpacity : 1,
+                      // Add a dashed border for preview mode to indicate it's not committed yet
+                      ...(isHighlightPreview && {
+                        boxShadow: `0 0 0 1px ${previewColor || 'rgba(96, 165, 250, 0.6)'}`,
+                      }),
                     }}
                   />
                 );
@@ -2594,18 +2652,20 @@ export function PageCanvas({
               const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
               
               // Convert PDF coordinates to container coordinates
-              const minContainer = pdfToContainer(minX, minY);
-              const maxContainer = pdfToContainer(maxX, maxY);
+              // In PDF: minY = bottom, maxY = top
+              // pdfToContainer flips Y, so use maxY for canvas top
+              const canvasTopLeft = pdfToContainer(minX, maxY); // maxY is top in PDF
+              const canvasBottomRight = pdfToContainer(maxX, minY); // minY is bottom in PDF
               
               return (
                 <div
                   key={quadIdx}
                   className="absolute bg-blue-400/30 border border-blue-500"
                   style={{
-                    left: `${minContainer.x}px`,
-                    top: `${minContainer.y}px`,
-                    width: `${maxContainer.x - minContainer.x}px`,
-                    height: `${maxContainer.y - minContainer.y}px`,
+                    left: `${canvasTopLeft.x}px`,
+                    top: `${canvasTopLeft.y}px`,
+                    width: `${canvasBottomRight.x - canvasTopLeft.x}px`,
+                    height: `${canvasBottomRight.y - canvasTopLeft.y}px`,
                   }}
                 />
               );
@@ -2660,16 +2720,13 @@ export function PageCanvas({
               }
               
               // Calculate bounding box for SVG positioning
-              // CRITICAL: Convert from canvas pixel coordinates to canvas display coordinates
-              const devicePixelRatio = window.devicePixelRatio || 1;
-              const allCanvasPixelX = pathToRender.map((p: { x: number; y: number }) => pdfToCanvas(p.x, p.y).x);
-              const allCanvasPixelY = pathToRender.map((p: { x: number; y: number }) => pdfToCanvas(p.x, p.y).y);
-              const allCanvasDisplayX = allCanvasPixelX.map(x => x / devicePixelRatio);
-              const allCanvasDisplayY = allCanvasPixelY.map(y => y / devicePixelRatio);
-              const minCanvasX = Math.min(...allCanvasDisplayX);
-              const minCanvasY = Math.min(...allCanvasDisplayY);
-              const maxCanvasX = Math.max(...allCanvasDisplayX);
-              const maxCanvasY = Math.max(...allCanvasDisplayY);
+              // Canvas pixel = display coordinates (1:1 mapping)
+              const allCanvasX = pathToRender.map((p: { x: number; y: number }) => pdfToCanvas(p.x, p.y).x);
+              const allCanvasY = pathToRender.map((p: { x: number; y: number }) => pdfToCanvas(p.x, p.y).y);
+              const minCanvasX = Math.min(...allCanvasX);
+              const minCanvasY = Math.min(...allCanvasY);
+              const maxCanvasX = Math.max(...allCanvasX);
+              const maxCanvasY = Math.max(...allCanvasY);
               
               // Add padding for stroke width
               const padding = strokeWidth / 2;
@@ -2678,11 +2735,11 @@ export function PageCanvas({
               const boxWidth = (maxCanvasX - minCanvasX) + (padding * 2);
               const boxHeight = (maxCanvasY - minCanvasY) + (padding * 2);
               
-              // Adjust path points to be relative to bounding box (use display coordinates)
+              // Adjust path points to be relative to bounding box
+              // Canvas pixel = display coordinates (1:1 mapping)
               const relativePathPoints = pathToRender.map((p: { x: number; y: number }) => {
-                const canvasPixel = pdfToCanvas(p.x, p.y);
-                const canvasDisplay = { x: canvasPixel.x / devicePixelRatio, y: canvasPixel.y / devicePixelRatio };
-                return `${canvasDisplay.x - boxX},${canvasDisplay.y - boxY}`;
+                const canvasPos = pdfToCanvas(p.x, p.y);
+                return `${canvasPos.x - boxX},${canvasPos.y - boxY}`;
               }).join(" ");
               
               const isHovered = hoveredAnnotationId === annot.id && activeTool === "select";
@@ -2785,13 +2842,18 @@ export function PageCanvas({
                 }
               });
               
+              // Convert PDF coordinates to canvas coordinates
+              // Note: pdfToCanvas flips Y, so after conversion:
+              // - minCanvas.y is the BOTTOM in canvas space (larger value)
+              // - maxCanvas.y is the TOP in canvas space (smaller value)
               const minCanvas = pdfToCanvas(minQuadX, minQuadY);
               const maxCanvas = pdfToCanvas(maxQuadX, maxQuadY);
-              const devicePixelRatio = window.devicePixelRatio || 1;
-              const hoverBoxX = minCanvas.x / devicePixelRatio;
-              const hoverBoxY = minCanvas.y / devicePixelRatio;
-              const hoverBoxWidth = (maxCanvas.x - minCanvas.x) / devicePixelRatio;
-              const hoverBoxHeight = (maxCanvas.y - minCanvas.y) / devicePixelRatio;
+              
+              // For CSS positioning, we need top-left corner and positive dimensions
+              const hoverBoxX = Math.min(minCanvas.x, maxCanvas.x);
+              const hoverBoxY = Math.min(minCanvas.y, maxCanvas.y); // Use the smaller Y (top in canvas)
+              const hoverBoxWidth = Math.abs(maxCanvas.x - minCanvas.x);
+              const hoverBoxHeight = Math.abs(maxCanvas.y - minCanvas.y);
               
               return (
                 <div 
@@ -2802,7 +2864,15 @@ export function PageCanvas({
                     "absolute",
                     activeTool === "select" ? "cursor-pointer" : ""
                   )}
-                  style={{ pointerEvents: activeTool === "select" ? "auto" : "none", zIndex: 30 }}
+                  style={{ 
+                    pointerEvents: activeTool === "select" ? "auto" : "none", 
+                    zIndex: 30,
+                    // Position the clickable area at the bounding box
+                    left: `${hoverBoxX}px`,
+                    top: `${hoverBoxY}px`,
+                    width: `${hoverBoxWidth}px`,
+                    height: `${hoverBoxHeight}px`,
+                  }}
                   onClick={(e) => {
                     if (activeTool === "select") {
                       e.stopPropagation();
@@ -2828,8 +2898,8 @@ export function PageCanvas({
                     <div
                       className="absolute border-2 border-primary pointer-events-none"
                       style={{
-                        left: `${hoverBoxX - 4}px`,
-                        top: `${hoverBoxY - 4}px`,
+                        left: `-4px`,
+                        top: `-4px`,
                         width: `${hoverBoxWidth + 8}px`,
                         height: `${hoverBoxHeight + 8}px`,
                         borderRadius: "4px",
@@ -2842,24 +2912,35 @@ export function PageCanvas({
                     // Quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
                     if (!Array.isArray(quad) || quad.length < 8) return null;
                     
-                    const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
-                    const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
-                    const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
-                    const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+                    const quadMinX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+                    const quadMinY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+                    const quadMaxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+                    const quadMaxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
                     
                     // Convert PDF coordinates to canvas coordinates (for rendering)
-                    const minCanvas = pdfToCanvas(minX, minY);
-                    const maxCanvas = pdfToCanvas(maxX, maxY);
+                    // Note: pdfToCanvas flips Y
+                    const quadMinCanvas = pdfToCanvas(quadMinX, quadMinY);
+                    const quadMaxCanvas = pdfToCanvas(quadMaxX, quadMaxY);
+                    
+                    // Get the actual top-left in canvas space (smallest X and Y)
+                    const quadCanvasX = Math.min(quadMinCanvas.x, quadMaxCanvas.x);
+                    const quadCanvasY = Math.min(quadMinCanvas.y, quadMaxCanvas.y);
+                    const quadCanvasWidth = Math.abs(quadMaxCanvas.x - quadMinCanvas.x);
+                    const quadCanvasHeight = Math.abs(quadMaxCanvas.y - quadMinCanvas.y);
+                    
+                    // Position relative to parent container (which is at hoverBoxX, hoverBoxY)
+                    const relativeLeft = quadCanvasX - hoverBoxX;
+                    const relativeTop = quadCanvasY - hoverBoxY;
                     
                     return (
                       <div
                         key={idx}
                         className="absolute"
                         style={{
-                          left: `${minCanvas.x}px`,
-                          top: `${minCanvas.y}px`,
-                          width: `${maxCanvas.x - minCanvas.x}px`,
-                          height: `${maxCanvas.y - minCanvas.y}px`,
+                          left: `${relativeLeft}px`,
+                          top: `${relativeTop}px`,
+                          width: `${quadCanvasWidth}px`,
+                          height: `${quadCanvasHeight}px`,
                           backgroundColor: highlightColor,
                           opacity: opacity,
                         }}
@@ -2946,11 +3027,11 @@ export function PageCanvas({
               // pdfToCanvas expects PDF coordinates and flips Y internally
               // So we pass the top edge: annot.y + redactHeight
               const pdfTopY = annot.y + redactHeight;
-              const canvasPixel = pdfToCanvas(annot.x, pdfTopY);
-              const devicePixelRatio = window.devicePixelRatio || 1;
+              const canvasPos = pdfToCanvas(annot.x, pdfTopY);
+              // Canvas pixel = display coordinates (1:1 mapping)
               const redactContainer = { 
-                x: canvasPixel.x / devicePixelRatio, 
-                y: canvasPixel.y / devicePixelRatio 
+                x: canvasPos.x, 
+                y: canvasPos.y 
               };
               const redactContainerWidth = redactWidth * currentZoom;
               const redactContainerHeight = redactHeight * currentZoom;
@@ -3023,9 +3104,8 @@ export function PageCanvas({
             if (annot.x == null || annot.y == null || isNaN(annot.x) || isNaN(annot.y)) {
               return null;
             }
-            const canvasPixel = pdfToCanvas(annot.x, annot.y);
-            const devicePixelRatio = window.devicePixelRatio || 1;
-            const canvasPos = { x: canvasPixel.x / devicePixelRatio, y: canvasPixel.y / devicePixelRatio };
+            // Canvas pixel = display coordinates (1:1 mapping)
+            const canvasPos = pdfToCanvas(annot.x, annot.y);
             
             
             // Determine if this annotation is being edited
@@ -3092,16 +3172,8 @@ export function PageCanvas({
                     // Update editing annotation to use real ID
                     setEditingAnnotation(newAnnotation);
                     
-                    // Write to PDF document (async, don't block UI)
-                    if (editor) {
-                      try {
-                        await editor.addTextAnnotation(currentDocument, newAnnotation);
-                      } catch (err) {
-                        console.error("Error creating text annotation in PDF:", err);
-                      }
-                    } else {
-                      console.warn("PDF editor not initialized, text annotation not saved to PDF");
-                    }
+                    // Don't write to PDF immediately - this causes duplication when page re-renders
+                    // Text annotations will be written to PDF on save/export
                   } else if (currentDocument && !annot.id.startsWith("temp_")) {
                     // Update existing annotation as user types
                     // Note: We don't wrap every keystroke with undo/redo to avoid history bloat
@@ -3112,18 +3184,8 @@ export function PageCanvas({
                       { content: html }
                     );
                     
-                    // Update in PDF document
-                    if (editor && annot.pdfAnnotation) {
-                      try {
-                        await editor.updateAnnotationInPdf(
-                          currentDocument,
-                          annot.pdfAnnotation,
-                          { content: html }
-                        );
-                      } catch (err) {
-                        console.error("Error updating annotation in PDF:", err);
-                      }
-                    }
+                    // Don't update in PDF immediately - this causes duplication when page re-renders
+                    // Updates will be written to PDF on save/export
                   }
                 }}
                 onBlur={async () => {
@@ -3195,15 +3257,8 @@ export function PageCanvas({
                           finalAnnotation
                         );
                         
-                        if (editor) {
-                          try {
-                            await editor.addTextAnnotation(currentDocument, finalAnnotation);
-                          } catch (err) {
-                            console.error("Error creating text annotation in PDF:", err);
-                          }
-                        } else {
-                          console.warn("PDF editor not initialized, text annotation not saved to PDF");
-                        }
+                        // Don't write to PDF immediately - this causes duplication when page re-renders
+                        // Text annotations will be written to PDF on save/export
                       } else if (!annot.id.startsWith("temp_")) {
                         // Update existing annotation - wrap with undo/redo
                         // Read HTML directly from editor DOM to get the latest content including font-size changes
@@ -3215,18 +3270,8 @@ export function PageCanvas({
                           { content: contentToSave }
                         );
                         
-                        // Update in PDF document
-                        if (editor && annot.pdfAnnotation) {
-                          try {
-                            await editor.updateAnnotationInPdf(
-                              currentDocument,
-                              annot.pdfAnnotation,
-                              { content: contentToSave }
-                            );
-                          } catch (err) {
-                            console.error("Error updating annotation in PDF:", err);
-                          }
-                        }
+                        // Don't update in PDF immediately - this causes duplication when page re-renders
+                        // Updates will be written to PDF on save/export
                       }
                     }
                     setEditingAnnotation(null);
@@ -3439,15 +3484,8 @@ export function PageCanvas({
               // annot.y is the BOTTOM edge in PDF coordinates
               // For CSS positioning, we need the TOP edge
               const pdfTopY = annot.y + (annot.height || 0);
-              const canvasPixel = pdfToCanvas(annot.x, pdfTopY);
-              const devicePixelRatio = window.devicePixelRatio || 1;
-              
-              // Since ImageAnnotation is inside the transformed div (like RichTextEditor),
-              // use canvas display coordinates - the CSS transform will handle scaling
-              const canvasPos = { 
-                x: canvasPixel.x / devicePixelRatio, 
-                y: canvasPixel.y / devicePixelRatio 
-              };
+              // Canvas pixel = display coordinates (1:1 mapping)
+              const canvasPos = pdfToCanvas(annot.x, pdfTopY);
               
               return (
                 <ImageAnnotation

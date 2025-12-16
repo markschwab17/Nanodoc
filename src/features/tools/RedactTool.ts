@@ -23,7 +23,7 @@ export const RedactTool: ToolHandler = {
   handleMouseUp: async (_e: React.MouseEvent, context: ToolContext, selectionStart, selectionEnd) => {
     if (!selectionStart || !selectionEnd) return;
 
-    const { document, pageNumber, addAnnotation, editor, renderer, canvasRef, BASE_SCALE } = context;
+    const { document, pageNumber, addAnnotation, removeAnnotation, editor, renderer, canvasRef, BASE_SCALE } = context;
     const currentDocument = document;
 
     // Create redaction from selection box
@@ -148,6 +148,7 @@ export const RedactTool: ToolHandler = {
               try {
                 // Get fresh mupdf document reference
                 const freshMupdfDoc = currentDocument.getMupdfDocument();
+                const freshPageMetadata = currentDocument.getPageMetadata(pageNumber);
                 
                 // Render the page with updated content
                 const rendered = await renderer.renderPage(freshMupdfDoc, pageNumber, {
@@ -155,18 +156,17 @@ export const RedactTool: ToolHandler = {
                   rotation: 0,
                 });
                 
-                // Update canvas with new render, accounting for device pixel ratio
-                const devicePixelRatio = window.devicePixelRatio || 1;
-                const displayWidth = rendered.width;
-                const displayHeight = rendered.height;
+                // Use PDF dimensions for 1:1 mapping (canvas size = PDF size)
+                const pdfDisplayWidth = freshPageMetadata?.width || rendered.width;
+                const pdfDisplayHeight = freshPageMetadata?.height || rendered.height;
                 
-                // Set canvas internal resolution (actual pixels)
-                canvas.width = displayWidth * devicePixelRatio;
-                canvas.height = displayHeight * devicePixelRatio;
+                // Set canvas internal resolution to match rendered size (1:1 with PDF)
+                canvas.width = rendered.width;
+                canvas.height = rendered.height;
                 
-                // Set canvas display size (CSS pixels)
-                canvas.style.width = `${displayWidth}px`;
-                canvas.style.height = `${displayHeight}px`;
+                // Set canvas display size to match PDF dimensions
+                canvas.style.width = `${pdfDisplayWidth}px`;
+                canvas.style.height = `${pdfDisplayHeight}px`;
                 
                 const ctx = canvas.getContext("2d", {
                   willReadFrequently: false,
@@ -174,10 +174,7 @@ export const RedactTool: ToolHandler = {
                 });
                 
                 if (ctx && rendered.imageData instanceof ImageData) {
-                  // Scale context to account for device pixel ratio
-                  ctx.scale(devicePixelRatio, devicePixelRatio);
-                  
-                  // Disable image smoothing for crisp pixel-perfect rendering
+                  // No scaling needed - canvas internal resolution matches rendered size (1:1)
                   ctx.imageSmoothingEnabled = false;
                   ctx.imageSmoothingQuality = "high";
                   
@@ -196,6 +193,11 @@ export const RedactTool: ToolHandler = {
             // Render immediately (no delay needed since we've already applied the redaction)
             await renderPage();
           }
+          
+          // CRITICAL: Remove the redaction annotation from the store after successful redaction
+          // The content is now permanently deleted from the PDF, so we don't need to show
+          // the redaction overlay anymore (the white area is now part of the PDF canvas)
+          removeAnnotation(currentDocument.getId(), annotation.id);
           
           // Show success notification
           useNotificationStore.getState().showNotification(

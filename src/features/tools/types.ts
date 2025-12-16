@@ -17,6 +17,7 @@ export interface ToolContext {
   pdfToCanvas: (pdfX: number, pdfY: number) => { x: number; y: number };
   pdfToContainer: (pdfX: number, pdfY: number) => { x: number; y: number };
   addAnnotation: (documentId: string, annotation: Annotation) => void;
+  removeAnnotation: (documentId: string, annotationId: string) => void;
   setEditingAnnotation: (annotation: Annotation | null) => void;
   setAnnotationText: (text: string) => void;
   setIsEditingMode: (isEditing: boolean) => void;

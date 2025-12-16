@@ -4,11 +4,16 @@ import Editor from "./pages/Editor";
 import FAQ from "./pages/FAQ";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
+import { DesktopRedirect } from "./components/DesktopRedirect";
 
 export const router = createBrowserRouter([
   {
     path: "/",
-    element: <Home />,
+    element: (
+      <DesktopRedirect>
+        <Home />
+      </DesktopRedirect>
+    ),
   },
   {
     path: "/editor",

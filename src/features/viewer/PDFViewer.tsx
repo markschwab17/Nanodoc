@@ -50,7 +50,7 @@ export function PDFViewer() {
     baseFitScaleRef.current = baseFitScale;
   }, [baseFitScale]);
 
-  // Initialize mupdf
+  // Initialize mupdf - simplified to match working ThumbnailCarousel pattern
   useEffect(() => {
     const initMupdf = async () => {
       try {
@@ -59,7 +59,11 @@ export function PDFViewer() {
         setRenderer(new PDFRenderer(mupdfModule.default));
         setIsInitialized(true);
       } catch (error) {
-        console.error("Failed to initialize mupdf:", error);
+        // Set initialized to true anyway to show error state instead of infinite loading
+        setIsInitialized(true);
+        usePDFStore.getState().setError(
+          error instanceof Error ? error.message : "Failed to initialize PDF viewer"
+        );
       }
     };
 
@@ -430,7 +434,37 @@ export function PDFViewer() {
   };
 
 
+  // Retry initialization if we have a document but no renderer (thumbnails work, so mupdf must be available)
+  useEffect(() => {
+    if (currentDocument && (!mupdf || !renderer)) {
+      const retryInit = async () => {
+        try {
+          const mupdfModule = await import("mupdf");
+          if (mupdfModule?.default) {
+            setMupdf(mupdfModule.default);
+            setRenderer(new PDFRenderer(mupdfModule.default));
+            setIsInitialized(true);
+          }
+        } catch (error) {
+          // Still set initialized to true to prevent infinite loading
+          setIsInitialized(true);
+        }
+      };
+      retryInit();
+    }
+  }, [currentDocument, mupdf, renderer]);
+
+  // Show initialization message only if we don't have mupdf/renderer
+  // But if we have a document, thumbnails work so mupdf must be loading - give it a moment
   if (!isInitialized || !mupdf || !renderer) {
+    // If we have a document, show a shorter message since initialization should complete soon
+    if (currentDocument) {
+      return (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="text-muted-foreground">Loading PDF viewer...</div>
+        </div>
+      );
+    }
     return (
       <div className="absolute inset-0 flex items-center justify-center">
         <div className="text-muted-foreground">Initializing PDF viewer...</div>

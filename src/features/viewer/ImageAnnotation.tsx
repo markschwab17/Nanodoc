@@ -173,11 +173,10 @@ export function ImageAnnotation({
       if (moveDistance > 3) {
         e.preventDefault();
         
-        const devicePixelRatio = window.devicePixelRatio || 1;
-        const BASE_SCALE = 2.0;
-        
-        const pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel);
-        const pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * zoomLevel);
+        // With 1:1 mapping (BASE_SCALE = 1.0, no devicePixelRatio scaling):
+        // pdfDelta = screenDelta / zoomLevel
+        const pdfDeltaX = screenDeltaX / zoomLevel;
+        const pdfDeltaY = -screenDeltaY / zoomLevel; // Negate Y because PDF Y-axis is flipped
         
         if (onMove) {
           onMove(pdfDeltaX, pdfDeltaY);

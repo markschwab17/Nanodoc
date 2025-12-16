@@ -725,6 +725,12 @@ export class PDFEditor {
 
   /**
    * Add text annotation to a page
+   * 
+   * COORDINATE SYSTEM:
+   * - In our app, text annotation.y stores the TOP of the text box in PDF coordinates
+   * - PDF coordinates: Y=0 is at bottom, Y increases upward
+   * - But MuPDF FreeText annotations use display coordinates (Y=0 at top) internally
+   * - So we need to convert from PDF coords to display coords
    */
   async addTextAnnotation(
     document: PDFDocument,
@@ -739,25 +745,95 @@ export class PDFEditor {
 
     const page = pdfDoc.loadPage(annotation.pageNumber);
     
-    // Create text annotation
-    const rect: [number, number, number, number] = [
-      annotation.x,
-      annotation.y,
-      annotation.x + (annotation.width || 100),
-      annotation.y + (annotation.height || 50),
-    ];
+    // Get page bounds for coordinate conversion
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    const width = annotation.width || 100;
+    const height = annotation.height || 50;
+    
+    // Our annotation.y is the TOP of the box in PDF coordinates (Y=0 at bottom, Y increases upward)
+    // MuPDF FreeText annotations use display coordinates (Y=0 at top, Y increases downward)
+    // So we need to convert: displayY = pageHeight - pdfY
+    // 
+    // In PDF coords:
+    // - annotation.y = TOP edge (larger Y value, closer to top of page)
+    // - annotation.y - height = BOTTOM edge (smaller Y value, closer to bottom of page)
+    // 
+    // Convert to display coords:
+    // - TOP in display = pageHeight - annotation.y (smaller display Y)
+    // - BOTTOM in display = pageHeight - (annotation.y - height) (larger display Y)
+    const displayTopY = pageHeight - annotation.y;
+    const displayBottomY = pageHeight - (annotation.y - height);
+    
+    // Clamp to page bounds
+    const x0 = Math.max(0, Math.min(annotation.x, pageBounds[2]));
+    const x1 = Math.max(0, Math.min(annotation.x + width, pageBounds[2]));
+    
+    // In display coords: rect = [left, top, right, bottom] where top < bottom
+    const y0 = Math.max(0, Math.min(displayTopY, pageHeight)); // Top edge in display
+    const y1 = Math.max(0, Math.min(displayBottomY, pageHeight)); // Bottom edge in display
+    
+    // Ensure y0 < y1 
+    const finalY0 = Math.min(y0, y1);
+    const finalY1 = Math.max(y0, y1);
+    
+    const rect: [number, number, number, number] = [x0, finalY0, x1, finalY1];
     
     const annot = page.createAnnotation("FreeText");
     annot.setRect(rect);
-    annot.setContents(annotation.content || "");
     
-    if (annotation.color) {
-      // Convert hex color to RGB array [0-1 range]
-      const hex = annotation.color.replace("#", "");
-      const r = parseInt(hex.substring(0, 2), 16) / 255;
-      const g = parseInt(hex.substring(2, 4), 16) / 255;
-      const b = parseInt(hex.substring(4, 6), 16) / 255;
-      annot.setColor([r, g, b]);
+    // Strip HTML tags and decode entities for plain text content
+    const plainText = (annotation.content || "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"');
+    annot.setContents(plainText);
+    
+    // Set default appearance string to control text rendering
+    // Format: "/FontName FontSize Tf R G B rg" for text color
+    const fontSize = annotation.fontSize || 12;
+    try {
+      // Parse color - handle both hex and rgba formats
+      let r = 0, g = 0, b = 0;
+      if (annotation.color) {
+        if (annotation.color.startsWith("#")) {
+          const hex = annotation.color.replace("#", "");
+          r = parseInt(hex.substring(0, 2), 16) / 255;
+          g = parseInt(hex.substring(2, 4), 16) / 255;
+          b = parseInt(hex.substring(4, 6), 16) / 255;
+        } else if (annotation.color.startsWith("rgba") || annotation.color.startsWith("rgb")) {
+          const match = annotation.color.match(/[\d.]+/g);
+          if (match && match.length >= 3) {
+            r = parseFloat(match[0]) / 255;
+            g = parseFloat(match[1]) / 255;
+            b = parseFloat(match[2]) / 255;
+          }
+        }
+      }
+      
+      // Set default appearance for text rendering
+      annot.setDefaultAppearance(`/Helv ${fontSize} Tf ${r} ${g} ${b} rg`);
+      
+      // Remove border/frame around text box (set border width to 0)
+      try {
+        annot.setBorderWidth(0);
+      } catch {
+        // setBorderWidth might not be available in all mupdf versions
+      }
+      
+      // Try to set interior color to transparent (no fill)
+      try {
+        annot.setInteriorColor([]);
+      } catch {
+        // setInteriorColor might not be available
+      }
+    } catch (error) {
+      console.warn("Could not set text annotation appearance:", error);
     }
     
     annot.update();
@@ -765,6 +841,15 @@ export class PDFEditor {
 
   /**
    * Add highlight annotation to a page
+   * 
+   * COORDINATE SYSTEM:
+   * - Our app stores coordinates in PDF coordinates (Y=0 at bottom, Y increases upward)
+   * - MuPDF's annotation API uses display coordinates (Y=0 at top)
+   * - So we need to convert from PDF coords to display coords
+   * 
+   * ANNOTATION TYPES:
+   * - Text highlights use PDF Highlight annotation with QuadPoints
+   * - Overlay (freehand) highlights use Ink annotation for smooth paths
    */
   async addHighlightAnnotation(
     document: PDFDocument,
@@ -779,111 +864,136 @@ export class PDFEditor {
 
     const page = pdfDoc.loadPage(annotation.pageNumber);
     
-    // For overlay highlights, quads might be empty (path is used instead for rendering)
-    // For text highlights, quads are required
+    // Get page height for coordinate conversion
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    // Parse highlight color
+    const color = annotation.color || "#FFFF00";
+    const hex = color.replace("#", "");
+    const r = parseInt(hex.substring(0, 2), 16) / 255;
+    const g = parseInt(hex.substring(2, 4), 16) / 255;
+    const b = parseInt(hex.substring(4, 6), 16) / 255;
+    const opacity = annotation.opacity !== undefined ? annotation.opacity : 0.5;
+    
+    // For overlay (freehand) highlights, use Ink annotation for better quality
+    if (annotation.highlightMode === "overlay" && annotation.path && annotation.path.length >= 2) {
+      const annot = page.createAnnotation("Ink");
+      
+      // Convert path to ink list format (array of stroke arrays)
+      // Each stroke is an array of [x, y] points in display coordinates
+      const inkPath: number[] = [];
+      for (const point of annotation.path) {
+        // Convert from PDF coordinates to display coordinates
+        inkPath.push(point.x, pageHeight - point.y);
+      }
+      
+      // Set the ink list (array of strokes, we have one continuous stroke)
+      try {
+        annot.setInkList([inkPath]);
+      } catch {
+        // Fallback: try setting as single array
+        try {
+          (annot as any).setInkList(inkPath);
+        } catch (e) {
+          console.warn("Could not set ink list:", e);
+        }
+      }
+      
+      // Set stroke color
+      annot.setColor([r, g, b]);
+      
+      // Set stroke width for the ink annotation
+      const strokeWidth = annotation.strokeWidth || 15;
+      try {
+        annot.setBorderWidth(strokeWidth);
+      } catch {
+        // Border width might not apply to ink
+      }
+      
+      // Set opacity
+      try {
+        if (typeof annot.setOpacity === 'function') {
+          annot.setOpacity(opacity);
+        }
+        const annotObj = annot.getObject();
+        if (annotObj) {
+          annotObj.put("CA", opacity);
+          // Use Multiply blend mode for highlight effect
+          try {
+            annotObj.put("BM", "Multiply");
+          } catch {
+            // Blend mode might not be supported
+          }
+        }
+      } catch {
+        // Ignore opacity errors
+      }
+      
+      if (annotation.content) {
+        annot.setContents(annotation.content);
+      }
+      
+      annot.update();
+      return;
+    }
+    
+    // For text highlights, use Highlight annotation with QuadPoints
     if (annotation.highlightMode === "text" && (!annotation.quads || annotation.quads.length === 0)) {
       throw new Error("Text highlight annotation requires quads");
     }
     
-    // For overlay highlights, generate quads from path if quads are empty
-    if (annotation.highlightMode === "overlay" && (!annotation.quads || annotation.quads.length === 0)) {
-      if (annotation.path && annotation.path.length >= 2) {
-        // Generate quads from path - create a quad for each path segment
-        const quads: number[][] = [];
-        const strokeWidth = annotation.strokeWidth || 15;
-        const halfWidth = strokeWidth / 2;
-        
-        for (let i = 0; i < annotation.path.length - 1; i++) {
-          const p1 = annotation.path[i];
-          const p2 = annotation.path[i + 1];
-          
-          const dx = p2.x - p1.x;
-          const dy = p2.y - p1.y;
-          const len = Math.sqrt(dx * dx + dy * dy);
-          
-          if (len === 0) continue;
-          
-          const perpX = -dy / len;
-          const perpY = dx / len;
-          
-          quads.push([
-            p1.x + perpX * halfWidth, p1.y + perpY * halfWidth,
-            p1.x - perpX * halfWidth, p1.y - perpY * halfWidth,
-            p2.x - perpX * halfWidth, p2.y - perpY * halfWidth,
-            p2.x + perpX * halfWidth, p2.y + perpY * halfWidth
-          ]);
-        }
-        
-        annotation.quads = quads;
-      } else {
-        // If no path and no quads, create a minimal quad from bounds
-        const x = annotation.x;
-        const y = annotation.y;
-        const w = annotation.width || 10;
-        const h = annotation.height || 10;
-        annotation.quads = [[x, y, x + w, y, x + w, y + h, x, y + h]];
-      }
-    }
-    
-    // Ensure we have quads before creating annotation
+    // Fallback: generate quads from bounds if needed
     if (!annotation.quads || annotation.quads.length === 0) {
-      throw new Error("Highlight annotation requires quads or path");
+      const x = annotation.x;
+      const y = annotation.y;
+      const w = annotation.width || 10;
+      const h = annotation.height || 10;
+      annotation.quads = [[x, y, x + w, y, x + w, y + h, x, y + h]];
     }
     
-    // Create highlight annotation
+    // Create highlight annotation for text highlights
     const annot = page.createAnnotation("Highlight");
     
-    // Set quads (array of Quad objects, each Quad is [x0, y0, x1, y1, x2, y2, x3, y3])
+    // Set quads - convert from PDF coordinates to display coordinates
     if (annotation.quads && annotation.quads.length > 0) {
-      // Convert number[][] to Quad[] format expected by mupdf
       const quadList = annotation.quads.map((quad) => {
         if (Array.isArray(quad) && quad.length >= 8) {
-          return quad as any; // Quad type
+          // Convert from PDF coordinates to display coordinates
+          // Each quad has 4 points: [x0,y0, x1,y1, x2,y2, x3,y3]
+          return [
+            quad[0], pageHeight - quad[1], // point 0
+            quad[2], pageHeight - quad[3], // point 1
+            quad[4], pageHeight - quad[5], // point 2
+            quad[6], pageHeight - quad[7], // point 3
+          ] as any;
         }
         return [0, 0, 0, 0, 0, 0, 0, 0];
       });
       annot.setQuadPoints(quadList);
     }
     
-    // Set highlight color (default yellow)
-    const color = annotation.color || "#FFFF00";
-    const hex = color.replace("#", "");
-    const r = parseInt(hex.substring(0, 2), 16) / 255;
-    const g = parseInt(hex.substring(2, 4), 16) / 255;
-    const b = parseInt(hex.substring(4, 6), 16) / 255;
+    // Set highlight color
     annot.setColor([r, g, b]);
     
-    // Set opacity if provided (PDF annotations support opacity via CA field)
-    if (annotation.opacity !== undefined) {
-      try {
-        // Try to set opacity using setOpacity or CA field
-        if (annot.setOpacity) {
-          annot.setOpacity(annotation.opacity);
-        } else {
-          // Fallback: set CA (constant alpha) field directly
-          const annotObj = annot.getObject();
-          if (annotObj) {
-            annotObj.put("CA", annotation.opacity);
-          }
-        }
-      } catch (error) {
-        console.warn("Could not set highlight opacity:", error);
+    // Set opacity
+    try {
+      if (typeof annot.setOpacity === 'function') {
+        annot.setOpacity(opacity);
       }
-    }
-    
-    // Store stroke width in annotation metadata if provided (for overlay highlights)
-    // Note: PDF Highlight annotations don't directly support stroke width,
-    // but we store it in the annotation for rendering purposes
-    if (annotation.strokeWidth !== undefined) {
-      try {
-        const annotObj = annot.getObject();
-        if (annotObj) {
-          // Store as custom metadata
-          annotObj.put("StrokeWidth", annotation.strokeWidth);
+      
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        annotObj.put("CA", opacity);
+        // Use Multiply blend mode for natural highlight appearance
+        try {
+          annotObj.put("BM", "Multiply");
+        } catch {
+          // Blend mode might not be supported
         }
-      } catch (error) {
-        console.warn("Could not store stroke width:", error);
       }
+    } catch (error) {
+      console.warn("Could not set highlight opacity:", error);
     }
     
     if (annotation.content) {

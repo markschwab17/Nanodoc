@@ -8,6 +8,7 @@ import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
+import { getSpansInSelectionFromPage } from "@/core/pdf/PDFTextExtractor";
 
 // Store overlay path during drag
 let overlayPath: Array<{ x: number; y: number }> = [];
@@ -16,6 +17,10 @@ let dragStartCoords: { x: number; y: number } | null = null;
 let isShiftPressed = false;
 let lockedDirection: "horizontal" | "vertical" | "diagonal" | null = null;
 let lockedEndPoint: { x: number; y: number } | null = null; // Store locked end point
+
+// Throttle text extraction to avoid too many async calls during drag
+let lastExtractionTime = 0;
+const EXTRACTION_THROTTLE_MS = 16; // Update every ~16ms (60fps) for smooth live preview
 
 // Helper to convert path to quads for storage
 function pathToQuads(path: Array<{ x: number; y: number }>, strokeWidth: number): number[][] {
@@ -140,6 +145,11 @@ export const HighlightTool: ToolHandler = {
     lockedDirection = null;
     lockedEndPoint = null;
     
+    // Clear any previous text selection preview
+    if (context.setSelectedTextSpans) {
+      context.setSelectedTextSpans([]);
+    }
+    
     // Check if we have selected text spans (text selection mode)
     // We'll detect mode on mouseUp based on whether we can extract text quads
     isOverlayMode = false; // Will be determined on mouseUp
@@ -151,7 +161,7 @@ export const HighlightTool: ToolHandler = {
     context.setSelectionEnd(coords);
   },
 
-  handleMouseMove: (e: React.MouseEvent, context: ToolContext) => {
+  handleMouseMove: async (e: React.MouseEvent, context: ToolContext) => {
     if (!context.isSelecting || !context.selectionStart) return;
     
     const coords = context.getPDFCoordinates(e);
@@ -193,6 +203,34 @@ export const HighlightTool: ToolHandler = {
     // Limit path length for performance
     if (overlayPath.length > 100) {
       overlayPath = overlayPath.slice(-100);
+    }
+    
+    // Extract text in real-time for live preview (throttled to avoid too many async calls)
+    const now = Date.now();
+    if (context.currentDocument && context.setSelectedTextSpans && (now - lastExtractionTime) > EXTRACTION_THROTTLE_MS) {
+      lastExtractionTime = now;
+      
+      // Capture values in closure to avoid stale references
+      const currentDoc = context.currentDocument;
+      const currentPageNumber = context.pageNumber;
+      const startPoint = context.selectionStart;
+      const currentEndPoint = endPoint;
+      const setSpans = context.setSelectedTextSpans;
+      
+      // Extract text asynchronously
+      (async () => {
+        try {
+          const result = await getSpansInSelectionFromPage(
+            currentDoc,
+            currentPageNumber,
+            startPoint!,
+            currentEndPoint
+          );
+          setSpans(result.spans);
+        } catch (error) {
+          // Silently ignore errors during live preview - text extraction may fail in some areas
+        }
+      })();
     }
   },
 
@@ -254,7 +292,7 @@ export const HighlightTool: ToolHandler = {
       return;
     }
 
-    const { document, pageNumber, addAnnotation, editor } = context;
+    const { document, pageNumber, addAnnotation } = context;
     const currentDocument = document;
     
     // Get highlight settings from store
@@ -270,45 +308,34 @@ export const HighlightTool: ToolHandler = {
       let selectedText = "";
       
       try {
-        const BASE_SCALE = 2.0;
-        // Normalize coordinates (min/max to handle drag direction)
+        // Get page height for coordinate conversion
+        const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+        const pageHeight = pageMetadata?.height || 792;
+        
+        // Normalize coordinates (min/max to handle drag direction) in PDF space
         const minX = Math.min(selectionStart.x, finalSelectionEnd.x);
         const minY = Math.min(selectionStart.y, finalSelectionEnd.y);
         const maxX = Math.max(selectionStart.x, finalSelectionEnd.x);
         const maxY = Math.max(selectionStart.y, finalSelectionEnd.y);
         
-        const p = [minX, minY];
-        const q = [maxX, maxY];
+        // mupdf's highlight() expects display coordinates (Y=0 at top, Y increases downward)
+        // Selection coordinates are in PDF space (Y=0 at bottom, Y increases upward)
+        // Convert: displayY = pageHeight - pdfY
+        const displayMinY = pageHeight - maxY; // maxY in PDF becomes minY in display
+        const displayMaxY = pageHeight - minY; // minY in PDF becomes maxY in display
+        
+        const p = [minX, displayMinY];
+        const q = [maxX, displayMaxY];
         const structuredText = page.toStructuredText("preserve-whitespace");
         
-        // Try PDF coordinates first (normalized)
+        // Use display coordinates for highlight()
         quads = structuredText.highlight(p, q);
         
-        // If no quads, try canvas coordinates (multiply by BASE_SCALE)
-        // highlight() might expect canvas coordinates in some cases
+        // Try with slightly expanded area to catch text near edges
         if (!quads || quads.length === 0) {
-          const pCanvas = [minX * BASE_SCALE, minY * BASE_SCALE];
-          const qCanvas = [maxX * BASE_SCALE, maxY * BASE_SCALE];
-          quads = structuredText.highlight(pCanvas, qCanvas);
-        }
-        
-        // Try with original coordinates (in case direction matters)
-        if (!quads || quads.length === 0) {
-          quads = structuredText.highlight([selectionStart.x, selectionStart.y], [finalSelectionEnd.x, finalSelectionEnd.y]);
-        }
-        
-        // Try with slightly expanded area to catch text near edges (like PDFTextExtractor does)
-        if (!quads || quads.length === 0) {
-          const expandedP = [minX - 2, minY - 2];
-          const expandedQ = [maxX + 2, maxY + 2];
+          const expandedP = [minX - 2, displayMinY - 2];
+          const expandedQ = [maxX + 2, displayMaxY + 2];
           quads = structuredText.highlight(expandedP, expandedQ);
-        }
-        
-        // Try canvas coordinates with expanded area
-        if (!quads || quads.length === 0) {
-          const expandedPCanvas = [(minX - 2) * BASE_SCALE, (minY - 2) * BASE_SCALE];
-          const expandedQCanvas = [(maxX + 2) * BASE_SCALE, (maxY + 2) * BASE_SCALE];
-          quads = structuredText.highlight(expandedPCanvas, expandedQCanvas);
         }
         
         if (quads && quads.length > 0) {
@@ -332,12 +359,27 @@ export const HighlightTool: ToolHandler = {
 
       if (!isOverlayMode && quads && quads.length > 0) {
         // Text selection mode: use text quads
+        // IMPORTANT: The quads from mupdf's highlight() are in display coordinates (Y=0 at top)
+        // We need to convert them to PDF coordinates (Y=0 at bottom) for consistent rendering
+        const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+        const pageHeight = pageMetadata?.height || 792;
+        
         const quadArray = quads.map((quad: any) => {
+          let rawQuad: number[];
           if (Array.isArray(quad) && quad.length >= 8) {
-            return quad;
+            rawQuad = quad;
+          } else {
+            rawQuad = [quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0,
+                    quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0];
           }
-          return [quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0,
-                  quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0];
+          // Convert from display coordinates (Y=0 at top) to PDF coordinates (Y=0 at bottom)
+          // For each Y coordinate: pdfY = pageHeight - displayY
+          return [
+            rawQuad[0], pageHeight - rawQuad[1], // point 0
+            rawQuad[2], pageHeight - rawQuad[3], // point 1
+            rawQuad[4], pageHeight - rawQuad[5], // point 2
+            rawQuad[6], pageHeight - rawQuad[7], // point 3
+          ];
         });
 
         annotation = {
@@ -439,6 +481,8 @@ export const HighlightTool: ToolHandler = {
 
       // Always commit the highlight (don't cancel) - even if there was an error
       // Add to app state with undo/redo support
+      // NOTE: We don't write to PDF immediately - highlights are rendered as DOM overlays
+      // and only written to PDF on save/export to avoid duplication issues
       try {
         wrapAnnotationOperation(
           () => {
@@ -450,17 +494,9 @@ export const HighlightTool: ToolHandler = {
           annotation
         );
 
-        // Write to PDF document
-        if (!editor) {
-          console.warn("PDF editor not initialized, annotation not saved to PDF");
-        } else {
-          try {
-            await editor.addHighlightAnnotation(currentDocument, annotation);
-          } catch (err) {
-            console.error("Error writing highlight to PDF:", err);
-            // Still keep the annotation in the UI even if PDF save fails
-          }
-        }
+        // Don't write to PDF immediately - this causes duplication when page re-renders
+        // The highlight will be written to PDF when the document is saved/exported
+        // (see ExportDialog or save functionality)
       } catch (annotationError) {
         console.error("Error adding annotation to store:", annotationError);
         // Try to create a minimal overlay highlight as fallback
@@ -535,6 +571,11 @@ export const HighlightTool: ToolHandler = {
     dragStartCoords = null;
     lockedDirection = null;
     lockedEndPoint = null;
+    
+    // Clear text selection preview
+    if (context.setSelectedTextSpans) {
+      context.setSelectedTextSpans([]);
+    }
   },
 };
 

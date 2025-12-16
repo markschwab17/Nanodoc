@@ -589,43 +589,12 @@ export function RichTextEditor({
         e.preventDefault();
         
         // Convert screen pixel delta to PDF coordinate delta
-        // The text box is positioned using: canvasPos = pdfToCanvas(annot.x, annot.y) / devicePixelRatio
-        // This gives display pixel coordinates
+        // With 1:1 mapping (BASE_SCALE = 1.0, no devicePixelRatio scaling):
         // The text box is inside a container with CSS transform: scale(zoomLevel)
-        // So screen pixel deltas need to be divided by zoomLevel to get display pixel deltas
-        
-        // Get zoom level from UI store (more reliable than DOM parsing)
-        // The text box is inside a container with CSS transform: scale(zoomLevel)
-        // Screen pixels are in viewport coordinates, but text box is in transformed space
-        // So we need to divide by zoomLevel to get display pixel deltas
-        
-        // Convert screen pixels to PDF coordinates
-        // Text box position: canvasPos = pdfToCanvas(annot.x, annot.y) / devicePixelRatio
-        // pdfToCanvas: (pdfX * BASE_SCALE, (pageHeight - pdfY) * BASE_SCALE) → (canvasX, canvasY)
-        // So: canvasPos = (annot.x * BASE_SCALE / devicePixelRatio, (pageHeight - annot.y) * BASE_SCALE / devicePixelRatio)
-        // The text box is inside a container with transform: scale(zoomLevel)
-        // So screen position: screenPos = canvasPos * zoomLevel
-        // When we drag, screenDeltaX = change in screenPos.x
-        // screenDeltaX = (pdfDeltaX * BASE_SCALE * zoomLevel) / devicePixelRatio
-        // Therefore: pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel)
-        // For Y: screenDeltaY = change in screenPos.y
-        // Since pdfToCanvas flips Y: canvasY = (pageHeight - pdfY) * BASE_SCALE / devicePixelRatio
-        // screenY = canvasY * zoomLevel = (pageHeight - pdfY) * BASE_SCALE * zoomLevel / devicePixelRatio
-        // screenDeltaY = -pdfDeltaY * BASE_SCALE * zoomLevel / devicePixelRatio
-        // Therefore: pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * zoomLevel)
-        // The text box is positioned at: canvasPos = pdfToCanvas(annot.x, annot.y) / devicePixelRatio
-        // This is in display pixels, inside a container with scale(zoomLevel)
-        // So screen position: screenPos = canvasPos * zoomLevel
-        // When we drag: screenDeltaX = change in screenPos.x = canvasDeltaX * zoomLevel
-        // Where canvasDeltaX = change in canvasPos.x = pdfDeltaX * BASE_SCALE / devicePixelRatio
-        // So: screenDeltaX = (pdfDeltaX * BASE_SCALE / devicePixelRatio) * zoomLevel
-        // Therefore: pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel)
-        // For Y: same but negated because pdfToCanvas flips Y
-        const devicePixelRatio = window.devicePixelRatio || 1;
-        const BASE_SCALE = 2.0;
-        
-        const pdfDeltaX = (screenDeltaX * devicePixelRatio) / (BASE_SCALE * zoomLevel);
-        const pdfDeltaY = -(screenDeltaY * devicePixelRatio) / (BASE_SCALE * zoomLevel); // Negate Y because pdfToCanvas flips Y
+        // So: pdfDelta = screenDelta / zoomLevel
+        // Y is negated because pdfToCanvas flips Y (PDF Y=0 at bottom, canvas Y=0 at top)
+        const pdfDeltaX = screenDeltaX / zoomLevel;
+        const pdfDeltaY = -screenDeltaY / zoomLevel; // Negate Y because pdfToCanvas flips Y
         
         if (onMove) {
           onMove(pdfDeltaX, pdfDeltaY);

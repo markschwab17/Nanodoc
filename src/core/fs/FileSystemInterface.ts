@@ -42,6 +42,13 @@ export interface FileSystemInterface {
    * In Tauri, this will use the native save dialog.
    */
   saveTextFile(text: string, fileName: string): Promise<void>;
+
+  /**
+   * Saves a file directly to the specified path without showing a dialog.
+   * Only available in Tauri (desktop) environment.
+   * In browser, this will throw an error.
+   */
+  saveFileToPath(data: Uint8Array, filePath: string): Promise<void>;
 }
 
 

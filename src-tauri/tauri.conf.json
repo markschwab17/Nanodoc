@@ -54,7 +54,7 @@
       {
         "ext": ["pdf"],
         "mimeType": "application/pdf",
-        "role": "Viewer"
+        "role": "Editor"
       }
     ],
     "macOS": {

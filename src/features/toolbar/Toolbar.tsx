@@ -242,10 +242,17 @@ export function Toolbar() {
     const originalPath = usePDFStore.getState().getDocumentPath(currentDoc.getId());
     
     // If we have an original path, save directly to it (no dialog)
-    if (originalPath && 'saveFileToPath' in fileSystem) {
-      await syncAndSavePDF(async (data) => {
-        await (fileSystem as any).saveFileToPath(data, originalPath);
-      });
+    // Only available in Tauri (desktop) environment
+    if (originalPath && isTauri) {
+      try {
+        await syncAndSavePDF(async (data) => {
+          await fileSystem.saveFileToPath(data, originalPath);
+        });
+      } catch (error) {
+        // If saveFileToPath fails (e.g., in browser), fall back to Save As
+        console.error("Error saving to path, falling back to Save As:", error);
+        await handleSaveAs();
+      }
     } else {
       // No original path, show Save As dialog
       await handleSaveAs();

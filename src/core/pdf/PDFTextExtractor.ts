@@ -55,6 +55,12 @@ export async function extractStructuredText(
     const mupdfDoc = document.getMupdfDocument();
     const page = mupdfDoc.loadPage(pageNumber);
     
+    // Get page height for Y-axis flipping
+    // mupdf returns text coordinates in display space (Y=0 at top, Y increases downward)
+    // We need PDF coordinates (Y=0 at bottom, Y increases upward) to match getPDFCoordinates()
+    const pageMetadata = document.getPageMetadata(pageNumber);
+    const pageHeight = pageMetadata?.height || 792; // Default to letter size if not available
+    
     // Get structured text with position information
     // Try multiple extraction methods to handle different PDF text types:
     // 1. Regular text objects (toStructuredText with preserve-whitespace)
@@ -147,6 +153,17 @@ export async function extractStructuredText(
       }
     }
     
+    // Helper to flip Y coordinates from display space (Y=0 at top) to PDF space (Y=0 at bottom)
+    // Display bbox: [x0, y0_display, x1, y1_display] where y0_display < y1_display (top to bottom)
+    // PDF bbox: [x0, y0_pdf, x1, y1_pdf] where y0_pdf < y1_pdf (bottom to top)
+    const flipBboxY = (x0: number, y0: number, x1: number, y1: number): [number, number, number, number] => {
+      // Flip both Y coordinates: newY = pageHeight - oldY
+      // After flipping, the bottom becomes the new y0 and top becomes y1
+      const newY0 = pageHeight - y1; // bottom in display space becomes y0 in PDF space
+      const newY1 = pageHeight - y0; // top in display space becomes y1 in PDF space
+      return [x0, newY0, x1, newY1];
+    };
+
     for (const block of blocks) {
       
       if (block.type === "text" || block.type === "paragraph") {
@@ -159,26 +176,19 @@ export async function extractStructuredText(
               
               if (line.bbox) {
                 if (typeof line.bbox === 'object' && !Array.isArray(line.bbox)) {
-                  // bbox is {x, y, w, h} - convert to [x0, y0, x1, y1]
-                  // NOTE: mupdf structured text coordinates are in rendered canvas pixels (at BASE_SCALE=2.0)
-                  // We need to convert to PDF coordinates by dividing by BASE_SCALE
-                  // Based on getPDFCoordinates comment: "mupdf's toPixmap() does NOT flip Y-axis when rendering!"
-                  // This means canvas y:643 maps directly to PDF y:643 (no flip)
-                  // So toStructuredText() should also use the same coordinate system
-                  const BASE_SCALE = 2.0;
+                  // bbox is {x, y, w, h} - convert to [x0, y0, x1, y1] and flip Y
+                  // mupdf returns coordinates in display space (Y=0 at top)
+                  // We need PDF coordinates (Y=0 at bottom) to match getPDFCoordinates()
                   const b = line.bbox;
-                  bbox = [b.x / BASE_SCALE, b.y / BASE_SCALE, (b.x + b.w) / BASE_SCALE, (b.y + b.h) / BASE_SCALE] as [number, number, number, number];
+                  bbox = flipBboxY(b.x, b.y, b.x + b.w, b.y + b.h);
                 } else if (Array.isArray(line.bbox) && line.bbox.length >= 4) {
-                  // bbox is already [x0, y0, x1, y1] - convert from canvas pixels to PDF coordinates
-                  const BASE_SCALE = 2.0;
-                  bbox = [line.bbox[0] / BASE_SCALE, line.bbox[1] / BASE_SCALE, line.bbox[2] / BASE_SCALE, line.bbox[3] / BASE_SCALE] as [number, number, number, number];
+                  // bbox is already [x0, y0, x1, y1] - flip Y to convert to PDF coordinates
+                  bbox = flipBboxY(line.bbox[0], line.bbox[1], line.bbox[2], line.bbox[3]);
                 } else if (line.x !== undefined && line.y !== undefined) {
                   // Use x, y coordinates and estimate bbox from text
-                  // Convert from canvas pixels to PDF coordinates
-                  const BASE_SCALE = 2.0;
-                  const estimatedWidth = (line.text.length * (line.font?.size || 12) * 0.6) / BASE_SCALE;
-                  const estimatedHeight = (line.font?.size || 12) / BASE_SCALE;
-                  bbox = [line.x / BASE_SCALE, line.y / BASE_SCALE, (line.x / BASE_SCALE) + estimatedWidth, (line.y / BASE_SCALE) + estimatedHeight] as [number, number, number, number];
+                  const estimatedWidth = line.text.length * (line.font?.size || 12) * 0.6;
+                  const estimatedHeight = line.font?.size || 12;
+                  bbox = flipBboxY(line.x, line.y, line.x + estimatedWidth, line.y + estimatedHeight);
                   } else {
                   continue;
                 }
@@ -191,11 +201,9 @@ export async function extractStructuredText(
                 });
               } else if (line.x !== undefined && line.y !== undefined) {
                 // Fallback: use x, y and estimate bbox
-                // Convert from canvas pixels to PDF coordinates
-                const BASE_SCALE = 2.0;
-                const estimatedWidth = (line.text.length * (line.font?.size || 12) * 0.6) / BASE_SCALE;
-                const estimatedHeight = (line.font?.size || 12) / BASE_SCALE;
-                bbox = [line.x / BASE_SCALE, line.y / BASE_SCALE, (line.x / BASE_SCALE) + estimatedWidth, (line.y / BASE_SCALE) + estimatedHeight] as [number, number, number, number];
+                const estimatedWidth = line.text.length * (line.font?.size || 12) * 0.6;
+                const estimatedHeight = line.font?.size || 12;
+                bbox = flipBboxY(line.x, line.y, line.x + estimatedWidth, line.y + estimatedHeight);
                 spans.push({
                   text: line.text,
                   bbox: bbox,
@@ -207,7 +215,6 @@ export async function extractStructuredText(
             
             // Also check for spans array (in case some PDFs use that format)
             if (line.spans && Array.isArray(line.spans)) {
-              const BASE_SCALE = 2.0;
               for (const span of line.spans) {
                 if (span.text) {
                   let spanBbox: [number, number, number, number];
@@ -215,18 +222,18 @@ export async function extractStructuredText(
                   if (span.bbox) {
                     if (typeof span.bbox === 'object' && !Array.isArray(span.bbox)) {
                       const b = span.bbox;
-                      // Convert from canvas pixels to PDF coordinates
-                      spanBbox = [b.x / BASE_SCALE, b.y / BASE_SCALE, (b.x + b.w) / BASE_SCALE, (b.y + b.h) / BASE_SCALE] as [number, number, number, number];
+                      // Flip Y to convert from display to PDF coordinates
+                      spanBbox = flipBboxY(b.x, b.y, b.x + b.w, b.y + b.h);
                     } else if (Array.isArray(span.bbox) && span.bbox.length >= 4) {
-                      // Convert from canvas pixels to PDF coordinates
-                      spanBbox = [span.bbox[0] / BASE_SCALE, span.bbox[1] / BASE_SCALE, span.bbox[2] / BASE_SCALE, span.bbox[3] / BASE_SCALE] as [number, number, number, number];
+                      // Flip Y to convert from display to PDF coordinates
+                      spanBbox = flipBboxY(span.bbox[0], span.bbox[1], span.bbox[2], span.bbox[3]);
                     } else {
                       continue;
                     }
                   } else if (span.x !== undefined && span.y !== undefined) {
-                    const estimatedWidth = (span.text.length * (span.font?.size || 12) * 0.6) / BASE_SCALE;
-                    const estimatedHeight = (span.font?.size || 12) / BASE_SCALE;
-                    spanBbox = [span.x / BASE_SCALE, span.y / BASE_SCALE, (span.x / BASE_SCALE) + estimatedWidth, (span.y / BASE_SCALE) + estimatedHeight] as [number, number, number, number];
+                    const estimatedWidth = span.text.length * (span.font?.size || 12) * 0.6;
+                    const estimatedHeight = span.font?.size || 12;
+                    spanBbox = flipBboxY(span.x, span.y, span.x + estimatedWidth, span.y + estimatedHeight);
                   } else {
                     continue;
                   }
@@ -250,6 +257,96 @@ export async function extractStructuredText(
     console.error(`Error extracting text from page ${pageNumber}:`, error);
     return [];
   }
+}
+
+/**
+ * Select text by flow - handles paragraph/multi-line selection like a word processor
+ * This selects all text between two points in reading order (not just a rectangular area)
+ */
+function selectTextByFlow(
+  spans: TextSpan[],
+  selectionStart: { x: number; y: number },
+  selectionEnd: { x: number; y: number }
+): TextSpan[] {
+  if (spans.length === 0) return [];
+  
+  // Sort spans by reading order (top to bottom, left to right in PDF coordinates)
+  // PDF coordinates: Y increases upward, so higher Y is "higher" on the page
+  const sortedSpans = [...spans].sort((a, b) => {
+    const [aX0, aY0, , aY1] = a.bbox;
+    const [bX0, bY0, , bY1] = b.bbox;
+    const aCenterY = (aY0 + aY1) / 2;
+    const bCenterY = (bY0 + bY1) / 2;
+    
+    // Group by line (within 5 points vertically)
+    if (Math.abs(aCenterY - bCenterY) > 5) {
+      return bCenterY - aCenterY; // Higher Y first (top of page)
+    }
+    return aX0 - bX0; // Left to right
+  });
+  
+  // Determine which point is "first" in reading order
+  // Compare by Y first (higher Y = earlier), then X (lower X = earlier)
+  let startPoint = selectionStart;
+  let endPoint = selectionEnd;
+  
+  if (selectionEnd.y > selectionStart.y || 
+      (Math.abs(selectionEnd.y - selectionStart.y) < 5 && selectionEnd.x < selectionStart.x)) {
+    // End point is earlier in reading order, swap
+    startPoint = selectionEnd;
+    endPoint = selectionStart;
+  }
+  
+  // Find the first and last span indices
+  let startIdx = -1;
+  let endIdx = -1;
+  
+  for (let i = 0; i < sortedSpans.length; i++) {
+    const [spanX0, spanY0, spanX1, spanY1] = sortedSpans[i].bbox;
+    const spanCenterY = (spanY0 + spanY1) / 2;
+    
+    // Check if start point is at or before this span
+    if (startIdx === -1) {
+      // Start point is before or within this span's line
+      if (startPoint.y >= spanY0 - 5 && startPoint.y <= spanY1 + 5) {
+        // Same line - check X
+        if (startPoint.x <= spanX1) {
+          startIdx = i;
+        }
+      } else if (startPoint.y > spanY1) {
+        // Start point is above this line (earlier in reading order)
+        startIdx = i;
+      }
+    }
+    
+    // Check if end point is at or after this span
+    if (endPoint.y >= spanY0 - 5 && endPoint.y <= spanY1 + 5) {
+      // Same line - check X
+      if (endPoint.x >= spanX0) {
+        endIdx = i;
+      }
+    } else if (endPoint.y > spanCenterY) {
+      // End point is above this span's line, so we've passed it
+      if (endIdx === -1 && i > 0) {
+        endIdx = i - 1;
+      }
+    } else {
+      // End point is below this span's line, so this might be the last span
+      endIdx = i;
+    }
+  }
+  
+  // Handle edge cases
+  if (startIdx === -1) startIdx = 0;
+  if (endIdx === -1) endIdx = sortedSpans.length - 1;
+  if (startIdx > endIdx) {
+    const temp = startIdx;
+    startIdx = endIdx;
+    endIdx = temp;
+  }
+  
+  // Return all spans between start and end
+  return sortedSpans.slice(startIdx, endIdx + 1);
 }
 
 /**
@@ -309,23 +406,21 @@ export async function getSpansInSelectionFromPage(
     const mupdfDoc = document.getMupdfDocument();
     const page = mupdfDoc.loadPage(pageNumber);
     
-    // Get page metadata to check bounds (currently unused but may be needed for bounds checking)
-    // const pageMetadata = document.getPageMetadata(pageNumber);
+    // Get page height for coordinate conversion
+    const pageMetadata = document.getPageMetadata(pageNumber);
+    const pageHeight = pageMetadata?.height || 792;
     
-    // First, extract all text spans to see what's available
+    // First, extract all text spans to see what's available (already in PDF coordinates)
     const allSpans = await extractStructuredText(document, pageNumber);
     
-    // Use mupdf's highlight method to get quads for the selection
-    // Try different extraction methods if structured text returns empty
-    // NOTE: highlight() might expect coordinates in canvas pixel space (at BASE_SCALE)
-    // but getPDFCoordinates() returns PDF coordinates. Try both.
-    const BASE_SCALE = 2.0;
-    const p = [selectionStart.x, selectionStart.y];
-    const q = [selectionEnd.x, selectionEnd.y];
+    // mupdf's highlight() expects coordinates in display space (Y=0 at top, Y increases downward)
+    // Selection coordinates are in PDF space (Y=0 at bottom, Y increases upward)
+    // Convert selection to display space: displayY = pageHeight - pdfY
+    const displayStartY = pageHeight - selectionStart.y;
+    const displayEndY = pageHeight - selectionEnd.y;
     
-    // Also try canvas coordinates (multiply by BASE_SCALE) in case highlight() expects those
-    const pCanvas = [selectionStart.x * BASE_SCALE, selectionStart.y * BASE_SCALE];
-    const qCanvas = [selectionEnd.x * BASE_SCALE, selectionEnd.y * BASE_SCALE];
+    const p = [selectionStart.x, displayStartY];
+    const q = [selectionEnd.x, displayEndY];
     
     let structuredText;
     let quads;
@@ -333,13 +428,8 @@ export async function getSpansInSelectionFromPage(
     // Try structured text extraction first
     try {
       structuredText = page.toStructuredText("preserve-whitespace");
-      // Try PDF coordinates first
+      // Use display coordinates for highlight()
       quads = structuredText.highlight(p, q);
-      
-      // If no quads, try canvas coordinates
-      if (!quads || quads.length === 0) {
-        quads = structuredText.highlight(pCanvas, qCanvas);
-      }
     } catch (e) {
       quads = null;
     }
@@ -351,6 +441,7 @@ export async function getSpansInSelectionFromPage(
           const pageText = structuredText.asText();
           if (pageText && pageText.length > 0) {
             // Create spans from quads and distribute text
+            // Quads are in display space (Y down), convert to PDF space (Y up)
             const selectedSpans: TextSpan[] = [];
             for (const quad of quads) {
               const quadArray = Array.isArray(quad) ? quad : 
@@ -359,14 +450,20 @@ export async function getSpansInSelectionFromPage(
               
               if (quadArray.length < 8) continue;
               
-              const quadX0 = Math.min(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
-              const quadY0 = Math.min(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
-              const quadX1 = Math.max(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
-              const quadY1 = Math.max(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
+              // Get bbox in display coordinates
+              const displayX0 = Math.min(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
+              const displayY0 = Math.min(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
+              const displayX1 = Math.max(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
+              const displayY1 = Math.max(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
+              
+              // Flip Y to PDF coordinates: pdfY = pageHeight - displayY
+              // After flipping, displayY0 (top) becomes higher PDF Y, displayY1 (bottom) becomes lower PDF Y
+              const pdfY0 = pageHeight - displayY1; // bottom of display becomes y0 in PDF
+              const pdfY1 = pageHeight - displayY0; // top of display becomes y1 in PDF
               
               selectedSpans.push({
                 text: "",
-                bbox: [quadX0, quadY0, quadX1, quadY1] as [number, number, number, number],
+                bbox: [displayX0, pdfY0, displayX1, pdfY1] as [number, number, number, number],
               });
             }
             
@@ -410,9 +507,7 @@ export async function getSpansInSelectionFromPage(
       }
       
       // Extract text directly from quads
-      // CRITICAL: quads from highlight() are in canvas coordinates (at BASE_SCALE)
-      // We need to convert them to PDF coordinates to match with spans
-      const BASE_SCALE = 2.0;
+      // Quads from highlight() are in display space (Y down), convert to PDF space (Y up)
       const selectedSpans: TextSpan[] = [];
       let fullText = "";
       
@@ -423,17 +518,17 @@ export async function getSpansInSelectionFromPage(
         
         if (quadArray.length < 8) continue;
         
-        // Get bounding box of quad in canvas coordinates
-        const quadCanvasX0 = Math.min(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
-        const quadCanvasY0 = Math.min(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
-        const quadCanvasX1 = Math.max(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
-        const quadCanvasY1 = Math.max(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
+        // Get bounding box of quad in display coordinates
+        const displayX0 = Math.min(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
+        const displayY0 = Math.min(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
+        const displayX1 = Math.max(quadArray[0], quadArray[2], quadArray[4], quadArray[6]);
+        const displayY1 = Math.max(quadArray[1], quadArray[3], quadArray[5], quadArray[7]);
         
-        // Convert from canvas coordinates to PDF coordinates
-        const quadX0 = quadCanvasX0 / BASE_SCALE;
-        const quadY0 = quadCanvasY0 / BASE_SCALE;
-        const quadX1 = quadCanvasX1 / BASE_SCALE;
-        const quadY1 = quadCanvasY1 / BASE_SCALE;
+        // Flip Y to PDF coordinates: pdfY = pageHeight - displayY
+        const quadX0 = displayX0;
+        const quadY0 = pageHeight - displayY1; // bottom of display becomes y0 in PDF
+        const quadX1 = displayX1;
+        const quadY1 = pageHeight - displayY0; // top of display becomes y1 in PDF
         
         // Create a span from the quad bounds (now in PDF coordinates)
         selectedSpans.push({
@@ -442,8 +537,8 @@ export async function getSpansInSelectionFromPage(
         });
       }
       
-      // CRITICAL: Split ALL spans into characters FIRST, then filter by selection rectangle
-      // This allows selecting partial words instead of whole words
+      // CRITICAL: Split ALL spans into characters FIRST, then filter by quads from highlight()
+      // The quads from mupdf's highlight() correctly handle text flow for paragraph selection
       const allCharacterSpans: TextSpan[] = [];
       for (const span of allSpans) {
         if (span.text) {
@@ -451,35 +546,35 @@ export async function getSpansInSelectionFromPage(
         }
       }
       
-      // Filter character spans by selection rectangle to get only what's actually selected
-      const minX = Math.min(selectionStart.x, selectionEnd.x);
-      const maxX = Math.max(selectionStart.x, selectionEnd.x);
-      const minY = Math.min(selectionStart.y, selectionEnd.y);
-      const maxY = Math.max(selectionStart.y, selectionEnd.y);
-      
       // Match quad spans with character spans
+      // IMPORTANT: Only use quads for filtering, NOT a bounding rectangle
+      // This allows proper text selection across lines (like in a word processor)
       const characterSpans: TextSpan[] = [];
+      const addedSpans = new Set<string>(); // Prevent duplicates
+      
       for (const quadSpan of selectedSpans) {
         const [quadX0, quadY0, quadX1, quadY1] = quadSpan.bbox;
         
-        // Find character spans that intersect with this quad AND are within selection rectangle
+        // Find character spans that intersect with this quad
         for (const charSpan of allCharacterSpans) {
           const [spanX0, spanY0, spanX1, spanY1] = charSpan.bbox;
-          if (!(spanX1 < quadX0 || spanX0 > quadX1 || spanY1 < quadY0 || spanY0 > quadY1) &&
-              !(spanX1 < minX || spanX0 > maxX || spanY1 < minY || spanY0 > maxY)) {
-            characterSpans.push(charSpan);
-            fullText += charSpan.text;
+          // Check if span intersects with quad (NOT with selection rectangle)
+          if (!(spanX1 < quadX0 || spanX0 > quadX1 || spanY1 < quadY0 || spanY0 > quadY1)) {
+            // Use bbox as key to prevent duplicates
+            const key = `${spanX0},${spanY0},${spanX1},${spanY1}`;
+            if (!addedSpans.has(key)) {
+              addedSpans.add(key);
+              characterSpans.push(charSpan);
+              fullText += charSpan.text;
+            }
           }
         }
       }
       
-      // If no quads matched but we have text from asText(), try to match by position
+      // If no quads matched but we have text from asText(), try to match by text flow
       if (characterSpans.length === 0 && pageText && pageText.length > 0 && allCharacterSpans.length > 0) {
-        // Filter character spans by selection rectangle only
-        const filteredChars = allCharacterSpans.filter((charSpan) => {
-          const [spanX0, spanY0, spanX1, spanY1] = charSpan.bbox;
-          return !(spanX1 < minX || spanX0 > maxX || spanY1 < minY || spanY0 > maxY);
-        });
+        // Use text flow selection: select all text between start and end points
+        const filteredChars = selectTextByFlow(allCharacterSpans, selectionStart, selectionEnd);
         characterSpans.push(...filteredChars);
         fullText = filteredChars.map(s => s.text).join("");
       }
@@ -489,35 +584,18 @@ export async function getSpansInSelectionFromPage(
       }
     }
     
-    // Fallback: manually find spans that intersect with selection area
+    // Fallback: manually find spans using text flow selection
     if (allSpans.length > 0) {
-      // CRITICAL: Split ALL spans into characters FIRST, then filter by selection rectangle
+      // CRITICAL: Split ALL spans into characters FIRST
       // This allows selecting partial words instead of whole words
       const allCharacterSpans: TextSpan[] = [];
       for (const span of allSpans) {
         allCharacterSpans.push(...splitSpanIntoCharacters(span));
       }
       
-      // Now filter character spans by selection rectangle
-      const minX = Math.min(selectionStart.x, selectionEnd.x);
-      const maxX = Math.max(selectionStart.x, selectionEnd.x);
-      const minY = Math.min(selectionStart.y, selectionEnd.y);
-      const maxY = Math.max(selectionStart.y, selectionEnd.y);
-      
-      const selectedCharacterSpans = allCharacterSpans.filter((charSpan) => {
-        const [spanX0, spanY0, spanX1, spanY1] = charSpan.bbox;
-        return !(spanX1 < minX || spanX0 > maxX || spanY1 < minY || spanY0 > maxY);
-      });
-      
-      // Sort by position
-      selectedCharacterSpans.sort((a, b) => {
-        const [aX0, aY0] = a.bbox;
-        const [bX0, bY0] = b.bbox;
-        if (Math.abs(aY0 - bY0) > 5) {
-          return bY0 - aY0; // Higher Y first
-        }
-        return aX0 - bX0;
-      });
+      // Use text flow selection instead of rectangle filtering
+      // This properly handles paragraph selection (like a word processor)
+      const selectedCharacterSpans = selectTextByFlow(allCharacterSpans, selectionStart, selectionEnd);
       
       const text = selectedCharacterSpans.map(s => s.text).join("");
       

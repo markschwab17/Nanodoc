@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
 import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 
 function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
@@ -31,6 +32,7 @@ function Editor() {
   const { readMode, activeTool } = useUIStore();
   const fileSystem = useFileSystem();
   const { loadPDF, loading } = usePDF();
+  const { showNotification } = useNotificationStore();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
   
   // Debug: Log loading state changes
@@ -278,18 +280,35 @@ function Editor() {
       // Listen for open-pdf-file event
       const unlisten = listen("open-pdf-file", async (event: any) => {
         const filePath = event.payload;
+        console.log("Received open-pdf-file event:", filePath);
+        
         if (filePath && typeof filePath === "string") {
+          const pdfStore = usePDFStore.getState();
           try {
+            pdfStore.setLoading(true);
+            pdfStore.clearError();
+            
             // Read the file
+            console.log("Reading file from path:", filePath);
             const fileData = await fileSystem.readFile(filePath);
+            console.log("File read successfully, size:", fileData.length);
+            
             const fileName = filePath.split(/[/\\]/).pop() || "file.pdf";
             
             // Load the PDF
+            console.log("Loading PDF:", fileName);
             const mupdfModule = await import("mupdf");
             await loadPDF(fileData, fileName, mupdfModule.default, filePath);
+            console.log("PDF loaded successfully");
           } catch (error) {
             console.error("Error opening PDF from system:", error);
+            pdfStore.setLoading(false);
+            const errorMessage = error instanceof Error ? error.message : "Failed to open PDF file";
+            pdfStore.setError(errorMessage);
+            showNotification(errorMessage, "error");
           }
+        } else {
+          console.warn("Invalid file path received:", filePath);
         }
       });
 
