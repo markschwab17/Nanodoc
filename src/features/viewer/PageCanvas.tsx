@@ -17,7 +17,7 @@ import { RichTextEditor } from "./RichTextEditor";
 import { ImageAnnotation } from "./ImageAnnotation";
 import { HorizontalRuler } from "./HorizontalRuler";
 import { VerticalRuler } from "./VerticalRuler";
-import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
+import { wrapAnnotationUpdate, wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 import { PDFDocument as PDFDocumentClass } from "@/core/pdf/PDFDocument";
 import { toolHandlers } from "@/features/tools";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
@@ -825,6 +825,43 @@ export function PageCanvas({
 
     renderPage();
   }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode]);
+  
+  // Effect to ensure centering when fitMode changes to "page" or "width"
+  useEffect(() => {
+    if (readMode || !containerRef.current || !document.isDocumentLoaded()) return;
+    
+    const pageMetadata = document.getPageMetadata(pageNumber);
+    if (!pageMetadata) return;
+    
+    if (fitMode === "page" || fitMode === "width") {
+      const container = containerRef.current;
+      const containerWidth = container.clientWidth;
+      const containerHeight = container.clientHeight;
+      
+      if (containerWidth > 0 && containerHeight > 0) {
+        let viewportScale = zoomLevel;
+        
+        if (fitMode === "width") {
+          viewportScale = containerWidth / pageMetadata.width;
+        } else if (fitMode === "page") {
+          const scaleX = containerWidth / pageMetadata.width;
+          const scaleY = containerHeight / pageMetadata.height;
+          viewportScale = Math.min(scaleX, scaleY);
+        }
+        
+        const scaledWidth = pageMetadata.width * viewportScale;
+        const scaledHeight = pageMetadata.height * viewportScale;
+        
+        const centerX = (containerWidth - scaledWidth) / 2;
+        const centerY = (containerHeight - scaledHeight) / 2;
+        
+        // Use requestAnimationFrame to ensure DOM is ready
+        requestAnimationFrame(() => {
+          setPanOffset({ x: centerX, y: centerY });
+        });
+      }
+    }
+  }, [fitMode, readMode, document, pageNumber, zoomLevel]);
   
   // Get page metadata to watch for rotation and dimension changes
   const pageMetadata = document?.getPageMetadata(pageNumber);
@@ -1752,14 +1789,17 @@ export function PageCanvas({
 
       if (pdfFile) {
         // Handle PDF file drop (existing behavior)
+        const pdfStore = usePDFStore.getState();
         try {
+          pdfStore.setLoading(true);
+          pdfStore.clearError();
+          
           // Load the dropped PDF as a new document/tab
           const arrayBuffer = await pdfFile.arrayBuffer();
           const data = new Uint8Array(arrayBuffer);
           const mupdfModule = await import("mupdf");
           
           // Use the store directly to create new document and tab
-          const pdfStore = usePDFStore.getState();
           const tabStore = (await import("@/shared/stores/tabStore")).useTabStore.getState();
           
           const documentId = `pdf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1796,6 +1836,11 @@ export function PageCanvas({
           });
         } catch (error) {
           console.error("Error opening PDF as new tab:", error);
+          pdfStore.setError(
+            error instanceof Error ? error.message : "Failed to load PDF"
+          );
+        } finally {
+          pdfStore.setLoading(false);
         }
         return;
       }
@@ -1924,8 +1969,16 @@ export function PageCanvas({
             preserveAspectRatio: true,
           };
 
-          // Add annotation to store
-          addAnnotation(currentDocument.getId(), imageAnnotation);
+          // Add annotation to store with undo/redo support
+          wrapAnnotationOperation(
+            () => {
+              addAnnotation(currentDocument.getId(), imageAnnotation);
+            },
+            "addAnnotation",
+            currentDocument.getId(),
+            imageAnnotation.id,
+            imageAnnotation
+          );
           console.log("Image annotation added to store:", imageAnnotation.id);
 
           // Select the new image annotation
@@ -3025,8 +3078,16 @@ export function PageCanvas({
                       content: html,
                     };
                     
-                    // Add to app state first (so it renders immediately)
-                    addAnnotation(currentDocument.getId(), newAnnotation);
+                    // Add to app state with undo/redo support
+                    wrapAnnotationOperation(
+                      () => {
+                        addAnnotation(currentDocument.getId(), newAnnotation);
+                      },
+                      "addAnnotation",
+                      currentDocument.getId(),
+                      newAnnotation.id,
+                      newAnnotation
+                    );
                     
                     // Update editing annotation to use real ID
                     setEditingAnnotation(newAnnotation);
@@ -3124,7 +3185,15 @@ export function PageCanvas({
                           content: htmlFromEditor,
                         };
                         
-                        addAnnotation(currentDocument.getId(), finalAnnotation);
+                        wrapAnnotationOperation(
+                          () => {
+                            addAnnotation(currentDocument.getId(), finalAnnotation);
+                          },
+                          "addAnnotation",
+                          currentDocument.getId(),
+                          finalAnnotation.id,
+                          finalAnnotation
+                        );
                         
                         if (editor) {
                           try {
@@ -3395,7 +3464,18 @@ export function PageCanvas({
                     if (!currentDocument) return;
                     const newX = annot.x + deltaX;
                     const newY = annot.y + deltaY;
-                    wrapAnnotationUpdate(
+                    
+                    // If this is the start of a drag, capture initial position
+                    if (!draggingAnnotationRef.current || draggingAnnotationRef.current.id !== annot.id) {
+                      draggingAnnotationRef.current = {
+                        id: annot.id,
+                        initialX: annot.x,
+                        initialY: annot.y,
+                      };
+                    }
+                    
+                    // Update position directly without undo during drag
+                    updateAnnotation(
                       currentDocument.getId(),
                       annot.id,
                       { x: newX, y: newY }
@@ -3403,23 +3483,96 @@ export function PageCanvas({
                   }}
                   onResize={(width, height) => {
                     if (!currentDocument) return;
-                    wrapAnnotationUpdate(
+                    // If this is the start of a resize, capture initial size
+                    if (!resizingAnnotationRef.current || resizingAnnotationRef.current.id !== annot.id) {
+                      resizingAnnotationRef.current = {
+                        id: annot.id,
+                        initialWidth: annot.width || 200,
+                        initialHeight: annot.height || 200,
+                      };
+                    }
+                    
+                    // Update size directly without undo during resize
+                    updateAnnotation(
                       currentDocument.getId(),
                       annot.id,
                       { width, height }
                     );
                   }}
-                  onResizeEnd={() => {}}
+                  onResizeEnd={() => {
+                    // When resize ends, record undo/redo with initial and final sizes
+                    if (currentDocument && resizingAnnotationRef.current && resizingAnnotationRef.current.id === annot.id) {
+                      const initialSize = resizingAnnotationRef.current;
+                      const finalSize = { width: annot.width || 200, height: annot.height || 200 };
+                      
+                      // Only record undo if size actually changed
+                      if (initialSize.initialWidth !== finalSize.width || initialSize.initialHeight !== finalSize.height) {
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          finalSize
+                        );
+                      }
+                      
+                      // Clear resize tracking
+                      resizingAnnotationRef.current = null;
+                    }
+                  }}
                   onRotate={(angle) => {
                     if (!currentDocument) return;
-                    wrapAnnotationUpdate(
+                    // If this is the start of a rotation, capture initial rotation
+                    if (!rotatingAnnotationRef.current || rotatingAnnotationRef.current.id !== annot.id) {
+                      rotatingAnnotationRef.current = {
+                        id: annot.id,
+                        initialRotation: annot.rotation || 0,
+                      };
+                    }
+                    
+                    // Update rotation directly without undo during rotation
+                    updateAnnotation(
                       currentDocument.getId(),
                       annot.id,
                       { rotation: angle }
                     );
                   }}
-                  onRotateEnd={() => {}}
-                  onDragEnd={() => {}}
+                  onRotateEnd={() => {
+                    // When rotation ends, record undo/redo with initial and final rotation
+                    if (currentDocument && rotatingAnnotationRef.current && rotatingAnnotationRef.current.id === annot.id) {
+                      const initialRotation = rotatingAnnotationRef.current;
+                      const finalRotation = annot.rotation || 0;
+                      
+                      // Only record undo if rotation actually changed
+                      if (initialRotation.initialRotation !== finalRotation) {
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          { rotation: finalRotation }
+                        );
+                      }
+                      
+                      // Clear rotation tracking
+                      rotatingAnnotationRef.current = null;
+                    }
+                  }}
+                  onDragEnd={() => {
+                    // When drag ends, record undo/redo with initial and final positions
+                    if (currentDocument && draggingAnnotationRef.current && draggingAnnotationRef.current.id === annot.id) {
+                      const initialPos = draggingAnnotationRef.current;
+                      const finalPos = { x: annot.x, y: annot.y };
+                      
+                      // Only record undo if position actually changed
+                      if (initialPos.initialX !== finalPos.x || initialPos.initialY !== finalPos.y) {
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          finalPos
+                        );
+                      }
+                      
+                      // Clear drag tracking
+                      draggingAnnotationRef.current = null;
+                    }
+                  }}
                   onDuplicate={(e) => {
                     if (!currentDocument) return;
                     e.preventDefault();

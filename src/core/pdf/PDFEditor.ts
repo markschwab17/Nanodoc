@@ -97,8 +97,8 @@ export class PDFEditor {
   async insertBlankPage(
     document: PDFDocument,
     index: number,
-    width: number = 612,
-    height: number = 792
+    _width: number = 612,
+    _height: number = 792
   ): Promise<void> {
     const mupdfDoc = document.getMupdfDocument();
     const pdfDoc = mupdfDoc.asPDF();

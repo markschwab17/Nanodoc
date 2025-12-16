@@ -8,6 +8,7 @@ import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { normalizeSelectionToRect, validatePDFRect } from "./coordinateHelpers";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 export const RedactTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -99,8 +100,16 @@ export const RedactTool: ToolHandler = {
         height: rect.height, // Height stays the same
       };
 
-      // Add to app state first (so it renders immediately)
-      addAnnotation(currentDocument.getId(), annotation);
+      // Add to app state with undo/redo support
+      wrapAnnotationOperation(
+        () => {
+          addAnnotation(currentDocument.getId(), annotation);
+        },
+        "addAnnotation",
+        currentDocument.getId(),
+        annotation.id,
+        annotation
+      );
 
       // Write to PDF document and apply redaction
       if (!editor) {

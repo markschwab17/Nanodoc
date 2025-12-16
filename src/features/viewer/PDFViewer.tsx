@@ -11,7 +11,7 @@ import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore"
 import { PageCanvas } from "./PageCanvas";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { VirtualizedPageList } from "./VirtualizedPageList";
-import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings } from "lucide-react";
+import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTools } from "@/features/toolbar/PageTools";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
@@ -20,7 +20,7 @@ import { useTabStore } from "@/shared/stores/tabStore";
 
 export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
-  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode } = useUIStore();
+  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
   const currentDocument = getCurrentDocument();
   const [mupdf, setMupdf] = useState<any>(null);
@@ -525,6 +525,62 @@ export function PDFViewer() {
         </div>
         
         <div className="flex items-center gap-2">
+          {/* Zoom Controls - Grouped with better styling */}
+          <div className="flex items-center gap-1 px-1.5 py-1 rounded-md border bg-muted/50">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => {
+                const newZoom = Math.max(0.25, zoomLevel - 0.25);
+                if (readMode) {
+                  setZoomLevel(newZoom);
+                } else {
+                  zoomToCenter(newZoom);
+                }
+              }}
+              title="Zoom Out"
+              disabled={readMode}
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </Button>
+            <div className="px-2 py-1 min-w-[50px] text-center">
+              <span className="text-xs font-medium text-foreground">
+                {Math.round(zoomLevel * 100)}%
+              </span>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => {
+                const newZoom = Math.min(5, zoomLevel + 0.25);
+                if (readMode) {
+                  setZoomLevel(newZoom);
+                } else {
+                  zoomToCenter(newZoom);
+                }
+              }}
+              title="Zoom In"
+              disabled={readMode}
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </Button>
+            <div className="h-4 w-px bg-border mx-0.5" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setFitMode("page")}
+              title="Fit Page"
+              disabled={readMode}
+            >
+              <Maximize className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          
+          <div className="h-6 w-px bg-border mx-1" />
+          
           <Button
             variant={showRulers ? "default" : "outline"}
             size="icon"

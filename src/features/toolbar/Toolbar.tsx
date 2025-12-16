@@ -12,96 +12,173 @@ import {
   Type, 
   Highlighter, 
   Eraser,
-  ZoomIn,
-  ZoomOut,
-  Maximize,
-  RotateCw,
-  BookmarkPlus,
   Undo2,
   Redo2,
   Save,
   Printer,
   Clock,
-  Maximize2,
-  Settings,
-  Ruler,
   TextSelect,
-  Circle,
   FileDown,
   FolderOpen
 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useUndoRedo } from "@/shared/hooks/useUndoRedo";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { PrintSettingsDialog } from "@/features/print/PrintSettingsDialog";
 import type { PrintSettings } from "@/shared/stores/printStore";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
-import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
 import { ExportDialog } from "@/features/export/ExportDialog";
 
 export function Toolbar() {
-  const { activeTool, setActiveTool, zoomLevel, zoomToCenter, setFitMode, readMode } = useUIStore();
-  const { currentPage, getCurrentDocument, addBookmark } = usePDFStore();
+  const { activeTool, setActiveTool } = useUIStore();
+  const { currentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
-  const [, setIsFullscreen] = useState(false);
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [showRecentFiles, setShowRecentFiles] = useState(false);
-  const [showSizeDialog, setShowSizeDialog] = useState(false);
   const [showPrintDialog, setShowPrintDialog] = useState(false);
   const [showDocumentSettings, setShowDocumentSettings] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
-  const [pageWidth, setPageWidth] = useState("8.5");
-  const [pageHeight, setPageHeight] = useState("11");
-  const { showRulers, toggleRulers } = useDocumentSettingsStore();
   
   // Get current tab for save state
   const activeTab = useTabStore.getState().getActiveTab();
   
-  // Format last saved time
-  const formatLastSaved = (timestamp: number | null): string => {
-    if (!timestamp) return "Never saved";
-    const now = Date.now();
-    const diff = now - timestamp;
-    const seconds = Math.floor(diff / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    
-    if (seconds < 60) return "Just now";
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    
-    const date = new Date(timestamp);
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    
-    if (date.toDateString() === today.toDateString()) {
-      return `Today ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    } else if (date.toDateString() === yesterday.toDateString()) {
-      return `Yesterday ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    } else {
-      return date.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // Viewport detection and auto-adjustment
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [, setContainerHeight] = useState(() => {
+    // Initialize with viewport height
+    if (typeof window !== 'undefined') {
+      return window.innerHeight;
     }
-  };
-
+    return 1000; // Default fallback
+  });
+  const [toolbarSize, setToolbarSize] = useState<'compact' | 'normal' | 'spacious'>(() => {
+    // Initialize based on viewport height
+    if (typeof window !== 'undefined') {
+      const height = window.innerHeight;
+      if (height < 700) return 'compact';
+      if (height < 1000) return 'normal';
+      return 'spacious';
+    }
+    return 'normal';
+  });
+  
+  // Calculate optimal toolbar size based on available height
+  const calculateToolbarSize = useCallback((height: number) => {
+    // Estimate required space for all content in each mode:
+    // Compact mode: buttons 32px, gaps 2px
+    // Normal mode: buttons 40px, gaps 4px  
+    // Spacious mode: buttons 48px, gaps 8px
+    
+    // Count items:
+    // - File actions: 4 buttons
+    // - Tool selection: 6 buttons
+    // - Undo/Redo: 2 buttons
+    // - Dividers: 2 dividers (~2-4px each)
+    
+    const buttonCount = 4 + 6 + 2; // 12 buttons
+    const dividerCount = 2;
+    
+    // Calculate required height for each mode
+    const compactHeight = 
+      (buttonCount * 32) + (buttonCount * 2) + (dividerCount * 2) + 20 + 20; // +20 for zoom text
+    
+    const normalHeight = 
+      (buttonCount * 40) + (buttonCount * 4) + (dividerCount * 3) + 30 + 20;
+    
+    // Determine size mode based on available height
+    // Add 10% buffer for safety
+    if (height < 700 || compactHeight > height * 0.9) {
+      return 'compact';
+    } else if (height < 1000 || normalHeight > height * 0.9) {
+      return 'normal';
+    } else {
+      return 'spacious';
+    }
+  }, [currentDocument, activeTab]);
+  
+  useEffect(() => {
+    if (!toolbarRef.current) return;
+    
+    const updateSize = () => {
+      // Try to get the actual container height first
+      const containerHeight = toolbarRef.current?.parentElement?.clientHeight || 
+                             toolbarRef.current?.clientHeight || 
+                             window.innerHeight;
+      
+      setContainerHeight(containerHeight);
+      
+      // Calculate and set toolbar size based on available height
+      const newSize = calculateToolbarSize(containerHeight);
+      setToolbarSize(newSize);
+    };
+    
+    // Initial calculation with a small delay to ensure DOM is ready
+    const timeoutId = setTimeout(updateSize, 0);
+    
+    // ResizeObserver for container size changes
+    const resizeObserver = new ResizeObserver(() => {
+      updateSize();
+    });
+    
+    // Observe both the toolbar container and its parent
+    if (toolbarRef.current) {
+      resizeObserver.observe(toolbarRef.current);
+      if (toolbarRef.current.parentElement) {
+        resizeObserver.observe(toolbarRef.current.parentElement);
+      }
+    }
+    
+    // Window resize listener as backup
+    window.addEventListener('resize', updateSize);
+    
+    return () => {
+      clearTimeout(timeoutId);
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateSize);
+    };
+  }, [calculateToolbarSize]);
+  
+  // Calculate dynamic classes based on toolbar size
+  const sizeClasses = useMemo(() => {
+    switch (toolbarSize) {
+      case 'compact':
+        return {
+          button: 'w-8 h-8',
+          icon: 'h-4 w-4',
+          gap: 'gap-0.5',
+          padding: 'p-1',
+          divider: 'my-1',
+          text: 'text-[10px]',
+        };
+      case 'normal':
+        return {
+          button: 'w-10 h-10',
+          icon: 'h-4.5 w-4.5',
+          gap: 'gap-1',
+          padding: 'p-1.5',
+          divider: 'my-1.5',
+          text: 'text-xs',
+        };
+      case 'spacious':
+        return {
+          button: 'w-12 h-12',
+          icon: 'h-5 w-5',
+          gap: 'gap-2',
+          padding: 'p-2',
+          divider: 'my-2',
+          text: 'text-xs',
+        };
+    }
+  }, [toolbarSize]);
+  
   const handleOpenFile = async () => {
     const result = await fileSystem.openFile();
     if (result) {
@@ -203,86 +280,6 @@ export function Toolbar() {
     }
   };
 
-  const handleRotatePage = async () => {
-    const currentDoc = getCurrentDocument();
-    if (!currentDoc) return;
-
-    try {
-      const mupdfModule = await import("mupdf");
-      const editor = new PDFEditor(mupdfModule.default);
-      
-      // Rotate current page 90 degrees clockwise
-      await editor.rotatePage(currentDoc, currentPage, 90);
-      
-      // Refresh document metadata after rotation
-      // Rotation affects page dimensions (width/height swap at 90/270 degrees)
-      currentDoc.refreshPageMetadata();
-      
-      // Small delay to ensure PDF is updated
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      // Refresh again to get updated bounds
-      currentDoc.refreshPageMetadata();
-      
-      // Mark tab as modified
-      const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
-      if (tab) {
-        useTabStore.getState().setTabModified(tab.id, true);
-      }
-    } catch (error) {
-      console.error("Error rotating page:", error);
-    }
-  };
-
-  const handleOpenSizeDialog = () => {
-    const currentDoc = getCurrentDocument();
-    if (!currentDoc) return;
-
-    // Get current page dimensions
-    const pageMetadata = currentDoc.getPageMetadata(currentPage);
-    if (pageMetadata) {
-      // Convert points to inches (72 points = 1 inch)
-      setPageWidth((pageMetadata.width / 72).toFixed(2));
-      setPageHeight((pageMetadata.height / 72).toFixed(2));
-    }
-    setShowSizeDialog(true);
-  };
-
-  const handleResizePage = async () => {
-    const currentDoc = getCurrentDocument();
-    if (!currentDoc) return;
-
-    try {
-      const widthInches = parseFloat(pageWidth);
-      const heightInches = parseFloat(pageHeight);
-      
-      if (isNaN(widthInches) || isNaN(heightInches) || widthInches <= 0 || heightInches <= 0) {
-        alert("Please enter valid dimensions");
-        return;
-      }
-
-      // Convert inches to points (1 inch = 72 points)
-      const widthPoints = widthInches * 72;
-      const heightPoints = heightInches * 72;
-
-      const mupdfModule = await import("mupdf");
-      const editor = new PDFEditor(mupdfModule.default);
-      
-      await editor.resizePage(currentDoc, currentPage, widthPoints, heightPoints);
-      
-      setShowSizeDialog(false);
-      
-      // Mark tab as modified
-      const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
-      if (tab) {
-        useTabStore.getState().setTabModified(tab.id, true);
-      }
-    } catch (error) {
-      console.error("Error resizing page:", error);
-      alert("Failed to resize page: " + (error instanceof Error ? error.message : String(error)));
-    }
-  };
-
   const handleApplyDocumentSettings = async (width: number, height: number, applyToAll: boolean) => {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
@@ -310,93 +307,31 @@ export function Toolbar() {
     }
   };
 
-  const handleZoomIn = () => {
-    const newZoom = Math.min(5, zoomLevel + 0.25);
-    zoomToCenter(newZoom);
-  };
-
-  const handleZoomOut = () => {
-    const newZoom = Math.max(0.25, zoomLevel - 0.25);
-    zoomToCenter(newZoom);
-  };
-
-  const handleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
-    }
-  };
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
-  }, []);
-
-  const handleBookmarkPage = () => {
-    if (!currentDocument) return;
-    
-    const bookmark = {
-      id: `bookmark_${Date.now()}`,
-      pageNumber: currentPage,
-      title: `Page ${currentPage + 1}`,
-      created: new Date(),
-    };
-    
-    addBookmark(currentDocument.getId(), bookmark);
-  };
-
   return (
-    <div className="flex flex-col items-center gap-2 p-2 h-full">
-      {/* Save State Indicator */}
-      {currentDocument && activeTab && (
-        <div className="w-full px-2 py-1.5 mb-1 bg-muted/50 rounded-md border border-border/50">
-          <div className="flex items-center gap-2 text-xs">
-            {activeTab.isModified ? (
-              <>
-                <Circle className="h-2 w-2 fill-orange-500 text-orange-500" />
-                <span className="text-orange-600 dark:text-orange-400 font-medium">Unsaved changes</span>
-              </>
-            ) : (
-              <>
-                <Circle className="h-2 w-2 fill-green-500 text-green-500" />
-                <span className="text-muted-foreground">Saved</span>
-              </>
-            )}
-          </div>
-          {activeTab.lastSaved && (
-            <div className="text-[10px] text-muted-foreground mt-0.5 ml-4">
-              {formatLastSaved(activeTab.lastSaved)}
-            </div>
-          )}
-        </div>
-      )}
-      
+    <div 
+      ref={toolbarRef}
+      className={`flex flex-col items-center ${sizeClasses.gap} ${sizeClasses.padding} h-full overflow-y-auto`}
+    >
       {/* File Actions */}
-      <div className="flex flex-col gap-1">
+      <div className={`flex flex-col ${sizeClasses.gap}`}>
         <Button
           variant="outline"
           size="icon"
           onClick={handleOpenFile}
           title="Open PDF"
-          className="w-12 h-12"
+          className={sizeClasses.button}
           data-action="open"
         >
-          <FolderOpen className="h-5 w-5" />
+          <FolderOpen className={sizeClasses.icon} />
         </Button>
         <Button
           variant="outline"
           size="icon"
           onClick={() => setShowRecentFiles(true)}
           title="Open Recent"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Clock className="h-5 w-5" />
+          <Clock className={sizeClasses.icon} />
         </Button>
         <Popover>
           <PopoverTrigger asChild>
@@ -405,10 +340,10 @@ export function Toolbar() {
               size="icon"
               disabled={!currentDocument}
               title="Save & Export"
-              className="w-12 h-12"
+              className={sizeClasses.button}
               data-action="save"
             >
-              <Save className="h-5 w-5" />
+              <Save className={sizeClasses.icon} />
             </Button>
           </PopoverTrigger>
           <PopoverContent className="w-56 p-1" side="left" align="start">
@@ -458,121 +393,85 @@ export function Toolbar() {
           onClick={handlePrint}
           disabled={!currentDocument}
           title="Print PDF"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Printer className="h-5 w-5" />
+          <Printer className={sizeClasses.icon} />
         </Button>
       </div>
 
-      <div className="h-px w-full bg-border my-2" />
+      <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
 
       {/* Tool Selection */}
-      <div className="flex flex-col gap-1">
+      <div className={`flex flex-col ${sizeClasses.gap}`}>
         <Button
           variant={activeTool === "select" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("select")}
           title="Select Tool"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <MousePointer2 className="h-5 w-5" />
+          <MousePointer2 className={sizeClasses.icon} />
         </Button>
         <Button
           variant={activeTool === "selectText" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("selectText")}
           title="Select Text Tool"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <TextSelect className="h-5 w-5" />
+          <TextSelect className={sizeClasses.icon} />
         </Button>
         <Button
           variant={activeTool === "pan" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("pan")}
           title="Pan Tool (or hold Space)"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Hand className="h-5 w-5" />
+          <Hand className={sizeClasses.icon} />
         </Button>
         <Button
           variant={activeTool === "text" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("text")}
           title="Text Annotation"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Type className="h-5 w-5" />
+          <Type className={sizeClasses.icon} />
         </Button>
         <Button
           variant={activeTool === "highlight" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("highlight")}
           title="Highlight Text"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Highlighter className="h-5 w-5" />
+          <Highlighter className={sizeClasses.icon} />
         </Button>
         <Button
           variant={activeTool === "redact" ? "default" : "outline"}
           size="icon"
           onClick={() => setActiveTool("redact")}
           title="Redact (Permanently Remove Content)"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Eraser className="h-5 w-5" />
+          <Eraser className={sizeClasses.icon} />
         </Button>
       </div>
 
-      <div className="h-px w-full bg-border my-2" />
-
-      {/* Zoom Controls */}
-      <div className="flex flex-col gap-1">
-        <Button 
-          variant="outline" 
-          size="icon" 
-          onClick={handleZoomIn} 
-          title="Zoom In"
-          className="w-12 h-12"
-        >
-          <ZoomIn className="h-5 w-5" />
-        </Button>
-        <div className="text-xs text-center text-muted-foreground px-2">
-          {Math.round(zoomLevel * 100)}%
-        </div>
-        <Button 
-          variant="outline" 
-          size="icon" 
-          onClick={handleZoomOut} 
-          title="Zoom Out"
-          className="w-12 h-12"
-        >
-          <ZoomOut className="h-5 w-5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => setFitMode("page")}
-          title="Fit Page"
-          className="w-12 h-12"
-        >
-          <Maximize className="h-5 w-5" />
-        </Button>
-      </div>
-
-      <div className="h-px w-full bg-border my-2" />
+      <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
 
       {/* Undo/Redo */}
-      <div className="flex flex-col gap-1">
+      <div className={`flex flex-col ${sizeClasses.gap}`}>
         <Button
           variant="outline"
           size="icon"
           onClick={() => undo()}
           disabled={!canUndo}
           title="Undo (Ctrl+Z)"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Undo2 className="h-5 w-5" />
+          <Undo2 className={sizeClasses.icon} />
         </Button>
         <Button
           variant="outline"
@@ -580,76 +479,14 @@ export function Toolbar() {
           onClick={() => redo()}
           disabled={!canRedo}
           title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
-          className="w-12 h-12"
+          className={sizeClasses.button}
         >
-          <Redo2 className="h-5 w-5" />
+          <Redo2 className={sizeClasses.icon} />
         </Button>
       </div>
 
-      <div className="h-px w-full bg-border my-2" />
+      <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
 
-      {/* Additional Tools */}
-      <div className="flex flex-col gap-1">
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handleBookmarkPage}
-          title="Bookmark Current Page"
-          className="w-12 h-12"
-          disabled={!currentDocument}
-        >
-          <BookmarkPlus className="h-5 w-5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handleRotatePage}
-          title="Rotate Page 90°"
-          className="w-12 h-12"
-          disabled={!currentDocument}
-        >
-          <RotateCw className="h-5 w-5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handleOpenSizeDialog}
-          title="Adjust Page Size (Current Page)"
-          className="w-12 h-12"
-          disabled={!currentDocument}
-        >
-          <Maximize2 className="h-5 w-5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => setShowDocumentSettings(true)}
-          title="Document Settings (All Pages)"
-          className="w-12 h-12"
-          disabled={!currentDocument}
-        >
-          <Settings className="h-5 w-5" />
-        </Button>
-        <Button
-          variant={showRulers ? "default" : "outline"}
-          size="icon"
-          onClick={toggleRulers}
-          title="Toggle Rulers"
-          className="w-12 h-12"
-          disabled={!currentDocument || readMode}
-        >
-          <Ruler className="h-5 w-5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handleFullscreen}
-          title="Toggle Fullscreen (F11)"
-          className="w-12 h-12"
-        >
-          <Maximize className="h-5 w-5" />
-        </Button>
-      </div>
 
       {/* Recent Files Modal */}
       <RecentFilesModal
@@ -665,52 +502,6 @@ export function Toolbar() {
         onPrint={handleExecutePrint}
         currentPage={currentPage}
       />
-
-      {/* Page Size Dialog */}
-      <Dialog open={showSizeDialog} onOpenChange={setShowSizeDialog}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Adjust Page Size</DialogTitle>
-            <DialogDescription>
-              Change the size of page {currentPage + 1}. Dimensions are in inches.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="width">Width (inches)</Label>
-              <Input
-                id="width"
-                type="number"
-                step="0.1"
-                min="1"
-                value={pageWidth}
-                onChange={(e) => setPageWidth(e.target.value)}
-                placeholder="8.5"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="height">Height (inches)</Label>
-              <Input
-                id="height"
-                type="number"
-                step="0.1"
-                min="1"
-                value={pageHeight}
-                onChange={(e) => setPageHeight(e.target.value)}
-                placeholder="11"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowSizeDialog(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleResizePage}>
-              Apply
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Document Settings Dialog */}
       <DocumentSettingsDialog

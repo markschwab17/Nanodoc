@@ -7,6 +7,7 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 // Store overlay path during drag
 let overlayPath: Array<{ x: number; y: number }> = [];
@@ -437,9 +438,17 @@ export const HighlightTool: ToolHandler = {
       }
 
       // Always commit the highlight (don't cancel) - even if there was an error
-      // Add to app state first (so it renders immediately)
+      // Add to app state with undo/redo support
       try {
-        addAnnotation(currentDocument.getId(), annotation);
+        wrapAnnotationOperation(
+          () => {
+            addAnnotation(currentDocument.getId(), annotation);
+          },
+          "addAnnotation",
+          currentDocument.getId(),
+          annotation.id,
+          annotation
+        );
 
         // Write to PDF document
         if (!editor) {
@@ -471,7 +480,15 @@ export const HighlightTool: ToolHandler = {
             opacity: highlightOpacity,
             highlightMode: "overlay",
           };
-          addAnnotation(currentDocument.getId(), fallbackAnnotation);
+          wrapAnnotationOperation(
+            () => {
+              addAnnotation(currentDocument.getId(), fallbackAnnotation);
+            },
+            "addAnnotation",
+            currentDocument.getId(),
+            fallbackAnnotation.id,
+            fallbackAnnotation
+          );
         } catch (fallbackError) {
           console.error("Error creating fallback highlight:", fallbackError);
         }
@@ -495,7 +512,15 @@ export const HighlightTool: ToolHandler = {
           opacity: highlightOpacity,
           highlightMode: "overlay",
         };
-        addAnnotation(currentDocument.getId(), errorAnnotation);
+        wrapAnnotationOperation(
+          () => {
+            addAnnotation(currentDocument.getId(), errorAnnotation);
+          },
+          "addAnnotation",
+          currentDocument.getId(),
+          errorAnnotation.id,
+          errorAnnotation
+        );
       } catch (fallbackError) {
         console.error("Error creating error fallback highlight:", fallbackError);
       }

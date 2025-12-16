@@ -20,17 +20,25 @@ import { Button } from "@/components/ui/button";
 import { FileText, Upload, File } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
+import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 
-function App() {
+function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
   const { tabs } = useTabStore();
   const { setCurrentDocument } = usePDFStore();
   const { getRecentFiles } = useRecentFilesStore();
   const { readMode, activeTool } = useUIStore();
   const fileSystem = useFileSystem();
-  const { loadPDF } = usePDF();
+  const { loadPDF, loading } = usePDF();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
+  
+  // Debug: Log loading state changes
+  useEffect(() => {
+    if (loading) {
+      console.log("Loading state is true - should show spinner");
+    }
+  }, [loading]);
   
   // Enable keyboard shortcuts
   useKeyboard();
@@ -169,7 +177,7 @@ function App() {
       window.removeEventListener("annotationSelected", handleAnnotationSelected);
     };
   }, []);
-  
+
   // Track edit mode state
   const [isEditing, setIsEditing] = useState(false);
   
@@ -217,15 +225,23 @@ function App() {
 
   // Handler for drag-and-drop area button
   const handleOpenFileFromButton = async () => {
-    const result = await fileSystem.openFile();
-    if (result) {
-      try {
+    const pdfStore = usePDFStore.getState();
+    try {
+      // Set loading state early, before file picker
+      pdfStore.setLoading(true);
+      
+      const result = await fileSystem.openFile();
+      if (result) {
         // Initialize mupdf
         const mupdfModule = await import("mupdf");
         await loadPDF(result.data, result.name, mupdfModule.default, result.path || null);
-      } catch (error) {
-        console.error("Error loading PDF:", error);
+      } else {
+        // User cancelled, clear loading
+        pdfStore.setLoading(false);
       }
+    } catch (error) {
+      console.error("Error loading PDF:", error);
+      pdfStore.setLoading(false);
     }
   };
 
@@ -300,6 +316,9 @@ function App() {
       
       {/* Notification Toast */}
       <NotificationToast />
+      
+      {/* Loading Indicator */}
+      <LoadingIndicator isLoading={loading} />
       
       {/* Large drag and drop area when no PDF is loaded */}
       {!currentDocument && (
@@ -398,8 +417,8 @@ function App() {
         </div>
       )}
 
-      {/* Floating Text Formatting Toolbar with Tabs - only when PDF is loaded and not in read mode */}
-      {currentDocument && !readMode && editingAnnotation && (editingAnnotation.type === "text" || editingAnnotation.type === "highlight") && (
+      {/* Floating Text Formatting Toolbar with Tabs - show when PDF is loaded and not in read mode */}
+      {currentDocument && !readMode && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
           <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg flex flex-col">
             <TextFormattingToolbar
@@ -531,4 +550,5 @@ function App() {
   );
 }
 
-export default App;
+export default Editor;
+

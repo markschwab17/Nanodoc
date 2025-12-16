@@ -32,7 +32,7 @@ export function ThumbnailItem({
 }: ThumbnailItemProps) {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [aspectRatio, setAspectRatio] = useState<number>(3 / 4); // Default portrait
+  const [isLandscape, setIsLandscape] = useState<boolean>(false);
 
   useEffect(() => {
     const loadThumbnail = async () => {
@@ -44,11 +44,11 @@ export function ThumbnailItem({
       try {
         setIsLoading(true);
         
-        // Get page metadata for aspect ratio
+        // Get page metadata to determine orientation
         const pageMetadata = document.getPageMetadata(pageNumber);
         if (pageMetadata) {
-          const ratio = pageMetadata.width / pageMetadata.height;
-          setAspectRatio(ratio);
+          // Determine if landscape or portrait based on width vs height
+          setIsLandscape(pageMetadata.width > pageMetadata.height);
         }
         
         const mupdfDoc = document.getMupdfDocument();
@@ -76,15 +76,22 @@ export function ThumbnailItem({
     loadThumbnail();
   }, [document, pageNumber, renderer, document?.getPageMetadata(pageNumber)?.rotation]);
 
+  // Use fixed aspect ratios: landscape (4:3) or portrait (3:4)
+  const aspectRatio = isLandscape ? 4 / 3 : 3 / 4;
+
   return (
     <div
       className={cn(
-        "relative flex-shrink-0 w-full max-w-[140px] mx-auto border-2 rounded cursor-pointer transition-all bg-background group",
+        "relative flex-shrink-0 border-2 rounded cursor-pointer transition-all bg-background group",
         isActive
           ? "border-primary shadow-lg ring-2 ring-primary/20"
           : "border-border hover:border-primary/50 hover:shadow-md"
       )}
-      style={{ aspectRatio: aspectRatio }}
+      style={{ 
+        aspectRatio: aspectRatio, 
+        width: '120px',
+        height: 'auto'
+      }}
       onClick={onClick}
     >
       {isLoading ? (
@@ -103,8 +110,8 @@ export function ThumbnailItem({
         />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center bg-muted rounded">
-          <div className="text-xs text-muted-foreground mb-1">Page {pageNumber + 1}</div>
-          <div className="text-[10px] text-muted-foreground/70">No preview</div>
+          <div className="text-sm font-medium text-muted-foreground mb-1">Page {pageNumber + 1}</div>
+          <div className="text-xs text-muted-foreground/70">No preview</div>
         </div>
       )}
       {/* Action buttons in top right */}
@@ -144,7 +151,7 @@ export function ThumbnailItem({
           </button>
         )}
       </div>
-      <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-xs text-center py-1 rounded-b">
+      <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-sm font-medium text-center py-1.5 rounded-b">
         {pageNumber + 1}
       </div>
     </div>

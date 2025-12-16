@@ -18,14 +18,20 @@ export function usePDF() {
   const recentFilesStore = useRecentFilesStore();
   const { setActiveTool } = useUIStore();
 
+  // Access loading state reactively
+  const loading = usePDFStore((state) => state.loading);
   const currentDocument = pdfStore.getCurrentDocument();
   const activeTab = tabStore.getActiveTab();
 
   const loadPDF = useCallback(
     async (data: Uint8Array, name: string, mupdf: any, filePath?: string | null) => {
       try {
+        // Set loading state and ensure it's visible
         pdfStore.setLoading(true);
         pdfStore.clearError();
+        
+        // Force a microtask delay to ensure React has time to render the loading state
+        await new Promise(resolve => setTimeout(resolve, 100));
 
         const documentId = `pdf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const document = new PDFDocument(documentId, name, data.length);
@@ -120,7 +126,7 @@ export function usePDF() {
     closeCurrentDocument,
     setCurrentPage: pdfStore.setCurrentPage,
     currentPage: pdfStore.currentPage,
-    loading: pdfStore.loading,
+    loading,
     error: pdfStore.error,
     annotations: currentDocument
       ? pdfStore.getAnnotations(currentDocument.getId())

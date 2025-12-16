@@ -119,7 +119,7 @@ export function SearchBar() {
         <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           type="text"
-          placeholder="Search PDF..."
+          placeholder="Search page number or page label"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="pl-8 pr-8 w-full"

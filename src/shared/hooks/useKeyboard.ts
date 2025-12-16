@@ -85,23 +85,25 @@ export function useKeyboard() {
 
       // Copy pages: Cmd/Ctrl + C (only when not in text input and not copying text box)
       if ((e.metaKey || e.ctrlKey) && e.key === "c") {
-        // Check if a text box is selected (check for focused text editor or active text annotation)
+        // Check if a text box is selected (check for focused text editor)
         const activeElement = document.activeElement as HTMLElement;
         const isTextEditorFocused = activeElement && 
           activeElement.hasAttribute("contenteditable") && 
           activeElement.getAttribute("data-rich-text-editor") === "true";
         
-        // Check if we're in text tool mode or select mode (where text boxes can be selected)
-        const isTextToolActive = activeTool === "text" || activeTool === "select";
-        
-        // If text editor is focused or we're in a tool mode where text boxes can be selected, don't copy pages
-        // Let the PageCanvas handler deal with text box copy
-        if (isTextEditorFocused || isTextToolActive) {
-          // Don't prevent default - let PageCanvas handle it
+        // Only block page copying if a text editor is actually focused
+        // Allow page copying even when select tool is active (users can select pages too)
+        if (isTextEditorFocused) {
+          // Don't prevent default - let PageCanvas handle text box copy
           return;
         }
         
+        // Check if we're in text tool mode (but not if text editor is focused, already handled above)
+        // In text tool mode without focused editor, still allow page copying
+        // The ThumbnailCarousel will handle it and check if pages are selected
+        
         // Trigger copy event - will be handled by ThumbnailCarousel
+        // ThumbnailCarousel will check if pages are selected and handle accordingly
         const copyEvent = new CustomEvent("copyPages");
         window.dispatchEvent(copyEvent);
         // Don't prevent default - allow normal copy for text

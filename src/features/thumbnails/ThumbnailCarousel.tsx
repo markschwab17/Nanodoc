@@ -514,20 +514,47 @@ export function ThumbnailCarousel() {
   };
 
   // Handle PDF file drag and drop to insert pages
-  const handlePDFDragOver = (e: React.DragEvent, index: number) => {
+  const handlePDFDragOver = (e: React.DragEvent, thumbnailIndex?: number, thumbnailElement?: HTMLElement) => {
     // Only handle if dragging a PDF file (not reordering pages)
-    const hasPdf = Array.from(e.dataTransfer.items).some(
-      (item) => item.type === "application/pdf" || (item.type === "" && item.kind === "file")
-    );
+    // Check both dataTransfer.items and dataTransfer.types for better compatibility
+    const types = Array.from(e.dataTransfer.types);
+    const items = Array.from(e.dataTransfer.items);
     
-      if (hasPdf && !draggedPage) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = "copy";
-        setIsDragOverPDF(true);
-        // Show indicator at the position where pages will be inserted (after this thumbnail)
-        setPdfDragOverIndex(index + 1);
+    const hasPdf = 
+      types.includes("Files") ||
+      types.includes("application/pdf") ||
+      items.some((item) => 
+        item.type === "application/pdf" || 
+        (item.type === "" && item.kind === "file") ||
+        (item.kind === "file" && item.type.includes("pdf"))
+      );
+    
+    if (hasPdf && !draggedPage) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "copy";
+      setIsDragOverPDF(true);
+      
+      // Calculate insertion point based on mouse position
+      let targetIndex: number;
+      
+      if (thumbnailIndex !== undefined && thumbnailElement) {
+        // Determine if we should insert before or after this thumbnail
+        // based on mouse Y position relative to the thumbnail center
+        const rect = thumbnailElement.getBoundingClientRect();
+        const mouseY = e.clientY;
+        const thumbnailCenter = rect.top + rect.height / 2;
+        
+        // If mouse is in top half, insert before (at thumbnailIndex)
+        // If mouse is in bottom half, insert after (at thumbnailIndex + 1)
+        targetIndex = mouseY < thumbnailCenter ? thumbnailIndex : thumbnailIndex + 1;
+      } else {
+        // Dragging over container (not a specific thumbnail), insert at end
+        targetIndex = pageCount;
       }
+      
+      setPdfDragOverIndex(targetIndex);
+    }
   };
 
   const handlePDFDragLeave = () => {
@@ -535,9 +562,30 @@ export function ThumbnailCarousel() {
     setPdfDragOverIndex(null);
   };
 
-  const handlePDFDrop = async (e: React.DragEvent, thumbnailIndex: number) => {
+  const handlePDFDrop = async (e: React.DragEvent, thumbnailIndex?: number, thumbnailElement?: HTMLElement) => {
     e.preventDefault();
     e.stopPropagation();
+    
+    console.log("handlePDFDrop called", { thumbnailIndex, pdfDragOverIndex, pageCount });
+    
+    // Calculate insert index - use pdfDragOverIndex if available, otherwise calculate from drop position
+    let insertIndex: number;
+    if (pdfDragOverIndex !== null) {
+      insertIndex = pdfDragOverIndex;
+    } else if (thumbnailIndex !== undefined && thumbnailElement) {
+      // Recalculate based on drop position
+      const rect = thumbnailElement.getBoundingClientRect();
+      const mouseY = e.clientY;
+      const thumbnailCenter = rect.top + rect.height / 2;
+      insertIndex = mouseY < thumbnailCenter ? thumbnailIndex : thumbnailIndex + 1;
+    } else {
+      // Default to end
+      insertIndex = pageCount;
+    }
+    
+    console.log("Calculated insertIndex:", insertIndex);
+    
+    // Clear drag state
     setIsDragOverPDF(false);
     setPdfDragOverIndex(null);
 
@@ -547,11 +595,18 @@ export function ThumbnailCarousel() {
     }
 
     const files = Array.from(e.dataTransfer.files);
+    console.log("Files in drop:", files.map(f => ({ name: f.name, type: f.type })));
+    
     const pdfFile = files.find(
       (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
     );
 
-    if (!pdfFile) return;
+    if (!pdfFile) {
+      console.warn("No PDF file found in drop");
+      return;
+    }
+    
+    console.log("PDF file found, starting insertion at index:", insertIndex);
 
     try {
       // Load the dropped PDF as a temporary document
@@ -568,44 +623,58 @@ export function ThumbnailCarousel() {
       await tempDocument.loadFromData(data, mupdfModule.default);
 
       // Insert all pages from the dropped PDF at the specified location
-      // Insert after the thumbnail index (so dropping on thumbnail 0 inserts at position 1)
-      const insertIndex = thumbnailIndex + 1;
       const sourcePageCount = tempDocument.getPageCount();
       const sourcePageIndices = Array.from({ length: sourcePageCount }, (_, i) => i);
+      const documentId = currentDocument.getId();
 
-      await editor.insertPagesFromDocument(
-        currentDocument,
-        tempDocument,
+      // Wrap with undo/redo
+      await wrapPageOperation(
+        async () => {
+          await editor.insertPagesFromDocument(
+            currentDocument,
+            tempDocument,
+            insertIndex,
+            sourcePageIndices
+          );
+
+          // Refresh document metadata
+          if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
+            (currentDocument as any).refreshPageMetadata();
+          }
+
+          // Remap annotations that are after the insertion point
+          const existingAnnotations = getAnnotations(documentId);
+          const remappedAnnotations = existingAnnotations.map((ann) => {
+            if (ann.pageNumber >= insertIndex) {
+              return {
+                ...ann,
+                pageNumber: ann.pageNumber + sourcePageCount,
+              };
+            }
+            return ann;
+          });
+
+          // Update annotations in store
+          const pdfStore = usePDFStore.getState();
+          const currentAnnotations = new Map(pdfStore.annotations);
+          currentAnnotations.set(documentId, remappedAnnotations);
+          usePDFStore.setState({ annotations: currentAnnotations });
+
+          // Move to first inserted page
+          setCurrentPage(insertIndex);
+        },
+        "insertPages",
+        documentId,
+        sourcePageIndices,
         insertIndex,
-        sourcePageIndices
+        tempDocId
       );
 
-      // Refresh document metadata
-      if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
-        (currentDocument as any).refreshPageMetadata();
+      // Mark tab as modified
+      const tab = useTabStore.getState().getTabByDocumentId(documentId);
+      if (tab) {
+        useTabStore.getState().setTabModified(tab.id, true);
       }
-
-      // Remap annotations that are after the insertion point
-      const documentId = currentDocument.getId();
-      const existingAnnotations = getAnnotations(documentId);
-      const remappedAnnotations = existingAnnotations.map((ann) => {
-        if (ann.pageNumber >= insertIndex) {
-          return {
-            ...ann,
-            pageNumber: ann.pageNumber + sourcePageCount,
-          };
-        }
-        return ann;
-      });
-
-      // Update annotations in store
-      const pdfStore = usePDFStore.getState();
-      const currentAnnotations = new Map(pdfStore.annotations);
-      currentAnnotations.set(documentId, remappedAnnotations);
-      usePDFStore.setState({ annotations: currentAnnotations });
-
-      // Move to first inserted page
-      setCurrentPage(insertIndex);
       
       showNotification(`Inserted ${sourcePageCount} page(s) at position ${insertIndex + 1}`, "success");
     } catch (error) {
@@ -752,9 +821,9 @@ export function ThumbnailCarousel() {
   const pageCount = currentDocument.getPageCount();
 
   return (
-    <div className="flex flex-col h-full w-full">
+    <div className="flex flex-col h-full w-full min-w-0">
       {/* Tab Navigation */}
-      <div className="flex border-b bg-background">
+      <div className="flex border-b bg-background flex-shrink-0">
         <Button
           variant="ghost"
           size="sm"
@@ -782,18 +851,58 @@ export function ThumbnailCarousel() {
       </div>
 
       {/* Tab Content */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0 w-full outline-none">
         {activeTab === "pages" ? (
-          <div className="flex flex-col gap-3 p-3">
+          <div 
+            className="flex flex-col gap-3 p-3 w-full min-w-0 outline-none" 
+            tabIndex={-1}
+            onDragOver={(e) => {
+              // Only handle PDF drag over on container if not over a thumbnail
+              // This prevents conflicts with thumbnail-level handlers
+              const target = e.target as HTMLElement;
+              const isOverThumbnail = target.closest('[draggable="true"]');
+              if (!isOverThumbnail) {
+                handlePDFDragOver(e);
+              }
+            }}
+            onDragLeave={(e) => {
+              // Only clear if we're actually leaving the container
+              const rect = e.currentTarget.getBoundingClientRect();
+              const x = e.clientX;
+              const y = e.clientY;
+              
+              if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+                handlePDFDragLeave();
+              }
+            }}
+            onDrop={(e) => {
+              // Check if this is a PDF file drop
+              const files = Array.from(e.dataTransfer.files);
+              const hasPdf = files.some(
+                (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
+              );
+              
+              if (hasPdf && !draggedPage) {
+                e.preventDefault();
+                e.stopPropagation();
+                handlePDFDrop(e);
+              }
+            }}
+          >
             {/* Drop indicator bar at the very top if inserting at position 0 */}
             {pdfDragOverIndex === 0 && isDragOverPDF && (
               <div className="h-1 bg-primary rounded-full shadow-lg -mb-2 z-20" />
             )}
             {Array.from({ length: pageCount }, (_, i) => (
-              <div key={i} className="relative">
+              <div key={i} className="relative w-full flex justify-center">
                 {/* Clean drop indicator bar for PDF insertion - shows between thumbnails */}
-                {pdfDragOverIndex === i + 1 && isDragOverPDF && (
+                {/* Show indicator before this thumbnail if targetIndex is i */}
+                {pdfDragOverIndex === i && isDragOverPDF && (
                   <div className="absolute -top-2 left-0 right-0 h-1 bg-primary z-20 rounded-full shadow-lg" />
+                )}
+                {/* Show indicator after this thumbnail if targetIndex is i + 1 */}
+                {pdfDragOverIndex === i + 1 && isDragOverPDF && (
+                  <div className="absolute -bottom-2 left-0 right-0 h-1 bg-primary z-20 rounded-full shadow-lg" />
                 )}
                 {/* Drop indicator line for page reordering */}
                 {dragOverIndex === i && draggedPage !== null && (
@@ -805,18 +914,35 @@ export function ThumbnailCarousel() {
                   onDragStart={(e) => handleDragStart(e, i)}
                   onDragOver={(e) => {
                     // Try PDF drop first, then page reorder
-                    handlePDFDragOver(e, i);
+                    const thumbnailElement = e.currentTarget;
+                    handlePDFDragOver(e, i, thumbnailElement);
                     if (!isDragOverPDF) {
                       handleDragOver(e, i);
                     }
                   }}
-                  onDragLeave={() => {
-                    handlePDFDragLeave();
-                    handleDragLeave();
+                  onDragLeave={(e) => {
+                    // Only clear if actually leaving this thumbnail
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const x = e.clientX;
+                    const y = e.clientY;
+                    
+                    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+                      handlePDFDragLeave();
+                      handleDragLeave();
+                    }
                   }}
                   onDrop={(e) => {
-                    if (isDragOverPDF) {
-                      handlePDFDrop(e, i);
+                    // Check if this is a PDF file drop
+                    const files = Array.from(e.dataTransfer.files);
+                    const hasPdf = files.some(
+                      (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
+                    );
+                    
+                    if (hasPdf && !draggedPage) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      // Pass thumbnail index and element for index calculation
+                      handlePDFDrop(e, i, e.currentTarget);
                     }
                     // Page reorder drop is handled elsewhere
                   }}
