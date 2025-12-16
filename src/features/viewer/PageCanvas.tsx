@@ -774,9 +774,11 @@ export function PageCanvas({
           throw new Error(`Page ${pageNumber} not found`);
         }
 
-        // Render PDF at fixed base scale - PDF coordinates stay constant
-        // Zoom and pan are handled via CSS transforms on the viewport
-        const renderScale = BASE_SCALE;
+        // Render PDF at high-DPI resolution for crisp text
+        // The coordinate system (BASE_SCALE) stays constant for tool positioning
+        // Only the render resolution is multiplied by devicePixelRatio
+        const dpr = window.devicePixelRatio || 1;
+        const renderScale = BASE_SCALE * dpr;
         
         // Calculate initial viewport scale for fit modes
         let viewportScale = zoomLevel;
@@ -833,16 +835,16 @@ export function PageCanvas({
 
         const canvas = canvasRef.current;
         
-        // For true 1:1 mapping: canvas internal resolution = rendered size = PDF size (when BASE_SCALE = 1.0)
-        // Note: Not scaling by devicePixelRatio keeps canvas.width === PDF width for exact 1:1
+        // High-DPI rendering: canvas backing buffer is DPR times larger than display size
+        // This gives crisp text on Retina/HiDPI displays
         const pdfDisplayWidth = pageMetadata.width;
         const pdfDisplayHeight = pageMetadata.height;
         
-        // Set canvas internal resolution to match rendered size (1:1 with PDF when BASE_SCALE = 1.0)
+        // Canvas backing size = rendered size (high-res, e.g., 2x on Retina)
         canvas.width = rendered.width;
         canvas.height = rendered.height;
         
-        // Set canvas display size to match PDF dimensions (true 1:1 mapping)
+        // Canvas display size = PDF dimensions (browser downscales crisply)
         canvas.style.width = `${pdfDisplayWidth}px`;
         canvas.style.height = `${pdfDisplayHeight}px`;
 
@@ -852,8 +854,8 @@ export function PageCanvas({
         });
         
         if (ctx && rendered.imageData instanceof ImageData) {
-          // No scaling needed - canvas internal resolution matches rendered size (1:1)
-          ctx.imageSmoothingEnabled = false;
+          // Enable smoothing for crisp downscaling on high-DPI displays
+          ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = "high";
           
           // Draw the rendered image data
@@ -969,7 +971,9 @@ export function PageCanvas({
         const metadata = document.getPageMetadata(pageNumber);
         if (!metadata) return;
         
-        const renderScale = BASE_SCALE;
+        // High-DPI rendering for crisp text
+        const dpr = window.devicePixelRatio || 1;
+        const renderScale = BASE_SCALE * dpr;
         
         // Render without additional rotation (PDF Rotate is already applied by mupdf)
         const rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
@@ -979,15 +983,15 @@ export function PageCanvas({
         
         const canvas = canvasRef.current;
         if (canvas) {
-          // For true 1:1 mapping: canvas internal resolution = rendered size = PDF size
+          // High-DPI: canvas backing buffer is DPR times larger than display
           const pdfDisplayWidth = metadata.width;
           const pdfDisplayHeight = metadata.height;
           
-          // Set canvas internal resolution to match rendered size (1:1 with PDF)
+          // Canvas backing size = rendered size (high-res)
           canvas.width = rendered.width;
           canvas.height = rendered.height;
           
-          // Set canvas display size to match PDF dimensions
+          // Canvas display size = PDF dimensions
           canvas.style.width = `${pdfDisplayWidth}px`;
           canvas.style.height = `${pdfDisplayHeight}px`;
           
@@ -997,8 +1001,8 @@ export function PageCanvas({
           });
           
           if (ctx && rendered.imageData instanceof ImageData) {
-            // No scaling needed - canvas internal resolution matches rendered size (1:1)
-            ctx.imageSmoothingEnabled = false;
+            // Enable smoothing for crisp downscaling on high-DPI
+            ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = "high";
             
             // Draw the rendered image data
@@ -1059,8 +1063,11 @@ export function PageCanvas({
       mediaboxHeight = pageMetadata.height;
     }
     
-    const pdfX = canvasPixelX / BASE_SCALE;
-    const pdfY = mediaboxHeight - (canvasPixelY / BASE_SCALE);  // Flip Y: PDF Y=0 is at bottom
+    // High-DPI: canvas backing buffer is DPR times larger than display size
+    // So we divide by (BASE_SCALE * dpr) to convert from canvas pixels to PDF points
+    const dpr = window.devicePixelRatio || 1;
+    const pdfX = canvasPixelX / (BASE_SCALE * dpr);
+    const pdfY = mediaboxHeight - (canvasPixelY / (BASE_SCALE * dpr));  // Flip Y: PDF Y=0 is at bottom
     
     return { x: pdfX, y: pdfY };
   };

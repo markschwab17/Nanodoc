@@ -150,21 +150,25 @@ export const RedactTool: ToolHandler = {
                 const freshMupdfDoc = currentDocument.getMupdfDocument();
                 const freshPageMetadata = currentDocument.getPageMetadata(pageNumber);
                 
+                // High-DPI rendering for crisp text
+                const dpr = window.devicePixelRatio || 1;
+                const renderScale = BASE_SCALE * dpr;
+                
                 // Render the page with updated content
                 const rendered = await renderer.renderPage(freshMupdfDoc, pageNumber, {
-                  scale: BASE_SCALE,
+                  scale: renderScale,
                   rotation: 0,
                 });
                 
-                // Use PDF dimensions for 1:1 mapping (canvas size = PDF size)
-                const pdfDisplayWidth = freshPageMetadata?.width || rendered.width;
-                const pdfDisplayHeight = freshPageMetadata?.height || rendered.height;
+                // Use PDF dimensions for display size (browser downscales crisply)
+                const pdfDisplayWidth = freshPageMetadata?.width || rendered.width / dpr;
+                const pdfDisplayHeight = freshPageMetadata?.height || rendered.height / dpr;
                 
-                // Set canvas internal resolution to match rendered size (1:1 with PDF)
+                // Canvas backing size = rendered size (high-res)
                 canvas.width = rendered.width;
                 canvas.height = rendered.height;
                 
-                // Set canvas display size to match PDF dimensions
+                // Canvas display size = PDF dimensions
                 canvas.style.width = `${pdfDisplayWidth}px`;
                 canvas.style.height = `${pdfDisplayHeight}px`;
                 
@@ -174,8 +178,8 @@ export const RedactTool: ToolHandler = {
                 });
                 
                 if (ctx && rendered.imageData instanceof ImageData) {
-                  // No scaling needed - canvas internal resolution matches rendered size (1:1)
-                  ctx.imageSmoothingEnabled = false;
+                  // Enable smoothing for crisp downscaling on high-DPI
+                  ctx.imageSmoothingEnabled = true;
                   ctx.imageSmoothingQuality = "high";
                   
                   // Draw the rendered image data

@@ -173,7 +173,8 @@ export function ImageAnnotation({
       if (moveDistance > 3) {
         e.preventDefault();
         
-        // With 1:1 mapping (BASE_SCALE = 1.0, no devicePixelRatio scaling):
+        // Overlay positioning uses CSS space, which is independent of canvas backing buffer
+        // (high-DPI rendering only affects canvas backing, not CSS positioning)
         // pdfDelta = screenDelta / zoomLevel
         const pdfDeltaX = screenDeltaX / zoomLevel;
         const pdfDeltaY = -screenDeltaY / zoomLevel; // Negate Y because PDF Y-axis is flipped

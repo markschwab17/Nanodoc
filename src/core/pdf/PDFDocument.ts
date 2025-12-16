@@ -51,12 +51,39 @@ export class PDFDocument {
       // Load page metadata
       for (let i = 0; i < this.metadata.pageCount; i++) {
         const page = this.mupdfDoc.loadPage(i);
-        const bounds = page.getBounds(); // Returns [x0, y0, x1, y1]
+        // IMPORTANT: mupdf's getBounds() already returns rotated dimensions
+        // (it applies the PDF's Rotate field automatically)
+        const bounds = page.getBounds(); // Returns [x0, y0, x1, y1] with rotation applied
+        
+        // Read actual rotation from page dictionary
+        let rotation = 0;
+        try {
+          const pageObj = page.getObject();
+          if (pageObj) {
+            const rotateValue = pageObj.get("Rotate");
+            if (rotateValue !== null && rotateValue !== undefined) {
+              if (typeof rotateValue === 'number') {
+                rotation = rotateValue;
+              } else if (rotateValue.valueOf && typeof rotateValue.valueOf === 'function') {
+                rotation = rotateValue.valueOf();
+              } else if (typeof rotateValue === 'object' && 'value' in rotateValue) {
+                rotation = rotateValue.value;
+              }
+            }
+          }
+        } catch (e) {
+          // Rotation might not be available, default to 0
+          rotation = 0;
+        }
+        
+        // Normalize rotation to 0-360 range
+        rotation = ((rotation % 360) + 360) % 360;
+        
         this.metadata.pages.push({
           pageNumber: i,
-          width: bounds[2] - bounds[0], // x1 - x0
-          height: bounds[3] - bounds[1], // y1 - y0
-          rotation: 0,
+          width: bounds[2] - bounds[0], // x1 - x0 (already rotated by mupdf)
+          height: bounds[3] - bounds[1], // y1 - y0 (already rotated by mupdf)
+          rotation: rotation,
         });
       }
 
@@ -121,17 +148,18 @@ export class PDFDocument {
       for (let i = 0; i < actualCount; i++) {
         try {
           const page = this.mupdfDoc.loadPage(i);
+          // IMPORTANT: mupdf's getBounds() already returns rotated dimensions
+          // (it applies the PDF's Rotate field automatically)
+          // Do NOT manually swap dimensions - that would double-swap!
           const bounds = page.getBounds();
-          // Get rotation if available
-          // In mupdf, rotation is stored in the page dictionary as "Rotate"
+          
+          // Get rotation from page dictionary
           let rotation = 0;
           try {
-            // Use getObject() to get the page dictionary
             const pageObj = page.getObject();
             if (pageObj) {
               const rotateValue = pageObj.get("Rotate");
               if (rotateValue !== null && rotateValue !== undefined) {
-                // Handle different return types
                 if (typeof rotateValue === 'number') {
                   rotation = rotateValue;
                 } else if (rotateValue.valueOf && typeof rotateValue.valueOf === 'function') {
@@ -142,29 +170,16 @@ export class PDFDocument {
               }
             }
           } catch (e) {
-            // Rotation method might not be available
+            // Rotation might not be available
             rotation = 0;
           }
           
           // Normalize rotation to 0-360 range
           rotation = ((rotation % 360) + 360) % 360;
           
-          
-          // Get the mediabox dimensions (these are the original page dimensions)
-          let mediaboxWidth = bounds[2] - bounds[0];
-          let mediaboxHeight = bounds[3] - bounds[1];
-          
-          // When page is rotated 90° or 270°, the displayed width and height are swapped
-          // Rotate = 90° or 270°: swap width and height
-          // Rotate = 0° or 180°: keep width and height as-is
-          let displayWidth = mediaboxWidth;
-          let displayHeight = mediaboxHeight;
-          
-          if (rotation === 90 || rotation === 270) {
-            // Swap width and height for 90° and 270° rotations
-            displayWidth = mediaboxHeight;
-            displayHeight = mediaboxWidth;
-          }
+          // Use bounds directly - mupdf already applies rotation to getBounds()
+          const displayWidth = bounds[2] - bounds[0];
+          const displayHeight = bounds[3] - bounds[1];
           
           this.metadata.pages.push({
             pageNumber: i,

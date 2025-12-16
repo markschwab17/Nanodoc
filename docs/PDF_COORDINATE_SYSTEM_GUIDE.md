@@ -19,6 +19,7 @@ This guide explains how to properly map mouse interactions to PDF coordinates an
 - **Y-axis**: Increases downward (top to bottom)
 - **X-axis**: Increases rightward (left to right)
 - **Units**: Pixels
+- **High-DPI**: Canvas backing buffer is `devicePixelRatio` times larger than display size for crisp rendering
 
 ### 3. Screen/Mouse Coordinate System
 - **Origin**: Browser viewport top-left
@@ -45,6 +46,21 @@ This guide explains how to properly map mouse interactions to PDF coordinates an
 
 ---
 
+## High-DPI Rendering
+
+The canvas uses high-DPI rendering for crisp text on Retina/HiDPI displays:
+
+- **Canvas backing buffer**: `pageWidth * dpr` × `pageHeight * dpr` pixels
+- **Canvas display size (CSS)**: `pageWidth` × `pageHeight` pixels
+- **Result**: Browser downscales the high-res buffer for crisp rendering
+
+**Important**: High-DPI affects the canvas backing buffer but NOT overlay positioning:
+- `getPDFCoordinates()` accounts for dpr when converting canvas pixels → PDF
+- `pdfToCanvas()` returns CSS coordinates (no dpr adjustment needed)
+- Overlays (selection boxes, text editors, images) are positioned in CSS space
+
+---
+
 ## The Conversion Pipeline
 
 ### Mouse → PDF (Capturing User Input)
@@ -64,13 +80,15 @@ const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null
   const canvasRelativeY = e.clientY - canvasRect.top;
   
   // Step 3: Convert from canvas screen size to canvas pixel coordinates
+  // (canvas backing buffer may be larger than display size for high-DPI)
   const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
   const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
   
   // Step 4: Convert canvas pixels to PDF coordinates
-  // Note: Flip Y-axis since PDF Y=0 is at bottom
-  const pdfX = canvasPixelX / BASE_SCALE;
-  const pdfY = pageMetadata.height - (canvasPixelY / BASE_SCALE);
+  // High-DPI: divide by (BASE_SCALE * dpr) since backing buffer is dpr times larger
+  const dpr = window.devicePixelRatio || 1;
+  const pdfX = canvasPixelX / (BASE_SCALE * dpr);
+  const pdfY = pageMetadata.height - (canvasPixelY / (BASE_SCALE * dpr));
   
   return { x: pdfX, y: pdfY };
 };
@@ -80,7 +98,7 @@ const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null
 - `getBoundingClientRect()` returns the canvas's actual rendered position/size on screen
 - This automatically accounts for CSS transforms (scale, translate, etc.)
 - We scale from screen coordinates → canvas pixels → PDF points
-- Simple ratio conversion at each step
+- The dpr adjustment accounts for the high-DPI backing buffer
 
 ### PDF → Canvas (Rendering Overlays)
 
@@ -96,7 +114,9 @@ const pdfToCanvas = (pdfX: number, pdfY: number): { x: number; y: number } => {
   // Flip Y coordinate
   const flippedY = pageMetadata.height - pdfY;
   
-  // Convert PDF points to canvas pixels (BASE_SCALE = 1.0 typically)
+  // Convert PDF points to CSS pixels for overlay positioning
+  // Note: No dpr adjustment needed - overlays are positioned in CSS space,
+  // not canvas backing buffer space
   return {
     x: pdfX * BASE_SCALE,
     y: flippedY * BASE_SCALE,
@@ -106,9 +126,9 @@ const pdfToCanvas = (pdfX: number, pdfY: number): { x: number; y: number } => {
 
 **Why this works:**
 - Flips Y-axis to convert from PDF (bottom-origin) to canvas (top-origin)
-- Scales from PDF points to canvas pixels
+- Returns CSS coordinates for overlay positioning (not canvas backing pixels)
 - Canvas is inside a transformed div, so CSS handles zoom/pan automatically
-- We just need to position elements in canvas pixel space
+- High-DPI only affects the canvas backing buffer, not CSS positioning
 
 ---
 
@@ -406,21 +426,23 @@ const getPDFCoordinates = (e: React.MouseEvent) => {
   const canvasRelativeX = e.clientX - canvasRect.left;
   const canvasRelativeY = e.clientY - canvasRect.top;
   
-  // Scale to canvas pixels
+  // Scale to canvas pixels (backing buffer may be larger for high-DPI)
   const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
   const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
   
-  // Convert to PDF (flip Y)
-  const pdfX = canvasPixelX / BASE_SCALE;
-  const pdfY = pageMetadata.height - (canvasPixelY / BASE_SCALE);
+  // Convert to PDF (flip Y, account for high-DPI backing buffer)
+  const dpr = window.devicePixelRatio || 1;
+  const pdfX = canvasPixelX / (BASE_SCALE * dpr);
+  const pdfY = pageMetadata.height - (canvasPixelY / (BASE_SCALE * dpr));
   
   return { x: pdfX, y: pdfY };
 };
 
-// 2. Convert PDF to canvas (for rendering)
+// 2. Convert PDF to canvas CSS coordinates (for rendering overlays)
 const pdfToCanvas = (pdfX: number, pdfY: number) => {
   const flippedY = pageMetadata.height - pdfY;  // Flip Y
   
+  // Returns CSS coordinates (no dpr adjustment - overlays in CSS space)
   return {
     x: pdfX * BASE_SCALE,
     y: flippedY * BASE_SCALE,
@@ -578,5 +600,5 @@ The text box tool preview uses this exact pattern and works correctly:
 
 ## Last Updated
 
-December 2025 - Fixed redaction tool coordinate system issues
+December 2025 - Added high-DPI rendering support for crisp text on Retina/HiDPI displays
 

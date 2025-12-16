@@ -589,7 +589,8 @@ export function RichTextEditor({
         e.preventDefault();
         
         // Convert screen pixel delta to PDF coordinate delta
-        // With 1:1 mapping (BASE_SCALE = 1.0, no devicePixelRatio scaling):
+        // Overlay positioning uses CSS space, independent of canvas backing buffer
+        // (high-DPI rendering only affects canvas backing, not CSS positioning)
         // The text box is inside a container with CSS transform: scale(zoomLevel)
         // So: pdfDelta = screenDelta / zoomLevel
         // Y is negated because pdfToCanvas flips Y (PDF Y=0 at bottom, canvas Y=0 at top)
