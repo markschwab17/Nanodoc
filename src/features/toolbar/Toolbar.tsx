@@ -19,7 +19,8 @@ import {
   Clock,
   TextSelect,
   FileDown,
-  FolderOpen
+  FolderOpen,
+  HelpCircle
 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
@@ -34,6 +35,7 @@ import { PrintSettingsDialog } from "@/features/print/PrintSettingsDialog";
 import type { PrintSettings } from "@/shared/stores/printStore";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { ExportDialog } from "@/features/export/ExportDialog";
+import { HelpDialog } from "@/features/help/HelpDialog";
 
 export function Toolbar() {
   const { activeTool, setActiveTool } = useUIStore();
@@ -46,9 +48,21 @@ export function Toolbar() {
   const [showPrintDialog, setShowPrintDialog] = useState(false);
   const [showDocumentSettings, setShowDocumentSettings] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  const [showHelpDialog, setShowHelpDialog] = useState(false);
   
   // Get current tab for save state
   const activeTab = useTabStore.getState().getActiveTab();
+
+  // Listen for help dialog open event
+  useEffect(() => {
+    const handleOpenHelp = () => {
+      setShowHelpDialog(true);
+    };
+    window.addEventListener("openHelp", handleOpenHelp);
+    return () => {
+      window.removeEventListener("openHelp", handleOpenHelp);
+    };
+  }, []);
   
   // Viewport detection and auto-adjustment
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -487,6 +501,18 @@ export function Toolbar() {
 
       <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
 
+      {/* Help Button */}
+      <div className={`flex flex-col ${sizeClasses.gap} mt-auto`}>
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => setShowHelpDialog(true)}
+          title="Help (F1 or Ctrl/Cmd + ?)"
+          className={sizeClasses.button}
+        >
+          <HelpCircle className={sizeClasses.icon} />
+        </Button>
+      </div>
 
       {/* Recent Files Modal */}
       <RecentFilesModal
@@ -517,6 +543,12 @@ export function Toolbar() {
         open={showExportDialog}
         onOpenChange={setShowExportDialog}
         document={currentDocument}
+      />
+
+      {/* Help Dialog */}
+      <HelpDialog
+        open={showHelpDialog}
+        onOpenChange={setShowHelpDialog}
       />
     </div>
   );

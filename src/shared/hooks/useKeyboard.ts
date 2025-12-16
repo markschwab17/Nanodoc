@@ -30,6 +30,18 @@ export function useKeyboard() {
         return;
       }
 
+      // Help: F1 or Cmd/Ctrl + ? (Shift + /)
+      if (
+        e.key === "F1" ||
+        ((e.metaKey || e.ctrlKey) && (e.key === "?" || (e.shiftKey && e.key === "/")))
+      ) {
+        e.preventDefault();
+        // Dispatch a custom event to open help dialog
+        const helpEvent = new CustomEvent("openHelp");
+        window.dispatchEvent(helpEvent);
+        return;
+      }
+
       // Save: Cmd/Ctrl + S
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
