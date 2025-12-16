@@ -11,16 +11,15 @@ import {
   Highlighter,
   EyeOff,
   Download,
+  ChevronDown,
 } from "lucide-react";
 
 // Download URLs configuration
-// Update these URLs to point to your actual release downloads
-// Common patterns:
-// - GitHub Releases: https://github.com/{user}/{repo}/releases/latest/download/{app-name}-{platform}-{arch}.{ext}
-// - Direct hosting: Your CDN or hosting URL
+// Exact filenames from GitHub release: https://github.com/markschwab17/nanodoc/releases/tag/v0.1.0
 const DOWNLOAD_URLS = {
-  mac: import.meta.env.VITE_DOWNLOAD_URL_MAC || "https://github.com/yourusername/nanodoc/releases/latest/download/Nanodoc_0.1.0_aarch64.dmg",
-  windows: import.meta.env.VITE_DOWNLOAD_URL_WINDOWS || "https://github.com/yourusername/nanodoc/releases/latest/download/Nanodoc_0.1.0_x64_en-US.msi",
+  macIntel: import.meta.env.VITE_DOWNLOAD_URL_MAC_INTEL || "https://github.com/markschwab17/nanodoc/releases/download/v0.1.0/Nanodoc_0.1.0_x64.dmg",
+  macAppleSilicon: import.meta.env.VITE_DOWNLOAD_URL_MAC_APPLE_SILICON || "https://github.com/markschwab17/nanodoc/releases/download/v0.1.0/Nanodoc_0.1.0_aarch64.dmg",
+  windows: import.meta.env.VITE_DOWNLOAD_URL_WINDOWS || "https://github.com/markschwab17/nanodoc/releases/download/v0.1.0/Nanodoc_0.1.0_x64_en-US.msi",
 };
 
 // Mac/Apple Logo SVG Component
@@ -38,38 +37,33 @@ const WindowsLogo = ({ className }: { className?: string }) => (
 );
 
 function Home() {
-  const [userPlatform, setUserPlatform] = useState<'mac' | 'windows' | null>(null);
+  const [userPlatform, setUserPlatform] = useState<'macIntel' | 'macAppleSilicon' | 'windows' | null>(null);
+  const [showMacDropdown, setShowMacDropdown] = useState(false);
 
   useEffect(() => {
     // Detect user's platform
     const platform = navigator.platform.toLowerCase();
+    
     if (platform.includes('mac') || platform.includes('darwin')) {
-      setUserPlatform('mac');
+      // Try to detect Apple Silicon (M1/M2/M3) vs Intel
+      // Note: Browser-based detection is limited, so we'll show both options
+      // but highlight based on best guess
+      const isLikelyAppleSilicon = 
+        navigator.hardwareConcurrency >= 8 || // Apple Silicon often has 8+ cores
+        (navigator as any).userAgentData?.platform === 'macOS';
+      
+      setUserPlatform(isLikelyAppleSilicon ? 'macAppleSilicon' : 'macIntel');
     } else if (platform.includes('win')) {
       setUserPlatform('windows');
     }
   }, []);
 
   const handleDownload = (url: string) => {
-    // Check if URL is a placeholder
-    if (url.includes('yourusername') || url.includes('github.com/yourusername')) {
-      // For placeholder URLs, open GitHub releases page
-      alert('Download links are not yet configured. Please update the DOWNLOAD_URLS in src/pages/Home.tsx or set VITE_DOWNLOAD_URL_MAC and VITE_DOWNLOAD_URL_WINDOWS environment variables.');
-      return;
-    }
-
-    // For cross-origin downloads, we need to open in a new window/tab
-    // The browser will handle the download if the server sends proper headers
-    // GitHub releases with /latest/download/ should work, but we'll open in new tab as fallback
+    // Create a hidden link and trigger download without navigation
     const link = document.createElement('a');
     link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    
-    // Try to set download attribute (works for same-origin)
-    // For cross-origin, the server must send Content-Disposition header
     link.download = '';
-    
+    link.style.display = 'none';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -190,38 +184,85 @@ function Home() {
             Get the full-featured desktop app for Mac or Windows
           </p>
           
-          <div className="flex flex-col sm:flex-row gap-6 justify-center items-center">
-            <button
-              onClick={() => handleDownload(DOWNLOAD_URLS.mac)}
-              className={`group flex flex-col items-center justify-center p-8 rounded-lg border-2 transition-all min-w-[220px] hover:scale-105 active:scale-95 cursor-pointer ${
-                userPlatform === 'mac'
-                  ? 'border-primary bg-primary/5 shadow-lg shadow-primary/20'
-                  : 'border-border bg-card hover:border-primary hover:shadow-lg'
-              }`}
-            >
-              <div className={`w-16 h-16 rounded-lg flex items-center justify-center mb-4 transition-colors ${
-                userPlatform === 'mac'
-                  ? 'bg-primary/20 group-hover:bg-primary/30'
-                  : 'bg-primary/10 group-hover:bg-primary/20'
-              }`}>
-                <MacLogo className="h-10 w-10 text-primary" />
-              </div>
-              <h3 className="text-xl font-semibold mb-2">
-                Mac Version
-                {userPlatform === 'mac' && (
-                  <span className="ml-2 text-sm text-primary font-normal">(Recommended)</span>
-                )}
-              </h3>
-              <p className="text-sm text-muted-foreground mb-4">Download for macOS</p>
-              <div className="flex items-center gap-2 text-primary group-hover:gap-3 transition-all">
-                <Download className="h-5 w-5" />
-                <span className="text-sm font-medium">Download</span>
-              </div>
-            </button>
+          <div className="flex flex-col sm:flex-row gap-6 justify-center items-stretch">
+            {/* Mac with Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => setShowMacDropdown(!showMacDropdown)}
+                className={`group flex flex-col items-center justify-center p-8 rounded-lg border-2 transition-all w-[280px] h-[280px] hover:scale-105 active:scale-95 cursor-pointer ${
+                  userPlatform === 'macAppleSilicon' || userPlatform === 'macIntel'
+                    ? 'border-primary bg-primary/5 shadow-lg shadow-primary/20'
+                    : 'border-border bg-card hover:border-primary hover:shadow-lg'
+                }`}
+              >
+                <div className={`w-16 h-16 rounded-lg flex items-center justify-center mb-4 transition-colors ${
+                  userPlatform === 'macAppleSilicon' || userPlatform === 'macIntel'
+                    ? 'bg-primary/20 group-hover:bg-primary/30'
+                    : 'bg-primary/10 group-hover:bg-primary/20'
+                }`}>
+                  <MacLogo className="h-10 w-10 text-primary" />
+                </div>
+                <h3 className="text-xl font-semibold mb-2 text-center">
+                  Mac Version
+                  {(userPlatform === 'macAppleSilicon' || userPlatform === 'macIntel') && (
+                    <span className="ml-2 text-sm text-primary font-normal">(Recommended)</span>
+                  )}
+                </h3>
+                <p className="text-sm text-muted-foreground mb-4 text-center">Select your Mac type</p>
+                <div className="flex items-center gap-2 text-primary group-hover:gap-3 transition-all">
+                  <Download className="h-5 w-5" />
+                  <ChevronDown className="h-4 w-4" />
+                </div>
+              </button>
+              
+              {/* Custom Dropdown */}
+              {showMacDropdown && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-40" 
+                    onClick={() => setShowMacDropdown(false)}
+                  />
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 mt-2 w-56 bg-popover border rounded-md shadow-lg z-50 p-1">
+                    <div className="flex flex-col">
+                      <button
+                        onClick={() => {
+                          handleDownload(DOWNLOAD_URLS.macAppleSilicon);
+                          setShowMacDropdown(false);
+                        }}
+                        className="flex items-center justify-between px-3 py-2 text-sm rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
+                      >
+                        <div className="flex flex-col items-start">
+                          <span className="font-medium">M Series chips</span>
+                        </div>
+                        {userPlatform === 'macAppleSilicon' && (
+                          <span className="text-xs text-primary">✓</span>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleDownload(DOWNLOAD_URLS.macIntel);
+                          setShowMacDropdown(false);
+                        }}
+                        className="flex items-center justify-between px-3 py-2 text-sm rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
+                      >
+                        <div className="flex flex-col items-start">
+                          <span className="font-medium">Intel</span>
+                          <span className="text-xs text-muted-foreground">Intel-based Macs</span>
+                        </div>
+                        {userPlatform === 'macIntel' && (
+                          <span className="text-xs text-primary">✓</span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
             
+            {/* Windows */}
             <button
               onClick={() => handleDownload(DOWNLOAD_URLS.windows)}
-              className={`group flex flex-col items-center justify-center p-8 rounded-lg border-2 transition-all min-w-[220px] hover:scale-105 active:scale-95 cursor-pointer ${
+              className={`group flex flex-col items-center justify-center p-8 rounded-lg border-2 transition-all w-[280px] h-[280px] hover:scale-105 active:scale-95 cursor-pointer ${
                 userPlatform === 'windows'
                   ? 'border-primary bg-primary/5 shadow-lg shadow-primary/20'
                   : 'border-border bg-card hover:border-primary hover:shadow-lg'
@@ -234,13 +275,13 @@ function Home() {
               }`}>
                 <WindowsLogo className="h-10 w-10 text-primary" />
               </div>
-              <h3 className="text-xl font-semibold mb-2">
+              <h3 className="text-xl font-semibold mb-2 text-center">
                 Windows Version
                 {userPlatform === 'windows' && (
                   <span className="ml-2 text-sm text-primary font-normal">(Recommended)</span>
                 )}
               </h3>
-              <p className="text-sm text-muted-foreground mb-4">Download for PC</p>
+              <p className="text-sm text-muted-foreground mb-4 text-center">Download for PC</p>
               <div className="flex items-center gap-2 text-primary group-hover:gap-3 transition-all">
                 <Download className="h-5 w-5" />
                 <span className="text-sm font-medium">Download</span>
