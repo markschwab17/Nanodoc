@@ -14,6 +14,7 @@ import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { RichTextEditor } from "./RichTextEditor";
+import { ImageAnnotation } from "./ImageAnnotation";
 import { HorizontalRuler } from "./HorizontalRuler";
 import { VerticalRuler } from "./VerticalRuler";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
@@ -22,6 +23,7 @@ import { toolHandlers } from "@/features/tools";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
+import { useTabStore } from "@/shared/stores/tabStore";
 
 interface PageCanvasProps {
   document: PDFDocument;
@@ -1671,12 +1673,22 @@ export function PageCanvas({
     let dragOverTimeout: NodeJS.Timeout | null = null;
 
     const handleDragOver = (e: DragEvent) => {
-      // Check if dragging a PDF file
+      // Check if dragging a PDF file or image file
       const hasPdf = Array.from(e.dataTransfer?.items || []).some(
         (item) => item.type === "application/pdf" || (item.type === "" && item.kind === "file")
       );
       
-      if (hasPdf) {
+      const hasImage = Array.from(e.dataTransfer?.items || []).some(
+        (item) => item.type.startsWith("image/") || 
+                  (item.kind === "file" && (
+                    item.type === "" || 
+                    item.type === "image/jpeg" || 
+                    item.type === "image/jpg" || 
+                    item.type === "image/png"
+                  ))
+      );
+      
+      if (hasPdf || hasImage) {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
@@ -1712,9 +1724,12 @@ export function PageCanvas({
     };
 
     const handleDrop = async (e: DragEvent) => {
+      console.log("Drop event fired", e.dataTransfer?.files?.length, "files");
+      
       // Check if drop is actually on this page canvas
       const target = e.target as HTMLElement;
       if (target && !container.contains(target) && target !== container) {
+        console.log("Drop target is not in container, ignoring");
         return;
       }
       
@@ -1728,60 +1743,211 @@ export function PageCanvas({
       setIsDragOverPage(false);
 
       const files = Array.from(e.dataTransfer?.files || []);
+      console.log("Files in drop:", files.map(f => ({ name: f.name, type: f.type })));
+      
+      // Check for PDF file first (existing behavior)
       const pdfFile = files.find(
         (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
       );
 
-      if (!pdfFile) {
-        console.warn("No PDF file found in drop");
+      if (pdfFile) {
+        // Handle PDF file drop (existing behavior)
+        try {
+          // Load the dropped PDF as a new document/tab
+          const arrayBuffer = await pdfFile.arrayBuffer();
+          const data = new Uint8Array(arrayBuffer);
+          const mupdfModule = await import("mupdf");
+          
+          // Use the store directly to create new document and tab
+          const pdfStore = usePDFStore.getState();
+          const tabStore = (await import("@/shared/stores/tabStore")).useTabStore.getState();
+          
+          const documentId = `pdf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const document = new PDFDocumentClass(documentId, pdfFile.name, data.length);
+          await document.loadFromData(data, mupdfModule.default);
+          
+          pdfStore.addDocument(document);
+          pdfStore.setCurrentDocument(documentId);
+
+          // Load existing annotations from PDF
+          const tempEditor = new PDFEditor(mupdfModule.default);
+          const pageCount = document.getPageCount();
+          const allAnnotations: any[] = [];
+          
+          for (let i = 0; i < pageCount; i++) {
+            const pageAnnotations = await tempEditor.loadAnnotationsFromPage(document, i);
+            allAnnotations.push(...pageAnnotations);
+          }
+          
+          // Add loaded annotations to store
+          for (const annot of allAnnotations) {
+            pdfStore.addAnnotation(documentId, annot);
+          }
+
+          // Create tab for this document
+          const tabId = `tab_${documentId}`;
+          tabStore.addTab({
+            id: tabId,
+            documentId,
+            name: pdfFile.name,
+            isModified: false,
+            lastSaved: null, // New document, never saved
+            order: tabStore.tabs.length,
+          });
+        } catch (error) {
+          console.error("Error opening PDF as new tab:", error);
+        }
         return;
       }
 
-      try {
-        // Load the dropped PDF as a new document/tab
-        const arrayBuffer = await pdfFile.arrayBuffer();
-        const data = new Uint8Array(arrayBuffer);
-        const mupdfModule = await import("mupdf");
-        
-        // Use the store directly to create new document and tab
-        const pdfStore = usePDFStore.getState();
-        const tabStore = (await import("@/shared/stores/tabStore")).useTabStore.getState();
-        
-        const documentId = `pdf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const document = new PDFDocumentClass(documentId, pdfFile.name, data.length);
-        await document.loadFromData(data, mupdfModule.default);
-        
-        pdfStore.addDocument(document);
-        pdfStore.setCurrentDocument(documentId);
+      // Check for image files (JPG, PNG)
+      const imageFile = files.find(
+        (file) => 
+          file.type === "image/jpeg" || 
+          file.type === "image/jpg" || 
+          file.type === "image/png" ||
+          file.name.toLowerCase().endsWith(".jpg") ||
+          file.name.toLowerCase().endsWith(".jpeg") ||
+          file.name.toLowerCase().endsWith(".png")
+      );
 
-        // Load existing annotations from PDF
-        const tempEditor = new PDFEditor(mupdfModule.default);
-        const pageCount = document.getPageCount();
-        const allAnnotations: any[] = [];
-        
-        for (let i = 0; i < pageCount; i++) {
-          const pageAnnotations = await tempEditor.loadAnnotationsFromPage(document, i);
-          allAnnotations.push(...pageAnnotations);
-        }
-        
-        // Add loaded annotations to store
-        for (const annot of allAnnotations) {
-          pdfStore.addAnnotation(documentId, annot);
-        }
+      if (imageFile && currentDocument && canvasRef.current) {
+        console.log("Image file detected:", imageFile.name, imageFile.type);
+        try {
+          // Convert image to base64 data URL
+          // Use FileReader to avoid stack overflow with large images
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              if (typeof reader.result === 'string') {
+                resolve(reader.result);
+              } else {
+                reject(new Error('Failed to read file as data URL'));
+              }
+            };
+            reader.onerror = (err) => {
+              console.error("FileReader error:", err);
+              reject(new Error('FileReader failed'));
+            };
+            reader.readAsDataURL(imageFile);
+          });
 
-        // Create tab for this document
-        const tabId = `tab_${documentId}`;
-        tabStore.addTab({
-          id: tabId,
-          documentId,
-          name: pdfFile.name,
-          isModified: false,
-          lastSaved: null, // New document, never saved
-          order: tabStore.tabs.length,
-        });
-      } catch (error) {
-        console.error("Error opening PDF as new tab:", error);
+          console.log("Image converted to data URL, length:", dataUrl.length);
+
+          // Load image to get dimensions
+          const img = new Image();
+          await new Promise((resolve, reject) => {
+            img.onload = () => {
+              console.log("Image loaded, dimensions:", img.width, "x", img.height);
+              resolve(undefined);
+            };
+            img.onerror = (err) => {
+              console.error("Image load error:", err);
+              reject(new Error('Failed to load image'));
+            };
+            img.src = dataUrl;
+          });
+
+          const imageWidth = img.width;
+          const imageHeight = img.height;
+
+          // Get drop coordinates in PDF space
+          const canvasElement = canvasRef.current;
+          const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+          
+          if (!pageMetadata) {
+            console.warn("Cannot get page metadata for image drop");
+            showNotification("Cannot get page metadata for image drop", "error");
+            return;
+          }
+
+          // Get canvas position on screen
+          const canvasRect = canvasElement.getBoundingClientRect();
+          
+          if (canvasRect.width === 0 || canvasRect.height === 0 || canvasElement.width === 0 || canvasElement.height === 0) {
+            console.warn("Canvas has invalid dimensions");
+            showNotification("Canvas has invalid dimensions", "error");
+            return;
+          }
+          
+          // Calculate drop position relative to canvas
+          const canvasRelativeX = e.clientX - canvasRect.left;
+          const canvasRelativeY = e.clientY - canvasRect.top;
+          
+          console.log("Drop position:", e.clientX, e.clientY, "Canvas relative:", canvasRelativeX, canvasRelativeY);
+          
+          // Convert to canvas pixel coordinates
+          const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
+          const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
+          
+          // Convert to PDF coordinates
+          const BASE_SCALE = 2.0;
+          let mediaboxHeight: number;
+          if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
+            mediaboxHeight = pageMetadata.width;
+          } else {
+            mediaboxHeight = pageMetadata.height;
+          }
+          
+          const pdfX = canvasPixelX / BASE_SCALE;
+          const pdfY = mediaboxHeight - (canvasPixelY / BASE_SCALE);
+
+          // Calculate initial size (max 300x300 PDF points, maintain aspect ratio)
+          const maxSize = 300;
+          const aspectRatio = imageWidth / imageHeight;
+          let initialWidth = maxSize;
+          let initialHeight = maxSize / aspectRatio;
+          
+          if (initialHeight > maxSize) {
+            initialHeight = maxSize;
+            initialWidth = maxSize * aspectRatio;
+          }
+
+          // Position image at drop location (center the image on drop point)
+          const imageX = pdfX - (initialWidth / 2);
+          const imageY = pdfY - (initialHeight / 2);
+
+          console.log("Creating image annotation at PDF coords:", imageX, imageY, "Size:", initialWidth, initialHeight);
+
+          // Create image annotation
+          const imageAnnotation: Annotation = {
+            id: `image_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            type: "image",
+            pageNumber,
+            x: imageX,
+            y: imageY,
+            width: initialWidth,
+            height: initialHeight,
+            imageData: dataUrl,
+            imageWidth,
+            imageHeight,
+            preserveAspectRatio: true,
+          };
+
+          // Add annotation to store
+          addAnnotation(currentDocument.getId(), imageAnnotation);
+          console.log("Image annotation added to store:", imageAnnotation.id);
+
+          // Select the new image annotation
+          setEditingAnnotation(imageAnnotation);
+
+          // Mark tab as modified
+          const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
+          if (tab) {
+            useTabStore.getState().setTabModified(tab.id, true);
+          }
+
+          showNotification("Image added successfully!", "success");
+        } catch (error) {
+          console.error("Error adding image annotation:", error);
+          const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+          showNotification(`Failed to add image: ${errorMessage}`, "error");
+        }
+        return;
       }
+
+      // No supported file type found
+      console.warn("No supported file found in drop (PDF or image)");
     };
 
     // Use capture phase to intercept before react-dropzone
@@ -2759,6 +2925,10 @@ export function PageCanvas({
             // Text annotations are now always rendered using RichTextEditor
             // This is handled below in the RichTextEditor section
             return null;
+          } else if (annot.type === "image") {
+            // Image annotations are rendered using ImageAnnotation component
+            // This is handled below in the ImageAnnotation section
+            return null;
           }
           
           return null;
@@ -3181,6 +3351,114 @@ export function PageCanvas({
             );
           })();
         })})()}
+
+        {/* Image annotations - always visible (inside transformed div like text annotations) */}
+        {(() => {
+          const allImageAnnotations = annotations.filter(annot => annot.type === "image");
+          const filteredAnnotations = allImageAnnotations.filter(annot => annot.pageNumber === pageNumber);
+          return filteredAnnotations
+            .filter(annot => annot.x != null && annot.y != null && annot.imageData)
+            .map((annot) => {
+              const isSelected = editingAnnotation?.id === annot.id;
+              const isHovered = hoveredAnnotationId === annot.id && activeTool === "select" && !isSelected;
+              
+              // Get current viewport transform values
+              const currentZoom = zoomLevelRef.current;
+              if (currentZoom <= 0) return null;
+              
+              // Convert PDF coordinates to canvas display coordinates (same as text annotations)
+              // annot.y is the BOTTOM edge in PDF coordinates
+              // For CSS positioning, we need the TOP edge
+              const pdfTopY = annot.y + (annot.height || 0);
+              const canvasPixel = pdfToCanvas(annot.x, pdfTopY);
+              const devicePixelRatio = window.devicePixelRatio || 1;
+              
+              // Since ImageAnnotation is inside the transformed div (like RichTextEditor),
+              // use canvas display coordinates - the CSS transform will handle scaling
+              const canvasPos = { 
+                x: canvasPixel.x / devicePixelRatio, 
+                y: canvasPixel.y / devicePixelRatio 
+              };
+              
+              return (
+                <ImageAnnotation
+                  key={annot.id}
+                  annotation={annot}
+                  scale={1.0}
+                  style={{
+                    position: "absolute",
+                    left: `${canvasPos.x}px`,
+                    top: `${canvasPos.y}px`,
+                    zIndex: 25,
+                  }}
+                  onMove={(deltaX, deltaY) => {
+                    if (!currentDocument) return;
+                    const newX = annot.x + deltaX;
+                    const newY = annot.y + deltaY;
+                    wrapAnnotationUpdate(
+                      currentDocument.getId(),
+                      annot.id,
+                      { x: newX, y: newY }
+                    );
+                  }}
+                  onResize={(width, height) => {
+                    if (!currentDocument) return;
+                    wrapAnnotationUpdate(
+                      currentDocument.getId(),
+                      annot.id,
+                      { width, height }
+                    );
+                  }}
+                  onResizeEnd={() => {}}
+                  onRotate={(angle) => {
+                    if (!currentDocument) return;
+                    wrapAnnotationUpdate(
+                      currentDocument.getId(),
+                      annot.id,
+                      { rotation: angle }
+                    );
+                  }}
+                  onRotateEnd={() => {}}
+                  onDragEnd={() => {}}
+                  onDuplicate={(e) => {
+                    if (!currentDocument) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const duplicateAnnotation: Annotation = {
+                      ...annot,
+                      id: `image_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                      x: annot.x + 20,
+                      y: annot.y + 20,
+                    };
+                    addAnnotation(currentDocument.getId(), duplicateAnnotation);
+                    setEditingAnnotation(duplicateAnnotation);
+                    showNotification("Image duplicated - drag to position", "success");
+                  }}
+                  isSelected={isSelected}
+                  isHovered={isHovered}
+                  pageRotation={pageRotation}
+                  activeTool={activeTool}
+                  isSpacePressed={isSpacePressed}
+                  onClick={() => {
+                    if (activeTool === "select") {
+                      setEditingAnnotation(annot);
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseEnter={() => {
+                    if (activeTool === "select") {
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    if (activeTool === "select" && !isSelected) {
+                      setHoveredAnnotationId(null);
+                    }
+                  }}
+                />
+              );
+            });
+        })()}
       </div>
     </div>
   );

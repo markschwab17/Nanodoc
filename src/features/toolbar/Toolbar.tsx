@@ -11,7 +11,6 @@ import {
   Hand, 
   Type, 
   Highlighter, 
-  MessageSquare,
   Eraser,
   ZoomIn,
   ZoomOut,
@@ -20,16 +19,16 @@ import {
   BookmarkPlus,
   Undo2,
   Redo2,
-  FileText,
   Save,
   Printer,
-  HardDrive,
   Clock,
   Maximize2,
   Settings,
   Ruler,
   TextSelect,
-  Circle
+  Circle,
+  FileDown,
+  FolderOpen
 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
@@ -54,6 +53,7 @@ import { PrintSettingsDialog } from "@/features/print/PrintSettingsDialog";
 import type { PrintSettings } from "@/shared/stores/printStore";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
+import { ExportDialog } from "@/features/export/ExportDialog";
 
 export function Toolbar() {
   const { activeTool, setActiveTool, zoomLevel, zoomToCenter, setFitMode, readMode } = useUIStore();
@@ -67,6 +67,7 @@ export function Toolbar() {
   const [showSizeDialog, setShowSizeDialog] = useState(false);
   const [showPrintDialog, setShowPrintDialog] = useState(false);
   const [showDocumentSettings, setShowDocumentSettings] = useState(false);
+  const [showExportDialog, setShowExportDialog] = useState(false);
   const [pageWidth, setPageWidth] = useState("8.5");
   const [pageHeight, setPageHeight] = useState("11");
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
@@ -170,19 +171,8 @@ export function Toolbar() {
     });
   };
 
-  const handleSaveToDesktop = async () => {
-    const currentDoc = getCurrentDocument();
-    if (!currentDoc) return;
-
-    await syncAndSavePDF(async (data) => {
-      if ('saveFileToDesktop' in fileSystem) {
-        await (fileSystem as any).saveFileToDesktop(data, currentDoc.getName());
-      } else {
-        // Fallback to regular save in browser
-        await fileSystem.saveFile(data, currentDoc.getName());
-      }
-    });
-  };
+  // Check if we're in Tauri (desktop) or browser
+  const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
   const handlePrint = () => {
     const currentDoc = getCurrentDocument();
@@ -397,7 +387,7 @@ export function Toolbar() {
           className="w-12 h-12"
           data-action="open"
         >
-          <FileText className="h-5 w-5" />
+          <FolderOpen className="h-5 w-5" />
         </Button>
         <Button
           variant="outline"
@@ -414,24 +404,29 @@ export function Toolbar() {
               variant="outline"
               size="icon"
               disabled={!currentDocument}
-              title="Save PDF"
+              title="Save & Export"
               className="w-12 h-12"
               data-action="save"
             >
               <Save className="h-5 w-5" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent className="w-48 p-1" side="left" align="start">
+          <PopoverContent className="w-56 p-1" side="left" align="start">
             <div className="flex flex-col">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleSaveFile}
-                className="justify-start"
-              >
-                <Save className="h-4 w-4 mr-2" />
-                Save
-              </Button>
+              <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                Save as PDF
+              </div>
+              {isTauri && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleSaveFile}
+                  className="justify-start"
+                >
+                  <Save className="h-4 w-4 mr-2" />
+                  Save
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="sm"
@@ -441,14 +436,18 @@ export function Toolbar() {
                 <Save className="h-4 w-4 mr-2" />
                 Save As...
               </Button>
+              <div className="h-px bg-border my-1" />
+              <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                Export to Other Formats
+              </div>
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={handleSaveToDesktop}
+                onClick={() => setShowExportDialog(true)}
                 className="justify-start"
               >
-                <HardDrive className="h-4 w-4 mr-2" />
-                Save to Desktop
+                <FileDown className="h-4 w-4 mr-2" />
+                Export...
               </Button>
             </div>
           </PopoverContent>
@@ -513,15 +512,6 @@ export function Toolbar() {
           className="w-12 h-12"
         >
           <Highlighter className="h-5 w-5" />
-        </Button>
-        <Button
-          variant={activeTool === "callout" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("callout")}
-          title="Callout Note"
-          className="w-12 h-12"
-        >
-          <MessageSquare className="h-5 w-5" />
         </Button>
         <Button
           variant={activeTool === "redact" ? "default" : "outline"}
@@ -729,6 +719,13 @@ export function Toolbar() {
         document={currentDocument}
         currentPage={currentPage}
         onApply={handleApplyDocumentSettings}
+      />
+
+      {/* Export Dialog */}
+      <ExportDialog
+        open={showExportDialog}
+        onOpenChange={setShowExportDialog}
+        document={currentDocument}
       />
     </div>
   );

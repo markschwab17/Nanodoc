@@ -1,4 +1,5 @@
 import type { FileSystemInterface } from "./FileSystemInterface";
+import JSZip from "jszip";
 
 /**
  * Browser File System Implementation
@@ -104,6 +105,65 @@ export class BrowserFileSystem implements FileSystemInterface {
     throw new Error(
       "BrowserFileSystem.readFile() requires a blob URL, data URL, or File object. Use openFile() for file selection."
     );
+  }
+
+  /**
+   * Saves multiple files as a ZIP archive by triggering a download in the browser.
+   */
+  async saveMultipleFilesAsZip(
+    files: Array<{ data: Uint8Array; name: string }>,
+    zipFileName: string
+  ): Promise<void> {
+    const zip = new JSZip();
+    
+    // Add all files to the ZIP
+    for (const file of files) {
+      zip.file(file.name, file.data);
+    }
+    
+    // Generate ZIP file
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    
+    // Trigger download
+    const url = URL.createObjectURL(zipBlob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = zipFileName.endsWith(".zip") ? zipFileName : `${zipFileName}.zip`;
+    link.style.display = "none";
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Clean up the object URL after a short delay
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 100);
+  }
+
+  /**
+   * Saves a text file by triggering a download in the browser.
+   */
+  async saveTextFile(text: string, fileName: string): Promise<void> {
+    // Ensure the filename has .txt extension
+    const finalFileName = fileName.endsWith(".txt") ? fileName : `${fileName}.txt`;
+    
+    // Create blob with text content
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = finalFileName;
+    link.style.display = "none";
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Clean up the object URL after a short delay
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 100);
   }
 }
 

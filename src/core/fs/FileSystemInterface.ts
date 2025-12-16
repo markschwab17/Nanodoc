@@ -25,6 +25,23 @@ export interface FileSystemInterface {
    * In Tauri, this reads from the file system.
    */
   readFile(path: string): Promise<Uint8Array>;
+
+  /**
+   * Saves multiple files as a ZIP archive.
+   * In browser, this will trigger a download.
+   * In Tauri, this will use the native save dialog.
+   */
+  saveMultipleFilesAsZip(
+    files: Array<{ data: Uint8Array; name: string }>,
+    zipFileName: string
+  ): Promise<void>;
+
+  /**
+   * Saves a text file.
+   * In browser, this will trigger a download.
+   * In Tauri, this will use the native save dialog.
+   */
+  saveTextFile(text: string, fileName: string): Promise<void>;
 }
 
 

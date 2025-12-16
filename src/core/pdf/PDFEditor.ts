@@ -17,7 +17,7 @@ export interface PageReorderOperation {
 
 export interface Annotation {
   id: string;
-  type: "text" | "highlight" | "note" | "callout" | "redact";
+  type: "text" | "highlight" | "note" | "callout" | "redact" | "image";
   pageNumber: number;
   x: number;
   y: number;
@@ -46,6 +46,11 @@ export interface Annotation {
   boxPosition?: { x: number; y: number };
   // For text annotations: if true, box auto-fits to text (typewriter mode)
   autoFit?: boolean;
+  // For image annotations
+  imageData?: string; // base64 data URL
+  imageWidth?: number; // original image width in pixels
+  imageHeight?: number; // original image height in pixels
+  preserveAspectRatio?: boolean; // default: true
   // Store the actual mupdf annotation object for updates
   pdfAnnotation?: any;
 }
@@ -107,14 +112,94 @@ export class PDFEditor {
       throw new Error(`Invalid page index: ${index}. Must be between 0 and ${pageCount}`);
     }
 
-    // Create a temporary blank PDF document with one page
-    const tempPdfDoc = new this.mupdf.PDFDocument();
-    const mediabox: [number, number, number, number] = [0, 0, width, height];
-    tempPdfDoc.addPage(mediabox, 0, null, null);
+    // Create a blank page by copying an existing page and then clearing its content
+    // This avoids the addPage buffer issue entirely by using an existing page structure
+    const sourcePageIndex = Math.min(index - 1, pageCount - 1);
+    if (sourcePageIndex < 0) {
+      throw new Error("Cannot insert page: no pages to use as template");
+    }
     
-    // Use graftPage to copy the blank page from temp document to target at the specified index
-    // graftPage(targetIndex, sourceDoc, sourcePageIndex)
-    pdfDoc.graftPage(index, tempPdfDoc, 0);
+    // Duplicate the existing page at the target index (this gives us the correct dimensions)
+    pdfDoc.graftPage(index, pdfDoc, sourcePageIndex);
+    
+    // Now clear the content by directly manipulating the page's content stream
+    const newPage = pdfDoc.loadPage(index);
+    
+    try {
+      // Get the page object dictionary
+      const pageObj = newPage.getObject();
+      if (pageObj) {
+        // Remove the Contents entry to make the page blank
+        // A page without Contents is a valid blank page
+        pageObj.delete("Contents");
+        
+        // Also remove Resources if present (fonts, images, etc.)
+        // This ensures the page is truly blank
+        pageObj.delete("Resources");
+        
+        // Update the page object
+        pageObj.update();
+      }
+      
+      // CRITICAL: Force reload the page in mupdf to clear its internal cache
+      // This ensures the blank page is visible immediately
+      pdfDoc.loadPage(index);
+      
+      // Force thumbnail refresh by temporarily modifying page rotation
+      // This triggers the thumbnail useEffect dependency to re-render
+      try {
+        const pageObj = newPage.getObject();
+        if (pageObj) {
+          const currentRotate = pageObj.get("Rotate");
+          // Temporarily set rotation to force thumbnail refresh
+          pageObj.put("Rotate", currentRotate ? 0 : 1);
+          pageObj.update();
+          // Immediately set it back
+          if (currentRotate !== null && currentRotate !== undefined) {
+            pageObj.put("Rotate", currentRotate);
+          } else {
+            pageObj.delete("Rotate");
+          }
+          pageObj.update();
+          // Reload page again after rotation change
+          pdfDoc.loadPage(index);
+        }
+      } catch (rotateError) {
+        // If rotation manipulation fails, that's okay - page is still blank
+        console.warn("Could not trigger thumbnail refresh via rotation:", rotateError);
+      }
+    } catch (clearError) {
+      console.warn("Could not clear page content directly, trying redaction approach:", clearError);
+      
+      // Fallback: try redaction approach
+      try {
+        const pageBounds = newPage.getBounds();
+        const fullPageRect: [number, number, number, number] = [
+          pageBounds[0],
+          pageBounds[1],
+          pageBounds[2],
+          pageBounds[3]
+        ];
+        
+        const redactAnnot = newPage.createAnnotation("Redact");
+        redactAnnot.setRect(fullPageRect);
+        redactAnnot.update();
+        
+        if (typeof newPage.applyRedactions === 'function') {
+          try {
+            newPage.applyRedactions(false, 0);
+          } catch (e) {
+            newPage.applyRedactions();
+          }
+        }
+        
+        // Force reload after redaction
+        pdfDoc.loadPage(index);
+      } catch (redactError) {
+        console.warn("Could not clear page content with redaction either:", redactError);
+        // Page will have copied content, but at least it was inserted
+      }
+    }
   }
 
   /**
@@ -809,6 +894,72 @@ export class PDFEditor {
   }
 
   /**
+   * Add image annotation to a page
+   * Images are stored as FreeText annotations with image data in contents
+   * TODO: Enhance to properly embed images as XObjects in PDF
+   */
+  async addImageAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    if (!annotation.imageData) {
+      console.warn("Image annotation missing imageData");
+      return;
+    }
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    
+    // Create FreeText annotation to store image metadata
+    // The actual image data is stored in the contents field as base64
+    // For proper PDF embedding, we'd need to use mupdf's image insertion APIs
+    const rect: [number, number, number, number] = [
+      annotation.x,
+      annotation.y,
+      annotation.x + (annotation.width || 200),
+      annotation.y + (annotation.height || 200),
+    ];
+    
+    const annot = page.createAnnotation("FreeText");
+    annot.setRect(rect);
+    
+    // Store image data and metadata in contents as JSON
+    const imageMetadata = {
+      type: "image",
+      imageData: annotation.imageData,
+      imageWidth: annotation.imageWidth,
+      imageHeight: annotation.imageHeight,
+      preserveAspectRatio: annotation.preserveAspectRatio !== false,
+      rotation: annotation.rotation || 0,
+    };
+    annot.setContents(JSON.stringify(imageMetadata));
+    
+    // Store custom properties for easier retrieval
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        annotObj.put("ImageType", "embedded");
+        if (annotation.imageWidth) {
+          annotObj.put("ImageWidth", annotation.imageWidth);
+        }
+        if (annotation.imageHeight) {
+          annotObj.put("ImageHeight", annotation.imageHeight);
+        }
+      }
+    } catch (error) {
+      console.warn("Could not store image metadata:", error);
+    }
+    
+    annot.update();
+  }
+
+  /**
    * Add callout annotation to a page
    * Callouts are implemented as FreeText annotations with custom styling
    */
@@ -1068,6 +1219,49 @@ export class PDFEditor {
               height: rect[3] - rect[1],
             });
           } else if (type === "FreeText") {
+            // Check for image annotations (stored as FreeText with JSON in contents)
+            if (contents) {
+              try {
+                const parsed = JSON.parse(contents);
+                if (parsed.type === "image" && parsed.imageData) {
+                  // This is an image annotation
+                  // Get image metadata from annotation object
+                  let imageWidth = parsed.imageWidth;
+                  let imageHeight = parsed.imageHeight;
+                  try {
+                    const annotObj = pdfAnnot.getObject();
+                    if (annotObj) {
+                      const widthObj = annotObj.get("ImageWidth");
+                      const heightObj = annotObj.get("ImageHeight");
+                      if (widthObj) imageWidth = widthObj.valueOf();
+                      if (heightObj) imageHeight = heightObj.valueOf();
+                    }
+                  } catch (e) {
+                    // Use parsed values if object access fails
+                  }
+                  
+                  annotations.push({
+                    id,
+                    type: "image",
+                    pageNumber,
+                    x: rect[0],
+                    y: rect[1], // Bottom edge in PDF coordinates
+                    width: rect[2] - rect[0],
+                    height: rect[3] - rect[1],
+                    imageData: parsed.imageData,
+                    imageWidth: imageWidth || 200,
+                    imageHeight: imageHeight || 200,
+                    preserveAspectRatio: parsed.preserveAspectRatio !== false,
+                    rotation: parsed.rotation || 0,
+                    pdfAnnotation: pdfAnnot,
+                  });
+                  continue; // Skip normal FreeText handling
+                }
+              } catch (e) {
+                // Not JSON, continue with normal FreeText handling
+              }
+            }
+            
             // Determine if it's a callout or text annotation
             // For now, treat all FreeText as text annotations
             // Could enhance this by checking custom properties
@@ -1285,6 +1479,8 @@ export class PDFEditor {
             await this.addCalloutAnnotation(document, annot);
           } else if (annot.type === "redact") {
             await this.addRedactionAnnotation(document, annot);
+          } else if (annot.type === "image") {
+            await this.addImageAnnotation(document, annot);
           }
         } catch (error) {
           console.error(`Error syncing annotation ${annot.id}:`, error);

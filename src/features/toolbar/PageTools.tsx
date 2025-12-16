@@ -87,10 +87,60 @@ export function PageTools() {
       const insertIndex = currentPage + 1;
       console.log(`Inserting blank page at index ${insertIndex}`);
       
-      await editor.insertBlankPage(currentDocument, insertIndex);
+      // Get current page dimensions from document
+      let pageWidth = 612; // Default fallback
+      let pageHeight = 792; // Default fallback
+      
+      const currentPageMetadata = currentDocument.getPageMetadata(currentPage);
+      if (currentPageMetadata) {
+        pageWidth = currentPageMetadata.width;
+        pageHeight = currentPageMetadata.height;
+        console.log(`Using current page dimensions: ${pageWidth}x${pageHeight}`);
+      } else {
+        // Fall back to first page if current page metadata unavailable
+        const firstPageMetadata = currentDocument.getPageMetadata(0);
+        if (firstPageMetadata) {
+          pageWidth = firstPageMetadata.width;
+          pageHeight = firstPageMetadata.height;
+          console.log(`Using first page dimensions: ${pageWidth}x${pageHeight}`);
+        } else {
+          console.warn("No page metadata available, using default dimensions");
+        }
+      }
+      
+      await editor.insertBlankPage(currentDocument, insertIndex, pageWidth, pageHeight);
+      
+      // CRITICAL: Force reload the page in mupdf to clear its internal cache
+      // This ensures the new page is visible immediately
+      const mupdfDoc = currentDocument.getMupdfDocument();
+      const pdfDoc = mupdfDoc.asPDF();
+      if (pdfDoc) {
+        // Force reload by loading the inserted page
+        // This clears mupdf's internal page cache
+        try {
+          pdfDoc.loadPage(insertIndex);
+          console.log(`Force reloaded page ${insertIndex} in mupdf`);
+        } catch (reloadError) {
+          console.warn("Could not force reload page after insertion:", reloadError);
+        }
+      }
       
       // Refresh document metadata to update page count and page info
       currentDocument.refreshPageMetadata();
+      
+      // Force a second refresh after a small delay to ensure thumbnails update
+      // This triggers the thumbnail useEffect dependencies to refresh
+      setTimeout(() => {
+        currentDocument.refreshPageMetadata();
+        // Force page reload again to ensure cache is cleared
+        if (pdfDoc) {
+          try {
+            pdfDoc.loadPage(insertIndex);
+          } catch (e) {
+            // Ignore errors on second reload
+          }
+        }
+      }, 100);
       
       // Mark tab as modified
       const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
@@ -99,7 +149,10 @@ export function PageTools() {
       }
       
       // Force store update to trigger re-render
-      usePDFStore.getState().setCurrentPage(insertIndex);
+      // Use a small delay to ensure metadata refresh completes first
+      setTimeout(() => {
+        usePDFStore.getState().setCurrentPage(insertIndex);
+      }, 0);
       
       setShowInsertDialog(false);
       showNotification(`Blank page inserted after page ${currentPage + 1}`, "success");
