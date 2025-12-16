@@ -19,8 +19,8 @@ jobs:
             args: --target aarch64-apple-darwin
             rust_target: aarch64-apple-darwin
             
-          # macOS Intel
-          - platform: macos-13
+          # macOS Intel (cross-compile from ARM)
+          - platform: macos-latest
             args: --target x86_64-apple-darwin
             rust_target: x86_64-apple-darwin
             
@@ -42,7 +42,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Rust stable
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
@@ -86,11 +86,6 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Publish Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Release Ready
         run: |
-          # The release is created as draft, this makes it live
-          # Uncomment if you want auto-publish (otherwise manually publish from GitHub)
-          # gh release edit ${{ github.ref_name }} --draft=false --repo ${{ github.repository }}
           echo "Release ${{ github.ref_name }} is ready as a draft. Publish it manually from GitHub Releases."
