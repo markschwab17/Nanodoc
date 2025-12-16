@@ -1,7 +1,7 @@
 {
   "productName": "Nanodoc",
   "version": "0.1.0",
-  "identifier": "com.nanodoc.app",
+  "identifier": "com.nanodoc",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -52,7 +52,7 @@
     ],
     "fileAssociations": [
       {
-        "ext": "pdf",
+        "ext": ["pdf"],
         "mimeType": "application/pdf",
         "role": "Viewer"
       }

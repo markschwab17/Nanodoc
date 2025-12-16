@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { NavBar } from "@/features/navigation/NavBar";
 import { Button } from "@/components/ui/button";
+import { useEffect, useState } from "react";
 import {
   FileText,
   Combine,
@@ -12,7 +13,68 @@ import {
   Download,
 } from "lucide-react";
 
+// Download URLs configuration
+// Update these URLs to point to your actual release downloads
+// Common patterns:
+// - GitHub Releases: https://github.com/{user}/{repo}/releases/latest/download/{app-name}-{platform}-{arch}.{ext}
+// - Direct hosting: Your CDN or hosting URL
+const DOWNLOAD_URLS = {
+  mac: import.meta.env.VITE_DOWNLOAD_URL_MAC || "https://github.com/yourusername/nanodoc/releases/latest/download/Nanodoc_0.1.0_aarch64.dmg",
+  windows: import.meta.env.VITE_DOWNLOAD_URL_WINDOWS || "https://github.com/yourusername/nanodoc/releases/latest/download/Nanodoc_0.1.0_x64_en-US.msi",
+};
+
+// Mac/Apple Logo SVG Component
+const MacLogo = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+    <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+  </svg>
+);
+
+// Windows Logo SVG Component
+const WindowsLogo = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+    <path d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/>
+  </svg>
+);
+
 function Home() {
+  const [userPlatform, setUserPlatform] = useState<'mac' | 'windows' | null>(null);
+
+  useEffect(() => {
+    // Detect user's platform
+    const platform = navigator.platform.toLowerCase();
+    if (platform.includes('mac') || platform.includes('darwin')) {
+      setUserPlatform('mac');
+    } else if (platform.includes('win')) {
+      setUserPlatform('windows');
+    }
+  }, []);
+
+  const handleDownload = (url: string) => {
+    // Check if URL is a placeholder
+    if (url.includes('yourusername') || url.includes('github.com/yourusername')) {
+      // For placeholder URLs, open GitHub releases page
+      alert('Download links are not yet configured. Please update the DOWNLOAD_URLS in src/pages/Home.tsx or set VITE_DOWNLOAD_URL_MAC and VITE_DOWNLOAD_URL_WINDOWS environment variables.');
+      return;
+    }
+
+    // For cross-origin downloads, we need to open in a new window/tab
+    // The browser will handle the download if the server sends proper headers
+    // GitHub releases with /latest/download/ should work, but we'll open in new tab as fallback
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    
+    // Try to set download attribute (works for same-origin)
+    // For cross-origin, the server must send Content-Disposition header
+    link.download = '';
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const features = [
     {
       icon: Combine,
@@ -52,79 +114,7 @@ function Home() {
       
       {/* Hero Section */}
       <section className="container mx-auto px-4 py-20 md:py-32 relative">
-        {/* PDF Editor Interface Mockup */}
-        <div className="hero-interface-mockup">
-          <div className="mockup-container">
-            {/* Top Toolbar */}
-            <div className="mockup-toolbar">
-              <div className="mockup-toolbar-left">
-                <div className="mockup-doc-title">NanoDoc.pdf</div>
-                <div className="mockup-toolbar-icons">
-                  <div className="mockup-icon"></div>
-                  <div className="mockup-icon"></div>
-                  <div className="mockup-icon"></div>
-                </div>
-              </div>
-              <div className="mockup-toolbar-right">
-                <div className="mockup-status">Saved</div>
-              </div>
-            </div>
-            
-            {/* Main Content Area */}
-            <div className="mockup-content">
-              {/* Left Sidebar */}
-              <div className="mockup-sidebar-left">
-                <div className="mockup-search">Q Search PDF...</div>
-                <div className="mockup-tabs">
-                  <div className="mockup-tab active">Pages</div>
-                  <div className="mockup-tab">Q Search</div>
-                </div>
-                <div className="mockup-thumbnails">
-                  <div className="mockup-thumbnail selected"></div>
-                  <div className="mockup-thumbnail"></div>
-                </div>
-              </div>
-              
-              {/* Document Area */}
-              <div className="mockup-document">
-                <div className="mockup-doc-header">
-                  <div className="mockup-logo">N nanodoc</div>
-                </div>
-                <div className="mockup-doc-content">
-                  <div className="mockup-text-line"></div>
-                  <div className="mockup-text-line short"></div>
-                  <div className="mockup-text-line"></div>
-                  <div className="mockup-text-line medium"></div>
-                  <div className="mockup-text-line"></div>
-                </div>
-              </div>
-              
-              {/* Right Sidebar */}
-              <div className="mockup-sidebar-right">
-                <div className="mockup-tool-icon"></div>
-                <div className="mockup-tool-icon"></div>
-                <div className="mockup-tool-icon"></div>
-                <div className="mockup-tool-icon"></div>
-                <div className="mockup-tool-icon active"></div>
-                <div className="mockup-tool-icon"></div>
-                <div className="mockup-tool-icon"></div>
-                <div className="mockup-zoom">110%</div>
-              </div>
-            </div>
-            
-            {/* Bottom Bar */}
-            <div className="mockup-bottom-bar">
-              <div className="mockup-bottom-left">Insert Page</div>
-              <div className="mockup-bottom-center">Page 1 of 2</div>
-              <div className="mockup-bottom-right">
-                <div className="mockup-nav-icon"></div>
-                <div className="mockup-nav-icon"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-        <div className="max-w-4xl mx-auto text-center relative z-20">
+        <div className="max-w-4xl mx-auto text-center">
           <h1 className="text-5xl md:text-6xl font-bold mb-6 bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">
             100% Free PDF Editor
           </h1>
@@ -201,37 +191,65 @@ function Home() {
           </p>
           
           <div className="flex flex-col sm:flex-row gap-6 justify-center items-center">
-            <a
-              href="#"
-              className="group flex flex-col items-center justify-center p-8 rounded-lg border-2 border-border bg-card hover:border-primary hover:shadow-lg transition-all min-w-[200px]"
+            <button
+              onClick={() => handleDownload(DOWNLOAD_URLS.mac)}
+              className={`group flex flex-col items-center justify-center p-8 rounded-lg border-2 transition-all min-w-[220px] hover:scale-105 active:scale-95 cursor-pointer ${
+                userPlatform === 'mac'
+                  ? 'border-primary bg-primary/5 shadow-lg shadow-primary/20'
+                  : 'border-border bg-card hover:border-primary hover:shadow-lg'
+              }`}
             >
-              <div className="w-16 h-16 rounded-lg bg-primary/10 flex items-center justify-center mb-4 group-hover:bg-primary/20 transition-colors">
-                <svg className="h-10 w-10 text-primary" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
-                </svg>
+              <div className={`w-16 h-16 rounded-lg flex items-center justify-center mb-4 transition-colors ${
+                userPlatform === 'mac'
+                  ? 'bg-primary/20 group-hover:bg-primary/30'
+                  : 'bg-primary/10 group-hover:bg-primary/20'
+              }`}>
+                <MacLogo className="h-10 w-10 text-primary" />
               </div>
-              <h3 className="text-xl font-semibold mb-2">Mac Version</h3>
+              <h3 className="text-xl font-semibold mb-2">
+                Mac Version
+                {userPlatform === 'mac' && (
+                  <span className="ml-2 text-sm text-primary font-normal">(Recommended)</span>
+                )}
+              </h3>
               <p className="text-sm text-muted-foreground mb-4">Download for macOS</p>
-              <Download className="h-5 w-5 text-primary" />
-            </a>
-            
-            <a
-              href="#"
-              className="group flex flex-col items-center justify-center p-8 rounded-lg border-2 border-border bg-card hover:border-primary hover:shadow-lg transition-all min-w-[200px]"
-            >
-              <div className="w-16 h-16 rounded-lg bg-primary/10 flex items-center justify-center mb-4 group-hover:bg-primary/20 transition-colors">
-                <svg className="h-10 w-10 text-primary" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/>
-                </svg>
+              <div className="flex items-center gap-2 text-primary group-hover:gap-3 transition-all">
+                <Download className="h-5 w-5" />
+                <span className="text-sm font-medium">Download</span>
               </div>
-              <h3 className="text-xl font-semibold mb-2">Windows Version</h3>
+            </button>
+            
+            <button
+              onClick={() => handleDownload(DOWNLOAD_URLS.windows)}
+              className={`group flex flex-col items-center justify-center p-8 rounded-lg border-2 transition-all min-w-[220px] hover:scale-105 active:scale-95 cursor-pointer ${
+                userPlatform === 'windows'
+                  ? 'border-primary bg-primary/5 shadow-lg shadow-primary/20'
+                  : 'border-border bg-card hover:border-primary hover:shadow-lg'
+              }`}
+            >
+              <div className={`w-16 h-16 rounded-lg flex items-center justify-center mb-4 transition-colors ${
+                userPlatform === 'windows'
+                  ? 'bg-primary/20 group-hover:bg-primary/30'
+                  : 'bg-primary/10 group-hover:bg-primary/20'
+              }`}>
+                <WindowsLogo className="h-10 w-10 text-primary" />
+              </div>
+              <h3 className="text-xl font-semibold mb-2">
+                Windows Version
+                {userPlatform === 'windows' && (
+                  <span className="ml-2 text-sm text-primary font-normal">(Recommended)</span>
+                )}
+              </h3>
               <p className="text-sm text-muted-foreground mb-4">Download for PC</p>
-              <Download className="h-5 w-5 text-primary" />
-            </a>
+              <div className="flex items-center gap-2 text-primary group-hover:gap-3 transition-all">
+                <Download className="h-5 w-5" />
+                <span className="text-sm font-medium">Download</span>
+              </div>
+            </button>
           </div>
           
           <p className="text-sm text-muted-foreground mt-8">
-            Desktop versions coming soon. Use the web version for now.
+            Desktop app includes all web features plus native file system access
           </p>
         </div>
       </section>
