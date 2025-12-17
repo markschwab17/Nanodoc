@@ -20,7 +20,11 @@ import {
   TextSelect,
   FileDown,
   FolderOpen,
-  HelpCircle
+  HelpCircle,
+  PenTool,
+  Square,
+  FileText,
+  Stamp as StampIcon
 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
@@ -87,31 +91,30 @@ export function Toolbar() {
   // Calculate optimal toolbar size based on available height
   const calculateToolbarSize = useCallback((height: number) => {
     // Estimate required space for all content in each mode:
-    // Compact mode: buttons 32px, gaps 2px
-    // Normal mode: buttons 40px, gaps 4px  
-    // Spacious mode: buttons 48px, gaps 8px
+    // Compact mode: buttons 28px, gaps 1px
+    // Normal mode: buttons 36px, gaps 2px  
+    // Spacious mode: buttons 44px, gaps 4px
     
     // Count items:
     // - File actions: 4 buttons
-    // - Tool selection: 6 buttons
+    // - Tool selection: 10 buttons (select, selectText, pan, text, highlight, redact, draw, shape, form, stamp)
     // - Undo/Redo: 2 buttons
     // - Dividers: 2 dividers (~2-4px each)
     
-    const buttonCount = 4 + 6 + 2; // 12 buttons
+    const buttonCount = 4 + 10 + 2; // 16 buttons
     const dividerCount = 2;
     
     // Calculate required height for each mode
     const compactHeight = 
-      (buttonCount * 32) + (buttonCount * 2) + (dividerCount * 2) + 20 + 20; // +20 for zoom text
+      (buttonCount * 28) + (buttonCount * 1) + (dividerCount * 2) + 20; // Tighter spacing
     
     const normalHeight = 
-      (buttonCount * 40) + (buttonCount * 4) + (dividerCount * 3) + 30 + 20;
+      (buttonCount * 36) + (buttonCount * 2) + (dividerCount * 3) + 20;
     
-    // Determine size mode based on available height
-    // Add 10% buffer for safety
-    if (height < 700 || compactHeight > height * 0.9) {
+    // Force compact mode more aggressively to fit all tools
+    if (height < 800 || compactHeight > height * 0.95) {
       return 'compact';
-    } else if (height < 1000 || normalHeight > height * 0.9) {
+    } else if (height < 1100 || normalHeight > height * 0.9) {
       return 'normal';
     } else {
       return 'spacious';
@@ -165,29 +168,29 @@ export function Toolbar() {
     switch (toolbarSize) {
       case 'compact':
         return {
-          button: 'w-8 h-8',
-          icon: 'h-4 w-4',
-          gap: 'gap-0.5',
-          padding: 'p-1',
-          divider: 'my-1',
+          button: 'w-7 h-7',
+          icon: 'h-3.5 w-3.5',
+          gap: 'gap-0',
+          padding: 'p-0.5',
+          divider: 'my-0.5',
           text: 'text-[10px]',
         };
       case 'normal':
         return {
-          button: 'w-10 h-10',
-          icon: 'h-4.5 w-4.5',
-          gap: 'gap-1',
-          padding: 'p-1.5',
-          divider: 'my-1.5',
+          button: 'w-9 h-9',
+          icon: 'h-4 w-4',
+          gap: 'gap-0.5',
+          padding: 'p-1',
+          divider: 'my-1',
           text: 'text-xs',
         };
       case 'spacious':
         return {
-          button: 'w-12 h-12',
-          icon: 'h-5 w-5',
-          gap: 'gap-2',
-          padding: 'p-2',
-          divider: 'my-2',
+          button: 'w-11 h-11',
+          icon: 'h-4.5 w-4.5',
+          gap: 'gap-1',
+          padding: 'p-1.5',
+          divider: 'my-1.5',
           text: 'text-xs',
         };
     }
@@ -477,6 +480,42 @@ export function Toolbar() {
           className={sizeClasses.button}
         >
           <Eraser className={sizeClasses.icon} />
+        </Button>
+        <Button
+          variant={activeTool === "draw" ? "default" : "outline"}
+          size="icon"
+          onClick={() => setActiveTool("draw")}
+          title="Draw Tool"
+          className={sizeClasses.button}
+        >
+          <PenTool className={sizeClasses.icon} />
+        </Button>
+        <Button
+          variant={activeTool === "shape" ? "default" : "outline"}
+          size="icon"
+          onClick={() => setActiveTool("shape")}
+          title="Shapes (Arrow, Rectangle, Circle)"
+          className={sizeClasses.button}
+        >
+          <Square className={sizeClasses.icon} />
+        </Button>
+        <Button
+          variant={activeTool === "form" ? "default" : "outline"}
+          size="icon"
+          onClick={() => setActiveTool("form")}
+          title="Form Fields"
+          className={sizeClasses.button}
+        >
+          <FileText className={sizeClasses.icon} />
+        </Button>
+        <Button
+          variant={activeTool === "stamp" ? "default" : "outline"}
+          size="icon"
+          onClick={() => setActiveTool(activeTool === "stamp" ? "select" : "stamp")}
+          title="Stamps"
+          className={sizeClasses.button}
+        >
+          <StampIcon className={sizeClasses.icon} />
         </Button>
       </div>
 

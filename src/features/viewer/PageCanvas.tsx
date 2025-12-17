@@ -16,11 +16,19 @@ import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { RichTextEditor } from "./RichTextEditor";
 import { ImageAnnotation } from "./ImageAnnotation";
+import { StampAnnotation } from "./StampAnnotation";
+import { FormField } from "./FormField";
+import { CalloutAnnotation } from "./CalloutAnnotation";
+import { FormFieldHandles } from "./FormFieldHandles";
+import { ShapeHandles } from "./ShapeHandles";
 import { HorizontalRuler } from "./HorizontalRuler";
 import { VerticalRuler } from "./VerticalRuler";
 import { wrapAnnotationUpdate, wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 import { PDFDocument as PDFDocumentClass } from "@/core/pdf/PDFDocument";
 import { toolHandlers } from "@/features/tools";
+import { getSelectedStamp, getStampPreviewPosition, setPreviewUpdateCallback } from "@/features/tools/StampTool";
+import { getDrawingPath, isCurrentlyDrawing, setDrawPreviewCallback } from "@/features/tools/DrawTool";
+import { useStampStore } from "@/shared/stores/stampStore";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
@@ -117,6 +125,32 @@ export function PageCanvas({
   useEffect(() => {
     fitModeRef.current = fitMode;
   }, [fitMode]);
+  
+  // Register stamp preview update callback
+  useEffect(() => {
+    if (activeTool === "stamp") {
+      setPreviewUpdateCallback(() => {
+        const pos = getStampPreviewPosition();
+        setStampPreviewPosition(pos ? { ...pos } : null);
+      });
+    } else {
+      setPreviewUpdateCallback(null);
+      setStampPreviewPosition(null);
+    }
+    return () => setPreviewUpdateCallback(null);
+  }, [activeTool]);
+  
+  // Register draw preview update callback
+  useEffect(() => {
+    if (activeTool === "draw") {
+      setDrawPreviewCallback(() => {
+        setDrawingPathVersion(v => v + 1);
+      });
+    } else {
+      setDrawPreviewCallback(null);
+    }
+    return () => setDrawPreviewCallback(null);
+  }, [activeTool]);
   const [editingAnnotation, setEditingAnnotation] = useState<Annotation | null>(null);
   const [annotationText, setAnnotationText] = useState("");
   const [isEditingMode, setIsEditingMode] = useState(false);
@@ -126,6 +160,9 @@ export function PageCanvas({
   const [isCreatingTextBox, setIsCreatingTextBox] = useState(false);
   const [textBoxStart, setTextBoxStart] = useState<{ x: number; y: number } | null>(null);
   const [isDragOverPage, setIsDragOverPage] = useState(false);
+  const [stampPreviewPosition, setStampPreviewPosition] = useState<{ x: number; y: number } | null>(null);
+  const [drawingPathVersion, setDrawingPathVersion] = useState(0); // Incremented to force re-render of drawing preview
+  const { getStamp } = useStampStore();
   // Track drag/resize/rotate state for annotations to only record undo on operation end
   const draggingAnnotationRef = useRef<{ id: string; initialX: number; initialY: number } | null>(null);
   const resizingAnnotationRef = useRef<{ id: string; initialWidth: number; initialHeight: number } | null>(null);
@@ -650,11 +687,23 @@ export function PageCanvas({
   // Handle keyboard for space+drag pan
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't prevent space if user is typing in a text editor
+      // Don't prevent space if user is typing in an input field
       const domDocument = window.document;
       const activeElement = domDocument.activeElement as HTMLElement;
-      if (activeElement && activeElement.hasAttribute("contenteditable") && activeElement.getAttribute("data-rich-text-editor") === "true") {
-        return; // Allow spacebar to work in text editor
+      
+      // Check if user is focused on any text input element
+      if (activeElement) {
+        const tagName = activeElement.tagName.toLowerCase();
+        // Allow spacebar in text inputs, textareas, selects, and contenteditable elements
+        if (
+          tagName === "input" ||
+          tagName === "textarea" ||
+          tagName === "select" ||
+          activeElement.isContentEditable ||
+          (activeElement.hasAttribute("contenteditable") && activeElement.getAttribute("data-rich-text-editor") === "true")
+        ) {
+          return; // Allow spacebar to work in input fields
+        }
       }
       
       if (e.code === "Space" && !e.repeat) {
@@ -1404,7 +1453,8 @@ export function PageCanvas({
       const isClickingOnEditor = target.closest('[data-rich-text-editor]') || 
                                  target.closest('[data-annotation-id]') ||
                                  target.closest('[data-corner-handle]') ||
-                                 target.closest('[data-rotation-handle]');
+                                 target.closest('[data-rotation-handle]') ||
+                                 target.closest('[data-form-field-button]');
       
       // Don't deselect if clicking on the formatting toolbar or popover
       const isClickingOnToolbar = target.closest('[data-formatting-toolbar]') ||
@@ -1760,6 +1810,89 @@ export function PageCanvas({
               });
             }
           },
+          setIsCreatingTextBox,
+          setTextBoxStart,
+          editor,
+          renderer,
+          canvasRef,
+          containerRef,
+          BASE_SCALE,
+          zoomLevelRef,
+          fitMode,
+          panOffset,
+          panOffsetRef,
+          isSelecting,
+          selectionStart,
+          setSelectedTextSpans,
+        };
+        
+        toolHandler.handleMouseMove(e, toolContext);
+      }
+    }
+    
+    // Handle generic tool mouse move for draw, shape, and form tools
+    if ((activeTool === "draw" || activeTool === "shape" || activeTool === "form") && 
+        (isSelecting || selectionStart) && currentDocument) {
+      const toolHandler = toolHandlers[activeTool];
+      if (toolHandler && toolHandler.handleMouseMove) {
+        const toolContext = {
+          document,
+          pageNumber,
+          currentDocument,
+          annotations,
+          activeTool,
+          getPDFCoordinates,
+          pdfToCanvas,
+          pdfToContainer,
+          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
+          setEditingAnnotation,
+          setAnnotationText,
+          setIsEditingMode,
+          setIsSelecting,
+          setSelectionStart,
+          setSelectionEnd,
+          setIsCreatingTextBox,
+          setTextBoxStart,
+          editor,
+          renderer,
+          canvasRef,
+          containerRef,
+          BASE_SCALE,
+          zoomLevelRef,
+          fitMode,
+          panOffset,
+          panOffsetRef,
+          isSelecting,
+          selectionStart,
+          setSelectedTextSpans,
+        };
+        
+        toolHandler.handleMouseMove(e, toolContext);
+      }
+    }
+    
+    // Handle stamp tool mouse move for preview - always call when stamp tool is active
+    if (activeTool === "stamp" && currentDocument) {
+      const toolHandler = toolHandlers["stamp"];
+      if (toolHandler && toolHandler.handleMouseMove) {
+        const toolContext = {
+          document,
+          pageNumber,
+          currentDocument,
+          annotations,
+          activeTool,
+          getPDFCoordinates,
+          pdfToCanvas,
+          pdfToContainer,
+          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
+          setEditingAnnotation,
+          setAnnotationText,
+          setIsEditingMode,
+          setIsSelecting,
+          setSelectionStart,
+          setSelectionEnd,
           setIsCreatingTextBox,
           setTextBoxStart,
           editor,
@@ -2549,8 +2682,8 @@ export function PageCanvas({
           );
         })()}
 
-        {/* Render selection rectangle */}
-        {isSelecting && selectionStart && selectionEnd && activeTool !== "selectText" && activeTool !== "highlight" && (
+        {/* Render selection rectangle - not for draw tool (it has its own preview) */}
+        {isSelecting && selectionStart && selectionEnd && activeTool !== "selectText" && activeTool !== "highlight" && activeTool !== "draw" && (
           (() => {
             // Convert PDF coordinates to CANVAS coordinates (like text box does)
             const startCanvas = pdfToCanvas(selectionStart.x, selectionStart.y);
@@ -2588,6 +2721,64 @@ export function PageCanvas({
             );
           })()
         )}
+        
+        {/* Render drawing preview while drawing - drawingPathVersion triggers re-renders */}
+        {activeTool === "draw" && isCurrentlyDrawing() && drawingPathVersion >= 0 && (() => {
+          const path = getDrawingPath();
+          if (!path || path.length < 2) return null;
+          
+          // Get drawing settings from UI store
+          const { drawingColor, drawingStrokeWidth } = useUIStore.getState();
+          
+          // Calculate bounding box for SVG positioning
+          const allCanvasX = path.map(p => pdfToCanvas(p.x, p.y).x);
+          const allCanvasY = path.map(p => pdfToCanvas(p.x, p.y).y);
+          const minCanvasX = Math.min(...allCanvasX);
+          const minCanvasY = Math.min(...allCanvasY);
+          const maxCanvasX = Math.max(...allCanvasX);
+          const maxCanvasY = Math.max(...allCanvasY);
+          
+          const padding = (drawingStrokeWidth || 5) / 2 + 2;
+          const boxX = minCanvasX - padding;
+          const boxY = minCanvasY - padding;
+          const boxWidth = (maxCanvasX - minCanvasX) + (padding * 2);
+          const boxHeight = (maxCanvasY - minCanvasY) + (padding * 2);
+          
+          const pathPoints = path.map(p => {
+            const canvasPos = pdfToCanvas(p.x, p.y);
+            return `${canvasPos.x - boxX},${canvasPos.y - boxY}`;
+          }).join(" ");
+          
+          return (
+            <div
+              className="absolute pointer-events-none"
+              style={{
+                left: `${boxX}px`,
+                top: `${boxY}px`,
+                width: `${boxWidth}px`,
+                height: `${boxHeight}px`,
+                zIndex: 60,
+              }}
+            >
+              <svg
+                style={{
+                  width: `${boxWidth}px`,
+                  height: `${boxHeight}px`,
+                }}
+                viewBox={`0 0 ${boxWidth} ${boxHeight}`}
+              >
+                <polyline
+                  points={pathPoints}
+                  fill="none"
+                  stroke={drawingColor || "#000000"}
+                  strokeWidth={drawingStrokeWidth || 5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </div>
+          );
+        })()}
 
         {/* Render text selection highlights - show during drag and after release */}
         {(() => {
@@ -2999,68 +3190,8 @@ export function PageCanvas({
               );
             }
           } else if (annot.type === "callout") {
-            // Render callout with arrow
-            const arrowPoint = annot.arrowPoint || { x: annot.x + (annot.width || 0) / 2, y: annot.y + (annot.height || 0) / 2 };
-            const boxPos = annot.boxPosition || { x: annot.x + (annot.width || 150) + 20, y: annot.y };
-            const boxWidth = annot.width || 150;
-            const boxHeight = annot.height || 80;
-            
-            // Convert PDF coordinates to container coordinates (accounts for viewport transform)
-            const arrowContainer = pdfToContainer(arrowPoint.x, arrowPoint.y);
-            const boxContainer = pdfToContainer(boxPos.x, boxPos.y);
-            const boxContainerWidth = boxWidth * currentZoom;
-            const boxContainerHeight = boxHeight * currentZoom;
-            
-            return (
-              <div 
-                key={annot.id} 
-                className={cn(
-                  "absolute",
-                  activeTool === "select" ? "cursor-pointer" : ""
-                )}
-                style={{ pointerEvents: activeTool === "select" ? "auto" : "none", zIndex: 30 }}
-                onClick={() => {
-                  if (activeTool === "select") {
-                    setEditingAnnotation(annot);
-                    setAnnotationText(annot.content || "");
-                  }
-                }}
-              >
-                {/* Arrow line */}
-                <svg
-                  className="absolute"
-                  style={{
-                    left: `${Math.min(arrowContainer.x, boxContainer.x)}px`,
-                    top: `${Math.min(arrowContainer.y, boxContainer.y)}px`,
-                    width: `${Math.abs(boxContainer.x - arrowContainer.x)}px`,
-                    height: `${Math.abs(boxContainer.y - arrowContainer.y)}px`,
-                  }}
-                >
-                  <line
-                    x1={arrowContainer.x < boxContainer.x ? 0 : Math.abs(boxContainer.x - arrowContainer.x)}
-                    y1={arrowContainer.y < boxContainer.y ? 0 : Math.abs(boxContainer.y - arrowContainer.y)}
-                    x2={arrowContainer.x < boxContainer.x ? Math.abs(boxContainer.x - arrowContainer.x) : 0}
-                    y2={arrowContainer.y < boxContainer.y ? Math.abs(boxContainer.y - arrowContainer.y) : 0}
-                    stroke={annot.color || "#000000"}
-                    strokeWidth={2 * currentZoom}
-                  />
-                </svg>
-                {/* Callout box */}
-                <div
-                  className="absolute border-2 bg-yellow-100 p-2 rounded shadow-lg"
-                  style={{
-                    left: `${boxContainer.x}px`,
-                    top: `${boxContainer.y}px`,
-                    width: `${boxContainerWidth}px`,
-                    minHeight: `${boxContainerHeight}px`,
-                    borderColor: annot.color || "#000000",
-                    fontSize: `${12 * currentZoom}px`,
-                  }}
-                >
-                  {annot.content || "Note"}
-                </div>
-              </div>
-            );
+            // Callout annotations are rendered using CalloutAnnotation component below
+            return null;
           } else if (annot.type === "redact") {
             // Don't render redactions as overlays - the content is actually deleted from the PDF
             // The PDF canvas will show the white background where content was removed
@@ -3110,6 +3241,249 @@ export function PageCanvas({
           } else if (annot.type === "image") {
             // Image annotations are rendered using ImageAnnotation component
             // This is handled below in the ImageAnnotation section
+            return null;
+          } else if (annot.type === "draw") {
+            // Render drawing annotation
+            if (!annot.path || annot.path.length < 2) return null;
+            
+            const drawColor = annot.color || "#000000";
+            const strokeWidth = annot.strokeWidth || 3;
+            
+            // Calculate bounding box
+            const allCanvasX = annot.path.map(p => pdfToCanvas(p.x, p.y).x);
+            const allCanvasY = annot.path.map(p => pdfToCanvas(p.x, p.y).y);
+            const minCanvasX = Math.min(...allCanvasX);
+            const minCanvasY = Math.min(...allCanvasY);
+            const maxCanvasX = Math.max(...allCanvasX);
+            const maxCanvasY = Math.max(...allCanvasY);
+            
+            const padding = strokeWidth / 2;
+            const boxX = minCanvasX - padding;
+            const boxY = minCanvasY - padding;
+            const boxWidth = (maxCanvasX - minCanvasX) + (padding * 2);
+            const boxHeight = (maxCanvasY - minCanvasY) + (padding * 2);
+            
+            const relativePathPoints = annot.path.map(p => {
+              const canvasPos = pdfToCanvas(p.x, p.y);
+              return `${canvasPos.x - boxX},${canvasPos.y - boxY}`;
+            }).join(" ");
+            
+            const isHovered = hoveredAnnotationId === annot.id && activeTool === "select";
+            const isSelected = editingAnnotation?.id === annot.id;
+            
+            return (
+              <div 
+                key={annot.id}
+                data-annotation-id={annot.id}
+                className={cn("absolute", activeTool === "select" ? "cursor-pointer" : "")}
+                style={{ 
+                  pointerEvents: activeTool === "select" ? "auto" : "none",
+                  zIndex: 30,
+                  left: `${boxX}px`,
+                  top: `${boxY}px`,
+                  width: `${boxWidth}px`,
+                  height: `${boxHeight}px`,
+                }}
+                onClick={(e) => {
+                  if (activeTool === "select") {
+                    e.stopPropagation();
+                    setEditingAnnotation(annot);
+                    setHoveredAnnotationId(annot.id);
+                  }
+                }}
+                onMouseEnter={() => {
+                  if (activeTool === "select") setHoveredAnnotationId(annot.id);
+                }}
+                onMouseLeave={() => {
+                  if (activeTool === "select" && !isSelected) setHoveredAnnotationId(null);
+                }}
+              >
+                {(isHovered || isSelected) && (
+                  <div
+                    className="absolute border-2 border-primary pointer-events-none"
+                    style={{
+                      left: `-4px`,
+                      top: `-4px`,
+                      width: `${boxWidth + 8}px`,
+                      height: `${boxHeight + 8}px`,
+                      borderRadius: "4px",
+                      zIndex: 31,
+                    }}
+                  />
+                )}
+                <svg
+                  style={{
+                    width: `${boxWidth}px`,
+                    height: `${boxHeight}px`,
+                  }}
+                  viewBox={`0 0 ${boxWidth} ${boxHeight}`}
+                >
+                  <polyline
+                    points={relativePathPoints}
+                    fill="none"
+                    stroke={drawColor}
+                    strokeWidth={strokeWidth}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+            );
+          } else if (annot.type === "shape") {
+            // Render shape annotation
+            const strokeColor = annot.strokeColor || "#000000";
+            const strokeWidth = annot.strokeWidth || 2;
+            const fillColor = annot.fillColor || "#FFFFFF";
+            const fillOpacity = annot.fillOpacity !== undefined ? annot.fillOpacity : 0;
+            
+            if (annot.shapeType === "arrow" && annot.points && annot.points.length >= 2) {
+              const start = pdfToCanvas(annot.points[0].x, annot.points[0].y);
+              const end = pdfToCanvas(annot.points[1].x, annot.points[1].y);
+              const arrowHeadSize = annot.arrowHeadSize || 10;
+              
+              const dx = end.x - start.x;
+              const dy = end.y - start.y;
+              const angle = Math.atan2(dy, dx);
+              
+              const arrowHead1X = end.x - arrowHeadSize * Math.cos(angle - Math.PI / 6);
+              const arrowHead1Y = end.y - arrowHeadSize * Math.sin(angle - Math.PI / 6);
+              const arrowHead2X = end.x - arrowHeadSize * Math.cos(angle + Math.PI / 6);
+              const arrowHead2Y = end.y - arrowHeadSize * Math.sin(angle + Math.PI / 6);
+              
+              const minX = Math.min(start.x, end.x, arrowHead1X, arrowHead2X) - 10;
+              const minY = Math.min(start.y, end.y, arrowHead1Y, arrowHead2Y) - 10;
+              const maxX = Math.max(start.x, end.x, arrowHead1X, arrowHead2X) + 10;
+              const maxY = Math.max(start.y, end.y, arrowHead1Y, arrowHead2Y) + 10;
+              
+              const isSelected = editingAnnotation?.id === annot.id;
+              
+              return (
+                <div key={annot.id}>
+                  <div 
+                    data-annotation-id={annot.id}
+                    className={cn("absolute", activeTool === "select" ? "cursor-pointer" : "")}
+                    style={{
+                      pointerEvents: activeTool === "select" ? "auto" : "none",
+                      zIndex: 30,
+                      left: `${minX}px`,
+                      top: `${minY}px`,
+                      width: `${maxX - minX}px`,
+                      height: `${maxY - minY}px`,
+                    }}
+                    onClick={(e) => {
+                      if (activeTool === "select") {
+                        e.stopPropagation();
+                        setEditingAnnotation(annot);
+                      }
+                    }}
+                  >
+                    <svg style={{ width: "100%", height: "100%" }}>
+                      <line
+                        x1={start.x - minX}
+                        y1={start.y - minY}
+                        x2={end.x - minX}
+                        y2={end.y - minY}
+                        stroke={strokeColor}
+                        strokeWidth={strokeWidth}
+                      />
+                      <polygon
+                        points={`${end.x - minX},${end.y - minY} ${arrowHead1X - minX},${arrowHead1Y - minY} ${arrowHead2X - minX},${arrowHead2Y - minY}`}
+                        fill={strokeColor}
+                      />
+                    </svg>
+                  </div>
+                  {isSelected && activeTool === "select" && (
+                    <ShapeHandles
+                      annotation={annot}
+                      pdfToCanvas={pdfToCanvas}
+                      onUpdate={(updates) => {
+                        if (!currentDocument) return;
+                        updateAnnotation(
+                          currentDocument.getId(),
+                          annot.id,
+                          updates
+                        );
+                      }}
+                      zoomLevel={currentZoom}
+                    />
+                  )}
+                </div>
+              );
+            } else if (annot.shapeType === "rectangle" || annot.shapeType === "circle") {
+              const topLeft = pdfToCanvas(annot.x, annot.y + (annot.height || 0));
+              const width = annot.width || 0;
+              const height = annot.height || 0;
+              const isSelected = editingAnnotation?.id === annot.id;
+              
+              return (
+                <div key={annot.id}>
+                  <div 
+                    data-annotation-id={annot.id}
+                    className={cn("absolute", activeTool === "select" ? "cursor-pointer" : "")}
+                    style={{
+                      pointerEvents: activeTool === "select" ? "auto" : "none",
+                      zIndex: 30,
+                      left: `${topLeft.x}px`,
+                      top: `${topLeft.y}px`,
+                      width: `${width}px`,
+                      height: `${height}px`,
+                    }}
+                    onClick={(e) => {
+                      if (activeTool === "select") {
+                        e.stopPropagation();
+                        setEditingAnnotation(annot);
+                      }
+                    }}
+                  >
+                    <svg style={{ width: "100%", height: "100%" }}>
+                      {annot.shapeType === "rectangle" ? (
+                        <rect
+                          x={strokeWidth / 2}
+                          y={strokeWidth / 2}
+                          width={width - strokeWidth}
+                          height={height - strokeWidth}
+                          stroke={strokeColor}
+                          strokeWidth={strokeWidth}
+                          fill={fillColor}
+                          fillOpacity={fillOpacity}
+                        />
+                      ) : (
+                        <ellipse
+                          cx={width / 2}
+                          cy={height / 2}
+                          rx={(width - strokeWidth) / 2}
+                          ry={(height - strokeWidth) / 2}
+                          stroke={strokeColor}
+                          strokeWidth={strokeWidth}
+                          fill={fillColor}
+                          fillOpacity={fillOpacity}
+                        />
+                      )}
+                    </svg>
+                  </div>
+                  {isSelected && activeTool === "select" && (
+                    <ShapeHandles
+                      annotation={annot}
+                      pdfToCanvas={pdfToCanvas}
+                      onUpdate={(updates) => {
+                        if (!currentDocument) return;
+                        updateAnnotation(
+                          currentDocument.getId(),
+                          annot.id,
+                          updates
+                        );
+                      }}
+                      zoomLevel={currentZoom}
+                    />
+                  )}
+                </div>
+              );
+            }
+          } else if (annot.type === "formField") {
+            // Form fields are rendered using FormField component below
+            return null;
+          } else if (annot.type === "stamp") {
+            // Stamp annotations are rendered using StampAnnotation component below
             return null;
           }
           
@@ -3694,6 +4068,324 @@ export function PageCanvas({
                 />
               );
             });
+        })()}
+
+        {/* Form fields - always visible */}
+        {(() => {
+          const allFormFields = annotations.filter(annot => annot.type === "formField");
+          const filteredFields = allFormFields.filter(annot => annot.pageNumber === pageNumber);
+          return filteredFields
+            .filter(annot => annot.x != null && annot.y != null)
+            .map((annot) => {
+              const isSelected = editingAnnotation?.id === annot.id;
+              
+              return (
+                <div key={annot.id}>
+                  <FormField
+                    annotation={annot}
+                    pdfToCanvas={pdfToCanvas}
+                    onValueChange={(value) => {
+                      if (!currentDocument) return;
+                      updateAnnotation(
+                        currentDocument.getId(),
+                        annot.id,
+                        { fieldValue: value }
+                      );
+                    }}
+                    onOptionsChange={(options) => {
+                      if (!currentDocument) return;
+                      updateAnnotation(
+                        currentDocument.getId(),
+                        annot.id,
+                        { options }
+                      );
+                    }}
+                    isEditable={true}
+                    isSelected={isSelected}
+                    onClick={() => {
+                      if (activeTool === "select") {
+                        setEditingAnnotation(annot);
+                      }
+                    }}
+                  />
+                  {isSelected && activeTool === "select" && (
+                    <FormFieldHandles
+                      annotation={annot}
+                      pdfToCanvas={pdfToCanvas}
+                      onUpdate={(updates) => {
+                        if (!currentDocument) return;
+                        updateAnnotation(
+                          currentDocument.getId(),
+                          annot.id,
+                          updates
+                        );
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            });
+        })()}
+
+        {/* Callout annotations - always visible */}
+        {(() => {
+          const allCallouts = annotations.filter(annot => annot.type === "callout");
+          const filteredCallouts = allCallouts.filter(annot => annot.pageNumber === pageNumber);
+          return filteredCallouts.map((annot) => {
+            const currentZoom = zoomLevelRef.current;
+            if (currentZoom <= 0) return null;
+            
+            const isSelected = editingAnnotation?.id === annot.id;
+            
+            return (
+              <CalloutAnnotation
+                key={annot.id}
+                annotation={annot}
+                pdfToContainer={pdfToContainer}
+                onEdit={() => {
+                  setEditingAnnotation(annot);
+                  setAnnotationText(annot.content || "");
+                  setIsEditingMode(true);
+                }}
+                onDelete={async () => {
+                  if (!currentDocument) return;
+                  
+                  try {
+                    const mupdfModule = await import("mupdf");
+                    const { PDFEditor } = await import("@/core/pdf/PDFEditor");
+                    const editor = new PDFEditor(mupdfModule.default);
+                    
+                    await editor.deleteAnnotation(currentDocument, annot);
+                    
+                    const { wrapAnnotationOperation } = await import("@/shared/stores/undoHelpers");
+                    wrapAnnotationOperation(
+                      () => {
+                        usePDFStore.getState().removeAnnotation(
+                          currentDocument.getId(),
+                          annot.id
+                        );
+                      },
+                      "removeAnnotation",
+                      currentDocument.getId(),
+                      annot.id,
+                      undefined,
+                      annot
+                    );
+                  } catch (error) {
+                    console.error("Error deleting callout:", error);
+                  }
+                }}
+                isSelected={isSelected}
+                zoomLevel={currentZoom}
+              />
+            );
+          });
+        })()}
+
+        {/* Stamp annotations - always visible */}
+        {(() => {
+          const allStamps = annotations.filter(annot => annot.type === "stamp");
+          const filteredStamps = allStamps.filter(annot => annot.pageNumber === pageNumber);
+          return filteredStamps
+            .filter(annot => annot.x != null && annot.y != null)
+            .map((annot) => {
+              const isSelected = editingAnnotation?.id === annot.id;
+              const isHovered = hoveredAnnotationId === annot.id && activeTool === "select" && !isSelected;
+              
+              const currentZoom = zoomLevelRef.current;
+              if (currentZoom <= 0) return null;
+              
+              const pdfTopY = annot.y + (annot.height || 0);
+              const canvasPos = pdfToCanvas(annot.x, pdfTopY);
+              
+              return (
+                <StampAnnotation
+                  key={annot.id}
+                  annotation={annot}
+                  scale={1.0}
+                  style={{
+                    position: "absolute",
+                    left: `${canvasPos.x}px`,
+                    top: `${canvasPos.y}px`,
+                    zIndex: 25,
+                  }}
+                  onMove={(deltaX, deltaY) => {
+                    if (!currentDocument) return;
+                    const newX = annot.x + deltaX;
+                    const newY = annot.y + deltaY;
+                    
+                    if (!draggingAnnotationRef.current || draggingAnnotationRef.current.id !== annot.id) {
+                      draggingAnnotationRef.current = {
+                        id: annot.id,
+                        initialX: annot.x,
+                        initialY: annot.y,
+                      };
+                    }
+                    
+                    updateAnnotation(
+                      currentDocument.getId(),
+                      annot.id,
+                      { x: newX, y: newY }
+                    );
+                  }}
+                  onResize={(width, height) => {
+                    if (!currentDocument) return;
+                    if (!resizingAnnotationRef.current || resizingAnnotationRef.current.id !== annot.id) {
+                      resizingAnnotationRef.current = {
+                        id: annot.id,
+                        initialWidth: annot.width || 100,
+                        initialHeight: annot.height || 60,
+                      };
+                    }
+                    
+                    updateAnnotation(
+                      currentDocument.getId(),
+                      annot.id,
+                      { width, height }
+                    );
+                  }}
+                  onResizeEnd={() => {
+                    if (currentDocument && resizingAnnotationRef.current && resizingAnnotationRef.current.id === annot.id) {
+                      const initialSize = resizingAnnotationRef.current;
+                      const finalSize = { width: annot.width || 100, height: annot.height || 60 };
+                      
+                      if (initialSize.initialWidth !== finalSize.width || initialSize.initialHeight !== finalSize.height) {
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          finalSize
+                        );
+                      }
+                      
+                      resizingAnnotationRef.current = null;
+                    }
+                  }}
+                  onRotate={(angle) => {
+                    if (!currentDocument) return;
+                    if (!rotatingAnnotationRef.current || rotatingAnnotationRef.current.id !== annot.id) {
+                      rotatingAnnotationRef.current = {
+                        id: annot.id,
+                        initialRotation: annot.rotation || 0,
+                      };
+                    }
+                    
+                    updateAnnotation(
+                      currentDocument.getId(),
+                      annot.id,
+                      { rotation: angle }
+                    );
+                  }}
+                  onRotateEnd={() => {
+                    if (currentDocument && rotatingAnnotationRef.current && rotatingAnnotationRef.current.id === annot.id) {
+                      const initialRotation = rotatingAnnotationRef.current;
+                      const finalRotation = annot.rotation || 0;
+                      
+                      if (initialRotation.initialRotation !== finalRotation) {
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          { rotation: finalRotation }
+                        );
+                      }
+                      
+                      rotatingAnnotationRef.current = null;
+                    }
+                  }}
+                  onDragEnd={() => {
+                    if (currentDocument && draggingAnnotationRef.current && draggingAnnotationRef.current.id === annot.id) {
+                      const initialPos = draggingAnnotationRef.current;
+                      const finalPos = { x: annot.x, y: annot.y };
+                      
+                      if (initialPos.initialX !== finalPos.x || initialPos.initialY !== finalPos.y) {
+                        wrapAnnotationUpdate(
+                          currentDocument.getId(),
+                          annot.id,
+                          finalPos
+                        );
+                      }
+                      
+                      draggingAnnotationRef.current = null;
+                    }
+                  }}
+                  isSelected={isSelected}
+                  isHovered={isHovered}
+                  activeTool={activeTool}
+                  isSpacePressed={isSpacePressed}
+                  onClick={() => {
+                    if (activeTool === "select") {
+                      setEditingAnnotation(annot);
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseEnter={() => {
+                    if (activeTool === "select") {
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    if (activeTool === "select" && !isSelected) {
+                      setHoveredAnnotationId(null);
+                    }
+                  }}
+                />
+              );
+            });
+        })()}
+
+        {/* Stamp Preview - shows when stamp tool is active */}
+        {activeTool === "stamp" && stampPreviewPosition && (() => {
+          const selectedStampId = getSelectedStamp();
+          if (!selectedStampId) return null;
+          
+          const stamp = getStamp(selectedStampId);
+          if (!stamp) return null;
+          
+          const previewWidth = 100;
+          const previewHeight = 60;
+          const pdfTopY = stampPreviewPosition.y + previewHeight;
+          const canvasPos = pdfToCanvas(stampPreviewPosition.x, pdfTopY);
+          
+          return (
+            <div
+              key="stamp-preview"
+              className="absolute pointer-events-none opacity-70"
+              style={{
+                left: `${canvasPos.x}px`,
+                top: `${canvasPos.y}px`,
+                width: `${previewWidth}px`,
+                height: `${previewHeight}px`,
+                zIndex: 50,
+              }}
+            >
+              <div className="w-full h-full border-2 border-dashed border-blue-500 bg-white/50 flex items-center justify-center overflow-hidden rounded shadow-md">
+                {stamp.thumbnail ? (
+                  <img
+                    src={stamp.thumbnail}
+                    alt={stamp.name || "Stamp"}
+                    className="max-w-full max-h-full object-contain"
+                  />
+                ) : stamp.type === "text" && stamp.text ? (
+                  <div
+                    className="p-2 text-center"
+                    style={{
+                      color: stamp.textColor || "#000000",
+                      backgroundColor: stamp.backgroundEnabled 
+                        ? stamp.backgroundColor || "#FFFFFF" 
+                        : "transparent",
+                      fontFamily: stamp.font || "Arial",
+                      fontSize: "14px",
+                    }}
+                  >
+                    {stamp.text}
+                  </div>
+                ) : (
+                  <div className="text-sm text-gray-400">
+                    {stamp.name || "Stamp"}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
         })()}
       </div>
     </div>

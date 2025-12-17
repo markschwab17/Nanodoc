@@ -14,8 +14,14 @@ import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
 import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
+import { DrawToolbar } from "@/features/viewer/DrawToolbar";
+import { ShapeToolbar } from "@/features/viewer/ShapeToolbar";
+import { FormToolbar } from "@/features/viewer/FormToolbar";
+import { StampToolbar } from "@/features/viewer/StampToolbar";
 import { SearchBar } from "@/features/search/SearchBar";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
+import { StampGallery } from "@/features/stamps/StampGallery";
+import { StampCreator } from "@/features/stamps/StampCreator";
 import { Button } from "@/components/ui/button";
 import { FileText, Upload, File } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -34,6 +40,8 @@ function Editor() {
   const { loadPDF, loading } = usePDF();
   const { showNotification } = useNotificationStore();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
+  const [showStampGallery, setShowStampGallery] = useState(false);
+  const [showStampCreator, setShowStampCreator] = useState(false);
   
   // Debug: Log loading state changes
   useEffect(() => {
@@ -427,19 +435,19 @@ function Editor() {
         </aside>
       </div>
 
-      {/* Floating Highlight Toolbar - only when highlight tool is active and PDF is loaded */}
-      {currentDocument && !readMode && activeTool === "highlight" && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
-          <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg">
-            <HighlightToolbar />
-          </div>
-        </div>
-      )}
-
-      {/* Floating Text Formatting Toolbar with Tabs - show when PDF is loaded and not in read mode */}
+      {/* Floating Context Toolbar - changes based on active tool */}
       {currentDocument && !readMode && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
           <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg flex flex-col">
+            {/* Tool-specific toolbar */}
+            {activeTool === "highlight" && <HighlightToolbar />}
+            {activeTool === "draw" && <DrawToolbar />}
+            {activeTool === "shape" && <ShapeToolbar />}
+            {activeTool === "form" && <FormToolbar />}
+            {activeTool === "stamp" && <StampToolbar onOpenGallery={() => setShowStampGallery(true)} />}
+            
+            {/* Text formatting toolbar - shown for text tool or when editing */}
+            {(activeTool === "text" || activeTool === "select") && (
             <TextFormattingToolbar
               onFormat={(_command, _value) => {
                 // Formatting is handled by document.execCommand in the toolbar
@@ -551,6 +559,8 @@ function Editor() {
                 }
               }}
             />
+            )}
+            
             {/* Tabs in separate row at bottom edge */}
             <div className="border-t border-border">
               <TabBar />
@@ -563,6 +573,27 @@ function Editor() {
       <RecentFilesModal
         open={showRecentFilesOnStartup}
         onOpenChange={setShowRecentFilesOnStartup}
+      />
+
+      {/* Stamp Gallery Modal */}
+      {showStampGallery && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+          <div className="bg-background border rounded-lg shadow-lg p-6 max-w-2xl">
+            <StampGallery
+              onCreateNew={() => {
+                setShowStampGallery(false);
+                setShowStampCreator(true);
+              }}
+              onClose={() => setShowStampGallery(false)}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Stamp Creator Modal */}
+      <StampCreator
+        open={showStampCreator}
+        onClose={() => setShowStampCreator(false)}
       />
 
     </div>

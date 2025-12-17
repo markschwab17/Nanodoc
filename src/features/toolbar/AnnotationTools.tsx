@@ -1,7 +1,7 @@
 /**
  * Annotation Tools Component
  * 
- * Toolbar for text annotation tools with font selection, size, styling, and color picker.
+ * Comprehensive toolbar for all PDF annotation tools
  */
 
 import { useState } from "react";
@@ -13,142 +13,324 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Type, Bold, Italic, Underline, Palette, Highlighter, MessageSquare } from "lucide-react";
+import { 
+  Type, Highlighter, MessageSquare, PenTool, Square, Circle, 
+  ArrowRight, FileText, Stamp as StampIcon, Palette 
+} from "lucide-react";
 import { HexColorPicker } from "react-colorful";
+import { StampGallery } from "@/features/stamps/StampGallery";
+import { StampCreator } from "@/features/stamps/StampCreator";
 
 export function AnnotationTools() {
-  const { activeTool, setActiveTool } = useUIStore();
-  const [fontSize, setFontSize] = useState(12);
-  const [fontFamily, setFontFamily] = useState("Arial");
-  const [color, setColor] = useState("#000000");
-  const [bold, setBold] = useState(false);
-  const [italic, setItalic] = useState(false);
-  const [underline, setUnderline] = useState(false);
-  const [showColorPicker, setShowColorPicker] = useState(false);
+  const {
+    activeTool,
+    setActiveTool,
+    drawingStyle,
+    drawingColor,
+    drawingStrokeWidth,
+    setDrawingStyle,
+    setDrawingColor,
+    setDrawingStrokeWidth,
+    currentShapeType,
+    shapeStrokeColor,
+    shapeStrokeWidth,
+    shapeFillColor,
+    shapeFillOpacity,
+    arrowHeadSize,
+    setCurrentShapeType,
+    setShapeStrokeColor,
+    setShapeStrokeWidth,
+    setShapeFillColor,
+    setShapeFillOpacity,
+    setArrowHeadSize,
+    currentFieldType,
+    setCurrentFieldType,
+  } = useUIStore();
 
-  const isTextToolActive = activeTool === "text";
-  const isHighlightToolActive = activeTool === "highlight";
-  const isCalloutToolActive = activeTool === "callout";
-
-  const handleTextToolToggle = () => {
-    setActiveTool(isTextToolActive ? "select" : "text");
-  };
-
-  const handleHighlightToolToggle = () => {
-    setActiveTool(isHighlightToolActive ? "select" : "highlight");
-  };
-
-  const handleCalloutToolToggle = () => {
-    setActiveTool(isCalloutToolActive ? "select" : "callout");
-  };
+  const [showStampGallery, setShowStampGallery] = useState(false);
+  const [showStampCreator, setShowStampCreator] = useState(false);
 
   return (
-    <div className="flex items-center gap-2 p-2 border-b bg-background">
-      <Button
-        variant={isTextToolActive ? "default" : "outline"}
-        size="sm"
-        onClick={handleTextToolToggle}
-        title="Text Annotation"
-      >
-        <Type className="h-4 w-4 mr-2" />
-        Text
-      </Button>
-      
-      <Button
-        variant={isHighlightToolActive ? "default" : "outline"}
-        size="sm"
-        onClick={handleHighlightToolToggle}
-        title="Highlight Text"
-      >
-        <Highlighter className="h-4 w-4 mr-2" />
-        Highlight
-      </Button>
-      
-      <Button
-        variant={isCalloutToolActive ? "default" : "outline"}
-        size="sm"
-        onClick={handleCalloutToolToggle}
-        title="Callout Note"
-      >
-        <MessageSquare className="h-4 w-4 mr-2" />
-        Callout
-      </Button>
+    <div className="flex items-center gap-2 p-2 border-b bg-background overflow-x-auto">
+      {/* Basic Tools */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant={activeTool === "text" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setActiveTool(activeTool === "text" ? "select" : "text")}
+          title="Text Annotation"
+        >
+          <Type className="h-4 w-4 mr-1" />
+          Text
+        </Button>
+        
+        <Button
+          variant={activeTool === "highlight" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setActiveTool(activeTool === "highlight" ? "select" : "highlight")}
+          title="Highlight"
+        >
+          <Highlighter className="h-4 w-4 mr-1" />
+          Highlight
+        </Button>
+        
+        <Button
+          variant={activeTool === "callout" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setActiveTool(activeTool === "callout" ? "select" : "callout")}
+          title="Callout"
+        >
+          <MessageSquare className="h-4 w-4 mr-1" />
+          Callout
+        </Button>
+      </div>
 
-      {isTextToolActive && (
-        <>
-          <div className="h-6 w-px bg-border" />
+      <div className="h-6 w-px bg-border" />
 
-          {/* Font Family */}
-          <select
-            value={fontFamily}
-            onChange={(e) => setFontFamily(e.target.value)}
-            className="h-8 px-2 text-sm border rounded bg-background"
-          >
-            <option value="Arial">Arial</option>
-            <option value="Helvetica">Helvetica</option>
-            <option value="Times New Roman">Times New Roman</option>
-            <option value="Courier New">Courier New</option>
-            <option value="Verdana">Verdana</option>
-          </select>
+      {/* Drawing Tool */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant={activeTool === "draw" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setActiveTool(activeTool === "draw" ? "select" : "draw")}
+          title="Draw"
+        >
+          <PenTool className="h-4 w-4 mr-1" />
+          Draw
+        </Button>
 
-          {/* Font Size */}
-          <div className="flex items-center gap-2 min-w-[120px]">
-            <span className="text-xs text-muted-foreground">Size:</span>
-            <Slider
-              value={[fontSize]}
-              onValueChange={([value]) => setFontSize(value)}
-              min={8}
-              max={72}
-              step={1}
-              className="flex-1"
-            />
-            <span className="text-xs text-muted-foreground w-8">{fontSize}</span>
-          </div>
+        {activeTool === "draw" && (
+          <>
+            <select
+              value={drawingStyle}
+              onChange={(e) => setDrawingStyle(e.target.value as any)}
+              className="h-8 px-2 text-sm border rounded"
+              title="Drawing Style"
+            >
+              <option value="pen">Pen</option>
+              <option value="pencil">Pencil</option>
+              <option value="marker">Marker</option>
+            </select>
 
-          {/* Text Style Buttons */}
-          <Button
-            variant={bold ? "default" : "outline"}
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => setBold(!bold)}
-          >
-            <Bold className="h-4 w-4" />
-          </Button>
-          <Button
-            variant={italic ? "default" : "outline"}
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => setItalic(!italic)}
-          >
-            <Italic className="h-4 w-4" />
-          </Button>
-          <Button
-            variant={underline ? "default" : "outline"}
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => setUnderline(!underline)}
-          >
-            <Underline className="h-4 w-4" />
-          </Button>
-
-          {/* Color Picker */}
-          <Popover open={showColorPicker} onOpenChange={setShowColorPicker}>
-            <PopoverTrigger asChild>
-              <Button variant="outline" size="icon" className="h-8 w-8">
-                <Palette className="h-4 w-4" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-3">
-              <HexColorPicker color={color} onChange={setColor} />
-              <div
-                className="mt-2 h-8 w-full rounded border"
-                style={{ backgroundColor: color }}
+            <div className="flex items-center gap-1">
+              <span className="text-xs">Width:</span>
+              <Slider
+                value={[drawingStrokeWidth]}
+                onValueChange={([value]) => setDrawingStrokeWidth(value)}
+                min={1}
+                max={20}
+                step={1}
+                className="w-20"
               />
-            </PopoverContent>
-          </Popover>
-        </>
-      )}
+              <span className="text-xs w-6">{drawingStrokeWidth}</span>
+            </div>
+
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="icon" className="h-8 w-8">
+                  <div
+                    className="h-4 w-4 rounded border"
+                    style={{ backgroundColor: drawingColor }}
+                  />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-3">
+                <HexColorPicker color={drawingColor} onChange={setDrawingColor} />
+              </PopoverContent>
+            </Popover>
+          </>
+        )}
+      </div>
+
+      <div className="h-6 w-px bg-border" />
+
+      {/* Shape Tool */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant={activeTool === "shape" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setActiveTool(activeTool === "shape" ? "select" : "shape")}
+          title="Shapes"
+        >
+          <Square className="h-4 w-4 mr-1" />
+          Shapes
+        </Button>
+
+        {activeTool === "shape" && (
+          <>
+            <div className="flex items-center gap-1">
+              <Button
+                variant={currentShapeType === "rectangle" ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setCurrentShapeType("rectangle")}
+                title="Rectangle"
+              >
+                <Square className="h-4 w-4" />
+              </Button>
+              <Button
+                variant={currentShapeType === "circle" ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setCurrentShapeType("circle")}
+                title="Circle"
+              >
+                <Circle className="h-4 w-4" />
+              </Button>
+              <Button
+                variant={currentShapeType === "arrow" ? "default" : "outline"}
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setCurrentShapeType("arrow")}
+                title="Arrow"
+              >
+                <ArrowRight className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="text-xs">Stroke:</span>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="icon" className="h-8 w-8">
+                    <div
+                      className="h-4 w-4 rounded border"
+                      style={{ backgroundColor: shapeStrokeColor }}
+                    />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-3">
+                  <HexColorPicker color={shapeStrokeColor} onChange={setShapeStrokeColor} />
+                </PopoverContent>
+              </Popover>
+              <Slider
+                value={[shapeStrokeWidth]}
+                onValueChange={([value]) => setShapeStrokeWidth(value)}
+                min={1}
+                max={10}
+                step={1}
+                className="w-16"
+              />
+            </div>
+
+            <div className="flex items-center gap-1">
+              <span className="text-xs">Fill:</span>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="icon" className="h-8 w-8">
+                    <div
+                      className="h-4 w-4 rounded border"
+                      style={{ 
+                        backgroundColor: shapeFillColor,
+                        opacity: shapeFillOpacity 
+                      }}
+                    />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-3">
+                  <HexColorPicker color={shapeFillColor} onChange={setShapeFillColor} />
+                  <div className="mt-2">
+                    <span className="text-xs">Opacity:</span>
+                    <Slider
+                      value={[shapeFillOpacity * 100]}
+                      onValueChange={([value]) => setShapeFillOpacity(value / 100)}
+                      min={0}
+                      max={100}
+                      step={1}
+                      className="w-full"
+                    />
+                  </div>
+                </PopoverContent>
+              </Popover>
+            </div>
+
+            {currentShapeType === "arrow" && (
+              <div className="flex items-center gap-1">
+                <span className="text-xs">Head:</span>
+                <Slider
+                  value={[arrowHeadSize]}
+                  onValueChange={([value]) => setArrowHeadSize(value)}
+                  min={5}
+                  max={30}
+                  step={1}
+                  className="w-16"
+                />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="h-6 w-px bg-border" />
+
+      {/* Form Tool */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant={activeTool === "form" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setActiveTool(activeTool === "form" ? "select" : "form")}
+          title="Form Fields"
+        >
+          <FileText className="h-4 w-4 mr-1" />
+          Form
+        </Button>
+
+        {activeTool === "form" && (
+          <select
+            value={currentFieldType}
+            onChange={(e) => setCurrentFieldType(e.target.value as any)}
+            className="h-8 px-2 text-sm border rounded"
+            title="Field Type"
+          >
+            <option value="text">Text Field</option>
+            <option value="checkbox">Checkbox</option>
+            <option value="radio">Radio Button</option>
+            <option value="dropdown">Dropdown</option>
+            <option value="date">Date Picker</option>
+          </select>
+        )}
+      </div>
+
+      <div className="h-6 w-px bg-border" />
+
+      {/* Stamp Tool */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant={activeTool === "stamp" ? "default" : "outline"}
+          size="sm"
+          onClick={() => {
+            if (activeTool === "stamp") {
+              setActiveTool("select");
+            } else {
+              setShowStampGallery(true);
+            }
+          }}
+          title="Stamps"
+        >
+          <StampIcon className="h-4 w-4 mr-1" />
+          Stamp
+        </Button>
+
+        <Popover open={showStampGallery} onOpenChange={setShowStampGallery}>
+          <PopoverTrigger asChild>
+            <span />
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-4" align="start">
+            <StampGallery
+              onCreateNew={() => {
+                setShowStampGallery(false);
+                setShowStampCreator(true);
+              }}
+              onClose={() => setShowStampGallery(false)}
+            />
+          </PopoverContent>
+        </Popover>
+
+        <StampCreator
+          open={showStampCreator}
+          onClose={() => setShowStampCreator(false)}
+        />
+      </div>
     </div>
   );
 }
-

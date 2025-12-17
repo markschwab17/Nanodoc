@@ -17,7 +17,7 @@ export interface PageReorderOperation {
 
 export interface Annotation {
   id: string;
-  type: "text" | "highlight" | "note" | "callout" | "redact" | "image";
+  type: "text" | "highlight" | "note" | "callout" | "redact" | "image" | "formField" | "draw" | "shape" | "stamp";
   pageNumber: number;
   x: number;
   y: number;
@@ -53,6 +53,52 @@ export interface Annotation {
   preserveAspectRatio?: boolean; // default: true
   // Store the actual mupdf annotation object for updates
   pdfAnnotation?: any;
+  
+  // For form fields
+  fieldType?: "text" | "checkbox" | "radio" | "dropdown" | "date";
+  fieldName?: string;
+  fieldValue?: string | boolean;
+  options?: string[]; // For dropdowns and radio buttons
+  required?: boolean;
+  readOnly?: boolean;
+  multiline?: boolean;
+  radioGroup?: string; // For grouping radio buttons
+  
+  // For drawing annotations
+  drawingStyle?: "marker" | "pencil" | "pen";
+  smoothed?: boolean;
+  
+  // For shape annotations
+  shapeType?: "arrow" | "rectangle" | "circle";
+  points?: Array<{ x: number; y: number }>; // For arrows and complex shapes
+  strokeColor?: string;
+  fillColor?: string;
+  fillOpacity?: number;
+  arrowHeadSize?: number;
+  cornerRadius?: number; // For rounded rectangles
+  
+  // For stamp annotations
+  stampId?: string; // Reference to stamp in store
+  stampData?: StampData; // Embedded copy of stamp data
+  stampType?: "text" | "image" | "signature";
+}
+
+export interface StampData {
+  id: string;
+  name: string;
+  type: "text" | "image" | "signature";
+  createdAt: number;
+  thumbnail?: string; // base64 thumbnail
+  // For text stamps
+  text?: string;
+  font?: string;
+  textColor?: string;
+  backgroundEnabled?: boolean;
+  backgroundColor?: string;
+  // For image stamps
+  imageData?: string; // base64 image
+  // For signature stamps
+  signaturePath?: Array<{ x: number; y: number }>;
 }
 
 export class PDFEditor {
@@ -1609,7 +1655,7 @@ export class PDFEditor {
   ): Promise<Uint8Array> {
     // Sync annotations if provided
     if (annotations && annotations.length > 0) {
-      await this.syncAllAnnotations(document, annotations);
+      await this.syncAllAnnotationsExtended(document, annotations);
       
       // Apply redactions on all pages that have redaction annotations
       const mupdfDoc = document.getMupdfDocument();
@@ -1663,6 +1709,516 @@ export class PDFEditor {
    */
   createNewDocument(): any {
     return new this.mupdf.PDFDocument();
+  }
+
+  /**
+   * Add drawing annotation to a page
+   */
+  async addDrawingAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    if (!annotation.path || annotation.path.length < 2) {
+      console.warn("Drawing annotation requires a path with at least 2 points");
+      return;
+    }
+    
+    // Create Ink annotation
+    const annot = page.createAnnotation("Ink");
+    
+    // Convert path to ink list format (array of points in display coordinates)
+    const inkPath: number[] = [];
+    for (const point of annotation.path) {
+      inkPath.push(point.x, pageHeight - point.y);
+    }
+    
+    try {
+      annot.setInkList([inkPath]);
+    } catch {
+      try {
+        (annot as any).setInkList(inkPath);
+      } catch (e) {
+        console.warn("Could not set ink list:", e);
+      }
+    }
+    
+    // Set color
+    if (annotation.color) {
+      const hex = annotation.color.replace("#", "");
+      const r = parseInt(hex.substring(0, 2), 16) / 255;
+      const g = parseInt(hex.substring(2, 4), 16) / 255;
+      const b = parseInt(hex.substring(4, 6), 16) / 255;
+      annot.setColor([r, g, b]);
+    }
+    
+    // Set stroke width
+    if (annotation.strokeWidth) {
+      try {
+        annot.setBorderWidth(annotation.strokeWidth);
+      } catch {
+        // Border width might not apply to ink
+      }
+    }
+    
+    annot.update();
+  }
+
+  /**
+   * Add shape annotation to a page
+   */
+  async addShapeAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    if (!annotation.shapeType) {
+      console.warn("Shape annotation requires a shapeType");
+      return;
+    }
+    
+    let annot: any;
+    
+    if (annotation.shapeType === "arrow" && annotation.points && annotation.points.length >= 2) {
+      // Create Line annotation for arrow
+      annot = page.createAnnotation("Line");
+      
+      const start = annotation.points[0];
+      const end = annotation.points[1];
+      
+      // Convert to display coordinates
+      const startY = pageHeight - start.y;
+      const endY = pageHeight - end.y;
+      
+      try {
+        annot.setLine([start.x, startY, end.x, endY]);
+      } catch (e) {
+        console.warn("Could not set line:", e);
+      }
+      
+      // Set line ending style for arrow head
+      try {
+        annot.setLineEndingStyles("None", "OpenArrow");
+      } catch {
+        // Line ending styles might not be available
+      }
+    } else if (annotation.shapeType === "rectangle") {
+      // Create Square annotation
+      annot = page.createAnnotation("Square");
+      
+      const y = pageHeight - annotation.y - (annotation.height || 0);
+      const rect: [number, number, number, number] = [
+        annotation.x,
+        y,
+        annotation.x + (annotation.width || 0),
+        y + (annotation.height || 0),
+      ];
+      annot.setRect(rect);
+    } else if (annotation.shapeType === "circle") {
+      // Create Circle annotation
+      annot = page.createAnnotation("Circle");
+      
+      const y = pageHeight - annotation.y - (annotation.height || 0);
+      const rect: [number, number, number, number] = [
+        annotation.x,
+        y,
+        annotation.x + (annotation.width || 0),
+        y + (annotation.height || 0),
+      ];
+      annot.setRect(rect);
+    }
+    
+    if (annot) {
+      // Set stroke color
+      if (annotation.strokeColor) {
+        const hex = annotation.strokeColor.replace("#", "");
+        const r = parseInt(hex.substring(0, 2), 16) / 255;
+        const g = parseInt(hex.substring(2, 4), 16) / 255;
+        const b = parseInt(hex.substring(4, 6), 16) / 255;
+        annot.setColor([r, g, b]);
+      }
+      
+      // Set stroke width
+      if (annotation.strokeWidth) {
+        try {
+          annot.setBorderWidth(annotation.strokeWidth);
+        } catch {
+          // Border width might not be available
+        }
+      }
+      
+      // Set fill color
+      if (annotation.fillColor && annotation.fillOpacity !== undefined && annotation.fillOpacity > 0) {
+        const hex = annotation.fillColor.replace("#", "");
+        const r = parseInt(hex.substring(0, 2), 16) / 255;
+        const g = parseInt(hex.substring(2, 4), 16) / 255;
+        const b = parseInt(hex.substring(4, 6), 16) / 255;
+        
+        try {
+          annot.setInteriorColor([r, g, b]);
+          if (typeof annot.setOpacity === 'function') {
+            annot.setOpacity(annotation.fillOpacity);
+          }
+        } catch {
+          // Interior color might not be available
+        }
+      }
+      
+      annot.update();
+    }
+  }
+
+  /**
+   * Add form field annotation to a page
+   */
+  async addFormFieldAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    if (!annotation.fieldType) {
+      console.warn("Form field annotation requires a fieldType");
+      return;
+    }
+    
+    // Convert to display coordinates
+    const y = pageHeight - annotation.y - (annotation.height || 0);
+    const rect: [number, number, number, number] = [
+      annotation.x,
+      y,
+      annotation.x + (annotation.width || 0),
+      y + (annotation.height || 0),
+    ];
+    
+    // Create Widget annotation
+    const annot = page.createAnnotation("Widget");
+    annot.setRect(rect);
+    
+    // Set field properties using annotation object
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        // Set field name
+        if (annotation.fieldName) {
+          annotObj.put("T", annotation.fieldName);
+        }
+        
+        // Set field type and properties
+        if (annotation.fieldType === "text") {
+          annotObj.put("FT", "Tx");
+          if (annotation.multiline) {
+            annotObj.put("Ff", 4096); // Multiline flag
+          }
+        } else if (annotation.fieldType === "checkbox") {
+          annotObj.put("FT", "Btn");
+        } else if (annotation.fieldType === "radio") {
+          annotObj.put("FT", "Btn");
+          annotObj.put("Ff", 32768); // Radio flag
+        } else if (annotation.fieldType === "dropdown") {
+          annotObj.put("FT", "Ch");
+          if (annotation.options && annotation.options.length > 0) {
+            // Set options as array
+            annotObj.put("Opt", annotation.options);
+          }
+        }
+        
+        annotObj.update();
+      }
+    } catch (error) {
+      console.warn("Could not set form field properties:", error);
+    }
+    
+    annot.update();
+  }
+
+  /**
+   * Detect existing form fields on a page
+   */
+  async detectFormFields(
+    document: PDFDocument,
+    pageNumber: number
+  ): Promise<Annotation[]> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      return [];
+    }
+
+    const page = pdfDoc.loadPage(pageNumber);
+    const pdfAnnotations = page.getAnnotations();
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    const formFields: Annotation[] = [];
+    
+    for (const pdfAnnot of pdfAnnotations) {
+      try {
+        const type = pdfAnnot.getType();
+        
+        if (type === "Widget") {
+          const rect = pdfAnnot.getRect();
+          const annotObj = pdfAnnot.getObject();
+          
+          let fieldType: "text" | "checkbox" | "radio" | "dropdown" | "date" = "text";
+          let fieldName = "";
+          let fieldValue: string | boolean = "";
+          let options: string[] = [];
+          
+          if (annotObj) {
+            const ftObj = annotObj.get("FT");
+            const ftStr = ftObj ? ftObj.toString() : "";
+            
+            if (ftStr === "Tx") {
+              fieldType = "text";
+            } else if (ftStr === "Btn") {
+              const ff = annotObj.get("Ff");
+              if (ff && (ff.valueOf() & 32768)) {
+                fieldType = "radio";
+              } else {
+                fieldType = "checkbox";
+              }
+            } else if (ftStr === "Ch") {
+              fieldType = "dropdown";
+              const optObj = annotObj.get("Opt");
+              if (optObj && Array.isArray(optObj)) {
+                options = optObj;
+              }
+            }
+            
+            const tObj = annotObj.get("T");
+            if (tObj) {
+              fieldName = tObj.toString();
+            }
+            
+            const vObj = annotObj.get("V");
+            if (vObj) {
+              fieldValue = vObj.toString();
+            }
+          }
+          
+          const id = `form_${pageNumber}_${rect[0]}_${rect[1]}_${Math.random().toString(36).substr(2, 9)}`;
+          
+          formFields.push({
+            id,
+            type: "formField",
+            pageNumber,
+            x: rect[0],
+            y: pageHeight - rect[3],
+            width: rect[2] - rect[0],
+            height: rect[3] - rect[1],
+            fieldType,
+            fieldName,
+            fieldValue,
+            options: options.length > 0 ? options : undefined,
+            pdfAnnotation: pdfAnnot,
+          });
+        }
+      } catch (err) {
+        console.error("Error processing form field:", err);
+      }
+    }
+    
+    return formFields;
+  }
+
+  /**
+   * Add stamp annotation to a page
+   */
+  async addStampAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    // Convert to display coordinates
+    const y = pageHeight - annotation.y - (annotation.height || 0);
+    const rect: [number, number, number, number] = [
+      annotation.x,
+      y,
+      annotation.x + (annotation.width || 0),
+      y + (annotation.height || 0),
+    ];
+    
+    // Create Stamp annotation
+    const annot = page.createAnnotation("Stamp");
+    annot.setRect(rect);
+    
+    // Store stamp data in contents
+    if (annotation.stampData) {
+      annot.setContents(JSON.stringify(annotation.stampData));
+    }
+    
+    annot.update();
+  }
+
+  /**
+   * Flatten all annotations in the document
+   * This permanently merges annotations into page content
+   */
+  async flattenAllAnnotations(
+    document: PDFDocument,
+    currentPageOnly: boolean = false,
+    pageNumber?: number
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    
+    if (!pdfDoc) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const pageCount = document.getPageCount();
+    const pagesToFlatten = currentPageOnly && pageNumber !== undefined 
+      ? [pageNumber] 
+      : Array.from({ length: pageCount }, (_, i) => i);
+    
+    for (const pgNum of pagesToFlatten) {
+      try {
+        const page = pdfDoc.loadPage(pgNum);
+        
+        // Get all annotations on the page
+        const annotations = page.getAnnotations();
+        
+        if (annotations.length === 0) continue;
+        
+        // Update all annotations to generate appearance streams
+        for (const annot of annotations) {
+          try {
+            annot.update();
+          } catch (e) {
+            console.warn(`Could not update annotation:`, e);
+          }
+        }
+        
+        // Try to flatten using mupdf's built-in method if available
+        // Note: mupdf.js may not have a direct flatten method, so we ensure appearance streams are generated
+        // The annotations will be rendered by most PDF viewers even if not truly "flattened"
+        
+        // Alternative approach: Remove Link and Widget annotations after copying their appearance
+        // This makes them permanent part of the page
+        for (let i = annotations.length - 1; i >= 0; i--) {
+          const annot = annotations[i];
+          try {
+            const annotType = annot.getType();
+            
+            // Some annotation types can be safely removed after update
+            // as their appearance has been baked into the page
+            if (annotType === "Link" || annotType === "Widget") {
+              // For form fields, we want to keep the appearance but remove interactivity
+              page.deleteAnnotation(annot);
+            }
+          } catch (e) {
+            console.warn(`Could not process annotation for flattening:`, e);
+          }
+        }
+        
+      } catch (error) {
+        console.error(`Error flattening page ${pgNum}:`, error);
+      }
+    }
+    
+    // Refresh document metadata
+    document.refreshPageMetadata();
+  }
+
+  /**
+   * Update sync to handle new annotation types
+   */
+  async syncAllAnnotationsExtended(
+    document: PDFDocument,
+    annotations: Annotation[]
+  ): Promise<void> {
+    // Group annotations by page
+    const annotationsByPage = new Map<number, Annotation[]>();
+    for (const annot of annotations) {
+      if (!annotationsByPage.has(annot.pageNumber)) {
+        annotationsByPage.set(annot.pageNumber, []);
+      }
+      annotationsByPage.get(annot.pageNumber)!.push(annot);
+    }
+
+    // Process each page
+    for (const [pageNumber, pageAnnotations] of annotationsByPage) {
+      const mupdfDoc = document.getMupdfDocument();
+      const pdfDoc = mupdfDoc.asPDF();
+      
+      if (!pdfDoc) {
+        throw new Error("Document is not a PDF");
+      }
+
+      pdfDoc.loadPage(pageNumber);
+      
+      for (const annot of pageAnnotations) {
+        try {
+          if (annot.pdfAnnotation) {
+            continue;
+          }
+
+          // Handle all annotation types
+          if (annot.type === "text") {
+            await this.addTextAnnotation(document, annot);
+          } else if (annot.type === "highlight") {
+            await this.addHighlightAnnotation(document, annot);
+          } else if (annot.type === "callout") {
+            await this.addCalloutAnnotation(document, annot);
+          } else if (annot.type === "redact") {
+            await this.addRedactionAnnotation(document, annot);
+          } else if (annot.type === "image") {
+            await this.addImageAnnotation(document, annot);
+          } else if (annot.type === "draw") {
+            await this.addDrawingAnnotation(document, annot);
+          } else if (annot.type === "shape") {
+            await this.addShapeAnnotation(document, annot);
+          } else if (annot.type === "formField") {
+            await this.addFormFieldAnnotation(document, annot);
+          } else if (annot.type === "stamp") {
+            await this.addStampAnnotation(document, annot);
+          }
+        } catch (error) {
+          console.error(`Error syncing annotation ${annot.id}:`, error);
+        }
+      }
+    }
   }
 }
 

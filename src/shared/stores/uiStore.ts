@@ -6,7 +6,7 @@
 
 import { create } from "zustand";
 
-export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectText";
+export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectText" | "form" | "draw" | "shape" | "stamp";
 export type ViewMode = "single" | "spread" | "thumbnails";
 
 export interface UIState {
@@ -26,6 +26,22 @@ export interface UIState {
   highlightStrokeWidth: number;
   highlightOpacity: number;
   
+  // Drawing tool settings
+  drawingStyle: "marker" | "pencil" | "pen";
+  drawingColor: string;
+  drawingStrokeWidth: number;
+  
+  // Shape tool settings
+  currentShapeType: "arrow" | "rectangle" | "circle";
+  shapeStrokeColor: string;
+  shapeStrokeWidth: number;
+  shapeFillColor: string;
+  shapeFillOpacity: number;
+  arrowHeadSize: number;
+  
+  // Form tool settings
+  currentFieldType: "text" | "checkbox" | "radio" | "dropdown" | "date";
+  
   // Actions
   setZoomLevel: (level: number) => void;
   setFitMode: (mode: "width" | "page" | "custom") => void;
@@ -41,6 +57,16 @@ export interface UIState {
   setHighlightColor: (color: string) => void;
   setHighlightStrokeWidth: (width: number) => void;
   setHighlightOpacity: (opacity: number) => void;
+  setDrawingStyle: (style: "marker" | "pencil" | "pen") => void;
+  setDrawingColor: (color: string) => void;
+  setDrawingStrokeWidth: (width: number) => void;
+  setCurrentShapeType: (type: "arrow" | "rectangle" | "circle") => void;
+  setShapeStrokeColor: (color: string) => void;
+  setShapeStrokeWidth: (width: number) => void;
+  setShapeFillColor: (color: string) => void;
+  setShapeFillOpacity: (opacity: number) => void;
+  setArrowHeadSize: (size: number) => void;
+  setCurrentFieldType: (type: "text" | "checkbox" | "radio" | "dropdown" | "date") => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -59,6 +85,22 @@ export const useUIStore = create<UIState>((set, get) => ({
   highlightColor: "#FFFF00",
   highlightStrokeWidth: 15,
   highlightOpacity: 0.5,
+  
+  // Drawing tool settings
+  drawingStyle: "pen",
+  drawingColor: "#000000",
+  drawingStrokeWidth: 3,
+  
+  // Shape tool settings
+  currentShapeType: "rectangle",
+  shapeStrokeColor: "#000000",
+  shapeStrokeWidth: 2,
+  shapeFillColor: "#FFFFFF",
+  shapeFillOpacity: 0,
+  arrowHeadSize: 10,
+  
+  // Form tool settings
+  currentFieldType: "text",
 
   setZoomLevel: (level) => {
     const state = get();
@@ -161,5 +203,30 @@ export const useUIStore = create<UIState>((set, get) => ({
     const clampedOpacity = Math.max(0.1, Math.min(1.0, opacity));
     set({ highlightOpacity: clampedOpacity });
   },
+  
+  setDrawingStyle: (style) => set({ drawingStyle: style }),
+  setDrawingColor: (color) => set({ drawingColor: color }),
+  setDrawingStrokeWidth: (width) => {
+    const clampedWidth = Math.max(1, Math.min(50, width));
+    set({ drawingStrokeWidth: clampedWidth });
+  },
+  
+  setCurrentShapeType: (type) => set({ currentShapeType: type }),
+  setShapeStrokeColor: (color) => set({ shapeStrokeColor: color }),
+  setShapeStrokeWidth: (width) => {
+    const clampedWidth = Math.max(1, Math.min(20, width));
+    set({ shapeStrokeWidth: clampedWidth });
+  },
+  setShapeFillColor: (color) => set({ shapeFillColor: color }),
+  setShapeFillOpacity: (opacity) => {
+    const clampedOpacity = Math.max(0, Math.min(1.0, opacity));
+    set({ shapeFillOpacity: clampedOpacity });
+  },
+  setArrowHeadSize: (size) => {
+    const clampedSize = Math.max(5, Math.min(30, size));
+    set({ arrowHeadSize: clampedSize });
+  },
+  
+  setCurrentFieldType: (type) => set({ currentFieldType: type }),
 }));
 

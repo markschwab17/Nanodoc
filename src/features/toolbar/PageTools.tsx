@@ -26,11 +26,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, Layers } from "lucide-react";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
+import { FlattenDialog } from "@/features/export/FlattenDialog";
 
 export function PageTools() {
   const { currentDocument } = usePDF();
@@ -38,6 +39,7 @@ export function PageTools() {
   const { showNotification } = useNotificationStore();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showInsertDialog, setShowInsertDialog] = useState(false);
+  const [showFlattenDialog, setShowFlattenDialog] = useState(false);
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   const [insertMode, setInsertMode] = useState<"blank" | "fromPdf">("blank");
   const [insertPosition, setInsertPosition] = useState<"before" | "after">("after");
@@ -395,7 +397,49 @@ export function PageTools() {
     }
   }, [selectedSourceDocumentId, documents]);
 
+  const handleFlatten = async (currentPageOnly: boolean) => {
+    if (!currentDocument || !editor) return;
+
+    try {
+      const pageNum = currentPageOnly ? currentPage : undefined;
+      await editor.flattenAllAnnotations(currentDocument, currentPageOnly, pageNum);
+      
+      // Clear annotations from store for flattened pages
+      const documentId = currentDocument.getId();
+      const allAnnotations = getAnnotations(documentId);
+      
+      if (currentPageOnly) {
+        const remainingAnnotations = allAnnotations.filter(a => a.pageNumber !== currentPage);
+        usePDFStore.setState((state) => {
+          const newAnnotations = new Map(state.annotations);
+          newAnnotations.set(documentId, remainingAnnotations);
+          return { annotations: newAnnotations };
+        });
+      } else {
+        usePDFStore.setState((state) => {
+          const newAnnotations = new Map(state.annotations);
+          newAnnotations.set(documentId, []);
+          return { annotations: newAnnotations };
+        });
+      }
+      
+      // Mark as modified
+      const tab = useTabStore.getState().getTabByDocumentId(documentId);
+      if (tab) {
+        useTabStore.getState().setTabModified(tab.id, true);
+      }
+      
+      const pages = currentPageOnly ? `page ${currentPage + 1}` : "all pages";
+      showNotification(`Flattened annotations on ${pages}`, "success");
+    } catch (error) {
+      console.error("Error flattening:", error);
+      showNotification("Failed to flatten annotations", "error");
+    }
+  };
+
   if (!currentDocument) return null;
+  
+  const annotationCount = getAnnotations(currentDocument.getId()).length;
 
   return (
     <div className="flex items-center gap-2">
@@ -415,6 +459,16 @@ export function PageTools() {
       >
         <Trash2 className="h-4 w-4 mr-2" />
         Delete Page
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => setShowFlattenDialog(true)}
+        disabled={annotationCount === 0}
+        title="Flatten all annotations permanently"
+      >
+        <Layers className="h-4 w-4 mr-2" />
+        Flatten
       </Button>
 
       {/* Delete Confirmation Dialog */}
@@ -635,6 +689,17 @@ export function PageTools() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Flatten Dialog */}
+      <FlattenDialog
+        open={showFlattenDialog}
+        onClose={() => setShowFlattenDialog(false)}
+        document={currentDocument}
+        editor={editor}
+        annotationCount={annotationCount}
+        currentPage={currentPage}
+        onFlatten={handleFlatten}
+      />
     </div>
   );
 }
