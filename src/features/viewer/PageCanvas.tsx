@@ -29,6 +29,7 @@ import { toolHandlers } from "@/features/tools";
 import { getSelectedStamp, getStampPreviewPosition, setPreviewUpdateCallback } from "@/features/tools/StampTool";
 import { getDrawingPath, isCurrentlyDrawing, setDrawPreviewCallback } from "@/features/tools/DrawTool";
 import { useStampStore } from "@/shared/stores/stampStore";
+import { StampEditor } from "@/features/stamps/StampEditor";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
@@ -99,6 +100,8 @@ export function PageCanvas({
 
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  const [draggingShapeId, setDraggingShapeId] = useState<string | null>(null);
+  const shapeDragStartRef = useRef<{ x: number; y: number; annotX: number; annotY: number; points?: Array<{ x: number; y: number }> } | null>(null);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   
@@ -162,7 +165,8 @@ export function PageCanvas({
   const [isDragOverPage, setIsDragOverPage] = useState(false);
   const [stampPreviewPosition, setStampPreviewPosition] = useState<{ x: number; y: number } | null>(null);
   const [drawingPathVersion, setDrawingPathVersion] = useState(0); // Incremented to force re-render of drawing preview
-  const { getStamp } = useStampStore();
+  const [editingStampAnnotation, setEditingStampAnnotation] = useState<Annotation | null>(null);
+  const { getStamp, stampSizeMultiplier } = useStampStore();
   // Track drag/resize/rotate state for annotations to only record undo on operation end
   const draggingAnnotationRef = useRef<{ id: string; initialX: number; initialY: number } | null>(null);
   const resizingAnnotationRef = useRef<{ id: string; initialWidth: number; initialHeight: number } | null>(null);
@@ -207,6 +211,11 @@ export function PageCanvas({
       // Wait for DOM to update, then notify App.tsx
       requestAnimationFrame(() => {
         window.dispatchEvent(new CustomEvent("annotationSelected", { detail: { annotationId: editingAnnotation.id } }));
+      });
+    } else {
+      // Dispatch clear event when annotation is deselected
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent("clearEditingAnnotation"));
       });
     }
   }, [editingAnnotation?.id]);
@@ -1478,6 +1487,166 @@ export function PageCanvas({
     }
   };
 
+  // Handle shape dragging
+  useEffect(() => {
+    if (!draggingShapeId || !shapeDragStartRef.current || !currentDocument) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!shapeDragStartRef.current) return;
+
+      const screenDx = e.clientX - shapeDragStartRef.current.x;
+      const screenDy = e.clientY - shapeDragStartRef.current.y;
+      
+      // Only move if we've actually dragged (moved more than a few pixels)
+      const moveDistance = Math.sqrt(screenDx * screenDx + screenDy * screenDy);
+      if (moveDistance < 3) return;
+
+      // Convert screen delta to PDF delta
+      const currentZoomLevel = zoomLevelRef.current;
+      const pdfDx = screenDx / currentZoomLevel;
+      const pdfDy = -screenDy / currentZoomLevel; // Flip Y for PDF coordinates
+
+      const annotations = getAnnotations(currentDocument.getId());
+      const annot = annotations.find(a => a.id === draggingShapeId);
+      if (!annot) return;
+
+      if (annot.shapeType === "arrow" && annot.points && shapeDragStartRef.current.points) {
+        // For arrows, move the points from initial position
+        const initialPoints = shapeDragStartRef.current.points;
+        
+        // Calculate total delta from initial mouse position
+        const totalScreenDx = e.clientX - shapeDragStartRef.current.x;
+        const totalScreenDy = e.clientY - shapeDragStartRef.current.y;
+        const totalPdfDx = totalScreenDx / currentZoomLevel;
+        const totalPdfDy = -totalScreenDy / currentZoomLevel;
+        
+        const newPoints = initialPoints.map(p => ({
+          x: p.x + totalPdfDx,
+          y: p.y + totalPdfDy,
+        }));
+        
+        // Update bounding box
+        const minX = Math.min(newPoints[0].x, newPoints[1].x);
+        const maxX = Math.max(newPoints[0].x, newPoints[1].x);
+        const minY = Math.min(newPoints[0].y, newPoints[1].y);
+        const maxY = Math.max(newPoints[0].y, newPoints[1].y);
+        
+        updateAnnotation(
+          currentDocument.getId(),
+          draggingShapeId,
+          {
+            points: newPoints,
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY,
+          }
+        );
+
+        // Update editingAnnotation if it's the one being dragged
+        if (editingAnnotation?.id === draggingShapeId) {
+          setEditingAnnotation({
+            ...editingAnnotation,
+            points: newPoints,
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY,
+          });
+        }
+      } else {
+        // For rectangles and circles, move x and y
+        const newX = shapeDragStartRef.current.annotX + pdfDx;
+        const newY = shapeDragStartRef.current.annotY + pdfDy;
+
+        updateAnnotation(
+          currentDocument.getId(),
+          draggingShapeId,
+          { x: newX, y: newY }
+        );
+
+        // Update editingAnnotation if it's the one being dragged
+        if (editingAnnotation?.id === draggingShapeId) {
+          setEditingAnnotation({
+            ...editingAnnotation,
+            x: newX,
+            y: newY,
+          });
+        }
+
+        // Update drag start for incremental movement
+        shapeDragStartRef.current = {
+          x: e.clientX,
+          y: e.clientY,
+          annotX: newX,
+          annotY: newY,
+        };
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (draggingShapeId && shapeDragStartRef.current && currentDocument) {
+        // Get the initial position from when drag started
+        const annotations = getAnnotations(currentDocument.getId());
+        const annot = annotations.find(a => a.id === draggingShapeId);
+        
+        if (!annot) {
+          setDraggingShapeId(null);
+          shapeDragStartRef.current = null;
+          return;
+        }
+
+        // Check if position actually changed
+        if (annot.shapeType === "arrow" && annot.points && shapeDragStartRef.current.points) {
+          // For arrows, check if points changed
+          const initialPoints = shapeDragStartRef.current.points;
+          const pointsChanged = initialPoints.some((p, i) => 
+            Math.abs(p.x - annot.points![i].x) > 0.01 || 
+            Math.abs(p.y - annot.points![i].y) > 0.01
+          );
+          
+          if (pointsChanged) {
+            wrapAnnotationUpdate(
+              currentDocument.getId(),
+              draggingShapeId,
+              {
+                points: annot.points,
+                x: annot.x,
+                y: annot.y,
+                width: annot.width,
+                height: annot.height,
+              }
+            );
+          }
+        } else {
+          // For rectangles and circles, check if x/y changed
+          const initialX = shapeDragStartRef.current.annotX;
+          const initialY = shapeDragStartRef.current.annotY;
+          const finalX = annot.x;
+          const finalY = annot.y;
+
+          if (Math.abs(initialX - finalX) > 0.01 || Math.abs(initialY - finalY) > 0.01) {
+            wrapAnnotationUpdate(
+              currentDocument.getId(),
+              draggingShapeId,
+              { x: finalX, y: finalY }
+            );
+          }
+        }
+      }
+      setDraggingShapeId(null);
+      shapeDragStartRef.current = null;
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [draggingShapeId, currentDocument, zoomLevel, editingAnnotation, updateAnnotation, getAnnotations, zoomLevelRef]);
+
   const handleMouseMove = (e: React.MouseEvent) => {
     // Track shift key state
     setIsShiftPressed(e.shiftKey);
@@ -2682,8 +2851,149 @@ export function PageCanvas({
           );
         })()}
 
-        {/* Render selection rectangle - not for draw tool (it has its own preview) */}
-        {isSelecting && selectionStart && selectionEnd && activeTool !== "selectText" && activeTool !== "highlight" && activeTool !== "draw" && (
+        {/* Render shape preview while creating shapes */}
+        {isSelecting && selectionStart && selectionEnd && activeTool === "shape" && (() => {
+          const { currentShapeType, shapeStrokeColor, shapeStrokeWidth, shapeFillColor, shapeFillOpacity, arrowHeadSize } = useUIStore.getState();
+          
+          const startCanvas = pdfToCanvas(selectionStart.x, selectionStart.y);
+          const endCanvas = pdfToCanvas(selectionEnd.x, selectionEnd.y);
+          
+          if (currentShapeType === "arrow") {
+            // Render arrow preview
+            const dx = endCanvas.x - startCanvas.x;
+            const dy = endCanvas.y - startCanvas.y;
+            const angle = Math.atan2(dy, dx);
+            const headSize = arrowHeadSize || 10;
+            
+            // Calculate where the line should end (shortened by arrow head size)
+            const lineEndX = endCanvas.x - (headSize * Math.cos(angle));
+            const lineEndY = endCanvas.y - (headSize * Math.sin(angle));
+            
+            const arrowHead1X = endCanvas.x - headSize * Math.cos(angle - Math.PI / 6);
+            const arrowHead1Y = endCanvas.y - headSize * Math.sin(angle - Math.PI / 6);
+            const arrowHead2X = endCanvas.x - headSize * Math.cos(angle + Math.PI / 6);
+            const arrowHead2Y = endCanvas.y - headSize * Math.sin(angle + Math.PI / 6);
+            
+            const minX = Math.min(startCanvas.x, endCanvas.x, arrowHead1X, arrowHead2X) - 10;
+            const minY = Math.min(startCanvas.y, endCanvas.y, arrowHead1Y, arrowHead2Y) - 10;
+            const maxX = Math.max(startCanvas.x, endCanvas.x, arrowHead1X, arrowHead2X) + 10;
+            const maxY = Math.max(startCanvas.y, endCanvas.y, arrowHead1Y, arrowHead2Y) + 10;
+            
+            return (
+              <div
+                key="arrow-preview"
+                className="absolute pointer-events-none z-50"
+                style={{
+                  left: `${minX}px`,
+                  top: `${minY}px`,
+                  width: `${maxX - minX}px`,
+                  height: `${maxY - minY}px`,
+                }}
+              >
+                <svg style={{ width: "100%", height: "100%" }}>
+                  <line
+                    x1={startCanvas.x - minX}
+                    y1={startCanvas.y - minY}
+                    x2={lineEndX - minX}
+                    y2={lineEndY - minY}
+                    stroke={shapeStrokeColor}
+                    strokeWidth={shapeStrokeWidth}
+                    strokeLinecap="round"
+                  />
+                  <polygon
+                    points={`${endCanvas.x - minX},${endCanvas.y - minY} ${arrowHead1X - minX},${arrowHead1Y - minY} ${arrowHead2X - minX},${arrowHead2Y - minY}`}
+                    fill={shapeStrokeColor}
+                  />
+                </svg>
+              </div>
+            );
+          } else if (currentShapeType === "circle") {
+            // Render circle preview - pin to initial click position (center)
+            // The selectionStart/End now represent the bounding box calculated from center
+            const minX = Math.min(selectionStart.x, selectionEnd.x);
+            const minY = Math.min(selectionStart.y, selectionEnd.y);
+            const maxX = Math.max(selectionStart.x, selectionEnd.x);
+            const maxY = Math.max(selectionStart.y, selectionEnd.y);
+            const width = maxX - minX;
+            const height = maxY - minY;
+            const size = Math.max(width, height);
+            
+            // Convert to canvas coordinates - use same logic as final rendering
+            // In PDF: annotation.y is bottom edge, annotation.y + height is top edge
+            // So top-left in PDF is (minX, minY + size)
+            const topLeft = pdfToCanvas(minX, minY + size);
+            
+            return (
+              <div
+                key="circle-preview"
+                className="absolute pointer-events-none z-50"
+                style={{
+                  left: `${topLeft.x}px`,
+                  top: `${topLeft.y}px`,
+                  width: `${size}px`,
+                  height: `${size}px`,
+                }}
+              >
+                <svg style={{ width: "100%", height: "100%" }}>
+                  <ellipse
+                    cx={size / 2}
+                    cy={size / 2}
+                    rx={(size - shapeStrokeWidth) / 2}
+                    ry={(size - shapeStrokeWidth) / 2}
+                    stroke={shapeStrokeColor}
+                    strokeWidth={shapeStrokeWidth}
+                    fill={shapeFillColor}
+                    fillOpacity={shapeFillOpacity}
+                  />
+                </svg>
+              </div>
+            );
+          } else if (currentShapeType === "rectangle") {
+            // Render rectangle preview - use same coordinate system as final rendering
+            // Calculate bounding box in PDF coordinates (like ShapeTool does)
+            const minX = Math.min(selectionStart.x, selectionEnd.x);
+            const minY = Math.min(selectionStart.y, selectionEnd.y);
+            const maxX = Math.max(selectionStart.x, selectionEnd.x);
+            const maxY = Math.max(selectionStart.y, selectionEnd.y);
+            const width = maxX - minX;
+            const height = maxY - minY;
+            
+            // Convert to canvas coordinates - use same logic as final rendering
+            // In PDF: annotation.y is bottom edge, annotation.y + height is top edge
+            // So top-left in PDF is (minX, minY + height)
+            const topLeft = pdfToCanvas(minX, minY + height);
+            
+            return (
+              <div
+                key="rectangle-preview"
+                className="absolute pointer-events-none z-50"
+                style={{
+                  left: `${topLeft.x}px`,
+                  top: `${topLeft.y}px`,
+                  width: `${width}px`,
+                  height: `${height}px`,
+                }}
+              >
+                <svg style={{ width: "100%", height: "100%" }}>
+                  <rect
+                    x={shapeStrokeWidth / 2}
+                    y={shapeStrokeWidth / 2}
+                    width={width - shapeStrokeWidth}
+                    height={height - shapeStrokeWidth}
+                    stroke={shapeStrokeColor}
+                    strokeWidth={shapeStrokeWidth}
+                    fill={shapeFillColor}
+                    fillOpacity={shapeFillOpacity}
+                  />
+                </svg>
+              </div>
+            );
+          }
+          return null;
+        })()}
+
+        {/* Render selection rectangle - not for draw tool or shape tool (they have their own previews) */}
+        {isSelecting && selectionStart && selectionEnd && activeTool !== "selectText" && activeTool !== "highlight" && activeTool !== "draw" && activeTool !== "shape" && (
           (() => {
             // Convert PDF coordinates to CANVAS coordinates (like text box does)
             const startCanvas = pdfToCanvas(selectionStart.x, selectionStart.y);
@@ -2728,7 +3038,12 @@ export function PageCanvas({
           if (!path || path.length < 2) return null;
           
           // Get drawing settings from UI store
-          const { drawingColor, drawingStrokeWidth } = useUIStore.getState();
+          const { drawingColor, drawingStrokeWidth, drawingOpacity } = useUIStore.getState();
+          
+          // Always use pencil style
+          const strokeWidth = drawingStrokeWidth || 5;
+          const strokeOpacity = drawingOpacity !== undefined ? drawingOpacity : 1.0; // Default to 100% opacity
+          const strokeLinecap: "round" | "butt" | "square" = "round";
           
           // Calculate bounding box for SVG positioning
           const allCanvasX = path.map(p => pdfToCanvas(p.x, p.y).x);
@@ -2738,7 +3053,7 @@ export function PageCanvas({
           const maxCanvasX = Math.max(...allCanvasX);
           const maxCanvasY = Math.max(...allCanvasY);
           
-          const padding = (drawingStrokeWidth || 5) / 2 + 2;
+          const padding = (strokeWidth || 5) / 2 + 2;
           const boxX = minCanvasX - padding;
           const boxY = minCanvasY - padding;
           const boxWidth = (maxCanvasX - minCanvasX) + (padding * 2);
@@ -2771,8 +3086,9 @@ export function PageCanvas({
                   points={pathPoints}
                   fill="none"
                   stroke={drawingColor || "#000000"}
-                  strokeWidth={drawingStrokeWidth || 5}
-                  strokeLinecap="round"
+                  strokeWidth={strokeWidth}
+                  strokeOpacity={strokeOpacity}
+                  strokeLinecap={strokeLinecap}
                   strokeLinejoin="round"
                 />
               </svg>
@@ -2914,7 +3230,7 @@ export function PageCanvas({
 
         {/* Render annotations */}
         {annotations.length > 0 && (
-          <div className="absolute inset-0" style={{ zIndex: 20, pointerEvents: "auto" }}>
+          <div className="absolute inset-0" style={{ zIndex: 20, pointerEvents: (activeTool === "select" || activeTool === "selectText") ? "auto" : "none" }}>
             {annotations.map((annot) => {
               // Don't render text annotations if they're selected (RichTextEditor will show it instead)
               // This prevents double rendering. Highlights should always render even when selected.
@@ -3249,6 +3565,10 @@ export function PageCanvas({
             const drawColor = annot.color || "#000000";
             const strokeWidth = annot.strokeWidth || 3;
             
+            // Always use pencil style
+            const strokeOpacity = annot.strokeOpacity !== undefined ? annot.strokeOpacity : 1.0; // Default to 100% opacity
+            const strokeLinecap: "round" | "butt" | "square" = "round";
+            
             // Calculate bounding box
             const allCanvasX = annot.path.map(p => pdfToCanvas(p.x, p.y).x);
             const allCanvasY = annot.path.map(p => pdfToCanvas(p.x, p.y).y);
@@ -3323,7 +3643,8 @@ export function PageCanvas({
                     fill="none"
                     stroke={drawColor}
                     strokeWidth={strokeWidth}
-                    strokeLinecap="round"
+                    strokeOpacity={strokeOpacity}
+                    strokeLinecap={strokeLinecap}
                     strokeLinejoin="round"
                   />
                 </svg>
@@ -3333,8 +3654,12 @@ export function PageCanvas({
             // Render shape annotation
             const strokeColor = annot.strokeColor || "#000000";
             const strokeWidth = annot.strokeWidth || 2;
-            const fillColor = annot.fillColor || "#FFFFFF";
-            const fillOpacity = annot.fillOpacity !== undefined ? annot.fillOpacity : 0;
+            const fillColor = annot.fillColor || "transparent";
+            // If fillColor is set but fillOpacity is not, default to 1 (fully opaque)
+            // Otherwise use the specified opacity, or 0 if no fill color
+            const fillOpacity = annot.fillColor 
+              ? (annot.fillOpacity !== undefined ? annot.fillOpacity : 1)
+              : 0;
             
             if (annot.shapeType === "arrow" && annot.points && annot.points.length >= 2) {
               const start = pdfToCanvas(annot.points[0].x, annot.points[0].y);
@@ -3345,6 +3670,12 @@ export function PageCanvas({
               const dy = end.y - start.y;
               const angle = Math.atan2(dy, dx);
               
+              // Calculate where the line should end (shortened by arrow head size)
+              // The line should stop before the arrow head begins
+              const lineEndX = end.x - (arrowHeadSize * Math.cos(angle));
+              const lineEndY = end.y - (arrowHeadSize * Math.sin(angle));
+              
+              // Calculate arrow head points (extending from line end to actual end point)
               const arrowHead1X = end.x - arrowHeadSize * Math.cos(angle - Math.PI / 6);
               const arrowHead1Y = end.y - arrowHeadSize * Math.sin(angle - Math.PI / 6);
               const arrowHead2X = end.x - arrowHeadSize * Math.cos(angle + Math.PI / 6);
@@ -3356,12 +3687,13 @@ export function PageCanvas({
               const maxY = Math.max(start.y, end.y, arrowHead1Y, arrowHead2Y) + 10;
               
               const isSelected = editingAnnotation?.id === annot.id;
+              const isDraggingThis = draggingShapeId === annot.id;
               
               return (
                 <div key={annot.id}>
                   <div 
                     data-annotation-id={annot.id}
-                    className={cn("absolute", activeTool === "select" ? "cursor-pointer" : "")}
+                    className={cn("absolute", activeTool === "select" && isSelected ? "cursor-move" : activeTool === "select" ? "cursor-pointer" : "")}
                     style={{
                       pointerEvents: activeTool === "select" ? "auto" : "none",
                       zIndex: 30,
@@ -3370,25 +3702,69 @@ export function PageCanvas({
                       width: `${maxX - minX}px`,
                       height: `${maxY - minY}px`,
                     }}
+                    onMouseDown={(e) => {
+                      if (activeTool === "select") {
+                        // Don't start drag if clicking on a handle
+                        const target = e.target as HTMLElement;
+                        if (target.closest('[data-shape-handle]')) {
+                          return;
+                        }
+                        
+                        // Start dragging (works even if not selected yet)
+                        e.preventDefault();
+                        e.stopPropagation();
+                        
+                        // Select the arrow if not already selected
+                        if (!isSelected) {
+                          setEditingAnnotation(annot);
+                        }
+                        
+                        setDraggingShapeId(annot.id);
+                        shapeDragStartRef.current = {
+                          x: e.clientX,
+                          y: e.clientY,
+                          annotX: annot.x,
+                          annotY: annot.y,
+                          points: annot.points ? [...annot.points] : undefined,
+                        };
+                      }
+                    }}
                     onClick={(e) => {
                       if (activeTool === "select") {
+                        // Don't select if clicking on a handle or if we just dragged
+                        const target = e.target as HTMLElement;
+                        if (target.closest('[data-shape-handle]')) {
+                          return;
+                        }
+                        // If we dragged, don't trigger selection (already selected in onMouseDown)
+                        if (isDraggingThis && shapeDragStartRef.current) {
+                          const dx = e.clientX - shapeDragStartRef.current.x;
+                          const dy = e.clientY - shapeDragStartRef.current.y;
+                          const moveDistance = Math.sqrt(dx * dx + dy * dy);
+                          if (moveDistance > 3) {
+                            return; // We dragged, don't select again
+                          }
+                        }
                         e.stopPropagation();
                         setEditingAnnotation(annot);
                       }
                     }}
                   >
-                    <svg style={{ width: "100%", height: "100%" }}>
+                    <svg style={{ width: "100%", height: "100%", pointerEvents: "none" }}>
                       <line
                         x1={start.x - minX}
                         y1={start.y - minY}
-                        x2={end.x - minX}
-                        y2={end.y - minY}
+                        x2={lineEndX - minX}
+                        y2={lineEndY - minY}
                         stroke={strokeColor}
                         strokeWidth={strokeWidth}
+                        strokeLinecap="round"
+                        pointerEvents="stroke"
                       />
                       <polygon
                         points={`${end.x - minX},${end.y - minY} ${arrowHead1X - minX},${arrowHead1Y - minY} ${arrowHead2X - minX},${arrowHead2Y - minY}`}
                         fill={strokeColor}
+                        pointerEvents="all"
                       />
                     </svg>
                   </div>
@@ -3413,13 +3789,15 @@ export function PageCanvas({
               const topLeft = pdfToCanvas(annot.x, annot.y + (annot.height || 0));
               const width = annot.width || 0;
               const height = annot.height || 0;
+              const rotation = annot.rotation || 0;
               const isSelected = editingAnnotation?.id === annot.id;
+              const isDraggingThis = draggingShapeId === annot.id;
               
               return (
                 <div key={annot.id}>
                   <div 
                     data-annotation-id={annot.id}
-                    className={cn("absolute", activeTool === "select" ? "cursor-pointer" : "")}
+                    className={cn("absolute", activeTool === "select" && isSelected ? "cursor-move" : activeTool === "select" ? "cursor-pointer" : "")}
                     style={{
                       pointerEvents: activeTool === "select" ? "auto" : "none",
                       zIndex: 30,
@@ -3427,9 +3805,46 @@ export function PageCanvas({
                       top: `${topLeft.y}px`,
                       width: `${width}px`,
                       height: `${height}px`,
+                      transform: rotation !== 0 ? `rotate(${rotation * (180 / Math.PI)}deg)` : undefined,
+                      transformOrigin: "center center",
+                    }}
+                    onMouseDown={(e) => {
+                      if (activeTool === "select" && isSelected) {
+                        // Don't start drag if clicking on a handle
+                        const target = e.target as HTMLElement;
+                        if (target.closest('[data-shape-handle]')) {
+                          return;
+                        }
+                        
+                        // Start dragging
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDraggingShapeId(annot.id);
+                        shapeDragStartRef.current = {
+                          x: e.clientX,
+                          y: e.clientY,
+                          annotX: annot.x,
+                          annotY: annot.y,
+                          points: annot.points ? [...annot.points] : undefined,
+                        };
+                      }
                     }}
                     onClick={(e) => {
                       if (activeTool === "select") {
+                        // Don't select if clicking on a handle or if we just dragged
+                        const target = e.target as HTMLElement;
+                        if (target.closest('[data-shape-handle]')) {
+                          return;
+                        }
+                        // If we dragged, don't trigger selection
+                        if (isDraggingThis && shapeDragStartRef.current) {
+                          const dx = e.clientX - shapeDragStartRef.current.x;
+                          const dy = e.clientY - shapeDragStartRef.current.y;
+                          const moveDistance = Math.sqrt(dx * dx + dy * dy);
+                          if (moveDistance > 3) {
+                            return; // We dragged, don't select
+                          }
+                        }
                         e.stopPropagation();
                         setEditingAnnotation(annot);
                       }
@@ -4100,8 +4515,28 @@ export function PageCanvas({
                         { options }
                       );
                     }}
+                    onLockChange={(locked) => {
+                      if (!currentDocument) return;
+                      updateAnnotation(
+                        currentDocument.getId(),
+                        annot.id,
+                        { locked }
+                      );
+                    }}
+                    onMove={(deltaX, deltaY) => {
+                      if (!currentDocument) return;
+                      const newX = annot.x + deltaX;
+                      const newY = annot.y + deltaY;
+                      updateAnnotation(
+                        currentDocument.getId(),
+                        annot.id,
+                        { x: newX, y: newY }
+                      );
+                    }}
                     isEditable={true}
                     isSelected={isSelected}
+                    zoomLevel={zoomLevel}
+                    activeTool={activeTool}
                     onClick={() => {
                       if (activeTool === "select") {
                         setEditingAnnotation(annot);
@@ -4120,6 +4555,7 @@ export function PageCanvas({
                           updates
                         );
                       }}
+                      zoomLevel={zoomLevel}
                     />
                   )}
                 </div>
@@ -4195,6 +4631,9 @@ export function PageCanvas({
               const currentZoom = zoomLevelRef.current;
               if (currentZoom <= 0) return null;
               
+              // Use actualScale for coordinate conversion (accounts for fit modes)
+              const currentScale = actualScaleRef.current > 0 ? actualScaleRef.current : currentZoom;
+              
               const pdfTopY = annot.y + (annot.height || 0);
               const canvasPos = pdfToCanvas(annot.x, pdfTopY);
               
@@ -4202,7 +4641,7 @@ export function PageCanvas({
                 <StampAnnotation
                   key={annot.id}
                   annotation={annot}
-                  scale={1.0}
+                  scale={currentScale}
                   style={{
                     position: "absolute",
                     left: `${canvasPos.x}px`,
@@ -4211,6 +4650,7 @@ export function PageCanvas({
                   }}
                   onMove={(deltaX, deltaY) => {
                     if (!currentDocument) return;
+                    // deltaX and deltaY are already in PDF coordinates (converted in StampAnnotation)
                     const newX = annot.x + deltaX;
                     const newY = annot.y + deltaY;
                     
@@ -4242,6 +4682,22 @@ export function PageCanvas({
                       currentDocument.getId(),
                       annot.id,
                       { width, height }
+                    );
+                  }}
+                  onResizeWithPosition={(x, y, width, height) => {
+                    if (!currentDocument) return;
+                    if (!resizingAnnotationRef.current || resizingAnnotationRef.current.id !== annot.id) {
+                      resizingAnnotationRef.current = {
+                        id: annot.id,
+                        initialWidth: annot.width || 100,
+                        initialHeight: annot.height || 60,
+                      };
+                    }
+                    
+                    updateAnnotation(
+                      currentDocument.getId(),
+                      annot.id,
+                      { x, y, width, height }
                     );
                   }}
                   onResizeEnd={() => {
@@ -4317,6 +4773,12 @@ export function PageCanvas({
                       setHoveredAnnotationId(annot.id);
                     }
                   }}
+                  onDoubleClick={() => {
+                    // Open editor for text stamps on double-click
+                    if (annot.stampData?.type === "text" && activeTool === "select") {
+                      setEditingStampAnnotation(annot);
+                    }
+                  }}
                   onMouseEnter={() => {
                     if (activeTool === "select") {
                       setHoveredAnnotationId(annot.id);
@@ -4340,8 +4802,76 @@ export function PageCanvas({
           const stamp = getStamp(selectedStampId);
           if (!stamp) return null;
           
-          const previewWidth = 100;
-          const previewHeight = 60;
+          // Calculate preview dimensions the same way as actual stamp
+          let previewWidth = 100;
+          let previewHeight = 60;
+          
+          if (stamp.thumbnail) {
+            // Calculate from thumbnail dimensions (same logic as StampTool)
+            const img = new Image();
+            img.src = stamp.thumbnail;
+            if (img.complete && img.width && img.height) {
+              // Thumbnail is generated at scale 6, so convert to PDF points
+              const scale = 6; // Thumbnail generation scale
+              const thumbnailWidthInPoints = img.width / scale;
+              const thumbnailHeightInPoints = img.height / scale;
+              
+              // Use the actual thumbnail dimensions (scaled down) to match exactly what's rendered
+              previewWidth = thumbnailWidthInPoints;
+              previewHeight = thumbnailHeightInPoints;
+              
+              // Apply size multiplier
+              previewWidth *= stampSizeMultiplier;
+              previewHeight *= stampSizeMultiplier;
+              
+              if (previewWidth < 50) previewWidth = 50;
+              if (previewHeight < 30) previewHeight = 30;
+            }
+          } else if (stamp.type === "text" && stamp.text) {
+            // Calculate from text content (same logic as StampTool)
+            const lines = stamp.text.split('\n');
+            const fontSize = 12;
+            const lineHeight = fontSize * 1.2;
+            const borderOffset = stamp.borderOffset || 8;
+            const borderThickness = stamp.borderEnabled ? (stamp.borderThickness || 2) : 0;
+            const contentPadding = borderOffset;
+            
+            const canvas = window.document.createElement("canvas");
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+              ctx.font = `${fontSize}px ${stamp.font || "Arial"}`;
+              let maxTextWidth = 0;
+              lines.forEach((line) => {
+                const metrics = ctx.measureText(line);
+                if (metrics.width > maxTextWidth) {
+                  maxTextWidth = metrics.width;
+                }
+              });
+              
+              // Calculate content dimensions (text + padding)
+              const textBlockHeight = lines.length * lineHeight;
+              const contentWidth = maxTextWidth + contentPadding * 2;
+              const contentHeight = textBlockHeight + contentPadding * 2;
+              
+              // Total dimensions include border thickness
+              previewWidth = contentWidth + borderThickness;
+              previewHeight = contentHeight + borderThickness;
+              
+              // Apply size multiplier
+              previewWidth *= stampSizeMultiplier;
+              previewHeight *= stampSizeMultiplier;
+              
+              if (previewWidth < 50) previewWidth = 50;
+              if (previewHeight < 30) previewHeight = 30;
+            }
+          }
+          
+          // Calculate scale the same way as stamp annotations
+          const currentZoom = zoomLevelRef.current;
+          const currentScale = actualScaleRef.current > 0 ? actualScaleRef.current : currentZoom;
+          
+          // Position preview: stampPreviewPosition is the bottom-left corner in PDF coordinates
+          // Convert to canvas coordinates for top-left positioning
           const pdfTopY = stampPreviewPosition.y + previewHeight;
           const canvasPos = pdfToCanvas(stampPreviewPosition.x, pdfTopY);
           
@@ -4352,28 +4882,44 @@ export function PageCanvas({
               style={{
                 left: `${canvasPos.x}px`,
                 top: `${canvasPos.y}px`,
-                width: `${previewWidth}px`,
-                height: `${previewHeight}px`,
+                width: `${previewWidth * currentScale}px`,
+                height: `${previewHeight * currentScale}px`,
                 zIndex: 50,
               }}
             >
-              <div className="w-full h-full border-2 border-dashed border-blue-500 bg-white/50 flex items-center justify-center overflow-hidden rounded shadow-md">
+              <div className="w-full h-full border-2 border-dashed border-blue-500 bg-white/50 flex items-center justify-center rounded shadow-md">
                 {stamp.thumbnail ? (
                   <img
                     src={stamp.thumbnail}
                     alt={stamp.name || "Stamp"}
-                    className="max-w-full max-h-full object-contain"
+                    className="max-w-full max-h-full w-auto h-auto"
+                    style={{ 
+                      imageRendering: "auto",
+                      objectFit: "contain",
+                    }}
                   />
                 ) : stamp.type === "text" && stamp.text ? (
                   <div
-                    className="p-2 text-center"
+                    className="text-center"
                     style={{
                       color: stamp.textColor || "#000000",
-                      backgroundColor: stamp.backgroundEnabled 
-                        ? stamp.backgroundColor || "#FFFFFF" 
+                      backgroundColor: stamp.backgroundEnabled && stamp.backgroundColor
+                        ? (() => {
+                            const r = parseInt(stamp.backgroundColor.slice(1, 3), 16);
+                            const g = parseInt(stamp.backgroundColor.slice(3, 5), 16);
+                            const b = parseInt(stamp.backgroundColor.slice(5, 7), 16);
+                            const opacity = stamp.backgroundOpacity !== undefined ? stamp.backgroundOpacity / 100 : 1;
+                            return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+                          })()
                         : "transparent",
                       fontFamily: stamp.font || "Arial",
                       fontSize: "14px",
+                      padding: stamp.borderOffset !== undefined ? `${8 + stamp.borderOffset}px` : "8px",
+                      borderRadius: stamp.borderStyle === "rounded" ? "8px" : "0px",
+                      border: stamp.borderEnabled 
+                        ? `${stamp.borderThickness || 2}px solid ${stamp.borderColor || "#000000"}` 
+                        : "none",
+                      whiteSpace: "pre-line",
                     }}
                   >
                     {stamp.text}
@@ -4387,6 +4933,91 @@ export function PageCanvas({
             </div>
           );
         })()}
+
+        {/* Stamp Editor Dialog */}
+        <StampEditor
+          open={editingStampAnnotation !== null}
+          onClose={() => setEditingStampAnnotation(null)}
+          stampData={editingStampAnnotation?.stampData || null}
+          onSave={async (updatedStampData) => {
+            if (!currentDocument || !editingStampAnnotation) return;
+
+            // Recalculate stamp size based on updated data
+            let newWidth = editingStampAnnotation.width || 100;
+            let newHeight = editingStampAnnotation.height || 60;
+
+            if (updatedStampData.type === "text" && updatedStampData.text) {
+              const lines = updatedStampData.text.split('\n');
+              const fontSize = 12;
+              const lineHeight = fontSize * 1.2;
+              const borderOffset = updatedStampData.borderOffset || 8;
+              const borderThickness = updatedStampData.borderEnabled ? (updatedStampData.borderThickness || 2) : 0;
+              const contentPadding = borderOffset;
+              
+              const canvas = window.document.createElement("canvas");
+              const ctx = canvas.getContext("2d");
+              if (ctx) {
+                ctx.font = `${fontSize}px ${updatedStampData.font || "Arial"}`;
+                let maxTextWidth = 0;
+                lines.forEach((line) => {
+                  const metrics = ctx.measureText(line);
+                  if (metrics.width > maxTextWidth) {
+                    maxTextWidth = metrics.width;
+                  }
+                });
+                
+                const textBlockHeight = lines.length * lineHeight;
+                const contentWidth = maxTextWidth + contentPadding * 2;
+                const contentHeight = textBlockHeight + contentPadding * 2;
+                
+                const totalWidth = contentWidth + borderThickness;
+                const totalHeight = contentHeight + borderThickness;
+                
+                newWidth = totalWidth * stampSizeMultiplier;
+                newHeight = totalHeight * stampSizeMultiplier;
+                
+                if (newWidth < 50) newWidth = 50;
+                if (newHeight < 30) newHeight = 30;
+              }
+            } else if (updatedStampData.thumbnail) {
+              const img = new Image();
+              img.src = updatedStampData.thumbnail;
+              await new Promise<void>((resolve) => {
+                if (img.complete) {
+                  resolve();
+                } else {
+                  img.onload = () => resolve();
+                  img.onerror = () => resolve();
+                }
+              });
+              
+              if (img.width && img.height) {
+                const scale = 6;
+                const thumbnailWidthInPoints = img.width / scale;
+                const thumbnailHeightInPoints = img.height / scale;
+                
+                newWidth = thumbnailWidthInPoints * stampSizeMultiplier;
+                newHeight = thumbnailHeightInPoints * stampSizeMultiplier;
+                
+                if (newWidth < 50) newWidth = 50;
+                if (newHeight < 30) newHeight = 30;
+              }
+            }
+
+            // Update annotation with new stamp data and size
+            wrapAnnotationUpdate(
+              currentDocument.getId(),
+              editingStampAnnotation.id,
+              {
+                stampData: updatedStampData,
+                width: newWidth,
+                height: newHeight,
+              }
+            );
+
+            setEditingStampAnnotation(null);
+          }}
+        />
       </div>
     </div>
   );

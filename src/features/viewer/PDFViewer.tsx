@@ -371,6 +371,21 @@ export function PDFViewer() {
     previousPageRef.current = currentPage;
   }, [currentPage, readMode, scrollToPage]);
 
+  // Fit to page when switching pages in normal mode
+  useEffect(() => {
+    if (readMode || !currentDocument) return;
+    
+    // Skip if page didn't actually change
+    if (previousPageRef.current === currentPage) {
+      return;
+    }
+    
+    // Set fit mode to "page" to fit the new page to the viewport
+    setFitMode("page");
+    
+    previousPageRef.current = currentPage;
+  }, [currentPage, readMode, currentDocument, setFitMode]);
+
   // Calculate base fit-to-width scale when entering read mode or document changes
   useEffect(() => {
     if (readMode && currentDocument && scrollContainerRef.current) {

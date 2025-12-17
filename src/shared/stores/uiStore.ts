@@ -30,6 +30,7 @@ export interface UIState {
   drawingStyle: "marker" | "pencil" | "pen";
   drawingColor: string;
   drawingStrokeWidth: number;
+  drawingOpacity: number;
   
   // Shape tool settings
   currentShapeType: "arrow" | "rectangle" | "circle";
@@ -60,6 +61,7 @@ export interface UIState {
   setDrawingStyle: (style: "marker" | "pencil" | "pen") => void;
   setDrawingColor: (color: string) => void;
   setDrawingStrokeWidth: (width: number) => void;
+  setDrawingOpacity: (opacity: number) => void;
   setCurrentShapeType: (type: "arrow" | "rectangle" | "circle") => void;
   setShapeStrokeColor: (color: string) => void;
   setShapeStrokeWidth: (width: number) => void;
@@ -87,9 +89,10 @@ export const useUIStore = create<UIState>((set, get) => ({
   highlightOpacity: 0.5,
   
   // Drawing tool settings
-  drawingStyle: "pen",
+  drawingStyle: "pencil",
   drawingColor: "#000000",
   drawingStrokeWidth: 3,
+  drawingOpacity: 1.0,
   
   // Shape tool settings
   currentShapeType: "rectangle",
@@ -209,6 +212,10 @@ export const useUIStore = create<UIState>((set, get) => ({
   setDrawingStrokeWidth: (width) => {
     const clampedWidth = Math.max(1, Math.min(50, width));
     set({ drawingStrokeWidth: clampedWidth });
+  },
+  setDrawingOpacity: (opacity) => {
+    const clampedOpacity = Math.max(0, Math.min(1, opacity));
+    set({ drawingOpacity: clampedOpacity });
   },
   
   setCurrentShapeType: (type) => set({ currentShapeType: type }),

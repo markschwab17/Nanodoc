@@ -17,18 +17,18 @@ import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
 import { ShapeToolbar } from "@/features/viewer/ShapeToolbar";
 import { FormToolbar } from "@/features/viewer/FormToolbar";
-import { StampToolbar } from "@/features/viewer/StampToolbar";
 import { SearchBar } from "@/features/search/SearchBar";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { StampGallery } from "@/features/stamps/StampGallery";
 import { StampCreator } from "@/features/stamps/StampCreator";
 import { Button } from "@/components/ui/button";
-import { FileText, Upload, File } from "lucide-react";
+import { FileText, Upload, File, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
 import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
 
 function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
@@ -40,8 +40,40 @@ function Editor() {
   const { loadPDF, loading } = usePDF();
   const { showNotification } = useNotificationStore();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
-  const [showStampGallery, setShowStampGallery] = useState(false);
   const [showStampCreator, setShowStampCreator] = useState(false);
+  const [stampGalleryWidth, setStampGalleryWidth] = useState(320); // Default width in pixels
+  const [isResizingStampGallery, setIsResizingStampGallery] = useState(false);
+  
+  // Handle stamp gallery resize
+  useEffect(() => {
+    if (!isResizingStampGallery) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // Find the left sidebar (thumbnails) to calculate relative position
+      const leftSidebar = document.querySelector('aside:first-of-type');
+      if (!leftSidebar) return;
+      
+      const leftSidebarRect = leftSidebar.getBoundingClientRect();
+      const sidebarLeft = leftSidebarRect.left + leftSidebarRect.width;
+      const newWidth = e.clientX - sidebarLeft;
+      
+      // Constrain width between 200px and 800px
+      const constrainedWidth = Math.max(200, Math.min(800, newWidth));
+      setStampGalleryWidth(constrainedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingStampGallery(false);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizingStampGallery, stampGalleryWidth]);
   
   // Debug: Log loading state changes
   useEffect(() => {
@@ -62,6 +94,7 @@ function Editor() {
     if (!currentDocument) return null;
     
     const annotations = usePDFStore.getState().getAnnotations(currentDocument.getId());
+    const currentSelectedId = selectedAnnotationId; // Capture current value for use in this function
     
     // First, try to find a focused editor
     const activeElement = document.activeElement as HTMLElement;
@@ -141,9 +174,62 @@ function Editor() {
       }
     }
     
-    // Also check annotations store for any highlight that might be selected
-    // This is a fallback - we'll use a more direct approach by checking PageCanvas state
-    // For now, return null and we'll handle highlights differently
+    // Check for selected stamps first - look for stamp elements with data-annotation-id
+    // Stamps are selected via setEditingAnnotation in PageCanvas
+    // Check if selectedAnnotationId matches a stamp (prioritize this)
+    if (currentSelectedId !== null) {
+      const stampAnnotation = annotations.find(
+        (a) => a.id === currentSelectedId && a.type === "stamp"
+      );
+      if (stampAnnotation) {
+        return stampAnnotation;
+      }
+    }
+    
+    // Also check DOM for stamp elements
+    const selectedStamps = document.querySelectorAll('[data-annotation-id]');
+    for (const stampEl of Array.from(selectedStamps)) {
+      const element = stampEl as HTMLElement;
+      if (element.offsetParent !== null) {
+        const annotationId = element.getAttribute("data-annotation-id");
+        if (annotationId) {
+          const annotation = annotations.find(
+            (a) => a.id === annotationId && a.type === "stamp"
+          );
+          if (annotation) {
+            return annotation;
+          }
+        }
+      }
+    }
+    
+    // Check for selected shapes - look for shape elements with data-annotation-id
+    // Shapes are selected via setEditingAnnotation in PageCanvas, so we need to check
+    // the annotations store for any shape that might be selected
+    // We'll use a custom event or check the annotationSelected event detail
+    const selectedShapes = document.querySelectorAll('[data-annotation-id]');
+    for (const shapeEl of Array.from(selectedShapes)) {
+      const element = shapeEl as HTMLElement;
+      // Check if this is a shape element (has data-annotation-id and is visible)
+      if (element.offsetParent !== null) {
+        const annotationId = element.getAttribute("data-annotation-id");
+        if (annotationId) {
+          const annotation = annotations.find(
+            (a) => a.id === annotationId && a.type === "shape"
+          );
+          // For shapes, we need to check if they're selected via editingAnnotation
+          // Since PageCanvas dispatches annotationSelected event, we can check
+          // if this annotation matches the last selected one
+          if (annotation) {
+            // Check if this annotation was recently selected (within last event)
+            // We'll rely on the annotationSelected event to update annotationSelectionKey
+            // which will trigger a re-computation. For now, return the first shape found
+            // if we're in select mode
+            return annotation;
+          }
+        }
+      }
+    }
     
     return null;
   };
@@ -165,28 +251,138 @@ function Editor() {
     };
   }, []);
   
+  // Track selected annotation ID from events
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+  
   // Re-compute editingAnnotation when editor focus changes or document changes
   const [annotationSelectionKey, setAnnotationSelectionKey] = useState(0);
   // Force re-computation when annotationSelectionKey changes
   const editingAnnotation = React.useMemo(() => {
+    // If we have a selectedAnnotationId, try to get that annotation
+    if (selectedAnnotationId !== null && currentDocument) {
+      const annotations = usePDFStore.getState().getAnnotations(currentDocument.getId());
+      const annotation = annotations.find(a => a.id === selectedAnnotationId);
+      if (annotation) {
+        return annotation;
+      }
+      // Annotation not found, return null
+      return null;
+    }
+    
+    // If selectedAnnotationId is null, check if we should use DOM-based detection
+    // This is for text/highlight annotations that don't use selectedAnnotationId
+    // For shapes, if selectedAnnotationId is null, this will return null, closing the toolbar
     return getEditingAnnotation();
-  }, [annotationSelectionKey, editorFocusKey, currentDocument]);
+  }, [annotationSelectionKey, editorFocusKey, currentDocument, selectedAnnotationId]);
   
   // Listen for annotation selection events from PageCanvas
   useEffect(() => {
-    const handleAnnotationSelected = () => {
+    const handleAnnotationSelected = (e: Event) => {
+      const customEvent = e as CustomEvent<{ annotationId: string }>;
+      if (customEvent.detail?.annotationId) {
+        setSelectedAnnotationId(customEvent.detail.annotationId);
+      }
       // Wait for DOM to update, then force re-computation of editingAnnotation
       requestAnimationFrame(() => {
         setAnnotationSelectionKey(prev => prev + 1);
       });
     };
     
+    const handleClearEditingAnnotation = () => {
+      setSelectedAnnotationId(null);
+      setAnnotationSelectionKey(prev => prev + 1);
+    };
+    
+    const handleDeleteSelected = async () => {
+      // Get current editing annotation and document at the time of the event
+      const currentDoc = usePDFStore.getState().getCurrentDocument();
+      if (!currentDoc) return;
+      
+      // Get the current editing annotation - prioritize editingAnnotation memo
+      // This ensures we get the correct annotation for all types (text, highlight, shape, draw, form, stamp)
+      let annotToDelete = editingAnnotation;
+      
+      // If editingAnnotation is null, try to get from selectedAnnotationId
+      if (!annotToDelete && selectedAnnotationId !== null) {
+        const annotations = usePDFStore.getState().getAnnotations(currentDoc.getId());
+        annotToDelete = annotations.find(a => a.id === selectedAnnotationId) || null;
+      }
+      
+      // Last resort: try DOM-based detection (for text/highlight that might not be in editingAnnotation)
+      if (!annotToDelete) {
+        annotToDelete = getEditingAnnotation();
+      }
+      
+      // If no annotation found, don't delete anything (especially not the page!)
+      if (!annotToDelete) {
+        console.log("No annotation selected to delete");
+        return;
+      }
+      
+      try {
+        // Import mupdf and create editor instance
+        const mupdfModule = await import("mupdf");
+        const { PDFEditor } = await import("@/core/pdf/PDFEditor");
+        const editor = new PDFEditor(mupdfModule.default);
+        
+        // Delete from PDF
+        await editor.deleteAnnotation(
+          currentDoc,
+          annotToDelete
+        );
+        
+      // Remove from store
+      usePDFStore.getState().removeAnnotation(
+        currentDoc.getId(),
+        annotToDelete.id
+      );
+      
+      // Clear editing annotation
+      const activeElement = document.activeElement as HTMLElement;
+      if (activeElement && activeElement.hasAttribute("data-rich-text-editor")) {
+        activeElement.blur();
+      }
+      const selectedHighlights = document.querySelectorAll('[data-highlight-selected="true"]');
+      selectedHighlights.forEach(el => el.removeAttribute("data-highlight-selected"));
+        
+        // Clear selected annotation ID
+        setSelectedAnnotationId(null);
+        
+        // Dispatch clear event
+        window.dispatchEvent(new CustomEvent("clearEditingAnnotation"));
+        
+        // Record undo
+        useUndoRedoStore.getState().pushAction({
+          type: "removeAnnotation",
+          documentId: currentDoc.getId(),
+          beforeState: {},
+          afterState: {},
+          actionData: {
+            annotationId: annotToDelete.id,
+            annotation: annotToDelete,
+          },
+          undo: async () => {
+            // Undo logic would go here
+          },
+          redo: async () => {
+            // Redo logic would go here
+          },
+        });
+      } catch (error) {
+        console.error("Error deleting annotation:", error);
+      }
+    };
+    
     window.addEventListener("annotationSelected", handleAnnotationSelected);
+    window.addEventListener("clearEditingAnnotation", handleClearEditingAnnotation);
+    window.addEventListener("deleteSelectedAnnotation", handleDeleteSelected);
     
     return () => {
       window.removeEventListener("annotationSelected", handleAnnotationSelected);
+      window.removeEventListener("clearEditingAnnotation", handleClearEditingAnnotation);
+      window.removeEventListener("deleteSelectedAnnotation", handleDeleteSelected);
     };
-  }, []);
+  }, [selectedAnnotationId, editingAnnotation, getEditingAnnotation]);
 
   // Track edit mode state
   const [isEditing, setIsEditing] = useState(false);
@@ -405,7 +601,7 @@ function Editor() {
       )}
 
       {/* Main Content - Sidebar + Viewer - extends to top */}
-      <div className="h-screen flex overflow-hidden">
+      <div className="h-screen flex overflow-hidden relative">
         {/* Left Sidebar - Thumbnails and Bookmarks */}
         <aside className="w-64 border-r bg-secondary/50 flex flex-col overflow-hidden">
           {/* Thumbnails Section - takes available space from top */}
@@ -424,6 +620,51 @@ function Editor() {
           </div>
         </aside>
 
+        {/* Stamp Gallery Panel - appears when stamp tool is active, overlays on top */}
+        {activeTool === "stamp" && (
+          <aside 
+            className="absolute left-64 top-0 bottom-0 border-r bg-background flex flex-col overflow-hidden z-50 shadow-lg"
+            style={{ width: `${stampGalleryWidth}px` }}
+          >
+            <div className="border-b bg-secondary/50 p-4 flex-shrink-0 flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Stamp Gallery</h2>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  useUIStore.getState().setActiveTool("select");
+                }}
+                className="h-7 w-7 rounded-md hover:bg-muted"
+                title="Close"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="flex-1 overflow-hidden p-4">
+              <StampGallery
+                onCreateNew={() => {
+                  setShowStampCreator(true);
+                }}
+                onClose={() => {
+                  // Setting active tool to "select" will automatically hide the sidebar
+                  useUIStore.getState().setActiveTool("select");
+                }}
+              />
+            </div>
+            {/* Resize handle */}
+            <div
+              className="absolute top-0 right-0 w-2 h-full cursor-col-resize hover:bg-primary/30 bg-transparent transition-colors z-10 group"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsResizingStampGallery(true);
+              }}
+            >
+              <div className="absolute top-1/2 right-0 -translate-y-1/2 w-1 h-12 bg-border group-hover:bg-primary rounded-full transition-colors" />
+            </div>
+          </aside>
+        )}
+
         {/* Center - Large Viewer */}
         <main className="flex-1 flex overflow-hidden bg-muted">
           <PDFViewer />
@@ -437,17 +678,24 @@ function Editor() {
 
       {/* Floating Context Toolbar - changes based on active tool */}
       {currentDocument && !readMode && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
+        <div className="absolute top-4 left-64 right-16 z-40 flex justify-center">
           <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg flex flex-col">
             {/* Tool-specific toolbar */}
             {activeTool === "highlight" && <HighlightToolbar />}
+            {/* Draw toolbar - show when draw tool is active OR when a draw annotation is selected */}
             {activeTool === "draw" && <DrawToolbar />}
+            {activeTool === "select" && editingAnnotation?.type === "draw" && (
+              <DrawToolbar selectedAnnotation={editingAnnotation} />
+            )}
+            {/* Shape toolbar - only show when shape tool is active OR when a shape is explicitly selected */}
             {activeTool === "shape" && <ShapeToolbar />}
+            {activeTool === "select" && editingAnnotation?.type === "shape" && (
+              <ShapeToolbar selectedAnnotation={editingAnnotation} />
+            )}
             {activeTool === "form" && <FormToolbar />}
-            {activeTool === "stamp" && <StampToolbar onOpenGallery={() => setShowStampGallery(true)} />}
             
-            {/* Text formatting toolbar - shown for text tool or when editing */}
-            {(activeTool === "text" || activeTool === "select") && (
+            {/* Text formatting toolbar - shown for text tool or when select tool is active (default, but not for shape or draw) */}
+            {(activeTool === "text" || (activeTool === "select" && (!editingAnnotation || (editingAnnotation.type !== "shape" && editingAnnotation.type !== "draw")))) && (
             <TextFormattingToolbar
               onFormat={(_command, _value) => {
                 // Formatting is handled by document.execCommand in the toolbar
@@ -515,8 +763,16 @@ function Editor() {
               isEditing={isEditing}
               hasSelection={!!editingAnnotation}
               onDelete={async () => {
-                const annot = getEditingAnnotation();
-                if (!annot || !currentDocument) return;
+                // Use editingAnnotation from memo as primary source (works for all annotation types including stamps)
+                // Only fall back to getEditingAnnotation() if editingAnnotation is null (for text/highlight that might not use selectedAnnotationId)
+                let annot = editingAnnotation;
+                if (!annot) {
+                  annot = getEditingAnnotation();
+                }
+                if (!annot || !currentDocument) {
+                  console.log("No annotation to delete");
+                  return;
+                }
                 
                 try {
                   // Import mupdf and create editor instance
@@ -575,20 +831,6 @@ function Editor() {
         onOpenChange={setShowRecentFilesOnStartup}
       />
 
-      {/* Stamp Gallery Modal */}
-      {showStampGallery && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-          <div className="bg-background border rounded-lg shadow-lg p-6 max-w-2xl">
-            <StampGallery
-              onCreateNew={() => {
-                setShowStampGallery(false);
-                setShowStampCreator(true);
-              }}
-              onClose={() => setShowStampGallery(false)}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Stamp Creator Modal */}
       <StampCreator

@@ -400,9 +400,9 @@ export function ImageAnnotation({
         ...style,
         transform: `rotate(${totalRotation}deg)`,
         transformOrigin: "center center",
-        pointerEvents: (activeTool === "pan" || isSpacePressed) ? "none" : "auto",
+          pointerEvents: (activeTool === "pan" || activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "stamp" || isSpacePressed) ? "none" : "auto",
       }}
-      onMouseDown={activeTool !== "pan" && !isSpacePressed ? handleDragMouseDown : undefined}
+      onMouseDown={activeTool === "select" && !isSpacePressed ? handleDragMouseDown : undefined}
     >
       {/* Hover border overlay */}
       {isHovered && activeTool === "select" && !isSelected && (
@@ -435,7 +435,7 @@ export function ImageAnnotation({
           height: `${size.height * scale}px`,
           objectFit: "contain",
           display: "block",
-          pointerEvents: (activeTool === "pan" || isSpacePressed) ? "none" : "auto",
+          pointerEvents: (activeTool === "pan" || activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "stamp" || isSpacePressed) ? "none" : "auto",
         }}
         draggable={false}
         onClick={(e) => {

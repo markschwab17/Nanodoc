@@ -21,8 +21,10 @@ import {
   FileDown,
   FolderOpen,
   HelpCircle,
-  PenTool,
+  Pencil,
   Square,
+  Circle,
+  ArrowRight,
   FileText,
   Stamp as StampIcon
 } from "lucide-react";
@@ -42,7 +44,7 @@ import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 
 export function Toolbar() {
-  const { activeTool, setActiveTool } = useUIStore();
+  const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType } = useUIStore();
   const { currentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
@@ -53,6 +55,9 @@ export function Toolbar() {
   const [showDocumentSettings, setShowDocumentSettings] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
+  const [showShapeMenu, setShowShapeMenu] = useState(false);
+  const recentFilesButtonRef = useRef<HTMLButtonElement>(null);
+  const shapeMenuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Get current tab for save state
   const activeTab = useTabStore.getState().getActiveTab();
@@ -65,6 +70,15 @@ export function Toolbar() {
     window.addEventListener("openHelp", handleOpenHelp);
     return () => {
       window.removeEventListener("openHelp", handleOpenHelp);
+    };
+  }, []);
+  
+  // Cleanup shape menu timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (shapeMenuTimeoutRef.current) {
+        clearTimeout(shapeMenuTimeoutRef.current);
+      }
     };
   }, []);
   
@@ -349,6 +363,7 @@ export function Toolbar() {
           <FolderOpen className={sizeClasses.icon} />
         </Button>
         <Button
+          ref={recentFilesButtonRef}
           variant="outline"
           size="icon"
           onClick={() => setShowRecentFiles(true)}
@@ -488,17 +503,104 @@ export function Toolbar() {
           title="Draw Tool"
           className={sizeClasses.button}
         >
-          <PenTool className={sizeClasses.icon} />
+          <Pencil className={sizeClasses.icon} />
         </Button>
-        <Button
-          variant={activeTool === "shape" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("shape")}
-          title="Shapes (Arrow, Rectangle, Circle)"
-          className={sizeClasses.button}
-        >
-          <Square className={sizeClasses.icon} />
-        </Button>
+        <Popover open={showShapeMenu} onOpenChange={setShowShapeMenu}>
+          <PopoverTrigger asChild>
+            <div
+              className="relative"
+              onMouseEnter={() => {
+                // Clear any pending close timeout
+                if (shapeMenuTimeoutRef.current) {
+                  clearTimeout(shapeMenuTimeoutRef.current);
+                  shapeMenuTimeoutRef.current = null;
+                }
+                setShowShapeMenu(true);
+              }}
+              onMouseLeave={() => {
+                // Add delay before closing to allow mouse movement to popover
+                shapeMenuTimeoutRef.current = setTimeout(() => {
+                  setShowShapeMenu(false);
+                  shapeMenuTimeoutRef.current = null;
+                }, 300); // 300ms delay for better UX
+              }}
+            >
+              <Button
+                variant={activeTool === "shape" ? "default" : "outline"}
+                size="icon"
+                title="Shapes (Arrow, Rectangle, Circle)"
+                className={sizeClasses.button}
+              >
+                {currentShapeType === "rectangle" && <Square className={sizeClasses.icon} />}
+                {currentShapeType === "circle" && <Circle className={sizeClasses.icon} />}
+                {currentShapeType === "arrow" && <ArrowRight className={sizeClasses.icon} />}
+              </Button>
+            </div>
+          </PopoverTrigger>
+          <PopoverContent 
+            className="w-auto p-1" 
+            side="left" 
+            align="start"
+            style={{ marginLeft: '8px' }} // Add gap between button and popover
+            onMouseEnter={() => {
+              // Clear any pending close timeout
+              if (shapeMenuTimeoutRef.current) {
+                clearTimeout(shapeMenuTimeoutRef.current);
+                shapeMenuTimeoutRef.current = null;
+              }
+              setShowShapeMenu(true);
+            }}
+            onMouseLeave={() => {
+              // Add delay before closing to allow mouse movement
+              shapeMenuTimeoutRef.current = setTimeout(() => {
+                setShowShapeMenu(false);
+                shapeMenuTimeoutRef.current = null;
+              }, 300); // 300ms delay for better UX
+            }}
+          >
+            <div className="flex flex-col gap-0.5">
+              <Button
+                variant={currentShapeType === "rectangle" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => {
+                  setCurrentShapeType("rectangle");
+                  setActiveTool("shape");
+                  setShowShapeMenu(false);
+                }}
+                className="h-7 px-2 justify-start text-xs"
+              >
+                <Square className="h-3.5 w-3.5 mr-1.5" />
+                Rectangle
+              </Button>
+              <Button
+                variant={currentShapeType === "circle" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => {
+                  setCurrentShapeType("circle");
+                  setActiveTool("shape");
+                  setShowShapeMenu(false);
+                }}
+                className="h-7 px-2 justify-start text-xs"
+              >
+                <Circle className="h-3.5 w-3.5 mr-1.5" />
+                Circle
+              </Button>
+              <Button
+                variant={currentShapeType === "arrow" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => {
+                  setCurrentShapeType("arrow");
+                  setActiveTool("shape");
+                  setShowShapeMenu(false);
+                }}
+                className="h-7 px-2 justify-start text-xs"
+              >
+                <ArrowRight className="h-3.5 w-3.5 mr-1.5" />
+                Arrow
+              </Button>
+            </div>
+          </PopoverContent>
+        </Popover>
         <Button
           variant={activeTool === "form" ? "default" : "outline"}
           size="icon"
@@ -564,6 +666,7 @@ export function Toolbar() {
       <RecentFilesModal
         open={showRecentFiles}
         onOpenChange={setShowRecentFiles}
+        triggerRef={recentFilesButtonRef}
       />
 
       {/* Print Settings Dialog */}

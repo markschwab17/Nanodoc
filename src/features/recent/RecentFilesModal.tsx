@@ -1,38 +1,70 @@
 /**
- * Recent Files Modal Component
+ * Recent Files Slide-out Panel Component
  * 
- * Displays a list of recently opened PDF files and allows opening them.
+ * Displays a list of recently opened PDF files in a small slide-out menu.
  */
 
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FileText, X, Clock } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 interface RecentFilesModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  triggerRef?: React.RefObject<HTMLButtonElement>;
 }
 
-export function RecentFilesModal({ open, onOpenChange }: RecentFilesModalProps) {
+export function RecentFilesModal({ open, onOpenChange, triggerRef }: RecentFilesModalProps) {
   const { getRecentFiles, removeRecentFile } = useRecentFilesStore();
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [loading, setLoading] = useState<string | null>(null);
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
+  const [position, setPosition] = useState({ top: 0, right: 0 });
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const recentFiles = getRecentFiles();
+
+  // Update position based on trigger button
+  useEffect(() => {
+    if (open) {
+      if (triggerRef?.current) {
+        const rect = triggerRef.current.getBoundingClientRect();
+        // Position to the left of the button
+        // Panel's right edge should be at: button's left edge - gap
+        const gap = 8; // 8px gap between button and panel
+        setPosition({
+          top: rect.top,
+          right: window.innerWidth - rect.left + gap,
+        });
+      } else {
+        // Default position (top right) when no trigger ref (e.g., on startup)
+        setPosition({
+          top: 80,
+          right: 20,
+        });
+      }
+    }
+  }, [open, triggerRef]);
+
+  // Handle escape key to close
+  useEffect(() => {
+    if (!open) return;
+
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onOpenChange(false);
+      }
+    };
+
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [open, onOpenChange]);
 
   const handleOpenFile = async (filePath: string, fileName: string) => {
     setLoading(filePath);
@@ -50,7 +82,7 @@ export function RecentFilesModal({ open, onOpenChange }: RecentFilesModalProps) 
       const mupdfModule = await import("mupdf");
       await loadPDF(fileData, fileName, mupdfModule.default, filePath);
       
-      // Close modal on success
+      // Close panel on success
       onOpenChange(false);
     } catch (error) {
       console.error("Error opening recent file:", error);
@@ -93,90 +125,114 @@ export function RecentFilesModal({ open, onOpenChange }: RecentFilesModalProps) 
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh]">
-        <DialogHeader>
-          <DialogTitle>Recent Files</DialogTitle>
-          <DialogDescription>
-            Select a file to open it, or remove it from the recent list.
-          </DialogDescription>
-        </DialogHeader>
-        
-        {recentFiles.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <FileText className="h-12 w-12 text-muted-foreground mb-4" />
-            <p className="text-muted-foreground">No recent files</p>
-          </div>
-        ) : (
-          <ScrollArea className="max-h-[60vh] pr-4">
-            <div className="space-y-2">
-              {recentFiles.map((file) => {
-                const isLoading = loading === file.path;
-                const error = errors.get(file.path);
+    <>
+      {/* Backdrop */}
+      {open && (
+        <div
+          className="fixed inset-0 z-40 bg-transparent"
+          onClick={() => onOpenChange(false)}
+          aria-hidden={!open}
+        />
+      )}
 
-                return (
-                  <div
-                    key={file.path}
-                    className={cn(
-                      "flex items-center gap-3 p-3 rounded-lg border transition-colors",
-                      "hover:bg-accent",
-                      isLoading && "opacity-50 pointer-events-none",
-                      error && "border-destructive"
-                    )}
-                  >
-                    <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                    
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="font-medium truncate">{file.name}</p>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1">
-                        <Clock className="h-3 w-3 text-muted-foreground" />
-                        <p className="text-xs text-muted-foreground">
-                          {formatDate(file.lastOpened)}
-                        </p>
-                      </div>
-                      {error && (
-                        <p className="text-xs text-destructive mt-1">
-                          {error}
-                        </p>
+      {/* Slide-out Panel */}
+      <div
+        ref={panelRef}
+        className={cn(
+          "fixed z-50 w-80 bg-background border rounded-lg shadow-lg",
+          "transition-all duration-300 ease-in-out",
+          open ? "opacity-100 translate-x-0" : "opacity-0 -translate-x-4 pointer-events-none",
+          "max-h-[600px] flex flex-col"
+        )}
+        style={{
+          top: `${position.top}px`,
+          right: `${position.right}px`,
+        }}
+        aria-hidden={!open}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between p-3 border-b flex-shrink-0">
+          <h2 className="text-sm font-semibold">Recent Files</h2>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenChange(false)}
+            className="h-6 w-6"
+          >
+            <X className="h-3 w-3" />
+          </Button>
+        </div>
+
+        {/* Content */}
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="p-2">
+            {recentFiles.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-8 text-center">
+                <FileText className="h-8 w-8 text-muted-foreground mb-2" />
+                <p className="text-sm text-muted-foreground">No recent files</p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {recentFiles.map((file) => {
+                  const isLoading = loading === file.path;
+                  const error = errors.get(file.path);
+
+                  return (
+                    <div
+                      key={file.path}
+                      className={cn(
+                        "flex items-start gap-2 p-2 rounded-md border transition-colors",
+                        "hover:bg-accent cursor-pointer",
+                        isLoading && "opacity-50 pointer-events-none",
+                        error && "border-destructive"
                       )}
-                      <p className="text-xs text-muted-foreground truncate mt-1">
-                        {file.path}
-                      </p>
-                    </div>
+                      onClick={() => !isLoading && handleOpenFile(file.path, file.name)}
+                    >
+                      <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-0.5" />
+                      
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{file.name}</p>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <Clock className="h-3 w-3 text-muted-foreground" />
+                          <p className="text-xs text-muted-foreground">
+                            {formatDate(file.lastOpened)}
+                          </p>
+                        </div>
+                        {error && (
+                          <p className="text-xs text-destructive mt-0.5">
+                            {error}
+                          </p>
+                        )}
+                        <p className="text-xs text-muted-foreground truncate mt-0.5">
+                          {file.path}
+                        </p>
+                      </div>
 
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleOpenFile(file.path, file.name)}
-                        disabled={isLoading}
-                        className="h-8"
-                      >
-                        Open
-                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => handleRemoveFile(file.path)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveFile(file.path);
+                        }}
                         disabled={isLoading}
-                        className="h-8 w-8"
+                        className="h-6 w-6 flex-shrink-0"
                         title="Remove from recent"
                       >
-                        <X className="h-4 w-4" />
+                        <X className="h-3 w-3" />
                       </Button>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          </ScrollArea>
-        )}
-      </DialogContent>
-    </Dialog>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+      </div>
+    </>
   );
 }
+
 
 
 

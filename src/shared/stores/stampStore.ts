@@ -12,6 +12,7 @@ import type { StampData } from "@/core/pdf/PDFEditor";
 interface StampState {
   stamps: StampData[];
   recentlyUsed: string[]; // Array of stamp IDs
+  stampSizeMultiplier: number; // Size multiplier for stamp placement (0.1 to 2.0, default 0.5)
   
   // Actions
   addStamp: (stamp: StampData) => void;
@@ -21,6 +22,7 @@ interface StampState {
   markAsUsed: (id: string) => void;
   getRecentStamps: (limit?: number) => StampData[];
   searchStamps: (query: string) => StampData[];
+  setStampSizeMultiplier: (multiplier: number) => void;
 }
 
 export const useStampStore = create<StampState>()(
@@ -28,6 +30,7 @@ export const useStampStore = create<StampState>()(
     (set, get) => ({
       stamps: [],
       recentlyUsed: [],
+      stampSizeMultiplier: 0.5, // Default to 50% size
 
       addStamp: (stamp) => {
         set((state) => ({
@@ -79,12 +82,17 @@ export const useStampStore = create<StampState>()(
           stamp.name.toLowerCase().includes(lowerQuery)
         );
       },
+
+      setStampSizeMultiplier: (multiplier) => {
+        set({ stampSizeMultiplier: Math.max(0.1, Math.min(2.0, multiplier)) });
+      },
     }),
     {
       name: "pdf-stamp-storage",
       partialize: (state) => ({
         stamps: state.stamps,
         recentlyUsed: state.recentlyUsed,
+        stampSizeMultiplier: state.stampSizeMultiplier,
       }),
     }
   )

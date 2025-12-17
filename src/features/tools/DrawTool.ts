@@ -13,12 +13,11 @@ function smoothPath(points: Array<{ x: number; y: number }>): Array<{ x: number;
   if (points.length < 3) return points;
   
   const smoothed: Array<{ x: number; y: number }> = [];
-  const tension = 0.5; // Tension parameter (0 = linear, 1 = very smooth)
   
   // Add first point
   smoothed.push(points[0]);
   
-  // Smooth intermediate points
+  // Smooth intermediate points using Catmull-Rom spline
   for (let i = 0; i < points.length - 1; i++) {
     const p0 = points[Math.max(0, i - 1)];
     const p1 = points[i];
@@ -26,8 +25,9 @@ function smoothPath(points: Array<{ x: number; y: number }>): Array<{ x: number;
     const p3 = points[Math.min(points.length - 1, i + 2)];
     
     // Generate intermediate points using Catmull-Rom spline
+    // Standard Catmull-Rom formula: q(t) = 0.5 * (2*p1 + (-p0 + p2)*t + (2*p0 - 5*p1 + 4*p2 - p3)*t² + (-p0 + 3*p1 - 3*p2 + p3)*t³)
     const segments = 10;
-    for (let t = 0; t < segments; t++) {
+    for (let t = 1; t <= segments; t++) {
       const t_norm = t / segments;
       const t2 = t_norm * t_norm;
       const t3 = t2 * t_norm;
@@ -37,14 +37,14 @@ function smoothPath(points: Array<{ x: number; y: number }>): Array<{ x: number;
         (-p0.x + p2.x) * t_norm +
         (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
         (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3
-      ) * tension + p1.x * (1 - tension) + p2.x * tension * t_norm;
+      );
       
       const y = 0.5 * (
         (2 * p1.y) +
         (-p0.y + p2.y) * t_norm +
         (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
         (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3
-      ) * tension + p1.y * (1 - tension) + p2.y * tension * t_norm;
+      );
       
       smoothed.push({ x, y });
     }
@@ -168,7 +168,7 @@ export const DrawTool: ToolHandler = {
     }
   },
 
-  handleMouseUp: async (e: React.MouseEvent, context: ToolContext) => {
+  handleMouseUp: async (_e: React.MouseEvent, context: ToolContext) => {
     if (!isDrawing || currentPath.length < 2) {
       isDrawing = false;
       currentPath = [];
@@ -196,9 +196,9 @@ export const DrawTool: ToolHandler = {
     finalPath = smoothPath(finalPath);
     
     // Get drawing settings from UI store
-    const { drawingStyle, drawingColor, drawingStrokeWidth } = useUIStore.getState();
+    const { drawingColor, drawingStrokeWidth, drawingOpacity } = useUIStore.getState();
     
-    // Create drawing annotation
+    // Create drawing annotation (always use pencil style)
     const annotation: Annotation = {
       id: `draw_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       type: "draw",
@@ -208,15 +208,16 @@ export const DrawTool: ToolHandler = {
       width: Math.max(...finalPath.map(p => p.x)) - Math.min(...finalPath.map(p => p.x)),
       height: Math.max(...finalPath.map(p => p.y)) - Math.min(...finalPath.map(p => p.y)),
       path: finalPath,
-      drawingStyle,
+      drawingStyle: "pencil",
       color: drawingColor,
       strokeWidth: drawingStrokeWidth,
+      strokeOpacity: drawingOpacity,
       smoothed: true,
     };
     
     addAnnotation(currentDocument.getId(), annotation);
     
-    // Reset state
+    // Reset state (stay in draw mode)
     isDrawing = false;
     currentPath = [];
     context.setIsSelecting(false);

@@ -42,6 +42,17 @@ export const FormTool: ToolHandler = {
       
       addAnnotation(currentDocument.getId(), annotation);
       
+      // Switch to select tool and select the newly created annotation
+      useUIStore.getState().setActiveTool("select");
+      context.setEditingAnnotation(annotation);
+      
+      // Dispatch event to notify that annotation was selected
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent("annotationSelected", { 
+          detail: { annotationId: annotation.id } 
+        }));
+      });
+      
       e.preventDefault();
       e.stopPropagation();
       return;
@@ -67,7 +78,7 @@ export const FormTool: ToolHandler = {
     context.setSelectionEnd(coords);
   },
 
-  handleMouseUp: async (e: React.MouseEvent, context: ToolContext, selectionStart, selectionEnd) => {
+  handleMouseUp: async (_e: React.MouseEvent, context: ToolContext, _selectionStart, selectionEnd) => {
     if (!isCreatingField || !fieldStart || !selectionEnd) {
       isCreatingField = false;
       fieldStart = null;
@@ -135,6 +146,17 @@ export const FormTool: ToolHandler = {
     };
     
     addAnnotation(currentDocument.getId(), annotation);
+    
+    // Switch to select tool and select the newly created annotation
+    useUIStore.getState().setActiveTool("select");
+    context.setEditingAnnotation(annotation);
+    
+    // Dispatch event to notify that annotation was selected
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent("annotationSelected", { 
+        detail: { annotationId: annotation.id } 
+      }));
+    });
     
     // Reset state
     isCreatingField = false;

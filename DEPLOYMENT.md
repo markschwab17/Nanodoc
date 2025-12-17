@@ -108,3 +108,5 @@ If deploying to a custom domain:
 2. Update the canonical URL in `index.html` if different from `https://Nanodoc.app`
 3. Configure the domain in Netlify dashboard
 
+
+

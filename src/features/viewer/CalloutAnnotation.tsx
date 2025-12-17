@@ -24,7 +24,7 @@ export function CalloutAnnotation({
   onEdit,
   onDelete,
   isSelected,
-  zoomLevel,
+  zoomLevel: _zoomLevel,
 }: CalloutAnnotationProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isHovered, setIsHovered] = useState(false);

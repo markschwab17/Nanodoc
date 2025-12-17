@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/popover";
 import { 
   Type, Highlighter, MessageSquare, PenTool, Square, Circle, 
-  ArrowRight, FileText, Stamp as StampIcon, Palette 
+  ArrowRight, FileText, Stamp as StampIcon, X
 } from "lucide-react";
 import { HexColorPicker } from "react-colorful";
 import { StampGallery } from "@/features/stamps/StampGallery";
@@ -315,13 +315,28 @@ export function AnnotationTools() {
           <PopoverTrigger asChild>
             <span />
           </PopoverTrigger>
-          <PopoverContent className="w-auto p-4" align="start">
+          <PopoverContent className="w-auto p-4 relative" align="start">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => {
+                setShowStampGallery(false);
+                setActiveTool("select");
+              }}
+              className="absolute top-2 right-2 h-7 w-7 rounded-md z-50 bg-background hover:bg-muted border shadow-sm"
+              title="Close"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
             <StampGallery
               onCreateNew={() => {
                 setShowStampGallery(false);
                 setShowStampCreator(true);
               }}
-              onClose={() => setShowStampGallery(false)}
+              onClose={() => {
+                setShowStampGallery(false);
+                setActiveTool("select");
+              }}
             />
           </PopoverContent>
         </Popover>

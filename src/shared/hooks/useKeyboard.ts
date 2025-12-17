@@ -242,6 +242,16 @@ export function useKeyboard() {
         toggleReadMode();
         return;
       }
+
+      // Delete: Delete or Backspace key - delete currently selected annotation
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        
+        // Dispatch delete event - Editor.tsx will handle it
+        const deleteEvent = new CustomEvent("deleteSelectedAnnotation");
+        window.dispatchEvent(deleteEvent);
+        return;
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);

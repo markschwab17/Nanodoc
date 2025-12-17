@@ -861,9 +861,9 @@ export function RichTextEditor({
         ...style,
         transform: `rotate(${totalRotation}deg)`,
         transformOrigin: "center center",
-        pointerEvents: (activeTool === "pan" || isSpacePressed) ? "none" : "auto",
+        pointerEvents: (activeTool === "pan" || activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "stamp" || isSpacePressed) ? "none" : "auto",
       }}
-      onMouseDown={!isEditing && activeTool !== "pan" && !isSpacePressed ? handleDragMouseDown : undefined}
+      onMouseDown={!isEditing && activeTool === "select" && !isSpacePressed ? handleDragMouseDown : undefined}
     >
       {/* Hover border overlay - only show when select tool is active and not selected */}
       {isHovered && activeTool === "select" && !isSelected && !isEditing && (
@@ -985,8 +985,8 @@ export function RichTextEditor({
             : "rgba(255, 255, 255, 0)",
           userSelect: isEditing ? "text" : "none",
           WebkitUserSelect: isEditing ? "text" : "none",
-          pointerEvents: (activeTool === "pan" || isSpacePressed) ? "none" : (isEditing ? "auto" : "auto"), // Disable when pan tool is active or space is pressed
-          cursor: isEditing ? "text" : ((activeTool === "pan" || isSpacePressed) ? "default" : "move"), // Show default cursor when pan tool is active or space is pressed
+          pointerEvents: (activeTool === "pan" || activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "stamp" || isSpacePressed) ? "none" : (isEditing ? "auto" : "auto"), // Disable when non-select tools are active or space is pressed
+          cursor: isEditing ? "text" : ((activeTool === "pan" || activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "stamp" || isSpacePressed) ? "default" : "move"), // Show default cursor when non-select tools are active or space is pressed
           whiteSpace: annotation.autoFit ? "nowrap" : "pre-wrap", // No wrap for auto-fit, wrap for fixed box
           wordWrap: annotation.autoFit ? "normal" : "break-word", // Break long words only in fixed mode
           overflowWrap: annotation.autoFit ? "normal" : "break-word", // Break words only in fixed mode

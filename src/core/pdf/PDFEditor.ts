@@ -63,9 +63,11 @@ export interface Annotation {
   readOnly?: boolean;
   multiline?: boolean;
   radioGroup?: string; // For grouping radio buttons
+  locked?: boolean; // Lock position and size
   
   // For drawing annotations
   drawingStyle?: "marker" | "pencil" | "pen";
+  strokeOpacity?: number; // Opacity for drawing strokes (0-1)
   smoothed?: boolean;
   
   // For shape annotations
@@ -95,6 +97,12 @@ export interface StampData {
   textColor?: string;
   backgroundEnabled?: boolean;
   backgroundColor?: string;
+  backgroundOpacity?: number; // 0-100
+  borderEnabled?: boolean;
+  borderStyle?: "rounded" | "square";
+  borderThickness?: number;
+  borderColor?: string;
+  borderOffset?: number; // Distance from text in pixels
   // For image stamps
   imageData?: string; // base64 image
   // For signature stamps
@@ -1374,6 +1382,120 @@ export class PDFEditor {
               width: rect[2] - rect[0],
               height: rect[3] - rect[1],
             });
+          } else if (type === "Widget") {
+            // This is a form field - process it directly
+            const rect = pdfAnnot.getRect();
+            const annotObj = pdfAnnot.getObject();
+            const pageBounds = page.getBounds();
+            const pageHeight = pageBounds[3] - pageBounds[1];
+            
+            let fieldType: "text" | "checkbox" | "radio" | "dropdown" | "date" = "text";
+            let fieldName = "";
+            let fieldValue: string | boolean = "";
+            let options: string[] = [];
+            let readOnly = false;
+            let required = false;
+            let multiline = false;
+            let radioGroup = "";
+            
+            if (annotObj) {
+              const ftObj = annotObj.get("FT");
+              const ftName = ftObj && ftObj.getName ? ftObj.getName() : (ftObj ? ftObj.toString() : "");
+              
+              if (ftName === "Tx") {
+                fieldType = "text";
+                const ff = annotObj.get("Ff");
+                if (ff && typeof ff.valueOf === "function") {
+                  const flags = ff.valueOf();
+                  multiline = (flags & 4096) !== 0; // Multiline flag
+                  readOnly = (flags & 1) !== 0; // Read-only flag
+                  required = (flags & 2) !== 0; // Required flag
+                }
+              } else if (ftName === "Btn") {
+                const ff = annotObj.get("Ff");
+                if (ff && typeof ff.valueOf === "function") {
+                  const flags = ff.valueOf();
+                  if ((flags & 32768) !== 0) {
+                    fieldType = "radio";
+                  } else {
+                    fieldType = "checkbox";
+                  }
+                  readOnly = (flags & 1) !== 0;
+                  required = (flags & 2) !== 0;
+                } else {
+                  fieldType = "checkbox";
+                }
+              } else if (ftName === "Ch") {
+                fieldType = "dropdown";
+                const ff = annotObj.get("Ff");
+                if (ff && typeof ff.valueOf === "function") {
+                  const flags = ff.valueOf();
+                  readOnly = (flags & 1) !== 0;
+                  required = (flags & 2) !== 0;
+                }
+                const optObj = annotObj.get("Opt");
+                if (optObj) {
+                  if (Array.isArray(optObj)) {
+                    options = optObj.map((o: any) => o.toString ? o.toString() : String(o));
+                  } else {
+                    // Opt might be an array of arrays for export values
+                    try {
+                      const optArray = optObj;
+                      if (optArray && optArray.length) {
+                        options = optArray.map((o: any) => {
+                          if (Array.isArray(o) && o.length > 0) {
+                            return o[0].toString ? o[0].toString() : String(o[0]);
+                          }
+                          return o.toString ? o.toString() : String(o);
+                        });
+                      }
+                    } catch (e) {
+                      console.warn("Error parsing dropdown options:", e);
+                    }
+                  }
+                }
+              }
+              
+              const tObj = annotObj.get("T");
+              if (tObj) {
+                fieldName = tObj.toString ? tObj.toString() : String(tObj);
+              }
+              
+              const vObj = annotObj.get("V");
+              if (vObj) {
+                if (fieldType === "checkbox" || fieldType === "radio") {
+                  const vName = vObj.getName ? vObj.getName() : vObj.toString();
+                  fieldValue = vName === "Yes" || vName === "On";
+                } else {
+                  fieldValue = vObj.toString ? vObj.toString() : String(vObj);
+                }
+              }
+              
+              // Get radio group name
+              if (fieldType === "radio" && tObj) {
+                radioGroup = tObj.toString ? tObj.toString() : String(tObj);
+              }
+            }
+            
+            annotations.push({
+              id: `form_${pageNumber}_${rect[0]}_${rect[1]}_${Math.random().toString(36).substr(2, 9)}`,
+              type: "formField",
+              pageNumber,
+              x: rect[0],
+              y: pageHeight - rect[3], // Convert to display coordinates
+              width: rect[2] - rect[0],
+              height: rect[3] - rect[1],
+              fieldType,
+              fieldName,
+              fieldValue,
+              options: options.length > 0 ? options : undefined,
+              readOnly,
+              required,
+              multiline,
+              radioGroup: radioGroup || undefined,
+              pdfAnnotation: pdfAnnot, // Store reference for updates
+            });
+            continue; // Skip to next annotation
           } else if (type === "FreeText") {
             // Check for image annotations (stored as FreeText with JSON in contents)
             if (contents) {
@@ -1469,12 +1591,153 @@ export class PDFEditor {
   /**
    * Update an existing PDF annotation object directly
    */
+  /**
+   * Update form field value and properties in PDF
+   * This ensures form fields are properly synced before saving
+   */
+  async updateFormFieldValue(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    if (annotation.type !== "formField" || !annotation.pdfAnnotation) {
+      return;
+    }
+
+    try {
+      const mupdfDoc = document.getMupdfDocument();
+      const pdfDoc = mupdfDoc.asPDF();
+      if (!pdfDoc) return;
+
+      const page = pdfDoc.loadPage(annotation.pageNumber);
+      const pageBounds = page.getBounds();
+      const pageHeight = pageBounds[3] - pageBounds[1];
+      
+      const annotObj = annotation.pdfAnnotation.getObject();
+      if (!annotObj) return;
+
+      // Update position and size if changed
+      if (annotation.x !== undefined && annotation.y !== undefined && 
+          annotation.width !== undefined && annotation.height !== undefined) {
+        const y = pageHeight - annotation.y - annotation.height;
+        const rect: [number, number, number, number] = [
+          annotation.x,
+          y,
+          annotation.x + annotation.width,
+          y + annotation.height,
+        ];
+        annotation.pdfAnnotation.setRect(rect);
+      }
+
+      // Update field value based on type
+      if (annotation.fieldType === "text" || annotation.fieldType === "date") {
+        if (annotation.fieldValue !== undefined) {
+          if (typeof annotation.fieldValue === "string") {
+            annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+            annotObj.put("DV", this.mupdf.newString(annotation.fieldValue)); // Default value
+          } else {
+            annotObj.put("V", this.mupdf.newString(""));
+            annotObj.put("DV", this.mupdf.newString(""));
+          }
+        }
+      } else if (annotation.fieldType === "checkbox" || annotation.fieldType === "radio") {
+        if (annotation.fieldValue === true) {
+          annotObj.put("V", this.mupdf.newName("Yes"));
+          annotObj.put("AS", this.mupdf.newName("Yes"));
+        } else {
+          annotObj.put("V", this.mupdf.newName("Off"));
+          annotObj.put("AS", this.mupdf.newName("Off"));
+        }
+      } else if (annotation.fieldType === "dropdown") {
+        // Update options if changed
+        if (annotation.options && annotation.options.length > 0) {
+          const optArray = this.mupdf.newArray();
+          for (const opt of annotation.options) {
+            optArray.push(this.mupdf.newString(opt));
+          }
+          annotObj.put("Opt", optArray);
+        }
+        
+        // Update value if provided
+        if (annotation.fieldValue !== undefined && typeof annotation.fieldValue === "string") {
+          annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+        }
+      }
+
+      // Update field flags (readOnly, required)
+      let fieldFlags = 0;
+      const currentFlags = annotObj.get("Ff");
+      if (currentFlags && typeof currentFlags.valueOf === "function") {
+        fieldFlags = currentFlags.valueOf();
+      }
+      
+      if (annotation.readOnly) {
+        fieldFlags |= 1; // Read-only flag
+      } else {
+        fieldFlags &= ~1; // Clear read-only flag
+      }
+      
+      if (annotation.required) {
+        fieldFlags |= 2; // Required flag
+      } else {
+        fieldFlags &= ~2; // Clear required flag
+      }
+      
+      annotObj.put("Ff", fieldFlags);
+      
+      // Update field name if changed
+      if (annotation.fieldName) {
+        annotObj.put("T", this.mupdf.newString(annotation.fieldName));
+      }
+
+      annotObj.update();
+      annotation.pdfAnnotation.update();
+    } catch (error) {
+      console.warn("Could not update form field:", error);
+    }
+  }
+
   async updateAnnotationInPdf(
     _document: PDFDocument, // Not used but kept for API consistency
     pdfAnnotation: any, // The actual mupdf annotation object
     updates: Partial<Annotation>
   ): Promise<void> {
     if (!pdfAnnotation) return;
+
+    // Handle form field updates
+    if (updates.type === "formField" || (updates.fieldValue !== undefined && pdfAnnotation.getType() === "Widget")) {
+      // For form fields, update the value
+      const annotObj = pdfAnnotation.getObject();
+      if (annotObj) {
+        const fieldType = annotObj.get("FT");
+        if (fieldType) {
+          const ftName = fieldType.getName ? fieldType.getName() : null;
+          
+          if (ftName === "Tx" && updates.fieldValue && typeof updates.fieldValue === "string") {
+            // Text or date field
+            annotObj.put("V", this.mupdf.newString(updates.fieldValue));
+            annotObj.update();
+            pdfAnnotation.update();
+          } else if (ftName === "Btn") {
+            // Checkbox or radio
+            if (updates.fieldValue === true) {
+              annotObj.put("V", this.mupdf.newName("Yes"));
+              annotObj.put("AS", this.mupdf.newName("Yes"));
+            } else {
+              annotObj.put("V", this.mupdf.newName("Off"));
+              annotObj.put("AS", this.mupdf.newName("Off"));
+            }
+            annotObj.update();
+            pdfAnnotation.update();
+          } else if (ftName === "Ch" && updates.fieldValue && typeof updates.fieldValue === "string") {
+            // Dropdown
+            annotObj.put("V", this.mupdf.newString(updates.fieldValue));
+            annotObj.update();
+            pdfAnnotation.update();
+          }
+        }
+      }
+      return;
+    }
 
     if (updates.content !== undefined) {
       pdfAnnotation.setContents(updates.content);
@@ -1890,6 +2153,7 @@ export class PDFEditor {
 
   /**
    * Add form field annotation to a page
+   * Creates proper AcroForm fields that are compatible across PDF platforms
    */
   async addFormFieldAnnotation(
     document: PDFDocument,
@@ -1911,7 +2175,7 @@ export class PDFEditor {
       return;
     }
     
-    // Convert to display coordinates
+    // Convert to display coordinates (PDF uses bottom-left origin)
     const y = pageHeight - annotation.y - (annotation.height || 0);
     const rect: [number, number, number, number] = [
       annotation.x,
@@ -1920,7 +2184,7 @@ export class PDFEditor {
       y + (annotation.height || 0),
     ];
     
-    // Create Widget annotation
+    // Create Widget annotation (this creates the form field)
     const annot = page.createAnnotation("Widget");
     annot.setRect(rect);
     
@@ -1928,30 +2192,112 @@ export class PDFEditor {
     try {
       const annotObj = annot.getObject();
       if (annotObj) {
-        // Set field name
-        if (annotation.fieldName) {
-          annotObj.put("T", annotation.fieldName);
-        }
+        // Set field name (required for form fields)
+        const fieldName = annotation.fieldName || `field_${annotation.id}`;
+        annotObj.put("T", this.mupdf.newString(fieldName));
         
         // Set field type and properties
+        let fieldFlags = 0;
+        
         if (annotation.fieldType === "text") {
-          annotObj.put("FT", "Tx");
+          annotObj.put("FT", this.mupdf.newName("Tx"));
+          
+          // Set multiline flag
           if (annotation.multiline) {
-            annotObj.put("Ff", 4096); // Multiline flag
+            fieldFlags |= 4096; // Multiline flag (bit 13)
           }
+          
+          // Set field value if provided
+          if (annotation.fieldValue && typeof annotation.fieldValue === "string") {
+            annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+            annotObj.put("DV", this.mupdf.newString(annotation.fieldValue)); // Default value
+          }
+          
         } else if (annotation.fieldType === "checkbox") {
-          annotObj.put("FT", "Btn");
+          annotObj.put("FT", this.mupdf.newName("Btn"));
+          
+          // Set checkbox value
+          if (annotation.fieldValue === true) {
+            annotObj.put("V", this.mupdf.newName("Yes"));
+            annotObj.put("AS", this.mupdf.newName("Yes"));
+          } else {
+            annotObj.put("V", this.mupdf.newName("Off"));
+            annotObj.put("AS", this.mupdf.newName("Off"));
+          }
+          
+          // Set appearance dictionary for checkbox
+          const apDict = this.mupdf.newDictionary();
+          const nDict = this.mupdf.newDictionary();
+          nDict.put("Off", this.mupdf.newDictionary());
+          nDict.put("Yes", this.mupdf.newDictionary());
+          apDict.put("N", nDict);
+          annotObj.put("AP", apDict);
+          
         } else if (annotation.fieldType === "radio") {
-          annotObj.put("FT", "Btn");
-          annotObj.put("Ff", 32768); // Radio flag
+          annotObj.put("FT", this.mupdf.newName("Btn"));
+          fieldFlags |= 32768; // Radio flag (bit 16)
+          
+          // Set radio group name
+          if (annotation.radioGroup) {
+            annotObj.put("T", this.mupdf.newString(annotation.radioGroup));
+          }
+          
+          // Set radio value
+          if (annotation.fieldValue === true) {
+            annotObj.put("V", this.mupdf.newName("Yes"));
+            annotObj.put("AS", this.mupdf.newName("Yes"));
+          } else {
+            annotObj.put("V", this.mupdf.newName("Off"));
+            annotObj.put("AS", this.mupdf.newName("Off"));
+          }
+          
         } else if (annotation.fieldType === "dropdown") {
-          annotObj.put("FT", "Ch");
+          annotObj.put("FT", this.mupdf.newName("Ch"));
+          fieldFlags |= 131072; // Combo box flag (bit 18) - makes it a dropdown, not listbox
+          
+          // Set options
           if (annotation.options && annotation.options.length > 0) {
-            // Set options as array
-            annotObj.put("Opt", annotation.options);
+            const optArray = this.mupdf.newArray();
+            for (const opt of annotation.options) {
+              optArray.push(this.mupdf.newString(opt));
+            }
+            annotObj.put("Opt", optArray);
+            
+            // Set default value if provided
+            if (annotation.fieldValue && typeof annotation.fieldValue === "string") {
+              annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+            }
+          }
+          
+        } else if (annotation.fieldType === "date") {
+          // Date fields are text fields with special formatting
+          annotObj.put("FT", this.mupdf.newName("Tx"));
+          fieldFlags |= 4096; // Multiline flag (for date picker compatibility)
+          
+          // Set date value if provided
+          if (annotation.fieldValue && typeof annotation.fieldValue === "string") {
+            annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+            annotObj.put("DV", this.mupdf.newString(annotation.fieldValue));
           }
         }
         
+        // Set field flags (readOnly, required, etc.)
+        if (annotation.readOnly) {
+          fieldFlags |= 1; // Read-only flag (bit 1)
+        }
+        if (annotation.required) {
+          fieldFlags |= 2; // Required flag (bit 2) - though this is more of a validation hint
+        }
+        
+        if (fieldFlags > 0) {
+          annotObj.put("Ff", fieldFlags);
+        }
+        
+        // Set appearance characteristics for better compatibility
+        const mkDict = this.mupdf.newDictionary();
+        annotObj.put("MK", mkDict);
+        
+        // Ensure the field is added to the AcroForm
         annotObj.update();
       }
     } catch (error) {
@@ -1959,6 +2305,9 @@ export class PDFEditor {
     }
     
     annot.update();
+    
+    // Store the PDF annotation object for future updates
+    annotation.pdfAnnotation = annot;
   }
 
   /**
@@ -2093,7 +2442,7 @@ export class PDFEditor {
 
   /**
    * Flatten all annotations in the document
-   * This permanently merges annotations into page content
+   * This permanently merges annotations into page content by rendering them onto the page
    */
   async flattenAllAnnotations(
     document: PDFDocument,
@@ -2107,6 +2456,14 @@ export class PDFEditor {
       throw new Error("Document is not a PDF");
     }
 
+    // First, ensure all annotations are synced to the PDF
+    // Get annotations from the store
+    const { usePDFStore } = await import("@/shared/stores/pdfStore");
+    const annotations = usePDFStore.getState().getAnnotations(document.getId());
+    
+    // Sync all annotations to ensure they exist in the PDF
+    await this.syncAllAnnotationsExtended(document, annotations);
+
     const pageCount = document.getPageCount();
     const pagesToFlatten = currentPageOnly && pageNumber !== undefined 
       ? [pageNumber] 
@@ -2117,12 +2474,12 @@ export class PDFEditor {
         const page = pdfDoc.loadPage(pgNum);
         
         // Get all annotations on the page
-        const annotations = page.getAnnotations();
+        const pageAnnotations = page.getAnnotations();
         
-        if (annotations.length === 0) continue;
+        if (pageAnnotations.length === 0) continue;
         
         // Update all annotations to generate appearance streams
-        for (const annot of annotations) {
+        for (const annot of pageAnnotations) {
           try {
             annot.update();
           } catch (e) {
@@ -2130,26 +2487,83 @@ export class PDFEditor {
           }
         }
         
-        // Try to flatten using mupdf's built-in method if available
-        // Note: mupdf.js may not have a direct flatten method, so we ensure appearance streams are generated
-        // The annotations will be rendered by most PDF viewers even if not truly "flattened"
-        
-        // Alternative approach: Remove Link and Widget annotations after copying their appearance
-        // This makes them permanent part of the page
-        for (let i = annotations.length - 1; i >= 0; i--) {
-          const annot = annotations[i];
-          try {
-            const annotType = annot.getType();
+        // Flatten by rendering page with annotations, then replacing page content
+        // Method: Render to pixmap (includes annotations), then insert as image on page
+        try {
+          const pageBounds = page.getBounds();
+          const pageWidth = pageBounds[2] - pageBounds[0];
+          const pageHeight = pageBounds[3] - pageBounds[1];
+          
+          // Render at high resolution for quality (2x scale)
+          const scale = 2.0;
+          const transform = this.mupdf.Matrix.scale(scale, scale);
+          
+          // Render page WITH annotations to pixmap
+          const pixmap = page.toPixmap(
+            transform,
+            this.mupdf.ColorSpace.DeviceRGB,
+            false,
+            true // CRITICAL: Include annotations in rendering
+          );
+          
+          // Create image from pixmap
+          const image = this.mupdf.Image.fromPixmap(pixmap);
+          
+          // Insert the image onto the page to replace content
+          // This embeds the rendered annotations as part of the page
+          const rect: [number, number, number, number] = [
+            pageBounds[0],
+            pageBounds[1],
+            pageBounds[2],
+            pageBounds[3]
+          ];
+          
+          // Use page.insertImage if available, otherwise manipulate content stream directly
+          if (typeof page.insertImage === 'function') {
+            page.insertImage(image, rect);
+          } else {
+            // Manual approach: Add image to page content stream
+            const pageObj = page.getObject();
             
-            // Some annotation types can be safely removed after update
-            // as their appearance has been baked into the page
-            if (annotType === "Link" || annotType === "Widget") {
-              // For form fields, we want to keep the appearance but remove interactivity
-              page.deleteAnnotation(annot);
+            // Get or create Resources dictionary
+            let resources = pageObj.get("Resources");
+            if (!resources || !resources.isDictionary()) {
+              resources = this.mupdf.newDictionary();
+              pageObj.put("Resources", resources);
             }
-          } catch (e) {
-            console.warn(`Could not process annotation for flattening:`, e);
+            
+            // Get or create XObject dictionary
+            let xObjects = resources.get("XObject");
+            if (!xObjects || !xObjects.isDictionary()) {
+              xObjects = this.mupdf.newDictionary();
+              resources.put("XObject", xObjects);
+            }
+            
+            // Add image as XObject
+            xObjects.put("FlattenedPage", image.getObject());
+            
+            // Create content stream to draw the image
+            const contentCommands = `q\n${pageWidth} 0 0 ${pageHeight} 0 0 cm\n/FlattenedPage Do\nQ\n`;
+            const contentBuffer = this.mupdf.newBufferFromString(contentCommands);
+            
+            // Replace page contents
+            pageObj.put("Contents", contentBuffer);
           }
+          
+          // Now delete all annotation objects - content is baked into the page
+          const annotationsToDelete = [...pageAnnotations];
+          for (const annot of annotationsToDelete) {
+            try {
+              page.deleteAnnotation(annot);
+            } catch (e) {
+              console.warn(`Could not delete annotation after flattening:`, e);
+            }
+          }
+          
+        } catch (e) {
+          console.error(`Error flattening page ${pgNum}:`, e);
+          // If flattening fails, don't delete annotations - keep them visible
+          throw new Error(`Failed to flatten page ${pgNum + 1}: ${e}`);
         }
         
       } catch (error) {
@@ -2190,11 +2604,39 @@ export class PDFEditor {
       
       for (const annot of pageAnnotations) {
         try {
+          // For form fields, update existing ones or create new ones
+          if (annot.type === "formField") {
+            if (annot.pdfAnnotation) {
+              // Update existing form field value and properties
+              await this.updateFormFieldValue(document, annot);
+              // Also update position/size if changed
+              if (annot.x !== undefined && annot.y !== undefined && annot.width !== undefined && annot.height !== undefined) {
+                const page = pdfDoc.loadPage(pageNumber);
+                const pageBounds = page.getBounds();
+                const pageHeight = pageBounds[3] - pageBounds[1];
+                const y = pageHeight - annot.y - annot.height;
+                const rect: [number, number, number, number] = [
+                  annot.x,
+                  y,
+                  annot.x + annot.width,
+                  y + annot.height,
+                ];
+                annot.pdfAnnotation.setRect(rect);
+                annot.pdfAnnotation.update();
+              }
+            } else {
+              // Create new form field
+              await this.addFormFieldAnnotation(document, annot);
+            }
+            continue;
+          }
+
+          // Skip if annotation already has a PDF annotation object (already synced)
           if (annot.pdfAnnotation) {
             continue;
           }
 
-          // Handle all annotation types
+          // Handle all other annotation types
           if (annot.type === "text") {
             await this.addTextAnnotation(document, annot);
           } else if (annot.type === "highlight") {
@@ -2209,8 +2651,6 @@ export class PDFEditor {
             await this.addDrawingAnnotation(document, annot);
           } else if (annot.type === "shape") {
             await this.addShapeAnnotation(document, annot);
-          } else if (annot.type === "formField") {
-            await this.addFormFieldAnnotation(document, annot);
           } else if (annot.type === "stamp") {
             await this.addStampAnnotation(document, annot);
           }

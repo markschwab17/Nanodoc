@@ -4,16 +4,10 @@
  * Toolbar for stamp tool
  */
 
-import { Button } from "@/components/ui/button";
-import { Stamp as StampIcon } from "lucide-react";
 import { useStampStore } from "@/shared/stores/stampStore";
 import { getSelectedStamp } from "@/features/tools/StampTool";
 
-interface StampToolbarProps {
-  onOpenGallery: () => void;
-}
-
-export function StampToolbar({ onOpenGallery }: StampToolbarProps) {
+export function StampToolbar() {
   const selectedStampId = getSelectedStamp();
   const stamp = selectedStampId ? useStampStore.getState().getStamp(selectedStampId) : null;
 
@@ -32,19 +26,9 @@ export function StampToolbar({ onOpenGallery }: StampToolbarProps) {
         </>
       ) : (
         <span className="text-xs text-muted-foreground">
-          Select a stamp from the gallery first
+          Select a stamp from the gallery on the left
         </span>
       )}
-      
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={onOpenGallery}
-        className="ml-auto"
-      >
-        <StampIcon className="h-4 w-4 mr-1" />
-        Gallery
-      </Button>
     </div>
   );
 }

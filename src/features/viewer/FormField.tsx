@@ -5,26 +5,30 @@
  * Font size scales dynamically based on field height
  */
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { cn } from "@/lib/utils";
-import { Settings } from "lucide-react";
+import { Settings, Lock, Unlock } from "lucide-react";
 
 interface FormFieldProps {
   annotation: Annotation;
   pdfToCanvas: (pdfX: number, pdfY: number) => { x: number; y: number };
   onValueChange: (value: string | boolean) => void;
   onOptionsChange?: (options: string[]) => void;
+  onLockChange?: (locked: boolean) => void;
   isEditable?: boolean;
   isSelected?: boolean;
   onClick?: () => void;
+  onMove?: (deltaX: number, deltaY: number) => void;
+  zoomLevel?: number;
+  activeTool?: string; // Current active tool - prevents interaction when non-select tools are active
 }
 
-// Calculate font size based on field height (60% of height, clamped between 10px and 48px)
+// Calculate font size based on field height (60% of height, clamped between 2px and 48px)
 function calculateFontSize(height: number): number {
   const fontSize = Math.round(height * 0.6);
-  return Math.max(10, Math.min(fontSize, 48));
+  return Math.max(2, Math.min(fontSize, 48));
 }
 
 export function FormField({
@@ -32,13 +36,19 @@ export function FormField({
   pdfToCanvas,
   onValueChange,
   onOptionsChange,
+  onLockChange,
   isEditable = true,
   isSelected = false,
   onClick,
+  onMove,
+  zoomLevel = 1,
+  activeTool = "select",
 }: FormFieldProps) {
   const [value, setValue] = useState<string | boolean>(annotation.fieldValue || "");
   const [isEditingOptions, setIsEditingOptions] = useState(false);
   const [optionsText, setOptionsText] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     setValue(annotation.fieldValue || "");
@@ -59,6 +69,11 @@ export function FormField({
   // Calculate dynamic font size based on field height
   const fontSize = calculateFontSize(annotation.height);
   
+  // For very small heights, reduce or remove padding to prevent overflow
+  const isVerySmall = annotation.height < 10;
+  const horizontalPadding = isVerySmall ? "1px" : "8px";
+  const verticalPadding = isVerySmall ? "0px" : "4px";
+  
   const containerStyle: React.CSSProperties = {
     position: "absolute",
     left: `${topLeft.x}px`,
@@ -66,6 +81,13 @@ export function FormField({
     width: `${annotation.width}px`,
     height: `${annotation.height}px`,
     zIndex: 500,
+    boxSizing: "border-box",
+    display: "flex",
+    flexDirection: "column",
+    pointerEvents: (activeTool === "select" || activeTool === "selectText") ? "auto" : "none", // Disable interaction when non-select tools are active
+    ...(isSelected && {
+      boxShadow: "inset 0 0 0 2px #3b82f6",
+    }),
   };
 
   const handleChange = (newValue: string | boolean) => {
@@ -81,6 +103,74 @@ export function FormField({
     setIsEditingOptions(false);
   };
 
+  // Check if field is locked
+  const isLocked = (annotation as any).locked === true;
+  
+  // Handle drag to move form field
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Don't allow interaction when non-select tools are active
+    if (activeTool !== "select" && activeTool !== "selectText") return;
+    
+    // Don't allow dragging if locked
+    if (isLocked) return;
+    
+    // Only allow dragging when selected and not clicking on input elements
+    if (!isSelected || !onMove) return;
+    
+    const target = e.target as HTMLElement;
+    // Don't drag if clicking on input, select, textarea, or button
+    if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA" || target.tagName === "BUTTON") {
+      return;
+    }
+    
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+  };
+  
+  const handleLockToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (onLockChange) {
+      onLockChange(!isLocked);
+    }
+  };
+
+  useEffect(() => {
+    if (!isDragging || !onMove) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragStartRef.current) return;
+      
+      // Calculate screen pixel delta
+      const screenDx = e.clientX - dragStartRef.current.x;
+      const screenDy = e.clientY - dragStartRef.current.y;
+      
+      // Convert screen delta to PDF delta using zoom level (same as RichTextEditor)
+      const pdfDx = screenDx / zoomLevel;
+      const pdfDy = -screenDy / zoomLevel; // Flip Y for PDF coordinates
+      
+      onMove(pdfDx, pdfDy);
+      
+      // Update drag start for next incremental delta
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      dragStartRef.current = null;
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isDragging, onMove, zoomLevel]);
+
   // Text input field
   if (annotation.fieldType === "text") {
     const placeholder = annotation.required ? "Required - Type here to fill in" : "Type here to fill in";
@@ -89,18 +179,60 @@ export function FormField({
       <div 
         style={containerStyle}
         onClick={onClick}
-        className={cn(isSelected && "ring-2 ring-blue-500 rounded")}
+        onMouseDown={handleMouseDown}
+        className={cn(
+          isSelected && "rounded",
+          isSelected && !isDragging && !isLocked && "cursor-move"
+        )}
       >
+        {/* Lock button - show for all form field types when selected */}
+        {isSelected && onLockChange && (
+          <button
+            data-form-field-button="true"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onClick={handleLockToggle}
+            className="absolute bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors flex items-center justify-center"
+            style={{
+              top: "-20px",
+              left: "-20px",
+              width: "20px",
+              height: "20px",
+              zIndex: 1000,
+            }}
+            title={isLocked ? "Unlock position" : "Lock position"}
+          >
+            {isLocked ? (
+              <Lock className="text-white" style={{ width: "12px", height: "12px" }} />
+            ) : (
+              <Unlock className="text-white" style={{ width: "12px", height: "12px" }} />
+            )}
+          </button>
+        )}
         {annotation.multiline ? (
           <textarea
+            key={`textarea-${annotation.id}`}
             value={value as string}
             onChange={(e) => handleChange(e.target.value)}
             disabled={!isEditable || annotation.readOnly}
             required={annotation.required}
             placeholder={placeholder}
-            style={{ fontSize: `${fontSize}px`, lineHeight: 1.2 }}
+            style={{ 
+              fontSize: `${fontSize}px`, 
+              lineHeight: 1,
+              padding: `${verticalPadding} ${horizontalPadding}`,
+              boxSizing: "border-box",
+              width: "100%",
+              height: "100%",
+              minHeight: 0,
+              maxHeight: "100%",
+              border: "1px solid #d1d5db",
+              margin: 0,
+            }}
             className={cn(
-              "w-full h-full px-2 py-1 border border-gray-300 rounded resize-none",
+              "rounded resize-none",
               "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent",
               "placeholder:text-gray-400 placeholder:italic",
               annotation.required && !value && "border-red-300"
@@ -108,15 +240,27 @@ export function FormField({
           />
         ) : (
           <input
+            key={`input-${annotation.id}`}
             type="text"
             value={value as string}
             onChange={(e) => handleChange(e.target.value)}
             disabled={!isEditable || annotation.readOnly}
             required={annotation.required}
             placeholder={placeholder}
-            style={{ fontSize: `${fontSize}px` }}
+            style={{ 
+              fontSize: `${fontSize}px`,
+              padding: `0 ${horizontalPadding}`,
+              boxSizing: "border-box",
+              width: "100%",
+              height: "100%",
+              minHeight: 0,
+              maxHeight: "100%",
+              border: "1px solid #d1d5db",
+              margin: 0,
+              lineHeight: 1,
+            }}
             className={cn(
-              "w-full h-full px-2 border border-gray-300 rounded",
+              "rounded",
               "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent",
               "placeholder:text-gray-400 placeholder:italic",
               annotation.required && !value && "border-red-300"
@@ -130,14 +274,46 @@ export function FormField({
   // Checkbox field
   if (annotation.fieldType === "checkbox") {
     // Scale checkbox size based on field dimensions (use smaller dimension)
-    const checkboxSize = Math.max(12, Math.min(annotation.width, annotation.height) * 0.7);
+    // Allow very small sizes - minimum 2px
+    const checkboxSize = Math.max(2, Math.min(annotation.width, annotation.height) * 0.7);
     
     return (
       <div 
         style={containerStyle} 
-        className={cn("flex items-center justify-center", isSelected && "ring-2 ring-blue-500 rounded")}
+        className={cn(
+          "flex items-center justify-center",
+          isSelected && "rounded",
+          isSelected && !isDragging && !isLocked && "cursor-move"
+        )}
         onClick={onClick}
+        onMouseDown={handleMouseDown}
       >
+        {/* Lock button */}
+        {isSelected && onLockChange && (
+          <button
+            data-form-field-button="true"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onClick={handleLockToggle}
+            className="absolute bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors flex items-center justify-center"
+            style={{
+              top: "-20px",
+              left: "-20px",
+              width: "20px",
+              height: "20px",
+              zIndex: 1000,
+            }}
+            title={isLocked ? "Unlock position" : "Lock position"}
+          >
+            {isLocked ? (
+              <Lock className="text-white" style={{ width: "12px", height: "12px" }} />
+            ) : (
+              <Unlock className="text-white" style={{ width: "12px", height: "12px" }} />
+            )}
+          </button>
+        )}
         <input
           type="checkbox"
           checked={value as boolean}
@@ -153,14 +329,46 @@ export function FormField({
   // Radio button field
   if (annotation.fieldType === "radio") {
     // Scale radio size based on field dimensions (use smaller dimension)
-    const radioSize = Math.max(12, Math.min(annotation.width, annotation.height) * 0.7);
+    // Allow very small sizes - minimum 2px
+    const radioSize = Math.max(2, Math.min(annotation.width, annotation.height) * 0.7);
     
     return (
       <div 
         style={containerStyle} 
-        className={cn("flex items-center justify-center", isSelected && "ring-2 ring-blue-500 rounded")}
+        className={cn(
+          "flex items-center justify-center",
+          isSelected && "rounded",
+          isSelected && !isDragging && !isLocked && "cursor-move"
+        )}
         onClick={onClick}
+        onMouseDown={handleMouseDown}
       >
+        {/* Lock button */}
+        {isSelected && onLockChange && (
+          <button
+            data-form-field-button="true"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onClick={handleLockToggle}
+            className="absolute bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors flex items-center justify-center"
+            style={{
+              top: "-20px",
+              left: "-20px",
+              width: "20px",
+              height: "20px",
+              zIndex: 1000,
+            }}
+            title={isLocked ? "Unlock position" : "Lock position"}
+          >
+            {isLocked ? (
+              <Lock className="text-white" style={{ width: "12px", height: "12px" }} />
+            ) : (
+              <Unlock className="text-white" style={{ width: "12px", height: "12px" }} />
+            )}
+          </button>
+        )}
         <input
           type="radio"
           name={annotation.radioGroup || annotation.fieldName}
@@ -182,17 +390,56 @@ export function FormField({
       <div 
         style={{...containerStyle, overflow: "visible"}}
         onClick={onClick}
-        className={cn(isSelected && "ring-2 ring-blue-500 rounded")}
+        onMouseDown={handleMouseDown}
+        className={cn(
+          isSelected && "rounded",
+          isSelected && !isDragging && !isLocked && "cursor-move"
+        )}
       >
         <div className="relative w-full h-full" style={{ overflow: "visible" }}>
+          {/* Lock button - positioned to the left of the gear icon */}
+          {isSelected && onLockChange && (
+            <button
+              data-form-field-button="true"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+              }}
+              onClick={handleLockToggle}
+              className="absolute bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors flex items-center justify-center"
+              style={{
+                top: "-20px",
+                left: "-20px",
+                width: "20px",
+                height: "20px",
+                zIndex: 1000,
+              }}
+              title={isLocked ? "Unlock position" : "Lock position"}
+            >
+              {isLocked ? (
+                <Lock className="text-white" style={{ width: "12px", height: "12px" }} />
+              ) : (
+                <Unlock className="text-white" style={{ width: "12px", height: "12px" }} />
+              )}
+            </button>
+          )}
           <select
             value={value as string}
             onChange={(e) => handleChange(e.target.value)}
             disabled={!isEditable || annotation.readOnly}
             required={annotation.required}
-            style={{ fontSize: `${fontSize}px` }}
+            style={{ 
+              fontSize: `${fontSize}px`,
+              padding: `0 ${horizontalPadding}`,
+              boxSizing: "border-box",
+              width: "100%",
+              height: "100%",
+              minHeight: 0,
+              border: "1px solid #d1d5db",
+              margin: 0,
+            }}
             className={cn(
-              "w-full h-full px-2 border border-gray-300 rounded bg-white",
+              "rounded bg-white",
               "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent",
               !value && "text-gray-400 italic",
               annotation.required && !value && "border-red-300"
@@ -218,15 +465,23 @@ export function FormField({
                 e.preventDefault();
                 setIsEditingOptions(true);
               }}
-              className="absolute p-1.5 bg-blue-500 text-white rounded text-xs flex items-center gap-1 shadow-md hover:bg-blue-600 transition-colors"
+              className="absolute bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors flex items-center justify-center"
               style={{
-                top: "-28px",
-                right: "0px",
+                top: "-20px",
+                right: "-20px",
+                width: "20px",
+                height: "20px",
                 zIndex: 1000,
               }}
+              title="Edit Options"
             >
-              <Settings className="h-3 w-3" />
-              Edit Options
+              <Settings 
+                className="text-white" 
+                style={{ 
+                  width: "12px", 
+                  height: "12px" 
+                }} 
+              />
             </button>
           )}
           {isEditingOptions && createPortal(
@@ -289,8 +544,38 @@ export function FormField({
       <div 
         style={containerStyle}
         onClick={onClick}
-        className={cn(isSelected && "ring-2 ring-blue-500 rounded")}
+        onMouseDown={handleMouseDown}
+        className={cn(
+          isSelected && "rounded",
+          isSelected && !isDragging && !isLocked && "cursor-move"
+        )}
       >
+        {/* Lock button */}
+        {isSelected && onLockChange && (
+          <button
+            data-form-field-button="true"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onClick={handleLockToggle}
+            className="absolute bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 transition-colors flex items-center justify-center"
+            style={{
+              top: "-20px",
+              left: "-20px",
+              width: "20px",
+              height: "20px",
+              zIndex: 1000,
+            }}
+            title={isLocked ? "Unlock position" : "Lock position"}
+          >
+            {isLocked ? (
+              <Lock className="text-white" style={{ width: "12px", height: "12px" }} />
+            ) : (
+              <Unlock className="text-white" style={{ width: "12px", height: "12px" }} />
+            )}
+          </button>
+        )}
         <input
           type="date"
           value={value as string}
@@ -298,9 +583,16 @@ export function FormField({
           disabled={!isEditable || annotation.readOnly}
           required={annotation.required}
           placeholder="Select date..."
-          style={{ fontSize: `${fontSize}px` }}
+          style={{ 
+            fontSize: `${fontSize}px`,
+            padding: `0 ${horizontalPadding}`,
+            boxSizing: "border-box",
+            width: "100%",
+            height: "100%",
+            border: "1px solid #d1d5db",
+          }}
           className={cn(
-            "w-full h-full px-2 border border-gray-300 rounded bg-white",
+            "rounded bg-white",
             "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent",
             !value && "text-gray-400",
             annotation.required && !value && "border-red-300"
