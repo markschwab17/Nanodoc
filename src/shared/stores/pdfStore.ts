@@ -9,6 +9,20 @@ import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import type { Bookmark } from "@/core/pdf/PDFBookmarks";
 
+// Individual search match (one per text match occurrence)
+export interface SearchMatch {
+  pageNumber: number;
+  quad: number[][]; // Array of quads (each quad is [x0, y0, x1, y1, x2, y2, x3, y3]) - multi-line matches have multiple quads
+  text: string;
+  matchIndex: number; // Global index across all pages
+}
+
+// Results structure stored per document
+export interface SearchResultData {
+  matches: SearchMatch[]; // Flattened list of all individual matches
+  query: string;
+}
+
 export interface PDFStoreState {
   documents: Map<string, PDFDocument>;
   documentPaths: Map<string, string | null>; // documentId -> original file path
@@ -16,8 +30,8 @@ export interface PDFStoreState {
   currentPage: number;
   annotations: Map<string, Annotation[]>; // documentId -> annotations
   bookmarks: Map<string, Bookmark[]>; // documentId -> bookmarks
-  searchResults: Map<string, any[]>; // documentId -> search results
-  currentSearchResult: number;
+  searchResults: Map<string, SearchResultData>; // documentId -> search results
+  currentSearchResult: number; // Index into the flattened matches array
   loading: boolean;
   error: string | null;
 
@@ -40,8 +54,10 @@ export interface PDFStoreState {
   addBookmark: (documentId: string, bookmark: Bookmark) => void;
   removeBookmark: (documentId: string, bookmarkId: string) => void;
   getBookmarks: (documentId: string) => Bookmark[];
-  setSearchResults: (documentId: string, results: any[]) => void;
-  getSearchResults: (documentId: string) => any[];
+  setSearchResults: (documentId: string, results: SearchResultData) => void;
+  getSearchResults: (documentId: string) => SearchResultData | null;
+  getSearchMatchesForPage: (documentId: string, pageNumber: number) => SearchMatch[];
+  getCurrentSearchMatch: () => SearchMatch | null;
   setCurrentSearchResult: (index: number) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
@@ -187,12 +203,30 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
     set((state) => {
       const newSearchResults = new Map(state.searchResults);
       newSearchResults.set(documentId, results);
-      return { searchResults: newSearchResults, currentSearchResult: results.length > 0 ? 0 : -1 };
+      return { 
+        searchResults: newSearchResults, 
+        currentSearchResult: results.matches.length > 0 ? 0 : -1 
+      };
     }),
 
   getSearchResults: (documentId) => {
     const state = get();
-    return state.searchResults.get(documentId) || [];
+    return state.searchResults.get(documentId) || null;
+  },
+
+  getSearchMatchesForPage: (documentId, pageNumber) => {
+    const state = get();
+    const results = state.searchResults.get(documentId);
+    if (!results) return [];
+    return results.matches.filter(m => m.pageNumber === pageNumber);
+  },
+
+  getCurrentSearchMatch: () => {
+    const state = get();
+    if (!state.currentDocumentId || state.currentSearchResult < 0) return null;
+    const results = state.searchResults.get(state.currentDocumentId);
+    if (!results || state.currentSearchResult >= results.matches.length) return null;
+    return results.matches[state.currentSearchResult];
   },
 
   setCurrentSearchResult: (index) => set({ currentSearchResult: index }),

@@ -4,7 +4,7 @@
  * Renders a single PDF page with enhanced zoom and pan support.
  */
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -50,17 +50,45 @@ export function PageCanvas({
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
   const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
-  const { getCurrentDocument, getAnnotations, addAnnotation, removeAnnotation, getSearchResults, updateAnnotation, setCurrentPage, currentPage } = usePDFStore();
+  const { 
+    getCurrentDocument, 
+    getAnnotations, 
+    addAnnotation, 
+    removeAnnotation, 
+    updateAnnotation, 
+    setCurrentPage, 
+    currentPage
+  } = usePDFStore();
+  
+  // Use separate selector for search state to ensure reactivity
+  const currentSearchResult = usePDFStore(state => state.currentSearchResult);
+  const searchResultsMap = usePDFStore(state => state.searchResults);
+  
   const { showRulers } = useDocumentSettingsStore();
   const { showNotification } = useNotificationStore();
   const { copyTextAnnotation, pasteTextAnnotation, hasTextAnnotation, clear: clearTextAnnotationClipboard } = useTextAnnotationClipboardStore();
   const currentDocument = getCurrentDocument();
   
-  const searchResults = currentDocument
-    ? getSearchResults(currentDocument.getId()).filter(
-        (r) => r.pageNumber === pageNumber
-      )
-    : [];
+  // Get search data reactively from the store
+  const documentSearchData = useMemo(() => {
+    if (!currentDocument) return null;
+    return searchResultsMap.get(currentDocument.getId()) || null;
+  }, [currentDocument, searchResultsMap]);
+  
+  // Get all search matches for this page
+  const pageSearchMatches = useMemo(() => {
+    if (!documentSearchData) return [];
+    return documentSearchData.matches.filter(m => m.pageNumber === pageNumber);
+  }, [documentSearchData, pageNumber]);
+  
+  // Get the current active match to highlight it differently
+  const currentSearchMatch = useMemo(() => {
+    if (!documentSearchData || currentSearchResult < 0 || currentSearchResult >= documentSearchData.matches.length) {
+      return null;
+    }
+    return documentSearchData.matches[currentSearchResult];
+  }, [documentSearchData, currentSearchResult]);
+
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
@@ -2649,36 +2677,49 @@ export function PageCanvas({
         {/* No selection rectangle for selectText - only show text highlights */}
 
         {/* Render search result highlights */}
-        {searchResults.map((result, resultIdx) => (
-          <div key={`search_${resultIdx}`} className="absolute pointer-events-none">
-            {result.quads.map((quad: number[], quadIdx: number) => {
-              // Quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
-              const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
-              const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
-              const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
-              const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
-              
-              // Convert PDF coordinates to container coordinates
-              // In PDF: minY = bottom, maxY = top
-              // pdfToContainer flips Y, so use maxY for canvas top
-              const canvasTopLeft = pdfToContainer(minX, maxY); // maxY is top in PDF
-              const canvasBottomRight = pdfToContainer(maxX, minY); // minY is bottom in PDF
-              
-              return (
-                <div
-                  key={quadIdx}
-                  className="absolute bg-blue-400/30 border border-blue-500"
-                  style={{
-                    left: `${canvasTopLeft.x}px`,
-                    top: `${canvasTopLeft.y}px`,
-                    width: `${canvasBottomRight.x - canvasTopLeft.x}px`,
-                    height: `${canvasBottomRight.y - canvasTopLeft.y}px`,
-                  }}
-                />
-              );
-            })}
-          </div>
-        ))}
+        {pageSearchMatches.length > 0 && (
+          <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 50 }}>
+            {pageSearchMatches.map((match) => {
+                // match.quad is an array of quads (for multi-line matches)
+                // Each quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
+                // Get the first quad for this match
+                const quads = match.quad;
+                const isCurrentMatch = currentSearchMatch?.matchIndex === match.matchIndex;
+                
+                // Render each quad in this match (usually just one, but can be multiple for multi-line text)
+                return quads.map((singleQuad: number[], quadIdx: number) => {
+                  const minX = Math.min(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
+                  const minY = Math.min(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
+                  const maxX = Math.max(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
+                  const maxY = Math.max(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
+                  
+                  // mupdf search quads use Y=0 at top (screen-like coordinates)
+                  // NOT Y=0 at bottom like standard PDF coordinates
+                  // So we don't need to flip Y - just scale directly with BASE_SCALE
+                  const canvasX = minX * BASE_SCALE;
+                  const canvasY = minY * BASE_SCALE;
+                  const width = (maxX - minX) * BASE_SCALE;
+                  const height = (maxY - minY) * BASE_SCALE;
+                  
+                  return (
+                    <div
+                      key={`search_${match.matchIndex}_${quadIdx}`}
+                      className="absolute pointer-events-none"
+                      style={{
+                        left: `${canvasX}px`,
+                        top: `${canvasY}px`,
+                        width: `${Math.max(width, 5)}px`,
+                        height: `${Math.max(height, 5)}px`,
+                        backgroundColor: isCurrentMatch ? 'rgba(251, 146, 60, 0.6)' : 'rgba(250, 204, 21, 0.5)',
+                        border: isCurrentMatch ? '2px solid #f97316' : '1px solid #eab308',
+                        boxShadow: isCurrentMatch ? '0 0 8px rgba(249, 115, 22, 0.6)' : 'none',
+                      }}
+                    />
+                  );
+                });
+              })}
+            </div>
+        )}
 
         {/* Render annotations */}
         {annotations.length > 0 && (

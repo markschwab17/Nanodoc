@@ -4,7 +4,7 @@
  * Horizontal scrollable carousel of PDF page thumbnails with search tab.
  */
 
-import { usePDFStore } from "@/shared/stores/pdfStore";
+import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/stores/pdfStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { ThumbnailItem } from "./ThumbnailItem";
@@ -32,12 +32,6 @@ import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationC
 
 type TabType = "pages" | "search";
 
-interface SearchResult {
-  pageNumber: number;
-  quads: number[][];
-  text: string;
-}
-
 export function ThumbnailCarousel() {
   const { currentPage, setCurrentPage, getCurrentDocument, setSearchResults, getSearchResults, currentSearchResult, setCurrentSearchResult, getAnnotations, documents } = usePDFStore();
   const currentDocument = getCurrentDocument();
@@ -64,7 +58,8 @@ export function ThumbnailCarousel() {
   const { showNotification } = useNotificationStore();
   const { hasTextAnnotation } = useTextAnnotationClipboardStore();
   
-  const results = currentDocument ? getSearchResults(currentDocument.getId()) : [];
+  const searchData = currentDocument ? getSearchResults(currentDocument.getId()) : null;
+  const totalMatches = searchData?.matches.length ?? 0;
   const currentResultIndex = currentSearchResult;
   
   // Track if the last page change was from a click (to preserve selection)
@@ -339,7 +334,7 @@ export function ThumbnailCarousel() {
   useEffect(() => {
     if (!searchQuery.trim() || !currentDocument) {
       if (currentDocument) {
-        setSearchResults(currentDocument.getId(), []);
+        setSearchResults(currentDocument.getId(), { matches: [], query: "" });
       }
       setCurrentSearchResult(-1);
       return;
@@ -354,7 +349,8 @@ export function ThumbnailCarousel() {
       try {
         const mupdfDoc = currentDocument.getMupdfDocument();
         const pageCount = currentDocument.getPageCount();
-        const allResults: SearchResult[] = [];
+        const allMatches: SearchMatch[] = [];
+        let matchIndex = 0;
 
         for (let i = 0; i < pageCount; i++) {
           if (cancelled) break;
@@ -363,11 +359,15 @@ export function ThumbnailCarousel() {
             const matches = page.search(searchQuery, 100);
 
             if (matches && matches.length > 0) {
-              allResults.push({
-                pageNumber: i,
-                quads: matches,
-                text: searchQuery,
-              });
+              // Flatten: create one SearchMatch per quad
+              for (const quad of matches) {
+                allMatches.push({
+                  pageNumber: i,
+                  quad: quad,
+                  text: searchQuery,
+                  matchIndex: matchIndex++,
+                });
+              }
             }
           } catch (error) {
             console.error(`Error searching page ${i}:`, error);
@@ -375,12 +375,16 @@ export function ThumbnailCarousel() {
         }
 
         if (!cancelled && currentDocument) {
-          setSearchResults(currentDocument.getId(), allResults);
+          const resultData: SearchResultData = {
+            matches: allMatches,
+            query: searchQuery,
+          };
+          setSearchResults(currentDocument.getId(), resultData);
         }
       } catch (error) {
         console.error("Error performing search:", error);
         if (!cancelled && currentDocument) {
-          setSearchResults(currentDocument.getId(), []);
+          setSearchResults(currentDocument.getId(), { matches: [], query: "" });
         }
       } finally {
         if (!cancelled) {
@@ -397,29 +401,29 @@ export function ThumbnailCarousel() {
 
 
   const handleSearchNext = () => {
-    if (results.length === 0) return;
-    const nextIndex = (currentResultIndex + 1) % results.length;
+    if (totalMatches === 0) return;
+    const nextIndex = (currentResultIndex + 1) % totalMatches;
     setCurrentSearchResult(nextIndex);
     navigateToSearchResult(nextIndex);
   };
 
   const handleSearchPrevious = () => {
-    if (results.length === 0) return;
-    const prevIndex = currentResultIndex <= 0 ? results.length - 1 : currentResultIndex - 1;
+    if (totalMatches === 0) return;
+    const prevIndex = currentResultIndex <= 0 ? totalMatches - 1 : currentResultIndex - 1;
     setCurrentSearchResult(prevIndex);
     navigateToSearchResult(prevIndex);
   };
 
   const navigateToSearchResult = (index: number) => {
-    if (index < 0 || index >= results.length) return;
-    const result = results[index];
-    setCurrentPage(result.pageNumber);
+    if (!searchData || index < 0 || index >= searchData.matches.length) return;
+    const match = searchData.matches[index];
+    setCurrentPage(match.pageNumber);
   };
 
   const handleSearchClear = () => {
     setSearchQuery("");
     if (currentDocument) {
-      setSearchResults(currentDocument.getId(), []);
+      setSearchResults(currentDocument.getId(), { matches: [], query: "" });
     }
     setCurrentSearchResult(-1);
   };
@@ -997,18 +1001,18 @@ export function ThumbnailCarousel() {
               </div>
             )}
 
-            {!isSearching && results.length > 0 && (
+            {!isSearching && totalMatches > 0 && searchData && (
               <>
                 <div className="flex items-center justify-between">
                   <div className="text-sm text-muted-foreground">
-                    {currentResultIndex + 1} of {results.length} results
+                    {currentResultIndex + 1} of {totalMatches} matches
                   </div>
                   <div className="flex gap-2">
                     <Button
                       variant="outline"
                       size="icon"
                       onClick={handleSearchPrevious}
-                      disabled={results.length === 0}
+                      disabled={totalMatches === 0}
                     >
                       <ChevronUp className="h-4 w-4" />
                     </Button>
@@ -1016,7 +1020,7 @@ export function ThumbnailCarousel() {
                       variant="outline"
                       size="icon"
                       onClick={handleSearchNext}
-                      disabled={results.length === 0}
+                      disabled={totalMatches === 0}
                     >
                       <ChevronDown className="h-4 w-4" />
                     </Button>
@@ -1024,9 +1028,9 @@ export function ThumbnailCarousel() {
                 </div>
 
                 <div className="flex flex-col gap-2">
-                  {results.map((result, idx) => (
+                  {searchData.matches.map((match, idx) => (
                     <Button
-                      key={idx}
+                      key={match.matchIndex}
                       variant={idx === currentResultIndex ? "default" : "outline"}
                       className="justify-start text-left h-auto py-2"
                       onClick={() => {
@@ -1035,9 +1039,9 @@ export function ThumbnailCarousel() {
                       }}
                     >
                       <div className="flex flex-col gap-1">
-                        <div className="font-medium">Page {result.pageNumber + 1}</div>
+                        <div className="font-medium">Page {match.pageNumber + 1}</div>
                         <div className="text-xs text-muted-foreground">
-                          {result.quads.length} match{result.quads.length !== 1 ? "es" : ""}
+                          Match {idx + 1}
                         </div>
                       </div>
                     </Button>
@@ -1046,7 +1050,7 @@ export function ThumbnailCarousel() {
               </>
             )}
 
-            {!isSearching && searchQuery && results.length === 0 && (
+            {!isSearching && searchQuery && totalMatches === 0 && (
               <div className="text-sm text-muted-foreground text-center py-4">
                 No results found
               </div>

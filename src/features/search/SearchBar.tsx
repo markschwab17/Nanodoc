@@ -2,36 +2,38 @@
  * Search Bar Component
  * 
  * Search input for PDF text search functionality.
+ * Allows navigating through individual search matches with highlighting.
  */
 
 import { useState, useEffect } from "react";
 import { Search, X, ChevronUp, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { usePDFStore } from "@/shared/stores/pdfStore";
-
-interface SearchResult {
-  pageNumber: number;
-  quads: number[][]; // Array of quads for each match
-  text: string;
-}
+import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/stores/pdfStore";
 
 export function SearchBar() {
   const [query, setQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
-  const { getCurrentDocument, setCurrentPage, setSearchResults, getSearchResults, currentSearchResult, setCurrentSearchResult } = usePDFStore();
+  const { 
+    getCurrentDocument, 
+    setCurrentPage, 
+    setSearchResults, 
+    getSearchResults, 
+    currentSearchResult, 
+    setCurrentSearchResult 
+  } = usePDFStore();
   
-  const results = getCurrentDocument() ? getSearchResults(getCurrentDocument()!.getId()) : [];
-  const currentResultIndex = currentSearchResult;
-
   const currentDocument = getCurrentDocument();
+  const searchData = currentDocument ? getSearchResults(currentDocument.getId()) : null;
+  const totalMatches = searchData?.matches.length ?? 0;
+  const currentResultIndex = currentSearchResult;
 
   // Debounced search
   useEffect(() => {
     if (!currentDocument) return;
     
     if (!query.trim()) {
-      setSearchResults(currentDocument.getId(), []);
+      setSearchResults(currentDocument.getId(), { matches: [], query: "" });
       setCurrentSearchResult(-1);
       return;
     }
@@ -50,7 +52,8 @@ export function SearchBar() {
     try {
       const mupdfDoc = currentDocument.getMupdfDocument();
       const pageCount = currentDocument.getPageCount();
-      const allResults: SearchResult[] = [];
+      const allMatches: SearchMatch[] = [];
+      let matchIndex = 0;
 
       for (let i = 0; i < pageCount; i++) {
         try {
@@ -58,11 +61,15 @@ export function SearchBar() {
           const matches = page.search(searchQuery, 100); // Max 100 matches per page
 
           if (matches && matches.length > 0) {
-            allResults.push({
-              pageNumber: i,
-              quads: matches,
-              text: searchQuery,
-            });
+            // Flatten: create one SearchMatch per quad
+            for (const quad of matches) {
+              allMatches.push({
+                pageNumber: i,
+                quad: quad,
+                text: searchQuery,
+                matchIndex: matchIndex++,
+              });
+            }
           }
         } catch (error) {
           console.error(`Error searching page ${i}:`, error);
@@ -70,12 +77,16 @@ export function SearchBar() {
       }
 
       if (currentDocument) {
-        setSearchResults(currentDocument.getId(), allResults);
+        const resultData: SearchResultData = {
+          matches: allMatches,
+          query: searchQuery,
+        };
+        setSearchResults(currentDocument.getId(), resultData);
       }
     } catch (error) {
       console.error("Error performing search:", error);
       if (currentDocument) {
-        setSearchResults(currentDocument.getId(), []);
+        setSearchResults(currentDocument.getId(), { matches: [], query: "" });
       }
     } finally {
       setIsSearching(false);
@@ -83,30 +94,29 @@ export function SearchBar() {
   };
 
   const handleNext = () => {
-    if (results.length === 0) return;
-    const nextIndex = (currentResultIndex + 1) % results.length;
+    if (totalMatches === 0) return;
+    const nextIndex = (currentResultIndex + 1) % totalMatches;
     setCurrentSearchResult(nextIndex);
     navigateToResult(nextIndex);
   };
 
   const handlePrevious = () => {
-    if (results.length === 0) return;
-    const prevIndex = currentResultIndex <= 0 ? results.length - 1 : currentResultIndex - 1;
+    if (totalMatches === 0) return;
+    const prevIndex = currentResultIndex <= 0 ? totalMatches - 1 : currentResultIndex - 1;
     setCurrentSearchResult(prevIndex);
     navigateToResult(prevIndex);
   };
 
   const navigateToResult = (index: number) => {
-    if (index < 0 || index >= results.length) return;
-    const result = results[index];
-    setCurrentPage(result.pageNumber);
-    // TODO: Scroll to and highlight the result
+    if (!searchData || index < 0 || index >= searchData.matches.length) return;
+    const match = searchData.matches[index];
+    setCurrentPage(match.pageNumber);
   };
 
   const handleClear = () => {
     setQuery("");
     if (currentDocument) {
-      setSearchResults(currentDocument.getId(), []);
+      setSearchResults(currentDocument.getId(), { matches: [], query: "" });
     }
     setCurrentSearchResult(-1);
   };
@@ -119,7 +129,7 @@ export function SearchBar() {
         <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           type="text"
-          placeholder="Search page number or page label"
+          placeholder="Search text in document"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="pl-8 pr-8 w-full"
@@ -136,19 +146,19 @@ export function SearchBar() {
         )}
       </div>
 
-      {(results.length > 0 || isSearching) && (
+      {(totalMatches > 0 || isSearching) && (
         <div className="flex items-center gap-2">
-          {results.length > 0 && (
+          {totalMatches > 0 && (
             <>
               <div className="text-xs text-muted-foreground flex-1">
-                {currentResultIndex + 1} of {results.length}
+                {currentResultIndex + 1} of {totalMatches} matches
               </div>
               <Button
                 variant="outline"
                 size="icon"
                 className="h-7 w-7"
                 onClick={handlePrevious}
-                disabled={results.length === 0}
+                disabled={totalMatches === 0}
               >
                 <ChevronUp className="h-3 w-3" />
               </Button>
@@ -157,7 +167,7 @@ export function SearchBar() {
                 size="icon"
                 className="h-7 w-7"
                 onClick={handleNext}
-                disabled={results.length === 0}
+                disabled={totalMatches === 0}
               >
                 <ChevronDown className="h-3 w-3" />
               </Button>
