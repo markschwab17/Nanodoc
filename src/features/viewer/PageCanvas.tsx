@@ -3360,18 +3360,15 @@ export function PageCanvas({
                     }
                   }
                 }}
-                onResizeEnd={() => {
+                onResizeEnd={(initialWidth, initialHeight, finalWidth, finalHeight) => {
                   // When resize ends, record undo/redo with initial and final sizes
-                  if (currentDocument && resizingAnnotationRef.current && resizingAnnotationRef.current.id === annot.id) {
-                    const initialSize = resizingAnnotationRef.current;
-                    const finalSize = { width: annot.width || 100, height: annot.height || 50 };
-                    
+                  if (currentDocument) {
                     // Only record undo if size actually changed
-                    if (initialSize.initialWidth !== finalSize.width || initialSize.initialHeight !== finalSize.height) {
+                    if (initialWidth !== finalWidth || initialHeight !== finalHeight) {
                       wrapAnnotationUpdate(
                         currentDocument.getId(),
                         annot.id,
-                        finalSize
+                        { width: finalWidth, height: finalHeight }
                       );
                     }
                     

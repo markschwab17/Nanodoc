@@ -47,7 +47,7 @@ interface RichTextEditorProps {
   className?: string;
   scale: number;
   onResize?: (width: number, height: number) => void;
-  onResizeEnd?: () => void;
+  onResizeEnd?: (initialWidth: number, initialHeight: number, finalWidth: number, finalHeight: number) => void;
   onRotate?: (angle: number) => void;
   onRotateEnd?: () => void;
   onMove?: (x: number, y: number) => void;
@@ -683,106 +683,117 @@ export function RichTextEditor({
     setResizeCorner(corner);
   }, [isEditing, activeTool, isSpacePressed]);
   
-  // Handle resize - smooth updates using requestAnimationFrame
+  // Handle resize - immediate DOM manipulation for responsiveness
   useEffect(() => {
     if (!isResizing || !resizeCorner || !containerRef.current || activeTool === "pan" || isSpacePressed) return;
 
-    let rafId: number;
-    let pendingUpdate: { width: number; height: number } | null = null;
+    const editorElement = editorRef.current;
+    if (!editorElement) return;
 
+    // Disable CSS transitions and remove maxWidth constraint for instant resize feedback
+    const originalTransition = editorElement.style.transition;
+    editorElement.style.transition = 'none';
+    editorElement.style.maxWidth = 'none';
+
+    // Store initial values at the start of resize
+    const startWidth = initialResizeSizeRef.current.width;
+    const startHeight = initialResizeSizeRef.current.height;
+    const startMouseX = resizeStartRef.current.x;
+    const startMouseY = resizeStartRef.current.y;
+    const rotationRad = rotation * (Math.PI / 180);
+    const cos = Math.cos(rotationRad);
+    const sin = Math.sin(rotationRad);
+    
+    // Track the current size during resize
+    let currentWidth = startWidth;
+    let currentHeight = startHeight;
+
+    // Get current zoom level for proper coordinate conversion
+    const currentZoom = useUIStore.getState().zoomLevel;
+    
     const handleMouseMove = (e: MouseEvent) => {
-      // Use the initial center position (stored when resize started)
-      const centerX = initialResizeCenterRef.current.x;
-      const centerY = initialResizeCenterRef.current.y;
-
-      // Transform current mouse position to container's local (unrotated) coordinate system
-      const rad = -rotation * (Math.PI / 180); // Negative because CSS rotation is clockwise
-      const cos = Math.cos(rad);
-      const sin = Math.sin(rad);
+      // Calculate raw mouse delta from start position
+      const rawDeltaX = e.clientX - startMouseX;
+      const rawDeltaY = e.clientY - startMouseY;
       
-      // Transform current mouse position (relative to center)
-      const currentRelX = e.clientX - centerX;
-      const currentRelY = e.clientY - centerY;
-      const currentLocalX = currentRelX * cos - currentRelY * sin;
-      const currentLocalY = currentRelX * sin + currentRelY * cos;
+      // Rotate delta to account for element rotation (inverse rotation)
+      // Divide by zoomLevel to convert screen pixels to PDF units
+      const deltaX = (rawDeltaX * cos + rawDeltaY * sin) / currentZoom;
+      const deltaY = (-rawDeltaX * sin + rawDeltaY * cos) / currentZoom;
       
-      // Transform initial mouse position (relative to center)
-      const initialRelX = resizeStartRef.current.x - centerX;
-      const initialRelY = resizeStartRef.current.y - centerY;
-      const initialLocalX = initialRelX * cos - initialRelY * sin;
-      const initialLocalY = initialRelX * sin + initialRelY * cos;
+      // Calculate new size based on corner being dragged
+      let newWidth = startWidth;
+      let newHeight = startHeight;
       
-      // Calculate delta in local coordinates, then convert to PDF coordinates
-      const deltaX = (currentLocalX - initialLocalX) / scale;
-      const deltaY = (currentLocalY - initialLocalY) / scale;
-      
-      // Calculate new size based on initial size and delta
-      let newWidth = initialResizeSizeRef.current.width;
-      let newHeight = initialResizeSizeRef.current.height;
-      
-      // Calculate resize based on corner
       switch (resizeCorner) {
-        case "nw": // Top-left
-          newWidth = Math.max(100, initialResizeSizeRef.current.width - deltaX);
-          newHeight = Math.max(50, initialResizeSizeRef.current.height - deltaY);
+        case "nw": // Top-left - dragging away decreases size
+          newWidth = Math.max(50, startWidth - deltaX);
+          newHeight = Math.max(30, startHeight - deltaY);
           break;
-        case "ne": // Top-right
-          newWidth = Math.max(100, initialResizeSizeRef.current.width + deltaX);
-          newHeight = Math.max(50, initialResizeSizeRef.current.height - deltaY);
+        case "ne": // Top-right - X increases width, Y decreases height
+          newWidth = Math.max(50, startWidth + deltaX);
+          newHeight = Math.max(30, startHeight - deltaY);
           break;
-        case "sw": // Bottom-left
-          newWidth = Math.max(100, initialResizeSizeRef.current.width - deltaX);
-          newHeight = Math.max(50, initialResizeSizeRef.current.height + deltaY);
+        case "sw": // Bottom-left - X decreases width, Y increases height
+          newWidth = Math.max(50, startWidth - deltaX);
+          newHeight = Math.max(30, startHeight + deltaY);
           break;
-        case "se": // Bottom-right
-          newWidth = Math.max(100, initialResizeSizeRef.current.width + deltaX);
-          newHeight = Math.max(50, initialResizeSizeRef.current.height + deltaY);
+        case "se": // Bottom-right - dragging away increases size
+          newWidth = Math.max(50, startWidth + deltaX);
+          newHeight = Math.max(30, startHeight + deltaY);
           break;
       }
       
-      // Store pending update
-      pendingUpdate = { width: newWidth, height: newHeight };
-
-      // Cancel any pending frame and schedule update
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        if (pendingUpdate) {
-          // Update state
-          setSize(pendingUpdate);
-          sizeRef.current = pendingUpdate;
-          
-          // Callback for parent
-          if (onResize) {
-            onResize(pendingUpdate.width, pendingUpdate.height);
-          }
-          
-          pendingUpdate = null;
-        }
-      });
+      // Update tracked size
+      currentWidth = newWidth;
+      currentHeight = newHeight;
+      
+      // Apply size directly to DOM for immediate visual feedback
+      editorElement.style.width = `${newWidth * scale}px`;
+      editorElement.style.minHeight = `${newHeight * scale}px`;
+      
+      // Update ref synchronously
+      sizeRef.current = { width: newWidth, height: newHeight };
     };
 
     const handleMouseUp = () => {
-      const wasResizing = isResizing;
-      cancelAnimationFrame(rafId);
+      // Restore transition (maxWidth will be set by React on re-render with new size)
+      editorElement.style.transition = originalTransition;
+      
+      // Final size from tracked values
+      const finalSize = { width: currentWidth, height: currentHeight };
+      
+      // Update React state once at the end
+      setSize(finalSize);
+      sizeRef.current = finalSize;
+      
+      // Notify parent of the final size
+      if (onResize) {
+        onResize(finalSize.width, finalSize.height);
+      }
+      
       setIsResizing(false);
       setResizeCorner(null);
-      // Notify parent when resize ends
-      if (wasResizing && onResizeEnd) {
-        onResizeEnd();
+      
+      // Notify parent when resize ends with initial and final sizes for undo tracking
+      if (onResizeEnd) {
+        onResizeEnd(startWidth, startHeight, finalSize.width, finalSize.height);
       }
+      
       // Update initial refs for next resize
-      initialSizeRef.current = { width: sizeRef.current.width, height: sizeRef.current.height };
+      initialSizeRef.current = finalSize;
     };
 
-    window.addEventListener("mousemove", handleMouseMove, { passive: true });
+    window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
 
     return () => {
-      cancelAnimationFrame(rafId);
+      // Restore transition on cleanup (maxWidth handled by React)
+      editorElement.style.transition = originalTransition;
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizing, resizeCorner, scale, onResize, rotation, activeTool, isSpacePressed]);
+  }, [isResizing, resizeCorner, scale, onResize, onResizeEnd, rotation, activeTool, isSpacePressed]);
 
   // Handle rotation - up/down movement
   useEffect(() => {
@@ -912,6 +923,14 @@ export function RichTextEditor({
             return;
           }
           
+          // When text tool is active, clicking on this text box should enter edit mode
+          if (activeTool === "text") {
+            e.preventDefault();
+            e.stopPropagation();
+            onEditModeChange?.(true);
+            return;
+          }
+          
           // Don't start drag if clicking on interactive elements
           const target = e.target as HTMLElement;
           if (
@@ -945,7 +964,9 @@ export function RichTextEditor({
           e.stopPropagation();
         }}
         className={cn(
-          "px-3 py-2 outline-none rounded-lg transition-all duration-200",
+          "px-3 py-2 outline-none rounded-lg",
+          // Disable transitions during resize/rotate/drag for instant feedback
+          !isResizing && !isRotating && !isDragging && "transition-all duration-200",
           isSelected && "border border-primary/30 hover:border-primary/60 focus:border-primary",
           "resize-none overflow-auto",
           isSelected && "shadow-sm hover:shadow-md focus:shadow-lg",
