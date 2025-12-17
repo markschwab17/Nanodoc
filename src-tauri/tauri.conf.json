@@ -1,6 +1,6 @@
 {
   "productName": "Nanodoc",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "identifier": "com.nanodoc",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -65,7 +65,7 @@
       "exceptionDomain": "",
       "signingIdentity": "Developer ID Application",
       "providerShortName": "A3M3RYHFLP",
-      "entitlements": null
+      "entitlements": "entitlements.plist"
     },
     "windows": {
       "certificateThumbprint": null,
