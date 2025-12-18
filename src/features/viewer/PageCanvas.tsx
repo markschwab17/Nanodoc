@@ -1041,6 +1041,27 @@ export function PageCanvas({
     return () => clearInterval(intervalId);
   }, [document, pageNumber]);
   
+  // CRITICAL: Clear renderer cache and canvas when document changes to prevent artifacts
+  // This ensures that when switching PDFs, the previous PDF's rendered content doesn't appear
+  useEffect(() => {
+    if (renderer && document) {
+      renderer.clearCache();
+    }
+    
+    // Clear the canvas to remove any rendered content from previous document
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      }
+    }
+    
+    // Clear editing state when document changes
+    setEditingAnnotation(null);
+    setAnnotationText("");
+    setIsEditingMode(false);
+  }, [document?.getId(), renderer]);
+  
   // Effect to force re-render when rotation or dimensions change
   // This ensures the page re-renders with updated dimensions after rotation
   useEffect(() => {
@@ -1199,11 +1220,17 @@ export function PageCanvas({
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
     const flippedY = mediaboxHeight - pdfY;
     
-    
-    return {
+    const result = {
       x: pdfX * BASE_SCALE,
       y: flippedY * BASE_SCALE,  // Flip Y to match getPDFCoordinates
     };
+    
+    // Debug logging for arrow points specifically
+    if (Math.abs(pdfX) < 10000 && Math.abs(pdfY) < 10000) { // Only log reasonable values to avoid spam
+      console.log("🔴 [pdfToCanvas] Converting:", { pdfX, pdfY, mediaboxHeight, flippedY, result });
+    }
+    
+    return result;
   };
 
   // Helper function to convert PDF coordinates to container-relative (screen) coordinates
@@ -2204,9 +2231,50 @@ export function PageCanvas({
             allAnnotations.push(...pageAnnotations);
           }
           
-          // Add loaded annotations to store
+          // Add loaded annotations to store, checking for duplicates
+          const existingAnnotations = pdfStore.getAnnotations(documentId);
           for (const annot of allAnnotations) {
-            pdfStore.addAnnotation(documentId, annot);
+            // Check for duplicates (same logic as usePDF.ts)
+            let isDuplicate = false;
+            for (const existing of existingAnnotations) {
+              if (annot.pdfAnnotation && existing.pdfAnnotation === annot.pdfAnnotation) {
+                isDuplicate = true;
+                break;
+              }
+              // For arrows, match by position
+              if (annot.type === "shape" && annot.shapeType === "arrow" && 
+                  existing.type === "shape" && existing.shapeType === "arrow" &&
+                  annot.pageNumber === existing.pageNumber &&
+                  annot.points && existing.points && annot.points.length === 2 && existing.points.length === 2) {
+                const tolerance = 10;
+                const p1Match = Math.abs(annot.points[0].x - existing.points[0].x) < tolerance &&
+                                Math.abs(annot.points[0].y - existing.points[0].y) < tolerance;
+                const p2Match = Math.abs(annot.points[1].x - existing.points[1].x) < tolerance &&
+                                Math.abs(annot.points[1].y - existing.points[1].y) < tolerance;
+                const p1ReverseMatch = Math.abs(annot.points[0].x - existing.points[1].x) < tolerance &&
+                                       Math.abs(annot.points[0].y - existing.points[1].y) < tolerance;
+                const p2ReverseMatch = Math.abs(annot.points[1].x - existing.points[0].x) < tolerance &&
+                                       Math.abs(annot.points[1].y - existing.points[0].y) < tolerance;
+                if ((p1Match && p2Match) || (p1ReverseMatch && p2ReverseMatch)) {
+                  isDuplicate = true;
+                  pdfStore.updateAnnotation(documentId, existing.id, {
+                    pdfAnnotation: annot.pdfAnnotation || existing.pdfAnnotation,
+                    points: annot.points,
+                    x: annot.x,
+                    y: annot.y,
+                    width: annot.width,
+                    height: annot.height,
+                    strokeColor: annot.strokeColor || existing.strokeColor,
+                    strokeWidth: annot.strokeWidth || existing.strokeWidth,
+                    arrowHeadSize: annot.arrowHeadSize || existing.arrowHeadSize,
+                  });
+                  break;
+                }
+              }
+            }
+            if (!isDuplicate) {
+              pdfStore.addAnnotation(documentId, annot);
+            }
           }
 
           // Create tab for this document
@@ -3662,9 +3730,32 @@ export function PageCanvas({
               : 0;
             
             if (annot.shapeType === "arrow" && annot.points && annot.points.length >= 2) {
+              // Check if this annotation is selected (needed for debug log and rendering)
+              const isSelected = editingAnnotation?.id === annot.id;
+              
+              // Validate points - reject if invalid (0,0, NaN, undefined, or out of bounds)
+              const p0 = annot.points[0];
+              const p1 = annot.points[1];
+              
+              
+              if (!p0 || !p1 || 
+                  typeof p0.x !== 'number' || typeof p0.y !== 'number' ||
+                  typeof p1.x !== 'number' || typeof p1.y !== 'number' ||
+                  isNaN(p0.x) || isNaN(p0.y) || isNaN(p1.x) || isNaN(p1.y) ||
+                  (p0.x === 0 && p0.y === 0 && p1.x === 0 && p1.y === 0) || // Both points at origin
+                  Math.abs(p0.x) > 100000 || Math.abs(p0.y) > 100000 ||
+                  Math.abs(p1.x) > 100000 || Math.abs(p1.y) > 100000) {
+                console.warn("🔴 [ARROW RENDER] Invalid arrow points, skipping render:", annot.points);
+                return null;
+              }
+              
+              console.log("🔴 [ARROW RENDER] Rendering arrow with PDF points:", annot.points, "for annotation", annot.id);
               const start = pdfToCanvas(annot.points[0].x, annot.points[0].y);
               const end = pdfToCanvas(annot.points[1].x, annot.points[1].y);
-              const arrowHeadSize = annot.arrowHeadSize || 10;
+              console.log("🔴 [ARROW RENDER] Converted to canvas:", { start, end });
+              // Convert arrow head size from PDF points to canvas pixels
+              const arrowHeadSizePdf = annot.arrowHeadSize || 10;
+              const arrowHeadSize = arrowHeadSizePdf * BASE_SCALE;
               
               const dx = end.x - start.x;
               const dy = end.y - start.y;
@@ -3686,7 +3777,15 @@ export function PageCanvas({
               const maxX = Math.max(start.x, end.x, arrowHead1X, arrowHead2X) + 10;
               const maxY = Math.max(start.y, end.y, arrowHead1Y, arrowHead2Y) + 10;
               
-              const isSelected = editingAnnotation?.id === annot.id;
+              console.log("🔴 [ARROW RENDER] Calculated bounds:", { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY });
+              
+              // Validate canvas coordinates are reasonable
+              if (Math.abs(start.x) > 100000 || Math.abs(start.y) > 100000 || 
+                  Math.abs(end.x) > 100000 || Math.abs(end.y) > 100000) {
+                console.error("🔴 [ARROW RENDER] Canvas coordinates out of bounds:", { start, end });
+                return null;
+              }
+              
               const isDraggingThis = draggingShapeId === annot.id;
               
               return (
@@ -3779,6 +3878,13 @@ export function PageCanvas({
                           annot.id,
                           updates
                         );
+                        // Update editingAnnotation if it's the one being edited
+                        if (editingAnnotation?.id === annot.id) {
+                          setEditingAnnotation({
+                            ...editingAnnotation,
+                            ...updates,
+                          });
+                        }
                       }}
                       zoomLevel={currentZoom}
                     />
@@ -3959,7 +4065,7 @@ export function PageCanvas({
                 pageRotation={pageRotation}
                 content={content}
                 isEditing={isEditing}
-                isSelected={isCurrentlyEditing}
+                isSelected={isCurrentlyEditing || (editingAnnotation?.id === annot.id)}
                 isHovered={isHovered}
                 activeTool={activeTool}
                 isSpacePressed={isSpacePressed}

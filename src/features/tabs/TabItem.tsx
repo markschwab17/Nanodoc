@@ -17,9 +17,11 @@ interface TabItemProps {
   onClick: () => void;
   onClose: () => void;
   onRename?: (newName: string) => void;
+  onDragStart?: (e: React.DragEvent, tabId: string) => void;
+  onDragEnd?: () => void;
 }
 
-export function TabItem({ tab, isActive, onClick, onClose, onRename }: TabItemProps) {
+export function TabItem({ tab, isActive, onClick, onClose, onRename, onDragStart, onDragEnd }: TabItemProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(tab.name);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -69,6 +71,24 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename }: TabItemPr
     }
   };
 
+  const handleTabClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isEditing) {
+      onClick();
+    }
+  };
+
+  const handleDragStartInternal = (e: React.DragEvent) => {
+    // Use "all" to allow both move (reordering) and copy (inserting pages)
+    e.dataTransfer.effectAllowed = "all";
+    e.dataTransfer.setData("application/x-tab-id", tab.id);
+    e.dataTransfer.setData("application/x-tab-document-id", tab.documentId);
+    e.dataTransfer.setData("text/plain", tab.name);
+    if (onDragStart) {
+      onDragStart(e, tab.id);
+    }
+  };
+
   return (
     <div
       className={cn(
@@ -77,7 +97,10 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename }: TabItemPr
           ? "border-primary bg-background"
           : "border-transparent bg-muted/30 hover:bg-muted/50"
       )}
-      onClick={!isEditing ? onClick : undefined}
+      onClick={handleTabClick}
+      draggable
+      onDragStart={handleDragStartInternal}
+      onDragEnd={onDragEnd}
     >
       {isEditing ? (
         <Input

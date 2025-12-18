@@ -837,7 +837,8 @@ export class PDFEditor {
     const annot = page.createAnnotation("FreeText");
     annot.setRect(rect);
     
-    // Strip HTML tags and decode entities for plain text content
+    // Store plain text in PDF contents (for PDF viewer compatibility)
+    // But also store HTML in a custom field so we can restore it
     const plainText = (annotation.content || "")
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<[^>]*>/g, "")
@@ -847,6 +848,20 @@ export class PDFEditor {
       .replace(/&gt;/g, ">")
       .replace(/&quot;/g, '"');
     annot.setContents(plainText);
+    
+    // Mark this as a custom annotation and store HTML content separately
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        annotObj.put("CustomAnnotation", this.mupdf.newString("true"));
+        // Store HTML content in a custom field
+        if (annotation.content) {
+          annotObj.put("HTMLContent", this.mupdf.newString(annotation.content));
+        }
+      }
+    } catch (e) {
+      // Ignore if we can't set the marker
+    }
     
     // Set default appearance string to control text rendering
     // Format: "/FontName FontSize Tf R G B rg" for text color
@@ -886,6 +901,9 @@ export class PDFEditor {
       } catch {
         // setInteriorColor might not be available
       }
+      
+      // Store the PDF annotation object for future updates
+      annotation.pdfAnnotation = annot;
     } catch (error) {
       console.warn("Could not set text annotation appearance:", error);
     }
@@ -989,6 +1007,9 @@ export class PDFEditor {
       }
       
       annot.update();
+      
+      // Store the PDF annotation object for future updates
+      annotation.pdfAnnotation = annot;
       return;
     }
     
@@ -1121,6 +1142,9 @@ export class PDFEditor {
     }
     
     annot.update();
+    
+    // Store the PDF annotation object for future updates
+    annotation.pdfAnnotation = annot;
   }
 
   /**
@@ -1139,19 +1163,39 @@ export class PDFEditor {
     }
 
     const page = pdfDoc.loadPage(annotation.pageNumber);
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
     
     // Create FreeText annotation for callout
     const boxPos = annotation.boxPosition || { x: annotation.x + 50, y: annotation.y - 50 };
+    
+    // Convert to PDF coordinates for storage
+    const pdfBoxY = pageHeight - boxPos.y;
+    const pdfArrowY = annotation.arrowPoint ? (pageHeight - annotation.arrowPoint.y) : undefined;
+    
+    // Store callout data in JSON format in contents
+    const calloutData = {
+      type: "callout",
+      content: annotation.content || "",
+      boxPosition: { x: boxPos.x, y: pdfBoxY },
+      arrowPoint: annotation.arrowPoint ? { x: annotation.arrowPoint.x, y: pdfArrowY! } : undefined,
+      width: annotation.width || 150,
+      height: annotation.height || 80,
+      fontSize: annotation.fontSize || 12,
+      fontFamily: annotation.fontFamily || "Arial",
+      color: annotation.color || "#000000",
+    };
+    
     const rect: [number, number, number, number] = [
       boxPos.x,
-      boxPos.y,
+      pdfBoxY - (annotation.height || 80),
       boxPos.x + (annotation.width || 150),
-      boxPos.y + (annotation.height || 80),
+      pdfBoxY,
     ];
     
     const annot = page.createAnnotation("FreeText");
     annot.setRect(rect);
-    annot.setContents(annotation.content || "");
+    annot.setContents(JSON.stringify(calloutData));
     
     if (annotation.color) {
       const hex = annotation.color.replace("#", "");
@@ -1162,6 +1206,9 @@ export class PDFEditor {
     }
     
     annot.update();
+    
+    // Store the PDF annotation object for future updates
+    annotation.pdfAnnotation = annot;
   }
 
   /**
@@ -1336,11 +1383,25 @@ export class PDFEditor {
       for (const pdfAnnot of pdfAnnotations) {
         try {
           const type = pdfAnnot.getType();
-          const rect = pdfAnnot.getRect();
+          
+          // Line annotations don't have a Rect property - skip it
+          let rect: number[] | null = null;
+          if (type !== "Line") {
+            try {
+              rect = pdfAnnot.getRect();
+            } catch (e) {
+              // Some annotation types don't have rect
+              console.warn(`Annotation type ${type} has no rect:`, e);
+            }
+          }
+          
           const contents = pdfAnnot.getContents() || "";
           
           // Generate a stable ID from annotation properties
-          const id = `pdf_${pageNumber}_${rect[0]}_${rect[1]}_${Math.random().toString(36).substr(2, 9)}`;
+          // For Line annotations, use a different ID generation method
+          const id = type === "Line" 
+            ? `pdf_${pageNumber}_line_${Math.random().toString(36).substr(2, 9)}`
+            : `pdf_${pageNumber}_${rect ? `${rect[0]}_${rect[1]}_` : ''}${Math.random().toString(36).substr(2, 9)}`;
           
           if (type === "Highlight") {
             // Get quad points for highlight
@@ -1359,20 +1420,72 @@ export class PDFEditor {
               console.error("Error getting quad points:", err);
             }
             
+            // Calculate bounding box from quads for proper positioning
+            if (!rect) {
+              console.warn("Highlight annotation has no rect, skipping");
+              continue;
+            }
+            let minX = rect[0], minY = rect[1], maxX = rect[2], maxY = rect[3];
+            if (quadPoints.length > 0) {
+              // Find min/max from all quad points
+              for (const quad of quadPoints) {
+                if (quad.length >= 8) {
+                  for (let i = 0; i < 8; i += 2) {
+                    minX = Math.min(minX, quad[i]);
+                    maxX = Math.max(maxX, quad[i]);
+                    minY = Math.min(minY, quad[i + 1]);
+                    maxY = Math.max(maxY, quad[i + 1]);
+                  }
+                }
+              }
+            }
+            
+            // Get highlight color if available
+            let highlightColor = "#FFFF00";
+            try {
+              const color = pdfAnnot.getColor();
+              if (color && color.length >= 3) {
+                const r = Math.round(color[0] * 255);
+                const g = Math.round(color[1] * 255);
+                const b = Math.round(color[2] * 255);
+                highlightColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+              }
+            } catch (e) {
+              // Use default color
+            }
+            
+            // Get opacity if available
+            let opacity = 0.5;
+            try {
+              const opacityObj = pdfAnnot.getOpacity ? pdfAnnot.getOpacity() : null;
+              if (opacityObj !== null && opacityObj !== undefined) {
+                opacity = typeof opacityObj === 'number' ? opacityObj : opacityObj.valueOf();
+              }
+            } catch (e) {
+              // Use default opacity
+            }
+            
             annotations.push({
               id,
               type: "highlight",
               pageNumber,
-              x: rect[0],
-              y: rect[1],
-              width: rect[2] - rect[0],
-              height: rect[3] - rect[1],
+              x: minX,
+              y: minY,
+              width: maxX - minX,
+              height: maxY - minY,
               quads: quadPoints,
               content: contents,
-              color: "#FFFF00",
+              color: highlightColor,
+              opacity,
+              highlightMode: "text", // Assume text highlight if it has quads
+              pdfAnnotation: pdfAnnot,
             });
           } else if (type === "Redact") {
             // Load redaction annotation
+            if (!rect) {
+              console.warn("Redact annotation has no rect, skipping");
+              continue;
+            }
             annotations.push({
               id,
               type: "redact",
@@ -1381,6 +1494,7 @@ export class PDFEditor {
               y: rect[1],
               width: rect[2] - rect[0],
               height: rect[3] - rect[1],
+              pdfAnnotation: pdfAnnot,
             });
           } else if (type === "Widget") {
             // This is a form field - process it directly
@@ -1497,6 +1611,57 @@ export class PDFEditor {
             });
             continue; // Skip to next annotation
           } else if (type === "FreeText") {
+            // First check if this is a stamp annotation stored as FreeText
+            const annotObj = pdfAnnot.getObject();
+            let isStampAnnotation = false;
+            
+            try {
+              if (annotObj) {
+                const stampFlag = annotObj.get("StampAnnotation");
+                if (stampFlag && stampFlag.toString() === "true") {
+                  isStampAnnotation = true;
+                }
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+            
+            // If it's a stamp annotation, load it as stamp
+            if (isStampAnnotation && contents) {
+              try {
+                const parsed = JSON.parse(contents);
+                if (parsed.type === "stamp" && parsed.stampData) {
+                  const stampData = parsed.stampData as StampData;
+                  if (stampData.id && stampData.name && stampData.type) {
+                    if (!rect) {
+                      console.warn("Stamp annotation has no rect, skipping");
+                      continue;
+                    }
+                    const pageBounds = page.getBounds();
+                    const pageHeight = pageBounds[3] - pageBounds[1];
+                    
+                    annotations.push({
+                      id,
+                      type: "stamp",
+                      pageNumber,
+                      x: rect[0],
+                      y: pageHeight - rect[3], // Convert to display coordinates
+                      width: rect[2] - rect[0],
+                      height: rect[3] - rect[1],
+                      stampId: stampData.id,
+                      stampData,
+                      stampType: stampData.type,
+                      pdfAnnotation: pdfAnnot,
+                    });
+                    continue; // Skip normal FreeText handling
+                  }
+                }
+              } catch (e) {
+                console.warn("Could not parse stamp data from FreeText:", e);
+                // Fall through to check if it's an image or callout
+              }
+            }
+            
             // Check for image annotations (stored as FreeText with JSON in contents)
             if (contents) {
               try {
@@ -1518,6 +1683,10 @@ export class PDFEditor {
                     // Use parsed values if object access fails
                   }
                   
+                  if (!rect) {
+                    console.warn("Image annotation has no rect, skipping");
+                    continue;
+                  }
                   annotations.push({
                     id,
                     type: "image",
@@ -1534,28 +1703,474 @@ export class PDFEditor {
                     pdfAnnotation: pdfAnnot,
                   });
                   continue; // Skip normal FreeText handling
+                } else if (parsed.type === "callout") {
+                  // This is a callout annotation
+                  if (!rect) {
+                    console.warn("Callout annotation has no rect, skipping");
+                    continue;
+                  }
+                  const pageBounds = page.getBounds();
+                  const pageHeight = pageBounds[3] - pageBounds[1];
+                  
+                  annotations.push({
+                    id,
+                    type: "callout",
+                    pageNumber,
+                    x: parsed.boxPosition?.x || rect[0],
+                    y: parsed.boxPosition ? (pageHeight - parsed.boxPosition.y) : rect[1],
+                    width: parsed.width || (rect[2] - rect[0]),
+                    height: parsed.height || (rect[3] - rect[1]),
+                    content: parsed.content || contents,
+                    arrowPoint: parsed.arrowPoint ? {
+                      x: parsed.arrowPoint.x,
+                      y: pageHeight - parsed.arrowPoint.y
+                    } : undefined,
+                    boxPosition: parsed.boxPosition ? {
+                      x: parsed.boxPosition.x,
+                      y: pageHeight - parsed.boxPosition.y
+                    } : undefined,
+                    fontSize: parsed.fontSize || 12,
+                    fontFamily: parsed.fontFamily || "Arial",
+                    color: parsed.color || "#000000",
+                    pdfAnnotation: pdfAnnot,
+                  });
+                  continue; // Skip normal FreeText handling
                 }
               } catch (e) {
                 // Not JSON, continue with normal FreeText handling
               }
             }
             
-            // Determine if it's a callout or text annotation
-            // For now, treat all FreeText as text annotations
-            // Could enhance this by checking custom properties
+            // Only load FreeText as text annotation if it's one of our custom annotations
+            // We mark our custom annotations with a "CustomAnnotation" flag
+            // Skip loading native PDF FreeText annotations to avoid duplication
+            // (annotObj already declared above for stamp check)
+            let isCustomAnnotation = false;
+            let htmlContent = contents; // Default to plain text contents
+            
+            // Check if this is a custom annotation by looking for our marker
+            try {
+              if (annotObj) {
+                const customFlag = annotObj.get("CustomAnnotation");
+                if (customFlag && customFlag.toString() === "true") {
+                  isCustomAnnotation = true;
+                  // Try to get HTML content if stored
+                  const htmlContentObj = annotObj.get("HTMLContent");
+                  if (htmlContentObj) {
+                    htmlContent = htmlContentObj.toString();
+                  }
+                }
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+            
+            // Only load if it's a custom annotation
+            // Skip native PDF FreeText annotations to prevent duplication
+            if (isCustomAnnotation) {
+              if (!rect) {
+                console.warn("Custom text annotation has no rect, skipping");
+                continue;
+              }
+              const pageBounds = page.getBounds();
+              const pageHeight = pageBounds[3] - pageBounds[1];
+              
+              annotations.push({
+                id,
+                type: "text",
+                pageNumber,
+                x: rect[0],
+                y: pageHeight - rect[3], // Convert to display coordinates
+                width: rect[2] - rect[0],
+                height: rect[3] - rect[1],
+                content: htmlContent, // Use HTML content if available, otherwise plain text
+                fontSize: 12,
+                fontFamily: "Arial",
+                color: "#000000",
+                pdfAnnotation: pdfAnnot,
+              });
+            }
+            // Otherwise, skip this FreeText annotation - it's a native PDF annotation
+          } else if (type === "FreeText") {
+            // Check if this is a stamp annotation stored as FreeText
+            const annotObj = pdfAnnot.getObject();
+            let isStampAnnotation = false;
+            
+            try {
+              if (annotObj) {
+                const stampFlag = annotObj.get("StampAnnotation");
+                if (stampFlag && stampFlag.toString() === "true") {
+                  isStampAnnotation = true;
+                }
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+            
+            // If it's a stamp annotation, load it as stamp
+            if (isStampAnnotation && contents) {
+              try {
+                const parsed = JSON.parse(contents);
+                if (parsed.type === "stamp" && parsed.stampData) {
+                  const stampData = parsed.stampData as StampData;
+                  if (stampData.id && stampData.name && stampData.type) {
+                    if (!rect) {
+                      console.warn("Stamp annotation has no rect, skipping");
+                      continue;
+                    }
+                    const pageBounds = page.getBounds();
+                    const pageHeight = pageBounds[3] - pageBounds[1];
+                    
+                    annotations.push({
+                      id,
+                      type: "stamp",
+                      pageNumber,
+                      x: rect[0],
+                      y: pageHeight - rect[3], // Convert to display coordinates
+                      width: rect[2] - rect[0],
+                      height: rect[3] - rect[1],
+                      stampId: stampData.id,
+                      stampData,
+                      stampType: stampData.type,
+                      pdfAnnotation: pdfAnnot,
+                    });
+                    continue; // Skip normal FreeText handling
+                  }
+                }
+              } catch (e) {
+                console.warn("Could not parse stamp data from FreeText:", e);
+                // Fall through to check if it's a callout or image
+              }
+            }
+            
+            // Check for image annotations (stored as FreeText with JSON in contents)
+            if (contents) {
+              try {
+                const parsed = JSON.parse(contents);
+                if (parsed.type === "image" && parsed.imageData) {
+                  // This is an image annotation - handled above, skip
+                  continue;
+                } else if (parsed.type === "callout") {
+                  // This is a callout annotation - handled above, skip
+                  continue;
+                }
+              } catch (e) {
+                // Not JSON, continue with normal FreeText handling
+              }
+            }
+            
+            // Only load FreeText as text annotation if it's one of our custom annotations
+            // We mark our custom annotations with a "CustomAnnotation" flag
+            // Skip loading native PDF FreeText annotations to avoid duplication
+            let isCustomAnnotation = false;
+            let htmlContent = contents; // Default to plain text contents
+            
+            // Check if this is a custom annotation by looking for our marker
+            try {
+              if (annotObj) {
+                const customFlag = annotObj.get("CustomAnnotation");
+                if (customFlag && customFlag.toString() === "true") {
+                  isCustomAnnotation = true;
+                  // Try to get HTML content if stored
+                  const htmlContentObj = annotObj.get("HTMLContent");
+                  if (htmlContentObj) {
+                    htmlContent = htmlContentObj.toString();
+                  }
+                }
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+            
+            // Only load if it's a custom annotation
+            // Skip native PDF FreeText annotations to prevent duplication
+            if (isCustomAnnotation) {
+              if (!rect) {
+                console.warn("Custom text annotation has no rect, skipping");
+                continue;
+              }
+              const pageBounds = page.getBounds();
+              const pageHeight = pageBounds[3] - pageBounds[1];
+              
+              annotations.push({
+                id,
+                type: "text",
+                pageNumber,
+                x: rect[0],
+                y: pageHeight - rect[3], // Convert to display coordinates
+                width: rect[2] - rect[0],
+                height: rect[3] - rect[1],
+                content: htmlContent, // Use HTML content if available, otherwise plain text
+                fontSize: 12,
+                fontFamily: "Arial",
+                color: "#000000",
+                pdfAnnotation: pdfAnnot,
+              });
+            }
+            // Otherwise, skip this FreeText annotation - it's a native PDF annotation
+          } else if (type === "Line") {
+            // Load arrow/shape annotation (Line is used for arrows)
+            // Keep points in PDF coordinates (Y=0 at bottom) - pdfToCanvas will convert them
+            let points: Array<{ x: number; y: number }> = [];
+            try {
+              const line = pdfAnnot.getLine();
+              console.log("🔵 [ARROW LOAD] getLine() returned:", line, "for page", pageNumber);
+              
+              // getLine() can return either [x1, y1, x2, y2] or [[x1, y1], [x2, y2]]
+              if (line && Array.isArray(line)) {
+                if (line.length >= 4 && typeof line[0] === 'number') {
+                  // Flat array format: [x1, y1, x2, y2]
+                  points = [
+                    { x: line[0], y: line[1] },
+                    { x: line[2], y: line[3] }
+                  ];
+                  console.log("🔵 [ARROW LOAD] Parsed points (flat format):", points);
+                } else if (line.length >= 2 && Array.isArray(line[0])) {
+                  // Nested array format: [[x1, y1], [x2, y2]]
+                  points = [
+                    { x: line[0][0], y: line[0][1] },
+                    { x: line[1][0], y: line[1][1] }
+                  ];
+                  console.log("🔵 [ARROW LOAD] Parsed points (nested format):", points);
+                } else {
+                  console.warn("🔵 [ARROW LOAD] Invalid line format:", line);
+                }
+              } else {
+                console.warn("🔵 [ARROW LOAD] Invalid line format:", line);
+              }
+            } catch (e) {
+              console.warn("Could not get line points:", e);
+            }
+            
+            // Get color
+            let strokeColor = "#000000";
+            try {
+              const color = pdfAnnot.getColor();
+              if (color && color.length >= 3) {
+                const r = Math.round(color[0] * 255);
+                const g = Math.round(color[1] * 255);
+                const b = Math.round(color[2] * 255);
+                strokeColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+              }
+            } catch (e) {
+              // Use default color
+            }
+            
+            // Get stroke width
+            let strokeWidth = 2;
+            try {
+              const borderWidth = pdfAnnot.getBorderWidth();
+              if (borderWidth) {
+                strokeWidth = borderWidth;
+              }
+            } catch (e) {
+              // Use default width
+            }
+            
+            // Get arrow head size if stored
+            let arrowHeadSize = 10; // Default
+            try {
+              const annotObj = pdfAnnot.getObject();
+              if (annotObj) {
+                const arrowSizeObj = annotObj.get("ArrowHeadSize");
+                if (arrowSizeObj && typeof arrowSizeObj.valueOf === 'function') {
+                  arrowHeadSize = arrowSizeObj.valueOf();
+                }
+              }
+            } catch (e) {
+              // Use default size
+            }
+            
+            if (points.length >= 2) {
+              // Validate points are reasonable (not 0,0 or NaN)
+              const isValid = points.every(p => 
+                typeof p.x === 'number' && typeof p.y === 'number' &&
+                !isNaN(p.x) && !isNaN(p.y) &&
+                Math.abs(p.x) < 100000 && Math.abs(p.y) < 100000 // Reasonable bounds
+              );
+              
+              if (!isValid) {
+                console.warn("🔵 [ARROW LOAD] Invalid points detected, skipping arrow:", points);
+              } else {
+                // CRITICAL FIX: getLine() returns coordinates in canvas space (Y=0 at top), not PDF space (Y=0 at bottom)
+                // We need to flip Y coordinates to convert from canvas to PDF coordinates
+                const pageBounds = page.getBounds();
+                const pageHeight = pageBounds[3] - pageBounds[1];
+                const pdfPoints = points.map(p => ({
+                  x: p.x,
+                  y: pageHeight - p.y  // Flip Y: convert from canvas (Y=0 at top) to PDF (Y=0 at bottom)
+                }));
+                
+                
+                const minX = Math.min(pdfPoints[0].x, pdfPoints[1].x);
+                const maxX = Math.max(pdfPoints[0].x, pdfPoints[1].x);
+                const minY = Math.min(pdfPoints[0].y, pdfPoints[1].y);
+                const maxY = Math.max(pdfPoints[0].y, pdfPoints[1].y);
+                
+                // Filter out artifact arrows with suspiciously small coordinates (top-left corner artifacts)
+                // These are typically failed save attempts that left broken annotations
+                const isArtifact = (minX < 200 && minY < 200 && maxX < 200 && maxY < 200) && 
+                                 (maxX - minX < 150 && maxY - minY < 150); // Small arrow in top-left corner
+                
+                if (isArtifact) {
+                  console.warn("🔵 [ARROW LOAD] Skipping artifact arrow (suspicious coordinates):", pdfPoints);
+                } else {
+                    annotations.push({
+                    id,
+                    type: "shape",
+                    pageNumber,
+                    x: minX,
+                    y: minY,
+                    width: maxX - minX,
+                    height: maxY - minY,
+                    shapeType: "arrow",
+                    points: pdfPoints,  // Use converted PDF coordinates
+                    strokeColor,
+                    strokeWidth,
+                    arrowHeadSize,
+                    pdfAnnotation: pdfAnnot,
+                  });
+                }
+              }
+            } else {
+              console.warn("🔵 [ARROW LOAD] Not enough points for arrow:", points);
+            }
+          } else if (type === "Square" || type === "Circle") {
+            // Load rectangle or circle annotation
+            const pageBounds = page.getBounds();
+            const pageHeight = pageBounds[3] - pageBounds[1];
+            
+            // Get color
+            let strokeColor = "#000000";
+            let fillColor: string | undefined;
+            try {
+              const color = pdfAnnot.getColor();
+              if (color && color.length >= 3) {
+                const r = Math.round(color[0] * 255);
+                const g = Math.round(color[1] * 255);
+                const b = Math.round(color[2] * 255);
+                strokeColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+              }
+            } catch (e) {
+              // Use default color
+            }
+            
+            // Get fill color if available
+            try {
+              const fillColorObj = pdfAnnot.getFillColor ? pdfAnnot.getFillColor() : null;
+              if (fillColorObj && fillColorObj.length >= 3) {
+                const r = Math.round(fillColorObj[0] * 255);
+                const g = Math.round(fillColorObj[1] * 255);
+                const b = Math.round(fillColorObj[2] * 255);
+                fillColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+              }
+            } catch (e) {
+              // No fill color
+            }
+            
+            // Get stroke width
+            let strokeWidth = 2;
+            try {
+              const borderWidth = pdfAnnot.getBorderWidth();
+              if (borderWidth) {
+                strokeWidth = borderWidth;
+              }
+            } catch (e) {
+              // Use default width
+            }
+            
+            if (!rect) {
+              console.warn("Shape annotation has no rect, skipping");
+              continue;
+            }
             annotations.push({
               id,
-              type: "text",
+              type: "shape",
               pageNumber,
               x: rect[0],
-              y: rect[1],
+              y: pageHeight - rect[3], // Convert to display coordinates
               width: rect[2] - rect[0],
               height: rect[3] - rect[1],
-              content: contents,
-              fontSize: 12,
-              fontFamily: "Arial",
-              color: "#000000",
+              shapeType: type === "Square" ? "rectangle" : "circle",
+              strokeColor,
+              strokeWidth,
+              fillColor,
+              fillOpacity: fillColor ? 0.5 : undefined, // Default fill opacity if fill color exists
+              pdfAnnotation: pdfAnnot,
             });
+          } else if (type === "Ink") {
+            // Load drawing annotation
+            const pageBounds = page.getBounds();
+            const pageHeight = pageBounds[3] - pageBounds[1];
+            
+            let path: Array<{ x: number; y: number }> = [];
+            try {
+              const inkList = pdfAnnot.getInkList();
+              if (inkList && inkList.length > 0) {
+                // Ink list is an array of strokes, each stroke is an array of [x, y, x, y, ...]
+                for (const stroke of inkList) {
+                  if (Array.isArray(stroke)) {
+                    for (let i = 0; i < stroke.length; i += 2) {
+                      if (i + 1 < stroke.length) {
+                        path.push({
+                          x: stroke[i],
+                          y: pageHeight - stroke[i + 1] // Convert to display coordinates
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn("Could not get ink list:", e);
+            }
+            
+            // Get color
+            let color = "#000000";
+            try {
+              const annotColor = pdfAnnot.getColor();
+              if (annotColor && annotColor.length >= 3) {
+                const r = Math.round(annotColor[0] * 255);
+                const g = Math.round(annotColor[1] * 255);
+                const b = Math.round(annotColor[2] * 255);
+                color = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+              }
+            } catch (e) {
+              // Use default color
+            }
+            
+            // Get stroke width
+            let strokeWidth = 3;
+            try {
+              const borderWidth = pdfAnnot.getBorderWidth();
+              if (borderWidth) {
+                strokeWidth = borderWidth;
+              }
+            } catch (e) {
+              // Use default width
+            }
+            
+            if (path.length >= 2) {
+              const minX = Math.min(...path.map(p => p.x));
+              const maxX = Math.max(...path.map(p => p.x));
+              const minY = Math.min(...path.map(p => p.y));
+              const maxY = Math.max(...path.map(p => p.y));
+              
+              annotations.push({
+                id,
+                type: "draw",
+                pageNumber,
+                x: minX,
+                y: minY,
+                width: maxX - minX,
+                height: maxY - minY,
+                path,
+                color,
+                strokeWidth,
+                drawingStyle: "pencil",
+                pdfAnnotation: pdfAnnot,
+              });
+            }
           }
         } catch (err) {
           console.error("Error processing annotation:", err);
@@ -1916,46 +2531,6 @@ export class PDFEditor {
     document: PDFDocument,
     annotations?: Annotation[]
   ): Promise<Uint8Array> {
-    // Sync annotations if provided
-    if (annotations && annotations.length > 0) {
-      await this.syncAllAnnotationsExtended(document, annotations);
-      
-      // Apply redactions on all pages that have redaction annotations
-      const mupdfDoc = document.getMupdfDocument();
-      const pdfDoc = mupdfDoc.asPDF();
-      
-      if (pdfDoc) {
-        // Group redactions by page
-        const redactionsByPage = new Map<number, Annotation[]>();
-        for (const annot of annotations) {
-          if (annot.type === "redact") {
-            if (!redactionsByPage.has(annot.pageNumber)) {
-              redactionsByPage.set(annot.pageNumber, []);
-            }
-            redactionsByPage.get(annot.pageNumber)!.push(annot);
-          }
-        }
-        
-        // Apply redactions on each page that has them
-        for (const pageNumber of redactionsByPage.keys()) {
-          try {
-            const page = pdfDoc.loadPage(pageNumber);
-            if (typeof page.applyRedactions === 'function') {
-              try {
-                // Try with parameters first (0 = white fill, 0 = remove images)
-                page.applyRedactions(0, 0);
-              } catch (e) {
-                // Fallback to no parameters
-                page.applyRedactions();
-              }
-            }
-          } catch (err) {
-            console.error(`Error applying redactions on page ${pageNumber}:`, err);
-          }
-        }
-      }
-    }
-
     const mupdfDoc = document.getMupdfDocument();
     const pdfDoc = mupdfDoc.asPDF();
     
@@ -1963,6 +2538,72 @@ export class PDFEditor {
       throw new Error("Document is not a PDF");
     }
 
+    // Sync annotations if provided - this embeds them IN the PDF
+    if (annotations && annotations.length > 0) {
+      
+      await this.syncAllAnnotationsExtended(document, annotations);
+      
+      
+      // CRITICAL: After syncing, ensure all annotations are updated on their pages
+      // This forces mupdf to write the annotations to the PDF structure
+      const pagesWithAnnotations = new Set<number>();
+      for (const annot of annotations) {
+        pagesWithAnnotations.add(annot.pageNumber);
+      }
+      
+      // Update all pages that have annotations to ensure they're written to PDF
+      for (const pageNumber of pagesWithAnnotations) {
+        try {
+          const page = pdfDoc.loadPage(pageNumber);
+          const pageAnnotations = page.getAnnotations();
+          
+          
+          // Update all annotations on this page to ensure they're embedded
+          for (const pdfAnnot of pageAnnotations) {
+            try {
+              pdfAnnot.update();
+            } catch (e) {
+              console.warn(`Could not update annotation on page ${pageNumber}:`, e);
+            }
+          }
+          
+        } catch (err) {
+          console.error(`Error updating annotations on page ${pageNumber}:`, err);
+        }
+      }
+      
+      // Apply redactions on all pages that have redaction annotations
+      const redactionsByPage = new Map<number, Annotation[]>();
+      for (const annot of annotations) {
+        if (annot.type === "redact") {
+          if (!redactionsByPage.has(annot.pageNumber)) {
+            redactionsByPage.set(annot.pageNumber, []);
+          }
+          redactionsByPage.get(annot.pageNumber)!.push(annot);
+        }
+      }
+      
+      // Apply redactions on each page that has them
+      for (const pageNumber of redactionsByPage.keys()) {
+        try {
+          const page = pdfDoc.loadPage(pageNumber);
+          if (typeof page.applyRedactions === 'function') {
+            try {
+              // Try with parameters first (0 = white fill, 0 = remove images)
+              page.applyRedactions(0, 0);
+            } catch (e) {
+              // Fallback to no parameters
+              page.applyRedactions();
+            }
+          }
+        } catch (err) {
+          console.error(`Error applying redactions on page ${pageNumber}:`, err);
+        }
+      }
+    }
+
+    // Save the PDF with all annotations embedded
+    // saveToBuffer() writes the entire PDF including all annotations to a binary buffer
     const buffer = pdfDoc.saveToBuffer();
     return buffer.asUint8Array();
   }
@@ -1972,6 +2613,224 @@ export class PDFEditor {
    */
   createNewDocument(): any {
     return new this.mupdf.PDFDocument();
+  }
+
+  /**
+   * Export a single page as a new PDF document with all annotations
+   */
+  async exportPageAsPDF(
+    document: PDFDocument,
+    pageNumber: number,
+    annotations?: Annotation[]
+  ): Promise<Uint8Array> {
+    const mupdfDoc = document.getMupdfDocument();
+    const sourcePdf = mupdfDoc.asPDF();
+    
+    if (!sourcePdf) {
+      throw new Error("Document is not a PDF");
+    }
+
+    // Create a new PDF document
+    const newPdf = new this.mupdf.PDFDocument();
+    
+    // Graft the page from source to new document
+    newPdf.graftPage(0, sourcePdf, pageNumber);
+
+    // If annotations are provided, add them to the new document
+    if (annotations && annotations.length > 0) {
+      // Filter annotations for this page
+      const pageAnnotations = annotations.filter(ann => ann.pageNumber === pageNumber);
+      
+      if (pageAnnotations.length > 0) {
+        // Create a temporary PDFDocument wrapper for the new PDF
+        // We need to add annotations, so we'll work directly with the mupdf document
+        const page = newPdf.loadPage(0);
+        
+        // Add each annotation to the page
+        for (const annot of pageAnnotations) {
+          try {
+            // Create annotation based on type
+            if (annot.type === "text") {
+              await this.addTextAnnotationToPage(page, annot, 0);
+            } else if (annot.type === "highlight") {
+              await this.addHighlightAnnotationToPage(page, annot, 0);
+            } else if (annot.type === "callout") {
+              await this.addCalloutAnnotationToPage(page, annot, 0);
+            } else if (annot.type === "image") {
+              await this.addImageAnnotationToPage(page, annot, 0);
+            } else if (annot.type === "draw") {
+              await this.addDrawingAnnotationToPage(page, annot, 0);
+            } else if (annot.type === "shape") {
+              await this.addShapeAnnotationToPage(page, annot, 0);
+            }
+            // Note: form fields and stamps are handled differently
+          } catch (error) {
+            console.error(`Error adding annotation ${annot.id} to exported page:`, error);
+          }
+        }
+      }
+    }
+
+    // Save the new document to buffer
+    const buffer = newPdf.saveToBuffer();
+    return buffer.asUint8Array();
+  }
+
+  /**
+   * Helper methods to add annotations directly to a page (for export)
+   */
+  private async addTextAnnotationToPage(page: any, annotation: Annotation, newPageNumber: number): Promise<void> {
+    // Similar to addTextAnnotation but works with a page object directly
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    const annot = page.createAnnotation("FreeText");
+    annot.setRect([annotation.x, pageHeight - annotation.y - (annotation.height || 20), 
+                   annotation.x + (annotation.width || 200), pageHeight - annotation.y]);
+    
+    if (annotation.content) {
+      annot.setContents(annotation.content);
+    }
+    
+    if (annotation.color) {
+      const color = this.parseColor(annotation.color);
+      annot.setColor(color);
+    }
+    
+    annot.update();
+  }
+
+  private async addHighlightAnnotationToPage(page: any, annotation: Annotation, newPageNumber: number): Promise<void> {
+    if (!annotation.quads || annotation.quads.length === 0) return;
+    
+    const annot = page.createAnnotation("Highlight");
+    
+    // Convert quads to mupdf format
+    const quadList: number[] = [];
+    for (const quad of annotation.quads) {
+      quadList.push(...quad);
+    }
+    
+    annot.setQuadPoints(quadList);
+    
+    if (annotation.color) {
+      const color = this.parseColor(annotation.color);
+      annot.setColor(color);
+    }
+    
+    if (annotation.opacity !== undefined) {
+      annot.setOpacity(annotation.opacity);
+    }
+    
+    annot.update();
+  }
+
+  private async addCalloutAnnotationToPage(page: any, annotation: Annotation, newPageNumber: number): Promise<void> {
+    // Callouts are typically FreeText annotations with callout lines
+    // This is a simplified version - full implementation would need callout line handling
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    const annot = page.createAnnotation("FreeText");
+    annot.setRect([annotation.x, pageHeight - annotation.y - (annotation.height || 20), 
+                   annotation.x + (annotation.width || 200), pageHeight - annotation.y]);
+    
+    if (annotation.content) {
+      annot.setContents(annotation.content);
+    }
+    
+    annot.update();
+  }
+
+  private async addImageAnnotationToPage(page: any, annotation: Annotation, newPageNumber: number): Promise<void> {
+    if (!annotation.imageData) return;
+    
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    // Convert base64 data URL to image
+    const base64Data = annotation.imageData.split(',')[1] || annotation.imageData;
+    const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    
+    try {
+      const image = this.mupdf.Image.fromBuffer(imageBytes);
+      const annot = page.createAnnotation("Stamp");
+      
+      const width = annotation.width || annotation.imageWidth || 100;
+      const height = annotation.height || annotation.imageHeight || 100;
+      
+      annot.setRect([annotation.x, pageHeight - annotation.y - height, 
+                     annotation.x + width, pageHeight - annotation.y]);
+      
+      // Set appearance stream with image
+      annot.setAppearance(image);
+      annot.update();
+    } catch (error) {
+      console.error("Error adding image annotation to exported page:", error);
+    }
+  }
+
+  private async addDrawingAnnotationToPage(page: any, annotation: Annotation, newPageNumber: number): Promise<void> {
+    if (!annotation.path || annotation.path.length < 2) return;
+    
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    const annot = page.createAnnotation("Ink");
+    
+    const inkPath: number[] = [];
+    for (const point of annotation.path) {
+      inkPath.push(point.x, pageHeight - point.y);
+    }
+    
+    annot.setInkList([inkPath]);
+    
+    if (annotation.color) {
+      const color = this.parseColor(annotation.color);
+      annot.setColor(color);
+    }
+    
+    if (annotation.strokeWidth) {
+      annot.setBorder(annotation.strokeWidth);
+    }
+    
+    annot.update();
+  }
+
+  private async addShapeAnnotationToPage(page: any, annotation: Annotation, newPageNumber: number): Promise<void> {
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+    
+    let annot;
+    if (annotation.shapeType === "rectangle") {
+      annot = page.createAnnotation("Square");
+    } else if (annotation.shapeType === "circle") {
+      annot = page.createAnnotation("Circle");
+    } else {
+      // Arrow or other - use Line annotation
+      annot = page.createAnnotation("Line");
+    }
+    
+    if (annotation.width && annotation.height) {
+      annot.setRect([annotation.x, pageHeight - annotation.y - annotation.height, 
+                     annotation.x + annotation.width, pageHeight - annotation.y]);
+    }
+    
+    if (annotation.color) {
+      const color = this.parseColor(annotation.color);
+      annot.setColor(color);
+    }
+    
+    annot.update();
+  }
+
+  private parseColor(color: string): number[] {
+    // Convert hex color to RGB array [r, g, b] where values are 0-1
+    const hex = color.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16) / 255;
+    const g = parseInt(hex.substring(2, 4), 16) / 255;
+    const b = parseInt(hex.substring(4, 6), 16) / 255;
+    return [r, g, b];
   }
 
   /**
@@ -2035,6 +2894,9 @@ export class PDFEditor {
     }
     
     annot.update();
+    
+    // Store the PDF annotation object for future updates
+    annotation.pdfAnnotation = annot;
   }
 
   /**
@@ -2043,7 +2905,7 @@ export class PDFEditor {
   async addShapeAnnotation(
     document: PDFDocument,
     annotation: Annotation
-  ): Promise<void> {
+  ): Promise<any> {
     const mupdfDoc = document.getMupdfDocument();
     const pdfDoc = mupdfDoc.asPDF();
     
@@ -2066,17 +2928,103 @@ export class PDFEditor {
       // Create Line annotation for arrow
       annot = page.createAnnotation("Line");
       
+      // Test Hypothesis C: Need to set Rect before setLine
+      try {
+        const minX = Math.min(annotation.points[0].x, annotation.points[1].x);
+        const maxX = Math.max(annotation.points[0].x, annotation.points[1].x);
+        const minY = Math.min(annotation.points[0].y, annotation.points[1].y);
+        const maxY = Math.max(annotation.points[0].y, annotation.points[1].y);
+        const rect: [number, number, number, number] = [minX, minY, maxX, maxY];
+        annot.setRect(rect);
+      } catch (rectError) {
+        // Line annotations might not support setRect - that's okay
+      }
+      
       const start = annotation.points[0];
       const end = annotation.points[1];
       
-      // Convert to display coordinates
-      const startY = pageHeight - start.y;
-      const endY = pageHeight - end.y;
+      // Validate points are valid numbers
+      if (typeof start.x !== 'number' || typeof start.y !== 'number' ||
+          typeof end.x !== 'number' || typeof end.y !== 'number' ||
+          isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) {
+        console.warn("🟠 [ARROW SAVE] Invalid arrow points:", { start, end });
+        return;
+      }
       
+      // CRITICAL: The load code confirms getLine() returns canvas coordinates (Y=0 at top)
+      // So we must convert PDF coordinates to canvas coordinates before calling setLine()
+      const canvasStart = { x: start.x, y: pageHeight - start.y };
+      const canvasEnd = { x: end.x, y: pageHeight - end.y };
+      
+      // Test Hypothesis A: setLine() expects flat array [x1, y1, x2, y2] not nested
+      const flatArray = [canvasStart.x, canvasStart.y, canvasEnd.x, canvasEnd.y];
+      // Test Hypothesis B: setLine() expects nested array [[x1, y1], [x2, y2]]
+      const nestedArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+      
+      
+      // Try flat array format first (Hypothesis A)
       try {
-        annot.setLine([start.x, startY, end.x, endY]);
-      } catch (e) {
-        console.warn("Could not set line:", e);
+        annot.setLine(flatArray);
+        console.log("🟢 [ARROW SAVE] Successfully set line with flat array");
+      } catch (flatError) {
+        
+        // Try nested array format (Hypothesis B)
+        try {
+          annot.setLine(nestedArray);
+          console.log("🟢 [ARROW SAVE] Successfully set line with nested array");
+        } catch (nestedError) {
+          
+          // Test Hypothesis E: setLine() needs to be set via annotation object's "L" property
+          try {
+            const annotObj = annot.getObject();
+            if (!annotObj) {
+              throw new Error("Could not get annotation object");
+            }
+            
+            // Try multiple sources for mupdf instance (pdfDoc has newNumber, might have newArray too)
+            let mupdfInstance = this.mupdf;
+            if (!mupdfInstance || !mupdfInstance.newArray) {
+              // Try pdfDoc (as used in line 391 for newNumber)
+              if (pdfDoc && pdfDoc.newArray) {
+                mupdfInstance = pdfDoc;
+              }
+            }
+            
+            if (mupdfInstance && mupdfInstance.newArray && mupdfInstance.newNumber) {
+              // Create mupdf array with 4 numbers: [x1, y1, x2, y2] in CANVAS coordinates
+              const lineArray = mupdfInstance.newArray();
+              lineArray.push(mupdfInstance.newNumber(canvasStart.x));
+              lineArray.push(mupdfInstance.newNumber(canvasStart.y));
+              lineArray.push(mupdfInstance.newNumber(canvasEnd.x));
+              lineArray.push(mupdfInstance.newNumber(canvasEnd.y));
+              annotObj.put("L", lineArray);
+              annot.update();
+              console.log("🟢 [ARROW SAVE] Successfully set line via annotation object");
+            } else {
+              // Fallback: Try setting with plain array directly - mupdf might accept it (in CANVAS coordinates)
+              const lineArray = [canvasStart.x, canvasStart.y, canvasEnd.x, canvasEnd.y];
+              try {
+                annotObj.put("L", lineArray);
+                annot.update();
+                console.log("🟢 [ARROW SAVE] Successfully set line via plain array fallback");
+              } catch (putError) {
+                // If put() fails, maybe we need to use a different approach
+                // Try using the annotation's internal methods
+                throw putError;
+              }
+            }
+          } catch (objError) {
+            console.warn("🟠 [ARROW SAVE] Could not set line with any method, deleting broken annotation:", { flatError, nestedError, objError, start, end });
+            // CRITICAL: If we can't set the line, delete the annotation to prevent a broken annotation from being saved
+            try {
+              const page = pdfDoc.loadPage(annotation.pageNumber);
+              page.deleteAnnotation(annot);
+            } catch (deleteError) {
+              console.warn("Could not delete broken annotation:", deleteError);
+            }
+            return null;
+          }
+        }
       }
       
       // Set line ending style for arrow head
@@ -2084,6 +3032,16 @@ export class PDFEditor {
         annot.setLineEndingStyles("None", "OpenArrow");
       } catch {
         // Line ending styles might not be available
+      }
+      
+      // Store arrow head size in annotation object for later retrieval
+      try {
+        const annotObj = annot.getObject();
+        if (annotObj && annotation.arrowHeadSize) {
+          annotObj.put("ArrowHeadSize", this.mupdf.newNumber(annotation.arrowHeadSize));
+        }
+      } catch (e) {
+        // Ignore if we can't store it
       }
     } else if (annotation.shapeType === "rectangle") {
       // Create Square annotation
@@ -2119,6 +3077,7 @@ export class PDFEditor {
         const g = parseInt(hex.substring(2, 4), 16) / 255;
         const b = parseInt(hex.substring(4, 6), 16) / 255;
         annot.setColor([r, g, b]);
+      } else {
       }
       
       // Set stroke width
@@ -2148,7 +3107,12 @@ export class PDFEditor {
       }
       
       annot.update();
+      
+      
+      return annot;
     }
+    
+    return null;
   }
 
   /**
@@ -2376,6 +3340,10 @@ export class PDFEditor {
             }
           }
           
+          if (!rect) {
+            console.warn("Form field has no rect, skipping");
+            continue;
+          }
           const id = `form_${pageNumber}_${rect[0]}_${rect[1]}_${Math.random().toString(36).substr(2, 9)}`;
           
           formFields.push({
@@ -2428,16 +3396,42 @@ export class PDFEditor {
       y + (annotation.height || 0),
     ];
     
-    // Create Stamp annotation
-    const annot = page.createAnnotation("Stamp");
+    // Use FreeText annotation instead of Stamp to avoid default "DRAFT" appearance
+    // Store stamp data in JSON format in contents, marked with a special type
+    const annot = page.createAnnotation("FreeText");
     annot.setRect(rect);
     
-    // Store stamp data in contents
+    // Store stamp data in contents as JSON with a marker
     if (annotation.stampData) {
-      annot.setContents(JSON.stringify(annotation.stampData));
+      const stampDataJson = JSON.stringify({
+        type: "stamp",
+        stampData: annotation.stampData
+      });
+      annot.setContents(stampDataJson);
+      
+      // Mark this as a stamp annotation in the object
+      try {
+        const annotObj = annot.getObject();
+        if (annotObj) {
+          annotObj.put("StampAnnotation", this.mupdf.newString("true"));
+        }
+      } catch (e) {
+        // Ignore if we can't set the marker
+      }
+    }
+    
+    // Make it invisible (no border, transparent)
+    try {
+      annot.setBorderWidth(0);
+      annot.setInteriorColor([]);
+    } catch (e) {
+      // Ignore if these methods aren't available
     }
     
     annot.update();
+    
+    // Store the PDF annotation object for future updates
+    annotation.pdfAnnotation = annot;
   }
 
   /**
@@ -2631,12 +3625,354 @@ export class PDFEditor {
             continue;
           }
 
-          // Skip if annotation already has a PDF annotation object (already synced)
+          // If annotation already has a PDF annotation object, update it instead of skipping
           if (annot.pdfAnnotation) {
-            continue;
+            try {
+              const page = pdfDoc.loadPage(pageNumber);
+              const pageBounds = page.getBounds();
+              const pageHeight = pageBounds[3] - pageBounds[1];
+              
+              // Update position and size if changed
+              if (annot.x !== undefined && annot.y !== undefined && annot.width !== undefined && annot.height !== undefined) {
+                const y = pageHeight - annot.y - annot.height;
+                const rect: [number, number, number, number] = [
+                  annot.x,
+                  y,
+                  annot.x + annot.width,
+                  y + annot.height,
+                ];
+                annot.pdfAnnotation.setRect(rect);
+              }
+              
+              // Update content if it's a text annotation
+              if (annot.type === "text" && annot.content !== undefined) {
+                annot.pdfAnnotation.setContents(annot.content);
+              }
+              
+              // Update color if changed
+              if (annot.color) {
+                const hex = annot.color.replace("#", "");
+                const r = parseInt(hex.substring(0, 2), 16) / 255;
+                const g = parseInt(hex.substring(2, 4), 16) / 255;
+                const b = parseInt(hex.substring(4, 6), 16) / 255;
+                annot.pdfAnnotation.setColor([r, g, b]);
+              }
+              
+              // Update stamp data if it's a stamp annotation
+              if (annot.type === "stamp" && annot.stampData) {
+                annot.pdfAnnotation.setContents(JSON.stringify(annot.stampData));
+              }
+              
+              // Update callout data if it's a callout annotation
+              if (annot.type === "callout") {
+                const pageBounds = page.getBounds();
+                const pageHeight = pageBounds[3] - pageBounds[1];
+                const boxPos = annot.boxPosition || { x: annot.x, y: annot.y };
+                const pdfBoxY = pageHeight - boxPos.y;
+                const pdfArrowY = annot.arrowPoint ? (pageHeight - annot.arrowPoint.y) : undefined;
+                const calloutData = {
+                  type: "callout",
+                  content: annot.content || "",
+                  boxPosition: { x: boxPos.x, y: pdfBoxY },
+                  arrowPoint: annot.arrowPoint ? { x: annot.arrowPoint.x, y: pdfArrowY! } : undefined,
+                  width: annot.width || 150,
+                  height: annot.height || 80,
+                  fontSize: annot.fontSize || 12,
+                  fontFamily: annot.fontFamily || "Arial",
+                  color: annot.color || "#000000",
+                };
+                annot.pdfAnnotation.setContents(JSON.stringify(calloutData));
+              }
+              
+              // Update shape annotations (arrows, rectangles, circles)
+              if (annot.type === "shape") {
+                if (annot.shapeType === "arrow" && annot.points && annot.points.length >= 2) {
+                  const start = annot.points[0];
+                  const end = annot.points[1];
+                  
+                  // Validate points are valid numbers
+                  if (typeof start.x !== 'number' || typeof start.y !== 'number' ||
+                      typeof end.x !== 'number' || typeof end.y !== 'number' ||
+                      isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) {
+                    console.warn("🟠 [ARROW UPDATE] Invalid arrow points for update:", { start, end });
+                  } else {
+                    // Convert PDF coordinates to canvas coordinates for setLine()
+                    const canvasStart = { x: start.x, y: pageHeight - start.y };
+                    const canvasEnd = { x: end.x, y: pageHeight - end.y };
+                    const lineArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+                    console.log("🟡 [ARROW UPDATE] Updating arrow with points:", { pdfStart: start, pdfEnd: end, canvasStart, canvasEnd }, "to setLine(", lineArray, ")");
+                    try {
+                      annot.pdfAnnotation.setLine(lineArray);
+                      console.log("🟡 [ARROW UPDATE] Successfully updated line");
+                    } catch (e) {
+                      console.warn("🟠 [ARROW UPDATE] Could not update arrow line:", e, { start, end, lineArray });
+                    }
+                  }
+                  
+                  // Update arrow head size if stored
+                  if (annot.arrowHeadSize !== undefined) {
+                    try {
+                      const annotObj = annot.pdfAnnotation.getObject();
+                      if (annotObj) {
+                        annotObj.put("ArrowHeadSize", this.mupdf.newNumber(annot.arrowHeadSize));
+                        annot.pdfAnnotation.update();
+                      }
+                    } catch (e) {
+                      // Ignore if we can't store it
+                    }
+                  }
+                }
+                // Update stroke color for shapes
+                if (annot.strokeColor) {
+                  const hex = annot.strokeColor.replace("#", "");
+                  const r = parseInt(hex.substring(0, 2), 16) / 255;
+                  const g = parseInt(hex.substring(2, 4), 16) / 255;
+                  const b = parseInt(hex.substring(4, 6), 16) / 255;
+                  annot.pdfAnnotation.setColor([r, g, b]);
+                }
+                // Update stroke width
+                if (annot.strokeWidth !== undefined) {
+                  try {
+                    annot.pdfAnnotation.setBorderWidth(annot.strokeWidth);
+                  } catch (e) {
+                    // Border width might not be available
+                  }
+                }
+              }
+              
+              // Update draw annotations (ink paths)
+              if (annot.type === "draw" && annot.path && annot.path.length >= 2) {
+                const inkPath: number[] = [];
+                for (const point of annot.path) {
+                  inkPath.push(point.x, pageHeight - point.y);
+                }
+                try {
+                  annot.pdfAnnotation.setInkList([inkPath]);
+                } catch {
+                  try {
+                    (annot.pdfAnnotation as any).setInkList(inkPath);
+                  } catch (e) {
+                    console.warn("Could not update ink list:", e);
+                  }
+                }
+                // Update color
+                if (annot.color) {
+                  const hex = annot.color.replace("#", "");
+                  const r = parseInt(hex.substring(0, 2), 16) / 255;
+                  const g = parseInt(hex.substring(2, 4), 16) / 255;
+                  const b = parseInt(hex.substring(4, 6), 16) / 255;
+                  annot.pdfAnnotation.setColor([r, g, b]);
+                }
+                // Update stroke width
+                if (annot.strokeWidth !== undefined) {
+                  try {
+                    annot.pdfAnnotation.setBorderWidth(annot.strokeWidth);
+                  } catch (e) {
+                    // Border width might not apply to ink
+                  }
+                }
+              }
+              
+              // Update highlight annotations
+              if (annot.type === "highlight") {
+                if (annot.quads && annot.quads.length > 0) {
+                  const quadList = annot.quads.map((quad) => {
+                    if (Array.isArray(quad) && quad.length >= 8) {
+                      return [
+                        quad[0], pageHeight - quad[1],
+                        quad[2], pageHeight - quad[3],
+                        quad[4], pageHeight - quad[5],
+                        quad[6], pageHeight - quad[7],
+                      ] as any;
+                    }
+                    return [0, 0, 0, 0, 0, 0, 0, 0];
+                  });
+                  try {
+                    annot.pdfAnnotation.setQuadPoints(quadList);
+                  } catch (e) {
+                    console.warn("Could not update highlight quads:", e);
+                  }
+                }
+                // Update opacity
+                if (annot.opacity !== undefined) {
+                  try {
+                    if (typeof annot.pdfAnnotation.setOpacity === 'function') {
+                      annot.pdfAnnotation.setOpacity(annot.opacity);
+                    }
+                  } catch (e) {
+                    // Opacity might not be available
+                  }
+                }
+              }
+              
+              // Update image annotations
+              if (annot.type === "image" && annot.imageData) {
+                const imageMetadata = {
+                  type: "image",
+                  imageData: annot.imageData,
+                  imageWidth: annot.imageWidth,
+                  imageHeight: annot.imageHeight,
+                  preserveAspectRatio: annot.preserveAspectRatio !== false,
+                  rotation: annot.rotation || 0,
+                };
+                annot.pdfAnnotation.setContents(JSON.stringify(imageMetadata));
+              }
+              
+              // CRITICAL: Call update() to ensure annotation is written to PDF
+              annot.pdfAnnotation.update();
+              continue; // Skip creating new annotation
+            } catch (error) {
+              console.warn(`Error updating existing annotation ${annot.id}, will try to find existing or recreate:`, error);
+              
+              // CRITICAL FIX: If annotation is stale (not bound to page), try to find an existing one with same coordinates first
+              // This prevents creating duplicates when the pdfAnnotation reference is invalid but the annotation already exists in PDF
+              if (error instanceof Error && error.message && error.message.includes("not bound to any page")) {
+                try {
+                  const page = pdfDoc.loadPage(pageNumber);
+                  const pageAnnotations = page.getAnnotations();
+                  let foundExisting = false;
+                  
+                  // For arrows, try to find existing annotation by matching coordinates
+                  if (annot.type === "shape" && annot.shapeType === "arrow" && annot.points && annot.points.length === 2) {
+                    const tolerance = 1;
+                    for (const pdfAnnot of pageAnnotations) {
+                      try {
+                        const pdfType = pdfAnnot.getType();
+                        if (pdfType === "Line") {
+                          const line = pdfAnnot.getLine();
+                          if (line && Array.isArray(line) && line.length >= 4) {
+                            const pdfStart = { x: line[0], y: line[1] };
+                            const pdfEnd = { x: line[2], y: line[3] };
+                            const annotStart = annot.points[0];
+                            const annotEnd = annot.points[1];
+                            
+                            const startMatch = Math.abs(pdfStart.x - annotStart.x) < tolerance && 
+                                              Math.abs(pdfStart.y - annotStart.y) < tolerance;
+                            const endMatch = Math.abs(pdfEnd.x - annotEnd.x) < tolerance && 
+                                            Math.abs(pdfEnd.y - annotEnd.y) < tolerance;
+                            const reverseMatch = Math.abs(pdfStart.x - annotEnd.x) < tolerance && 
+                                               Math.abs(pdfStart.y - annotEnd.y) < tolerance &&
+                                               Math.abs(pdfEnd.x - annotStart.x) < tolerance && 
+                                               Math.abs(pdfEnd.y - annotStart.y) < tolerance;
+                            
+                            if ((startMatch && endMatch) || reverseMatch) {
+                              // Found existing annotation! Update it and reuse it
+                              foundExisting = true;
+                              annot.pdfAnnotation = pdfAnnot;
+                              
+                              // Update the existing annotation with current properties
+                              try {
+                                // Get page height for coordinate conversion
+                                const pageBounds = page.getBounds();
+                                const pageHeight = pageBounds[3] - pageBounds[1];
+                                // Convert PDF coordinates to canvas coordinates for setLine()
+                                const canvasStart = { x: annotStart.x, y: pageHeight - annotStart.y };
+                                const canvasEnd = { x: annotEnd.x, y: pageHeight - annotEnd.y };
+                                const lineArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+                                pdfAnnot.setLine(lineArray);
+                                
+                                if (annot.strokeColor) {
+                                  const hex = annot.strokeColor.replace("#", "");
+                                  const r = parseInt(hex.substring(0, 2), 16) / 255;
+                                  const g = parseInt(hex.substring(2, 4), 16) / 255;
+                                  const b = parseInt(hex.substring(4, 6), 16) / 255;
+                                  pdfAnnot.setColor([r, g, b]);
+                                }
+                                if (annot.strokeWidth !== undefined) {
+                                  try {
+                                    pdfAnnot.setBorderWidth(annot.strokeWidth);
+                                  } catch (e) {
+                                    // Border width might not be available
+                                  }
+                                }
+                                if (annot.arrowHeadSize !== undefined) {
+                                  try {
+                                    const annotObj = pdfAnnot.getObject();
+                                    if (annotObj) {
+                                      annotObj.put("ArrowHeadSize", this.mupdf.newNumber(annot.arrowHeadSize));
+                                    }
+                                  } catch (e) {
+                                    // Ignore
+                                  }
+                                }
+                                pdfAnnot.update();
+                              } catch (updateError) {
+                                console.warn(`Could not update found annotation ${annot.id}:`, updateError);
+                                foundExisting = false; // Fall through to create new one
+                              }
+                              break;
+                            }
+                          }
+                        }
+                      } catch (matchError) {
+                        // Continue searching
+                      }
+                    }
+                  }
+                  
+                  if (!foundExisting) {
+                    // No existing annotation found, delete stale one and create new
+                    if (annot.pdfAnnotation) {
+                      try {
+                        page.deleteAnnotation(annot.pdfAnnotation);
+                      } catch (deleteError) {
+                        // If delete fails, try to find and delete by matching properties
+                        for (const pdfAnnot of pageAnnotations) {
+                          try {
+                            const pdfType = pdfAnnot.getType();
+                            if (annot.type === "shape" && annot.shapeType === "arrow" && pdfType === "Line") {
+                              const line = pdfAnnot.getLine();
+                              if (line && annot.points && annot.points.length === 2) {
+                                const tolerance = 1;
+                                if (Array.isArray(line) && line.length >= 4) {
+                                  const pdfStart = { x: line[0], y: line[1] };
+                                  const pdfEnd = { x: line[2], y: line[3] };
+                                  const annotStart = annot.points[0];
+                                  const annotEnd = annot.points[1];
+                                  
+                                  const startMatch = Math.abs(pdfStart.x - annotStart.x) < tolerance && 
+                                                    Math.abs(pdfStart.y - annotStart.y) < tolerance;
+                                  const endMatch = Math.abs(pdfEnd.x - annotEnd.x) < tolerance && 
+                                                  Math.abs(pdfEnd.y - annotEnd.y) < tolerance;
+                                  const reverseMatch = Math.abs(pdfStart.x - annotEnd.x) < tolerance && 
+                                                     Math.abs(pdfStart.y - annotEnd.y) < tolerance &&
+                                                     Math.abs(pdfEnd.x - annotStart.x) < tolerance && 
+                                                     Math.abs(pdfEnd.y - annotStart.y) < tolerance;
+                                  
+                                  if ((startMatch && endMatch) || reverseMatch) {
+                                    page.deleteAnnotation(pdfAnnot);
+                                    break;
+                                  }
+                                }
+                              }
+                            }
+                          } catch (matchError) {
+                            // Continue searching
+                          }
+                        }
+                      }
+                    }
+                    // Clear the stale pdfAnnotation reference so we create a new one
+                    annot.pdfAnnotation = undefined;
+                  } else {
+                    // Found existing annotation, skip creating new one
+                    continue;
+                  }
+                } catch (findPageError) {
+                  console.warn(`Could not find existing annotation for ${annot.id}:`, findPageError);
+                  // Clear the stale pdfAnnotation reference so we create a new one
+                  annot.pdfAnnotation = undefined;
+                }
+              } else {
+                // Error is not "not bound to any page", clear reference and create new one
+                annot.pdfAnnotation = undefined;
+              }
+              
+              // Fall through to create new annotation if update fails and no existing one found
+            }
           }
 
-          // Handle all other annotation types
+          // Handle all other annotation types (create new annotations)
           if (annot.type === "text") {
             await this.addTextAnnotation(document, annot);
           } else if (annot.type === "highlight") {
@@ -2650,7 +3986,123 @@ export class PDFEditor {
           } else if (annot.type === "draw") {
             await this.addDrawingAnnotation(document, annot);
           } else if (annot.type === "shape") {
-            await this.addShapeAnnotation(document, annot);
+            // CRITICAL FIX: Before creating a new annotation, check if one with the same coordinates already exists
+            // This prevents creating duplicates when stale annotations are deleted
+            let existingPdfAnnot: any = null;
+            if (annot.shapeType === "arrow" && annot.points && annot.points.length === 2) {
+              try {
+                const page = pdfDoc.loadPage(pageNumber);
+                const pageAnnotations = page.getAnnotations();
+                const tolerance = 1; // Small tolerance for floating point differences
+                
+                
+                for (const pdfAnnot of pageAnnotations) {
+                  try {
+                    const pdfType = pdfAnnot.getType();
+                    if (pdfType === "Line") {
+                      const line = pdfAnnot.getLine();
+                      // getLine() returns coordinates in canvas space (Y=0 at top)
+                      // We need to convert them to PDF space for comparison with annot.points (which are in PDF space)
+                      const pageBounds = page.getBounds();
+                      const pageHeight = pageBounds[3] - pageBounds[1];
+                      if (line && Array.isArray(line)) {
+                        let canvasPoints: Array<{ x: number; y: number }> = [];
+                        if (line.length >= 4 && typeof line[0] === 'number') {
+                          canvasPoints = [
+                            { x: line[0], y: line[1] },
+                            { x: line[2], y: line[3] }
+                          ];
+                        } else if (line.length >= 2 && Array.isArray(line[0])) {
+                          canvasPoints = [
+                            { x: line[0][0], y: line[0][1] },
+                            { x: line[1][0], y: line[1][1] }
+                          ];
+                        }
+                        // Convert canvas coordinates to PDF coordinates for comparison
+                        const pdfStart = { x: canvasPoints[0].x, y: pageHeight - canvasPoints[0].y };
+                        const pdfEnd = { x: canvasPoints[1].x, y: pageHeight - canvasPoints[1].y };
+                        const annotStart = annot.points[0];
+                        const annotEnd = annot.points[1];
+                        
+                        const startMatch = Math.abs(pdfStart.x - annotStart.x) < tolerance && 
+                                          Math.abs(pdfStart.y - annotStart.y) < tolerance;
+                        const endMatch = Math.abs(pdfEnd.x - annotEnd.x) < tolerance && 
+                                        Math.abs(pdfEnd.y - annotEnd.y) < tolerance;
+                        const reverseMatch = Math.abs(pdfStart.x - annotEnd.x) < tolerance && 
+                                           Math.abs(pdfStart.y - annotEnd.y) < tolerance &&
+                                           Math.abs(pdfEnd.x - annotStart.x) < tolerance && 
+                                           Math.abs(pdfEnd.y - annotStart.y) < tolerance;
+                        
+                        if ((startMatch && endMatch) || reverseMatch) {
+                          existingPdfAnnot = pdfAnnot;
+                          break;
+                        } else {
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    // Continue searching
+                  }
+                }
+              } catch (e) {
+                // If check fails, proceed to create new annotation
+              }
+            }
+            
+            if (existingPdfAnnot) {
+              // Use existing annotation instead of creating a new one
+              annot.pdfAnnotation = existingPdfAnnot;
+              // Update the existing annotation with current properties
+              try {
+                const page = pdfDoc.loadPage(pageNumber);
+                const pageBounds = page.getBounds();
+                const pageHeight = pageBounds[3] - pageBounds[1];
+                const start = annot.points![0];
+                const end = annot.points![1];
+                // Convert PDF coordinates to canvas coordinates for setLine()
+                const canvasStart = { x: start.x, y: pageHeight - start.y };
+                const canvasEnd = { x: end.x, y: pageHeight - end.y };
+                const lineArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+                existingPdfAnnot.setLine(lineArray);
+                
+                // Update other properties
+                if (annot.strokeColor) {
+                  const hex = annot.strokeColor.replace("#", "");
+                  const r = parseInt(hex.substring(0, 2), 16) / 255;
+                  const g = parseInt(hex.substring(2, 4), 16) / 255;
+                  const b = parseInt(hex.substring(4, 6), 16) / 255;
+                  existingPdfAnnot.setColor([r, g, b]);
+                }
+                if (annot.strokeWidth !== undefined) {
+                  try {
+                    existingPdfAnnot.setBorderWidth(annot.strokeWidth);
+                  } catch (e) {
+                    // Border width might not be available
+                  }
+                }
+                if (annot.arrowHeadSize !== undefined) {
+                  try {
+                    const annotObj = existingPdfAnnot.getObject();
+                    if (annotObj) {
+                      annotObj.put("ArrowHeadSize", this.mupdf.newNumber(annot.arrowHeadSize));
+                    }
+                  } catch (e) {
+                    // Ignore
+                  }
+                }
+                existingPdfAnnot.update();
+              } catch (updateError) {
+                console.warn(`Could not update existing annotation ${annot.id}:`, updateError);
+              }
+            } else {
+              // No existing annotation found, create a new one
+              const pdfAnnot = await this.addShapeAnnotation(document, annot);
+              // Update the annotation object with the PDF annotation reference
+              // Note: This updates the local copy, but we need to update the store
+              if (pdfAnnot) {
+                annot.pdfAnnotation = pdfAnnot;
+              }
+            }
           } else if (annot.type === "stamp") {
             await this.addStampAnnotation(document, annot);
           }

@@ -9,6 +9,8 @@ import { useState, useEffect } from "react";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { Trash2, RotateCw } from "lucide-react";
+import { PDFEditor } from "@/core/pdf/PDFEditor";
+import { usePDFStore } from "@/shared/stores/pdfStore";
 
 interface ThumbnailItemProps {
   document: PDFDocument;
@@ -29,10 +31,12 @@ export function ThumbnailItem({
   onClick,
   onDelete,
   onRotate,
+  onDragStart,
 }: ThumbnailItemProps) {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isLandscape, setIsLandscape] = useState<boolean>(false);
+  const { getAnnotations } = usePDFStore();
 
   useEffect(() => {
     const loadThumbnail = async () => {
@@ -74,10 +78,68 @@ export function ThumbnailItem({
     };
 
     loadThumbnail();
-  }, [document, pageNumber, renderer, document?.getPageMetadata(pageNumber)?.rotation]);
+  }, [document, pageNumber, renderer, document?.getPageMetadata(pageNumber)?.rotation, document?.getPageCount()]);
 
   // Use fixed aspect ratios: landscape (4:3) or portrait (3:4)
   const aspectRatio = isLandscape ? 4 / 3 : 3 / 4;
+
+  const handleDragStart = async (e: React.DragEvent) => {
+    // Stop propagation to prevent parent drag handlers from interfering
+    e.stopPropagation();
+    
+    // This is a drag-out operation - prepare the page as PDF file
+    // The parent's page reordering is handled at a different level
+    try {
+      // Get all annotations for this page
+      const documentId = document.getId();
+      const allAnnotations = getAnnotations(documentId);
+      const pageAnnotations = allAnnotations.filter(ann => ann.pageNumber === pageNumber);
+
+      // Initialize mupdf and editor
+      const mupdfModule = await import("mupdf");
+      const editor = new PDFEditor(mupdfModule.default);
+
+      // Export the page as PDF
+      const pdfData = await editor.exportPageAsPDF(document, pageNumber, pageAnnotations);
+
+      // Create a File object from the PDF data
+      const fileName = `${document.getName().replace('.pdf', '')}_page_${pageNumber + 1}.pdf`;
+      const file = new File([pdfData], fileName, { type: 'application/pdf' });
+
+      // Set the file in the data transfer
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData('application/pdf', '');
+      e.dataTransfer.setData('text/plain', fileName);
+      e.dataTransfer.setData('application/x-page-export', 'true'); // Mark as page export
+      
+      // Use the items API to add the file (for dragging out of browser)
+      if (e.dataTransfer.items) {
+        // Don't clear items - we want to add the file
+        try {
+          e.dataTransfer.items.add(file);
+        } catch (err) {
+          // If items can't be modified, try fallback
+          console.warn("Could not add file to dataTransfer.items, using fallback:", err);
+          const blobUrl = URL.createObjectURL(file);
+          e.dataTransfer.setData('DownloadURL', `application/pdf:${fileName}:${blobUrl}`);
+        }
+      } else {
+        // Fallback for older browsers
+        const blobUrl = URL.createObjectURL(file);
+        e.dataTransfer.setData('DownloadURL', `application/pdf:${fileName}:${blobUrl}`);
+      }
+
+      // For Tauri, we might need to use a different approach
+      // Check if we're in Tauri environment
+      if (typeof window !== "undefined" && (window as any).__TAURI__) {
+        // Tauri handles file drags differently - the file will be available via the drag event
+        // The browser API should still work, but we can enhance it if needed
+      }
+    } catch (error) {
+      console.error("Error preparing page for drag-out:", error);
+      // Don't prevent the drag, just log the error
+    }
+  };
 
   return (
     <div
@@ -93,6 +155,8 @@ export function ThumbnailItem({
         height: 'auto'
       }}
       onClick={onClick}
+      draggable
+      onDragStart={handleDragStart}
     >
       {isLoading ? (
         <div className="w-full h-full flex items-center justify-center bg-muted rounded">

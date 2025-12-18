@@ -35,12 +35,6 @@ export function ShapeHandles({
     points?: Array<{ x: number; y: number }>;
   } | null>(null);
 
-  if (!annotation.width || !annotation.height) return null;
-
-  // Convert annotation bounds to canvas coordinates
-  const topLeft = pdfToCanvas(annotation.x, annotation.y + annotation.height);
-  const bottomRight = pdfToCanvas(annotation.x + annotation.width, annotation.y);
-
   const handleSize = 8 / zoomLevel; // Scale handle size with zoom
   const handleStyle = {
     width: `${handleSize}px`,
@@ -53,6 +47,75 @@ export function ShapeHandles({
     zIndex: 1001,
     pointerEvents: "auto" as const,
   };
+  
+  // For arrows, we handle them specially (they use points, not width/height)
+  if (annotation.shapeType === "arrow" && annotation.points) {
+    // Arrow endpoint handles - handle this case first
+    const start = pdfToCanvas(annotation.points[0].x, annotation.points[0].y);
+    const end = pdfToCanvas(annotation.points[1].x, annotation.points[1].y);
+    
+    // Calculate bounding box for relative positioning
+    const minX = Math.min(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxX = Math.max(start.x, end.x);
+    const maxY = Math.max(start.y, end.y);
+    
+    // Position handles relative to the bounding box
+    const startX = start.x - minX;
+    const startY = start.y - minY;
+    const endX = end.x - minX;
+    const endY = end.y - minY;
+
+    return (
+      <div
+        style={{
+          position: "absolute",
+          left: `${minX}px`,
+          top: `${minY}px`,
+          width: `${maxX - minX}px`,
+          height: `${maxY - minY}px`,
+          pointerEvents: "none",
+          zIndex: 1000,
+        }}
+      >
+        <div
+          data-shape-handle="start"
+          style={{
+            ...handleStyle,
+            left: `${startX - handleSize / 2}px`,
+            top: `${startY - handleSize / 2}px`,
+            cursor: "move",
+            pointerEvents: "auto",
+          }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            handleMouseDown(e, "start");
+          }}
+        />
+        <div
+          data-shape-handle="end"
+          style={{
+            ...handleStyle,
+            left: `${endX - handleSize / 2}px`,
+            top: `${endY - handleSize / 2}px`,
+            cursor: "move",
+            pointerEvents: "auto",
+          }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            handleMouseDown(e, "end");
+          }}
+        />
+      </div>
+    );
+  }
+  
+  // For rectangles and circles, require width/height
+  if (!annotation.width || !annotation.height) return null;
+
+  // Convert annotation bounds to canvas coordinates
+  const topLeft = pdfToCanvas(annotation.x, annotation.y + annotation.height);
+  const bottomRight = pdfToCanvas(annotation.x + annotation.width, annotation.y);
 
   const handleMouseDown = (e: React.MouseEvent, type: typeof dragType) => {
     e.preventDefault();
@@ -345,34 +408,6 @@ export function ShapeHandles({
     }
   }, [isDragging, handleMouseMove, handleMouseUp]);
 
-  if (annotation.shapeType === "arrow" && annotation.points) {
-    // Arrow endpoint handles
-    const start = pdfToCanvas(annotation.points[0].x, annotation.points[0].y);
-    const end = pdfToCanvas(annotation.points[1].x, annotation.points[1].y);
-
-    return (
-      <>
-        <div
-          style={{
-            ...handleStyle,
-            left: `${start.x - handleSize / 2}px`,
-            top: `${start.y - handleSize / 2}px`,
-            cursor: "move",
-          }}
-          onMouseDown={(e) => handleMouseDown(e, "start")}
-        />
-        <div
-          style={{
-            ...handleStyle,
-            left: `${end.x - handleSize / 2}px`,
-            top: `${end.y - handleSize / 2}px`,
-            cursor: "move",
-          }}
-          onMouseDown={(e) => handleMouseDown(e, "end")}
-        />
-      </>
-    );
-  }
 
   // Rectangle and circle resize handles
   const centerX = (topLeft.x + bottomRight.x) / 2;

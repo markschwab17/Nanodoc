@@ -84,7 +84,7 @@ export function FormField({
     boxSizing: "border-box",
     display: "flex",
     flexDirection: "column",
-    pointerEvents: (activeTool === "select" || activeTool === "selectText") ? "auto" : "none", // Disable interaction when non-select tools are active
+    pointerEvents: "auto", // Always allow interaction with form fields
     ...(isSelected && {
       boxShadow: "inset 0 0 0 2px #3b82f6",
     }),

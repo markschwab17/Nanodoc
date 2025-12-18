@@ -17,7 +17,12 @@ let isRepositioning: boolean = false; // Whether we're in reposition mode (Shift
 export const ShapeTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
     const coords = context.getPDFCoordinates(e);
-    if (!coords) return;
+    if (!coords) {
+      console.warn("🟣 [ARROW CREATE] getPDFCoordinates returned null");
+      return;
+    }
+    
+    console.log("🟣 [ARROW CREATE] Mouse down, getPDFCoordinates returned:", coords);
     
     const { currentShapeType } = useUIStore.getState();
     
@@ -260,7 +265,21 @@ export const ShapeTool: ToolHandler = {
       fillColor: shapeFillColor,
       fillOpacity: shapeFillOpacity,
       arrowHeadSize: currentShapeType === "arrow" ? arrowHeadSize : undefined,
-      points: currentShapeType === "arrow" ? [shapeStart, selectionEnd || shapeStart] : undefined,
+      points: currentShapeType === "arrow" ? (() => {
+        // Ensure points are valid numbers
+        const start = shapeStart;
+        const end = selectionEnd || shapeStart;
+        console.log("🟣 [ARROW CREATE] Creating arrow with points:", { start, end, shapeStart, selectionEnd });
+        if (!start || !end || 
+            typeof start.x !== 'number' || typeof start.y !== 'number' ||
+            typeof end.x !== 'number' || typeof end.y !== 'number' ||
+            isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) {
+          console.error("🟠 [ARROW CREATE] Invalid arrow points:", { start, end, shapeStart, selectionEnd });
+          return undefined;
+        }
+        console.log("🟣 [ARROW CREATE] Valid points, returning:", [start, end]);
+        return [start, end];
+      })() : undefined,
     };
     
     addAnnotation(currentDocument.getId(), annotation);

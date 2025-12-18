@@ -442,33 +442,35 @@ export function PageTools() {
   const annotationCount = getAnnotations(currentDocument.getId()).length;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1">
       <Button
         variant="outline"
-        size="sm"
+        size="icon"
+        className="h-7 w-7"
         onClick={() => setShowInsertDialog(true)}
+        title="Insert Page"
       >
-        <Plus className="h-4 w-4 mr-2" />
-        Insert Page
+        <Plus className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant="outline"
-        size="sm"
+        size="icon"
+        className="h-7 w-7"
         onClick={() => setShowDeleteDialog(true)}
         disabled={currentDocument.getPageCount() <= 1}
+        title="Delete Page"
       >
-        <Trash2 className="h-4 w-4 mr-2" />
-        Delete Page
+        <Trash2 className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant="outline"
-        size="sm"
+        size="icon"
+        className="h-7 w-7"
         onClick={() => setShowFlattenDialog(true)}
         disabled={annotationCount === 0}
         title="Flatten all annotations permanently"
       >
-        <Layers className="h-4 w-4 mr-2" />
-        Flatten
+        <Layers className="h-3.5 w-3.5" />
       </Button>
 
       {/* Delete Confirmation Dialog */}

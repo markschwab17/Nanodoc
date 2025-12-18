@@ -535,7 +535,8 @@ function Editor() {
       )}
       title=""
     >
-      <input {...getInputProps()} />
+      {/* Only render file input when no PDF is loaded to prevent interference with tab clicks */}
+      {!currentDocument && <input {...getInputProps()} />}
       
       {/* Notification Toast */}
       <NotificationToast />

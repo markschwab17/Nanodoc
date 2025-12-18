@@ -82,6 +82,27 @@ export function ThumbnailCarousel() {
     }
   }, [currentPage, selectedPages]);
 
+  // Add global drop handler to catch drops that might be missed
+  useEffect(() => {
+    const handleGlobalDrop = (e: DragEvent) => {
+      const isTabDrag = e.dataTransfer?.types.includes("application/x-tab-document-id") ||
+                       e.dataTransfer?.types.includes("application/x-tab-id");
+      if (isTabDrag && currentDocument) {
+        const target = e.target as HTMLElement;
+        // Check if drop is in thumbnail area
+        if (target.closest('[data-thumbnail-container]')) {
+          e.preventDefault();
+          e.stopPropagation();
+          const pageCount = currentDocument.getPageCount();
+          handlePDFDrop(e as any, pageCount, undefined);
+        }
+      }
+    };
+
+    window.addEventListener('drop', handleGlobalDrop, true);
+    return () => window.removeEventListener('drop', handleGlobalDrop, true);
+  }, [currentDocument]);
+
   useEffect(() => {
     const initRenderer = async () => {
       const mupdfModule = await import("mupdf");
@@ -450,13 +471,25 @@ export function ThumbnailCarousel() {
   };
 
   const handleDragStart = (e: React.DragEvent, pageNumber: number) => {
-    const pagesToDrag = selectedPages.size > 0 && selectedPages.has(pageNumber)
-      ? Array.from(selectedPages).sort((a, b) => a - b)
-      : [pageNumber];
+    // Check if this is a drag-out (user wants to export page)
+    // We detect this by checking if the drag is starting from a thumbnail
+    // and not from a selected page reorder operation
+    const isPageReorder = selectedPages.size > 0 && selectedPages.has(pageNumber);
+    
+    if (!isPageReorder) {
+      // This might be a drag-out - let ThumbnailItem handle it
+      // We'll still set draggedPage for potential reordering, but allow drag-out
+      setDraggedPage(pageNumber);
+      return;
+    }
+    
+    // This is a page reorder operation
+    const pagesToDrag = Array.from(selectedPages).sort((a, b) => a - b);
     
     setDraggedPage(pageNumber);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", pagesToDrag.join(","));
+    e.dataTransfer.setData("application/x-pdf-page-reorder", "true");
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
@@ -519,7 +552,11 @@ export function ThumbnailCarousel() {
 
   // Handle PDF file drag and drop to insert pages
   const handlePDFDragOver = (e: React.DragEvent, thumbnailIndex?: number, thumbnailElement?: HTMLElement) => {
-    // Only handle if dragging a PDF file (not reordering pages)
+    // Check if dragging a tab (different document) - check both types
+    const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
+    const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
+    
+    // Only handle if dragging a PDF file (not reordering pages) or a tab
     // Check both dataTransfer.items and dataTransfer.types for better compatibility
     const types = Array.from(e.dataTransfer.types);
     const items = Array.from(e.dataTransfer.items);
@@ -533,7 +570,7 @@ export function ThumbnailCarousel() {
         (item.kind === "file" && item.type.includes("pdf"))
       );
     
-    if (hasPdf && !draggedPage) {
+    if ((hasPdf || isTabDrag || hasTabId) && !draggedPage) {
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = "copy";
@@ -570,7 +607,164 @@ export function ThumbnailCarousel() {
     e.preventDefault();
     e.stopPropagation();
     
-    console.log("handlePDFDrop called", { thumbnailIndex, pdfDragOverIndex, pageCount });
+    // Check if this is a tab drag (different document)
+    // First check types to see if it's a tab drag
+    const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
+    const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
+    
+    if (isTabDrag || hasTabId) {
+      // Get the document ID from dataTransfer
+      let tabDocumentId = e.dataTransfer.getData("application/x-tab-document-id");
+      
+      // If getData returns empty, try alternative method - get from tab ID
+      if (!tabDocumentId || tabDocumentId.trim() === "") {
+        // Try getting it from the tab ID
+        const tabId = e.dataTransfer.getData("application/x-tab-id");
+        if (tabId) {
+          const tab = useTabStore.getState().tabs.find(t => t.id === tabId);
+          if (tab) {
+            tabDocumentId = tab.documentId;
+          }
+        }
+      }
+      
+      // Check if it's a different document
+      if (!tabDocumentId || tabDocumentId.trim() === "") {
+        console.warn("Tab document ID is empty, cannot insert pages");
+        return;
+      }
+      
+      if (tabDocumentId === currentDocument?.getId()) {
+        console.warn("Cannot insert pages from same document");
+        return;
+      }
+      
+      // This is a tab drag - insert pages from that document
+      const sourceDocument = documents.get(tabDocumentId);
+      if (!sourceDocument) {
+        console.warn("Source document not found:", tabDocumentId, "Available documents:", Array.from(documents.keys()));
+        return;
+      }
+      
+      if (!currentDocument || !editor) {
+        console.warn("Cannot insert pages: missing current document or editor");
+        return;
+      }
+
+      // Calculate insert index
+      let insertIndex: number;
+      if (pdfDragOverIndex !== null) {
+        insertIndex = pdfDragOverIndex;
+      } else if (thumbnailIndex !== undefined && thumbnailElement) {
+        const rect = thumbnailElement.getBoundingClientRect();
+        const mouseY = e.clientY;
+        const thumbnailCenter = rect.top + rect.height / 2;
+        insertIndex = mouseY < thumbnailCenter ? thumbnailIndex : thumbnailIndex + 1;
+      } else {
+        insertIndex = pageCount;
+      }
+
+      // Clear drag state
+      setIsDragOverPDF(false);
+      setPdfDragOverIndex(null);
+
+      try {
+        const sourcePageCount = sourceDocument.getPageCount();
+        const sourcePageIndices = Array.from({ length: sourcePageCount }, (_, i) => i);
+        const documentId = currentDocument.getId();
+
+        // Wrap with undo/redo
+        await wrapPageOperation(
+          async () => {
+            await editor.insertPagesFromDocument(
+              currentDocument,
+              sourceDocument,
+              insertIndex,
+              sourcePageIndices
+            );
+
+            // CRITICAL: Force reload pages in mupdf to clear its internal cache
+            const mupdfDoc = currentDocument.getMupdfDocument();
+            const pdfDoc = mupdfDoc.asPDF();
+            if (pdfDoc) {
+              for (let i = 0; i < sourcePageCount; i++) {
+                try {
+                  pdfDoc.loadPage(insertIndex + i);
+                } catch (reloadError) {
+                  console.warn(`Could not force reload page ${insertIndex + i}:`, reloadError);
+                }
+              }
+            }
+
+            // Clear renderer cache
+            if (renderer) {
+              renderer.clearCache();
+            }
+
+            // Refresh document metadata
+            if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
+              (currentDocument as any).refreshPageMetadata();
+            }
+
+            // Remap annotations that are after the insertion point
+            const existingAnnotations = getAnnotations(documentId);
+            const remappedAnnotations = existingAnnotations.map((ann) => {
+              if (ann.pageNumber >= insertIndex) {
+                return {
+                  ...ann,
+                  pageNumber: ann.pageNumber + sourcePageCount,
+                };
+              }
+              return ann;
+            });
+
+            // Copy annotations from source document
+            const sourceAnnotations = getAnnotations(tabDocumentId);
+            const copiedAnnotations = sourceAnnotations.map((ann) => ({
+              ...ann,
+              id: `${ann.id}_copy_${Date.now()}`,
+              pageNumber: insertIndex + ann.pageNumber,
+            }));
+
+            // Update annotations in store
+            const pdfStore = usePDFStore.getState();
+            const currentAnnotations = new Map(pdfStore.annotations);
+            currentAnnotations.set(documentId, [...remappedAnnotations, ...copiedAnnotations]);
+            usePDFStore.setState({ annotations: currentAnnotations });
+
+            // Move to first inserted page
+            setCurrentPage(insertIndex);
+          },
+          "insertPages",
+          documentId,
+          sourcePageIndices,
+          insertIndex,
+          tabDocumentId
+        );
+
+        // Force a second refresh after a small delay
+        setTimeout(() => {
+          if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
+            (currentDocument as any).refreshPageMetadata();
+          }
+          if (renderer) {
+            renderer.clearCache();
+          }
+        }, 100);
+
+        // Mark tab as modified
+        const tab = useTabStore.getState().getTabByDocumentId(documentId);
+        if (tab) {
+          useTabStore.getState().setTabModified(tab.id, true);
+        }
+        
+        showNotification(`Inserted ${sourcePageCount} page(s) from "${sourceDocument.getName()}" at position ${insertIndex + 1}`, "success");
+      } catch (error) {
+        console.error("Error inserting pages from tab:", error);
+        showNotification("Failed to insert pages from tab", "error");
+      }
+      return;
+    }
     
     // Calculate insert index - use pdfDragOverIndex if available, otherwise calculate from drop position
     let insertIndex: number;
@@ -583,11 +777,53 @@ export function ThumbnailCarousel() {
       const thumbnailCenter = rect.top + rect.height / 2;
       insertIndex = mouseY < thumbnailCenter ? thumbnailIndex : thumbnailIndex + 1;
     } else {
-      // Default to end
-      insertIndex = pageCount;
+      // Dropping on container without thumbnailIndex - try to calculate from mouse position
+      // Try to find the thumbnail container from the event target
+      const target = e.target as HTMLElement;
+      const container = target.closest('[data-thumbnail-container]') as HTMLElement || 
+                        (target.hasAttribute('data-thumbnail-container') ? target : null);
+      
+      if (container) {
+        const mouseY = e.clientY;
+        const thumbnailElements = container.querySelectorAll('[draggable="true"]');
+        
+        if (thumbnailElements.length > 0) {
+          // Find which thumbnail we're closest to
+          let closestIndex = -1;
+          let closestDistance = Infinity;
+          
+          thumbnailElements.forEach((thumb, idx) => {
+            const rect = thumb.getBoundingClientRect();
+            const thumbCenter = rect.top + rect.height / 2;
+            const distance = Math.abs(mouseY - thumbCenter);
+            
+            if (distance < closestDistance) {
+              closestDistance = distance;
+              closestIndex = idx;
+            }
+          });
+          
+          if (closestIndex >= 0) {
+            const closestThumb = thumbnailElements[closestIndex] as HTMLElement;
+            const rect = closestThumb.getBoundingClientRect();
+            const thumbCenter = rect.top + rect.height / 2;
+            
+            // If mouse is in top half, insert before (at closestIndex)
+            // If mouse is in bottom half, insert after (at closestIndex + 1)
+            insertIndex = mouseY < thumbCenter ? closestIndex : closestIndex + 1;
+            insertIndex = Math.max(0, Math.min(insertIndex, pageCount));
+          } else {
+            insertIndex = pageCount;
+          }
+        } else {
+          insertIndex = pageCount;
+        }
+      } else {
+        // Default to end
+        insertIndex = pageCount;
+      }
     }
     
-    console.log("Calculated insertIndex:", insertIndex);
     
     // Clear drag state
     setIsDragOverPDF(false);
@@ -599,7 +835,6 @@ export function ThumbnailCarousel() {
     }
 
     const files = Array.from(e.dataTransfer.files);
-    console.log("Files in drop:", files.map(f => ({ name: f.name, type: f.type })));
     
     const pdfFile = files.find(
       (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
@@ -609,8 +844,6 @@ export function ThumbnailCarousel() {
       console.warn("No PDF file found in drop");
       return;
     }
-    
-    console.log("PDF file found, starting insertion at index:", insertIndex);
 
     try {
       // Load the dropped PDF as a temporary document
@@ -641,7 +874,27 @@ export function ThumbnailCarousel() {
             sourcePageIndices
           );
 
-          // Refresh document metadata
+          // CRITICAL: Force reload pages in mupdf to clear its internal cache
+          // This ensures the new pages are visible immediately
+          const mupdfDoc = currentDocument.getMupdfDocument();
+          const pdfDoc = mupdfDoc.asPDF();
+          if (pdfDoc) {
+            // Force reload all inserted pages to clear mupdf's internal page cache
+            for (let i = 0; i < sourcePageCount; i++) {
+              try {
+                pdfDoc.loadPage(insertIndex + i);
+              } catch (reloadError) {
+                console.warn(`Could not force reload page ${insertIndex + i} after insertion:`, reloadError);
+              }
+            }
+          }
+
+          // Clear renderer cache to force fresh thumbnail rendering
+          if (renderer) {
+            renderer.clearCache();
+          }
+
+          // Refresh document metadata to update page count and page info
           if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
             (currentDocument as any).refreshPageMetadata();
           }
@@ -673,6 +926,30 @@ export function ThumbnailCarousel() {
         insertIndex,
         tempDocId
       );
+
+      // Force a second refresh after a small delay to ensure thumbnails update
+      // This triggers the thumbnail useEffect dependencies to refresh
+      setTimeout(() => {
+        if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
+          (currentDocument as any).refreshPageMetadata();
+        }
+        // Force page reload again to ensure cache is cleared
+        const mupdfDoc = currentDocument.getMupdfDocument();
+        const pdfDoc = mupdfDoc?.asPDF();
+        if (pdfDoc) {
+          for (let i = 0; i < sourcePageCount; i++) {
+            try {
+              pdfDoc.loadPage(insertIndex + i);
+            } catch (e) {
+              // Ignore errors on second reload
+            }
+          }
+        }
+        // Clear renderer cache again to ensure fresh thumbnails
+        if (renderer) {
+          renderer.clearCache();
+        }
+      }, 100);
 
       // Mark tab as modified
       const tab = useTabStore.getState().getTabByDocumentId(documentId);
@@ -856,17 +1133,72 @@ export function ThumbnailCarousel() {
 
       {/* Tab Content */}
       <ScrollArea className="flex-1 min-h-0 w-full outline-none">
-        {activeTab === "pages" ? (
-          <div 
-            className="flex flex-col gap-3 p-3 w-full min-w-0 outline-none" 
-            tabIndex={-1}
+          {activeTab === "pages" ? (
+            <div 
+              className="flex flex-col gap-3 p-3 w-full min-w-0 outline-none" 
+              tabIndex={-1}
+              data-thumbnail-container="true"
             onDragOver={(e) => {
-              // Only handle PDF drag over on container if not over a thumbnail
-              // This prevents conflicts with thumbnail-level handlers
-              const target = e.target as HTMLElement;
-              const isOverThumbnail = target.closest('[draggable="true"]');
-              if (!isOverThumbnail) {
-                handlePDFDragOver(e);
+              // Check if this is a tab drag or PDF file drag
+              const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
+              const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
+              const hasFiles = e.dataTransfer.types.includes("Files");
+              
+              // Always handle tab drags on the container (check both tab-id and tab-document-id)
+              if ((isTabDrag || hasTabId) && !draggedPage) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = "copy";
+                setIsDragOverPDF(true);
+                // Set drop index to end if dragging over empty space
+                setPdfDragOverIndex(pageCount);
+                return;
+              }
+              
+              // Handle PDF file drag over on container
+              // Calculate position based on mouse Y position relative to thumbnails
+              if (hasFiles && !draggedPage) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = "copy";
+                setIsDragOverPDF(true);
+                
+                // Find the closest thumbnail element to determine drop position
+                const container = e.currentTarget;
+                const mouseY = e.clientY;
+                const thumbnailElements = container.querySelectorAll('[draggable="true"]');
+                
+                let calculatedIndex = pageCount; // Default to end
+                
+                if (thumbnailElements.length > 0) {
+                  // Find which thumbnail we're closest to
+                  let closestIndex = -1;
+                  let closestDistance = Infinity;
+                  
+                  thumbnailElements.forEach((thumb, idx) => {
+                    const rect = thumb.getBoundingClientRect();
+                    const thumbCenter = rect.top + rect.height / 2;
+                    const distance = Math.abs(mouseY - thumbCenter);
+                    
+                    if (distance < closestDistance) {
+                      closestDistance = distance;
+                      closestIndex = idx;
+                    }
+                  });
+                  
+                  if (closestIndex >= 0) {
+                    const closestThumb = thumbnailElements[closestIndex] as HTMLElement;
+                    const rect = closestThumb.getBoundingClientRect();
+                    const thumbCenter = rect.top + rect.height / 2;
+                    
+                    // If mouse is in top half, insert before (at closestIndex)
+                    // If mouse is in bottom half, insert after (at closestIndex + 1)
+                    calculatedIndex = mouseY < thumbCenter ? closestIndex : closestIndex + 1;
+                    calculatedIndex = Math.max(0, Math.min(calculatedIndex, pageCount));
+                  }
+                }
+                
+                setPdfDragOverIndex(calculatedIndex);
               }
             }}
             onDragLeave={(e) => {
@@ -880,16 +1212,28 @@ export function ThumbnailCarousel() {
               }
             }}
             onDrop={(e) => {
-              // Check if this is a PDF file drop
+              // Always prevent default for tab drags
+              e.preventDefault();
+              e.stopPropagation();
+              
+              // Check if this is a PDF file drop or tab drag
               const files = Array.from(e.dataTransfer.files);
               const hasPdf = files.some(
                 (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
               );
+              const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
+              const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
               
+              // Handle tab drags (check both types)
+              if ((isTabDrag || hasTabId) && !draggedPage) {
+                handlePDFDrop(e, pageCount, undefined);
+                return;
+              }
+              
+              // Handle PDF file drops
               if (hasPdf && !draggedPage) {
-                e.preventDefault();
-                e.stopPropagation();
                 handlePDFDrop(e);
+                return;
               }
             }}
           >
@@ -898,7 +1242,7 @@ export function ThumbnailCarousel() {
               <div className="h-1 bg-primary rounded-full shadow-lg -mb-2 z-20" />
             )}
             {Array.from({ length: pageCount }, (_, i) => (
-              <div key={i} className="relative w-full flex justify-center">
+              <div key={`${i}-${pageCount}`} className="relative w-full flex justify-center">
                 {/* Clean drop indicator bar for PDF insertion - shows between thumbnails */}
                 {/* Show indicator before this thumbnail if targetIndex is i */}
                 {pdfDragOverIndex === i && isDragOverPDF && (
@@ -915,8 +1259,26 @@ export function ThumbnailCarousel() {
                 
                 <div
                   draggable
-                  onDragStart={(e) => handleDragStart(e, i)}
+                  onDragStart={(e) => {
+                    // Only handle page reordering if this is not a page export drag
+                    // Page export drags are handled by ThumbnailItem
+                    if (!e.dataTransfer.types.includes('application/x-page-export')) {
+                      handleDragStart(e, i);
+                    }
+                  }}
                   onDragOver={(e) => {
+                    // Check if this is a tab drag first
+                    const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
+                    const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
+                    if ((isTabDrag || hasTabId) && !draggedPage) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = "copy";
+                      const thumbnailElement = e.currentTarget;
+                      handlePDFDragOver(e, i, thumbnailElement);
+                      return;
+                    }
+                    
                     // Try PDF drop first, then page reorder
                     const thumbnailElement = e.currentTarget;
                     handlePDFDragOver(e, i, thumbnailElement);
@@ -936,18 +1298,30 @@ export function ThumbnailCarousel() {
                     }
                   }}
                   onDrop={(e) => {
-                    // Check if this is a PDF file drop
+                    // Check if this is a PDF file drop or tab drag
                     const files = Array.from(e.dataTransfer.files);
                     const hasPdf = files.some(
                       (file) => file.type === "application/pdf" || file.name.endsWith(".pdf")
                     );
+                    const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
+                    const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
                     
+                    // Handle tab drags
+                    if ((isTabDrag || hasTabId) && !draggedPage) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handlePDFDrop(e, i, e.currentTarget);
+                      return;
+                    }
+                    
+                    // Handle PDF file drops
                     if (hasPdf && !draggedPage) {
                       e.preventDefault();
                       e.stopPropagation();
-                      // Pass thumbnail index and element for index calculation
                       handlePDFDrop(e, i, e.currentTarget);
+                      return;
                     }
+                    
                     // Page reorder drop is handled elsewhere
                   }}
                   onDragEnd={handleDragEnd}

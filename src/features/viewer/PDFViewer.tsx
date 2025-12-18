@@ -13,6 +13,7 @@ import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { VirtualizedPageList } from "./VirtualizedPageList";
 import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { PageTools } from "@/features/toolbar/PageTools";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
@@ -36,6 +37,9 @@ export function PDFViewer() {
   const isZoomingRef = useRef(false); // Flag to prevent scroll interference during zoom
   const zoomAnchorPointRef = useRef<{ x: number; y: number } | null>(null); // Store anchor point for transform origin
   const previousReadModeRef = useRef(readMode); // Track previous read mode state
+  const [isEditingPage, setIsEditingPage] = useState(false);
+  const [pageInputValue, setPageInputValue] = useState("");
+  const pageInputRef = useRef<HTMLInputElement>(null);
   
   // Use refs for smooth zoom to avoid stale closures
   const zoomLevelRef = useRef(zoomLevel);
@@ -421,6 +425,46 @@ export function PDFViewer() {
     }
   };
 
+  const handlePageNumberClick = () => {
+    if (!currentDocument) return;
+    setPageInputValue(String(currentPage + 1));
+    setIsEditingPage(true);
+  };
+
+  const handlePageNumberSubmit = () => {
+    if (!currentDocument) return;
+    const pageNum = parseInt(pageInputValue, 10);
+    const pageCount = currentDocument.getPageCount();
+    
+    if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= pageCount) {
+      setCurrentPage(pageNum - 1); // Convert to 0-based index
+    }
+    setIsEditingPage(false);
+  };
+
+  const handlePageNumberKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      handlePageNumberSubmit();
+    } else if (e.key === "Escape") {
+      setIsEditingPage(false);
+    }
+  };
+
+  // Focus input when editing starts
+  useEffect(() => {
+    if (isEditingPage && pageInputRef.current) {
+      pageInputRef.current.focus();
+      pageInputRef.current.select();
+    }
+  }, [isEditingPage]);
+
+  // Reset editing state when page changes externally
+  useEffect(() => {
+    if (isEditingPage) {
+      setIsEditingPage(false);
+    }
+  }, [currentPage]);
+
   const handleApplyDocumentSettings = async (width: number, height: number, applyToAll: boolean) => {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
@@ -549,33 +593,58 @@ export function PDFViewer() {
       </div>
       
       {/* Bottom Navigation Bar with Read Mode Toggle */}
-      <div className="flex items-center justify-between p-2 border-t bg-background">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between px-2 py-1.5 border-t bg-background">
+        <div className="flex items-center gap-1">
           {!readMode && <PageTools />}
+          {!readMode && <div className="h-4 w-px bg-border mx-0.5" />}
           <Button
             variant="outline"
             size="icon"
+            className="h-7 w-7"
             onClick={handlePreviousPage}
             disabled={!canGoPrevious || readMode}
           >
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronLeft className="h-3.5 w-3.5" />
           </Button>
-          <span className="text-sm text-muted-foreground min-w-[100px] text-center">
-            Page {currentPage + 1} of {pageCount}
-          </span>
+          {isEditingPage ? (
+            <div className="flex items-center gap-1 min-w-[80px]">
+              <Input
+                ref={pageInputRef}
+                type="number"
+                min={1}
+                max={pageCount}
+                value={pageInputValue}
+                onChange={(e) => setPageInputValue(e.target.value)}
+                onKeyDown={handlePageNumberKeyDown}
+                onBlur={handlePageNumberSubmit}
+                className="h-7 w-12 px-1.5 text-xs text-center"
+                autoFocus
+              />
+              <span className="text-xs text-muted-foreground">of {pageCount}</span>
+            </div>
+          ) : (
+            <button
+              onClick={handlePageNumberClick}
+              className="text-xs text-muted-foreground min-w-[80px] text-center hover:text-foreground transition-colors cursor-pointer px-1 py-0.5 rounded"
+              title="Click to enter page number"
+            >
+              Page {currentPage + 1} of {pageCount}
+            </button>
+          )}
           <Button
             variant="outline"
             size="icon"
+            className="h-7 w-7"
             onClick={handleNextPage}
             disabled={!canGoNext || readMode}
           >
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>
         
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           {/* Zoom Controls - Grouped with better styling */}
-          <div className="flex items-center gap-1 px-1.5 py-1 rounded-md border bg-muted/50">
+          <div className="flex items-center gap-0.5 px-1 py-0.5 rounded-md border bg-muted/50">
             <Button
               variant="ghost"
               size="icon"
@@ -593,7 +662,7 @@ export function PDFViewer() {
             >
               <ZoomOut className="h-3.5 w-3.5" />
             </Button>
-            <div className="px-2 py-1 min-w-[50px] text-center">
+            <div className="px-1.5 py-0.5 min-w-[45px] text-center">
               <span className="text-xs font-medium text-foreground">
                 {Math.round(zoomLevel * 100)}%
               </span>
@@ -628,33 +697,36 @@ export function PDFViewer() {
             </Button>
           </div>
           
-          <div className="h-6 w-px bg-border mx-1" />
+          <div className="h-5 w-px bg-border mx-0.5" />
           
           <Button
             variant={showRulers ? "default" : "outline"}
             size="icon"
+            className="h-7 w-7"
             onClick={toggleRulers}
             title="Toggle Rulers"
             disabled={!currentDocument || readMode}
           >
-            <Ruler className="h-4 w-4" />
+            <Ruler className="h-3.5 w-3.5" />
           </Button>
           <Button
             variant="outline"
             size="icon"
+            className="h-7 w-7"
             onClick={() => setShowDocumentSettings(true)}
             title="Document Settings"
             disabled={!currentDocument}
           >
-            <Settings className="h-4 w-4" />
+            <Settings className="h-3.5 w-3.5" />
           </Button>
           <Button
             variant={readMode ? "default" : "outline"}
             size="icon"
+            className="h-7 w-7"
             onClick={toggleReadMode}
             title={readMode ? "Exit read mode (R)" : "Enter read mode (R)"}
           >
-            <BookOpen className="h-4 w-4" />
+            <BookOpen className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>

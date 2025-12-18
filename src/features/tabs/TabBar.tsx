@@ -16,12 +16,14 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 export function TabBar() {
-  const { tabs, activeTabId, setActiveTab, removeTab } =
+  const { tabs, activeTabId, setActiveTab, removeTab, reorderTabs } =
     useTabStore();
   const { setCurrentDocument } = usePDFStore();
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [isDragOver, setIsDragOver] = useState(false);
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const [dragOverTabIndex, setDragOverTabIndex] = useState<number | null>(null);
 
   const handleTabClick = (documentId: string) => {
     const tab = tabs.find((t) => t.documentId === documentId);
@@ -98,27 +100,117 @@ export function TabBar() {
     setIsDragOver(false);
   };
 
+  const handleTabDragStart = (e: React.DragEvent, tabId: string) => {
+    // Store the dragged tab ID
+    setDraggedTabId(tabId);
+  };
+
+  const handleTabDragOver = (e: React.DragEvent, index: number) => {
+    // Only handle if dragging a tab (not a PDF file)
+    if (e.dataTransfer.types.includes("application/x-tab-id") && draggedTabId) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "move";
+      setDragOverTabIndex(index);
+    }
+  };
+
+  const handleTabDragLeave = () => {
+    setDragOverTabIndex(null);
+  };
+
+  const handleTabDrop = (e: React.DragEvent, dropIndex: number) => {
+    // Only handle if this is a tab drag
+    if (!e.dataTransfer.types.includes("application/x-tab-id") || !draggedTabId) {
+      return;
+    }
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Use the stored draggedTabId instead of reading from dataTransfer
+    const fromIndex = tabs.findIndex(t => t.id === draggedTabId);
+    if (fromIndex !== -1 && fromIndex !== dropIndex) {
+      reorderTabs(fromIndex, dropIndex);
+    }
+    
+    setDraggedTabId(null);
+    setDragOverTabIndex(null);
+  };
+
+  const handleTabDragEnd = () => {
+    setDraggedTabId(null);
+    setDragOverTabIndex(null);
+  };
+
+  const handleContainerDragOver = (e: React.DragEvent) => {
+    // Handle drag over on the container (for dropping after the last tab)
+    if (e.dataTransfer.types.includes("application/x-tab-id") && draggedTabId) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "move";
+      // Set drag over index to the end (after last tab)
+      setDragOverTabIndex(tabs.length);
+    }
+  };
+
+  const handleContainerDrop = (e: React.DragEvent) => {
+    // Handle drop on the container (for dropping after the last tab)
+    if (!e.dataTransfer.types.includes("application/x-tab-id") || !draggedTabId) {
+      return;
+    }
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Use the stored draggedTabId
+    const fromIndex = tabs.findIndex(t => t.id === draggedTabId);
+    if (fromIndex !== -1 && fromIndex !== tabs.length) {
+      // Drop at the end
+      reorderTabs(fromIndex, tabs.length);
+    }
+    
+    setDraggedTabId(null);
+    setDragOverTabIndex(null);
+  };
+
   return (
     <div>
       <ScrollArea className="w-full">
-        <div className="flex items-center gap-1">
-          {tabs.map((tab) => (
-            <TabItem
+        <div 
+          className="flex items-center gap-1"
+          onDragOver={handleContainerDragOver}
+          onDrop={handleContainerDrop}
+        >
+          {tabs.map((tab, index) => (
+            <div
               key={tab.id}
-              tab={tab}
-              isActive={tab.id === activeTabId}
-              onClick={() => handleTabClick(tab.documentId)}
-              onClose={() => handleTabClose(tab.id)}
-              onRename={(newName) => {
-                // Update tab name
-                useTabStore.getState().updateTab(tab.id, { name: newName });
-                // Update PDF document name
-                const document = usePDFStore.getState().documents.get(tab.documentId);
-                if (document) {
-                  document.setName(newName);
-                }
-              }}
-            />
+              onDragOver={(e) => handleTabDragOver(e, index)}
+              onDragLeave={handleTabDragLeave}
+              onDrop={(e) => handleTabDrop(e, index)}
+              className={cn(
+                "transition-all relative",
+                dragOverTabIndex === index && "opacity-50"
+              )}
+            >
+              <TabItem
+                tab={tab}
+                isActive={tab.id === activeTabId}
+                onClick={() => handleTabClick(tab.documentId)}
+                onClose={() => handleTabClose(tab.id)}
+                onDragStart={handleTabDragStart}
+                onDragEnd={handleTabDragEnd}
+                onRename={(newName) => {
+                  // Update tab name
+                  useTabStore.getState().updateTab(tab.id, { name: newName });
+                  // Update PDF document name
+                  const document = usePDFStore.getState().documents.get(tab.documentId);
+                  if (document) {
+                    document.setName(newName);
+                  }
+                }}
+              />
+            </div>
           ))}
           {/* Plus button to open new PDF - supports drag and drop */}
           <Button

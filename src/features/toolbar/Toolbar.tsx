@@ -182,29 +182,29 @@ export function Toolbar() {
     switch (toolbarSize) {
       case 'compact':
         return {
-          button: 'w-7 h-7',
-          icon: 'h-3.5 w-3.5',
+          button: 'w-8 h-8',
+          icon: 'h-4 w-4',
           gap: 'gap-0',
           padding: 'p-0.5',
-          divider: 'my-0.5',
+          divider: 'my-1',
           text: 'text-[10px]',
         };
       case 'normal':
         return {
-          button: 'w-9 h-9',
-          icon: 'h-4 w-4',
+          button: 'w-10 h-10',
+          icon: 'h-4.5 w-4.5',
           gap: 'gap-0.5',
           padding: 'p-1',
-          divider: 'my-1',
+          divider: 'my-1.5',
           text: 'text-xs',
         };
       case 'spacious':
         return {
-          button: 'w-11 h-11',
-          icon: 'h-4.5 w-4.5',
+          button: 'w-12 h-12',
+          icon: 'h-5 w-5',
           gap: 'gap-1',
           padding: 'p-1.5',
-          divider: 'my-1.5',
+          divider: 'my-2',
           text: 'text-xs',
         };
     }
@@ -231,12 +231,87 @@ export function Toolbar() {
       // Get all annotations for this document
       const annotations = usePDFStore.getState().getAnnotations(currentDoc.getId());
       
+      
       // Initialize mupdf and PDFEditor
       const mupdfModule = await import("mupdf");
       const editor = new PDFEditor(mupdfModule.default);
       
       // Save document with annotations synced
       const pdfData = await editor.saveDocument(currentDoc, annotations);
+      
+      // CRITICAL FIX: After syncing, update store annotations with pdfAnnotation references
+      // This ensures that when the PDF is reloaded, the duplicate check can match by pdfAnnotation reference
+      const mupdfDoc = currentDoc.getMupdfDocument();
+      const pdfDoc = mupdfDoc.asPDF();
+      if (pdfDoc) {
+        // Group annotations by page for efficiency
+        const annotationsByPage = new Map<number, typeof annotations>();
+        for (const annot of annotations) {
+          if (!annotationsByPage.has(annot.pageNumber)) {
+            annotationsByPage.set(annot.pageNumber, []);
+          }
+          annotationsByPage.get(annot.pageNumber)!.push(annot);
+        }
+        
+        // For each page, match store annotations to PDF annotations
+        for (const [pageNumber, pageAnnots] of annotationsByPage) {
+          try {
+            const page = pdfDoc.loadPage(pageNumber);
+            const pdfAnnots = page.getAnnotations();
+            
+            // Match each store annotation to a PDF annotation
+            for (const storeAnnot of pageAnnots) {
+              if (!storeAnnot.pdfAnnotation && storeAnnot.type === "shape" && storeAnnot.shapeType === "arrow") {
+                // For arrows, match by line points
+                try {
+                  const matchingPdfAnnot = pdfAnnots.find((pa: any) => {
+                    try {
+                      const paType = pa.getType();
+                      if (paType !== "Line") return false;
+                      const paLine = pa.getLine();
+                      if (!paLine || !storeAnnot.points || storeAnnot.points.length !== 2) return false;
+                      
+                      const tolerance = 1; // Small tolerance for floating point differences
+                      if (Array.isArray(paLine) && paLine.length >= 4) {
+                        const pdfStart = { x: paLine[0], y: paLine[1] };
+                        const pdfEnd = { x: paLine[2], y: paLine[3] };
+                        const annotStart = storeAnnot.points[0];
+                        const annotEnd = storeAnnot.points[1];
+                        
+                        const startMatch = Math.abs(pdfStart.x - annotStart.x) < tolerance && 
+                                          Math.abs(pdfStart.y - annotStart.y) < tolerance;
+                        const endMatch = Math.abs(pdfEnd.x - annotEnd.x) < tolerance && 
+                                        Math.abs(pdfEnd.y - annotEnd.y) < tolerance;
+                        const reverseMatch = Math.abs(pdfStart.x - annotEnd.x) < tolerance && 
+                                           Math.abs(pdfStart.y - annotEnd.y) < tolerance &&
+                                           Math.abs(pdfEnd.x - annotStart.x) < tolerance && 
+                                           Math.abs(pdfEnd.y - annotStart.y) < tolerance;
+                        
+                        return (startMatch && endMatch) || reverseMatch;
+                      }
+                    } catch (e) {
+                      return false;
+                    }
+                    return false;
+                  });
+                  
+                  if (matchingPdfAnnot) {
+                    // Update the store annotation with the PDF annotation reference
+                    usePDFStore.getState().updateAnnotation(currentDoc.getId(), storeAnnot.id, {
+                      pdfAnnotation: matchingPdfAnnot
+                    });
+                  }
+                } catch (e) {
+                  console.warn(`Could not match PDF annotation for arrow ${storeAnnot.id}:`, e);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn(`Could not update pdfAnnotation references for page ${pageNumber}:`, e);
+          }
+        }
+      }
+      
       
       // Call the provided save function
       await saveFunction(pdfData);
@@ -348,10 +423,10 @@ export function Toolbar() {
   return (
     <div 
       ref={toolbarRef}
-      className={`flex flex-col items-center ${sizeClasses.gap} ${sizeClasses.padding} h-full overflow-y-auto`}
+      className={`flex flex-col items-center justify-between ${sizeClasses.padding} h-full overflow-y-auto`}
     >
       {/* File Actions */}
-      <div className={`flex flex-col ${sizeClasses.gap}`}>
+      <div className={`flex flex-col ${sizeClasses.gap} pt-1`}>
         <Button
           variant="outline"
           size="icon"
@@ -438,7 +513,7 @@ export function Toolbar() {
         </Button>
       </div>
 
-      <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
+      <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 
       {/* Tool Selection */}
       <div className={`flex flex-col ${sizeClasses.gap}`}>
@@ -621,7 +696,7 @@ export function Toolbar() {
         </Button>
       </div>
 
-      <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
+      <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 
       {/* Undo/Redo */}
       <div className={`flex flex-col ${sizeClasses.gap}`}>
@@ -647,10 +722,10 @@ export function Toolbar() {
         </Button>
       </div>
 
-      <div className={`h-px w-full bg-border ${sizeClasses.divider}`} />
+      <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 
       {/* Help Button */}
-      <div className={`flex flex-col ${sizeClasses.gap} mt-auto`}>
+      <div className={`flex flex-col ${sizeClasses.gap} mb-2`}>
         <Button
           variant="outline"
           size="icon"
