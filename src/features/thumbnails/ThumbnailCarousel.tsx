@@ -581,14 +581,26 @@ export function ThumbnailCarousel() {
       
       if (thumbnailIndex !== undefined && thumbnailElement) {
         // Determine if we should insert before or after this thumbnail
-        // based on mouse Y position relative to the thumbnail center
+        // Use a larger tolerance zone (40% of thumbnail height) for easier dropping
         const rect = thumbnailElement.getBoundingClientRect();
         const mouseY = e.clientY;
-        const thumbnailCenter = rect.top + rect.height / 2;
+        const thumbnailTop = rect.top;
+        const thumbnailHeight = rect.height;
+        const toleranceZone = thumbnailHeight * 0.4; // 40% tolerance zone
         
-        // If mouse is in top half, insert before (at thumbnailIndex)
-        // If mouse is in bottom half, insert after (at thumbnailIndex + 1)
-        targetIndex = mouseY < thumbnailCenter ? thumbnailIndex : thumbnailIndex + 1;
+        // If mouse is in top 40% of thumbnail, insert before (at thumbnailIndex)
+        // If mouse is in bottom 40% of thumbnail, insert after (at thumbnailIndex + 1)
+        // Middle 20% is a neutral zone that defaults to inserting after
+        const relativeY = mouseY - thumbnailTop;
+        if (relativeY < toleranceZone) {
+          targetIndex = thumbnailIndex;
+        } else if (relativeY > thumbnailHeight - toleranceZone) {
+          targetIndex = thumbnailIndex + 1;
+        } else {
+          // In the middle zone, use center point to decide
+          const thumbnailCenter = thumbnailTop + thumbnailHeight / 2;
+          targetIndex = mouseY < thumbnailCenter ? thumbnailIndex : thumbnailIndex + 1;
+        }
       } else {
         // Dragging over container (not a specific thumbnail), insert at end
         targetIndex = pageCount;
@@ -1189,11 +1201,21 @@ export function ThumbnailCarousel() {
                   if (closestIndex >= 0) {
                     const closestThumb = thumbnailElements[closestIndex] as HTMLElement;
                     const rect = closestThumb.getBoundingClientRect();
-                    const thumbCenter = rect.top + rect.height / 2;
+                    const thumbnailTop = rect.top;
+                    const thumbnailHeight = rect.height;
+                    const toleranceZone = thumbnailHeight * 0.4; // 40% tolerance zone
+                    const relativeY = mouseY - thumbnailTop;
                     
-                    // If mouse is in top half, insert before (at closestIndex)
-                    // If mouse is in bottom half, insert after (at closestIndex + 1)
-                    calculatedIndex = mouseY < thumbCenter ? closestIndex : closestIndex + 1;
+                    // Use larger tolerance zone for easier dropping
+                    if (relativeY < toleranceZone) {
+                      calculatedIndex = closestIndex;
+                    } else if (relativeY > thumbnailHeight - toleranceZone) {
+                      calculatedIndex = closestIndex + 1;
+                    } else {
+                      // In the middle zone, use center point to decide
+                      const thumbCenter = thumbnailTop + thumbnailHeight / 2;
+                      calculatedIndex = mouseY < thumbCenter ? closestIndex : closestIndex + 1;
+                    }
                     calculatedIndex = Math.max(0, Math.min(calculatedIndex, pageCount));
                   }
                 }

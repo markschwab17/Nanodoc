@@ -58,7 +58,8 @@ export function usePDF() {
         // CRITICAL: Clear renderer cache to prevent artifacts from previous PDF
         // This ensures the new PDF renders cleanly without artifacts from the previous document
         try {
-          const { PDFRenderer } = await import("@/core/pdf/PDFRenderer");
+          // PDFRenderer import reserved for future use - currently not needed
+          // const { PDFRenderer } = await import("@/core/pdf/PDFRenderer");
           // Get renderer instance if available (it's created in PageCanvas)
           // We'll clear cache in PageCanvas when document changes, but also try here
         } catch (e) {

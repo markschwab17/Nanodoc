@@ -31,7 +31,7 @@ export function ThumbnailItem({
   onClick,
   onDelete,
   onRotate,
-  onDragStart,
+  onDragStart: _onDragStart,
 }: ThumbnailItemProps) {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -104,7 +104,7 @@ export function ThumbnailItem({
 
       // Create a File object from the PDF data
       const fileName = `${document.getName().replace('.pdf', '')}_page_${pageNumber + 1}.pdf`;
-      const file = new File([pdfData], fileName, { type: 'application/pdf' });
+      const file = new File([pdfData as BlobPart], fileName, { type: 'application/pdf' });
 
       // Set the file in the data transfer
       e.dataTransfer.effectAllowed = 'copy';

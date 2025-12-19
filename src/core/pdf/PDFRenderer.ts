@@ -88,11 +88,14 @@ export class PDFRenderer {
       }
 
       // Render to pixmap
+      // CRITICAL: Exclude annotations from base rendering (false) since we render them with React
+      // This prevents duplicate rendering - native PDF annotations would appear on the canvas
+      // and we also render them as interactive React components, causing duplicates
       const pixmap = page.toPixmap(
         matrix,
         this.mupdf.ColorSpace.DeviceRGB,
         false,
-        true
+        false  // Don't include annotations - we render them with React
       );
 
       // Get image data

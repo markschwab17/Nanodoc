@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import { cn } from "@/lib/utils";
 
 export function TabBar() {
@@ -100,7 +100,7 @@ export function TabBar() {
     setIsDragOver(false);
   };
 
-  const handleTabDragStart = (e: React.DragEvent, tabId: string) => {
+  const handleTabDragStart = (_e: React.DragEvent, tabId: string) => {
     // Store the dragged tab ID
     setDraggedTabId(tabId);
   };
@@ -111,7 +111,28 @@ export function TabBar() {
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = "move";
-      setDragOverTabIndex(index);
+      
+      // Calculate drop position based on mouse X position within the tab
+      // Use tolerance zones for easier dropping
+      const target = e.currentTarget as HTMLElement;
+      const rect = target.getBoundingClientRect();
+      const mouseX = e.clientX;
+      const tabWidth = rect.width;
+      const toleranceZone = tabWidth * 0.4; // 40% tolerance zone
+      const relativeX = mouseX - rect.left;
+      
+      // If mouse is in left 40% of tab, insert before (at index)
+      // If mouse is in right 40% of tab, insert after (at index + 1)
+      // Middle 20% is a neutral zone that defaults to inserting after
+      if (relativeX < toleranceZone) {
+        setDragOverTabIndex(index);
+      } else if (relativeX > tabWidth - toleranceZone) {
+        setDragOverTabIndex(index + 1);
+      } else {
+        // In the middle zone, use center point to decide
+        const tabCenter = rect.left + tabWidth / 2;
+        setDragOverTabIndex(mouseX < tabCenter ? index : index + 1);
+      }
     }
   };
 
@@ -128,10 +149,28 @@ export function TabBar() {
     e.preventDefault();
     e.stopPropagation();
     
+    // Calculate actual drop index based on mouse position
+    const target = e.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const mouseX = e.clientX;
+    const tabWidth = rect.width;
+    const toleranceZone = tabWidth * 0.4;
+    const relativeX = mouseX - rect.left;
+    
+    let actualDropIndex = dropIndex;
+    if (relativeX < toleranceZone) {
+      actualDropIndex = dropIndex;
+    } else if (relativeX > tabWidth - toleranceZone) {
+      actualDropIndex = dropIndex + 1;
+    } else {
+      const tabCenter = rect.left + tabWidth / 2;
+      actualDropIndex = mouseX < tabCenter ? dropIndex : dropIndex + 1;
+    }
+    
     // Use the stored draggedTabId instead of reading from dataTransfer
     const fromIndex = tabs.findIndex(t => t.id === draggedTabId);
-    if (fromIndex !== -1 && fromIndex !== dropIndex) {
-      reorderTabs(fromIndex, dropIndex);
+    if (fromIndex !== -1 && fromIndex !== actualDropIndex) {
+      reorderTabs(fromIndex, actualDropIndex);
     }
     
     setDraggedTabId(null);
@@ -183,35 +222,49 @@ export function TabBar() {
           onDrop={handleContainerDrop}
         >
           {tabs.map((tab, index) => (
-            <div
-              key={tab.id}
-              onDragOver={(e) => handleTabDragOver(e, index)}
-              onDragLeave={handleTabDragLeave}
-              onDrop={(e) => handleTabDrop(e, index)}
-              className={cn(
-                "transition-all relative",
-                dragOverTabIndex === index && "opacity-50"
+            <Fragment key={tab.id}>
+              {/* Drop indicator before this tab */}
+              {dragOverTabIndex === index && (
+                <div className="w-0.5 h-6 bg-primary rounded-full mx-0.5" />
               )}
-            >
-              <TabItem
-                tab={tab}
-                isActive={tab.id === activeTabId}
-                onClick={() => handleTabClick(tab.documentId)}
-                onClose={() => handleTabClose(tab.id)}
-                onDragStart={handleTabDragStart}
-                onDragEnd={handleTabDragEnd}
-                onRename={(newName) => {
-                  // Update tab name
-                  useTabStore.getState().updateTab(tab.id, { name: newName });
-                  // Update PDF document name
-                  const document = usePDFStore.getState().documents.get(tab.documentId);
-                  if (document) {
-                    document.setName(newName);
-                  }
-                }}
-              />
-            </div>
+              <div
+                onDragOver={(e) => handleTabDragOver(e, index)}
+                onDragLeave={handleTabDragLeave}
+                onDrop={(e) => handleTabDrop(e, index)}
+                className={cn(
+                  "transition-all relative",
+                  dragOverTabIndex === index && "opacity-50",
+                  dragOverTabIndex === index + 1 && "opacity-50"
+                )}
+              >
+                <TabItem
+                  tab={tab}
+                  isActive={tab.id === activeTabId}
+                  onClick={() => handleTabClick(tab.documentId)}
+                  onClose={() => handleTabClose(tab.id)}
+                  onDragStart={handleTabDragStart}
+                  onDragEnd={handleTabDragEnd}
+                  onRename={(newName) => {
+                    // Update tab name
+                    useTabStore.getState().updateTab(tab.id, { name: newName });
+                    // Update PDF document name
+                    const document = usePDFStore.getState().documents.get(tab.documentId);
+                    if (document) {
+                      document.setName(newName);
+                    }
+                  }}
+                />
+              </div>
+              {/* Drop indicator after this tab (before next tab or end) */}
+              {dragOverTabIndex === index + 1 && index === tabs.length - 1 && (
+                <div className="w-0.5 h-6 bg-primary rounded-full mx-0.5" />
+              )}
+            </Fragment>
           ))}
+          {/* Drop indicator at the very end (after last tab) */}
+          {dragOverTabIndex === tabs.length && (
+            <div className="w-0.5 h-6 bg-primary rounded-full mx-0.5" />
+          )}
           {/* Plus button to open new PDF - supports drag and drop */}
           <Button
             variant="ghost"
