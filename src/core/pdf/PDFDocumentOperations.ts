@@ -167,17 +167,42 @@ export class PDFDocumentOperations {
             annotationsToDelete.push(pdfAnnot);
           }
           // Delete custom text annotations (FreeText with CustomAnnotation flag)
-          if (pdfType === "FreeText") {
+          // Also delete stamp annotations (FreeText with StampAnnotation flag, or Stamp type)
+          if (pdfType === "FreeText" || pdfType === "Stamp") {
             try {
               const annotObj = pdfAnnot.getObject();
               if (annotObj) {
                 const customFlag = annotObj.get("CustomAnnotation");
-                if (customFlag) {
+                const stampFlag = annotObj.get("StampAnnotation");
+                // Check for custom text annotation (only for FreeText)
+                if (pdfType === "FreeText" && customFlag) {
                   const flagStr = customFlag.toString();
                   if (flagStr === "true" || flagStr === "/true" || 
                       (typeof customFlag === 'boolean' && customFlag === true) ||
                       (customFlag.valueOf && customFlag.valueOf() === true)) {
                     annotationsToDelete.push(pdfAnnot);
+                  }
+                }
+                // Check for stamp annotation (FreeText with StampAnnotation flag, or Stamp type)
+                if (stampFlag) {
+                  const flagStr = stampFlag.toString();
+                  if (flagStr === "true" || flagStr === "/true" || 
+                      (typeof stampFlag === 'boolean' && stampFlag === true) ||
+                      (stampFlag.valueOf && stampFlag.valueOf() === true)) {
+                    annotationsToDelete.push(pdfAnnot);
+                  }
+                } else if (pdfType === "Stamp") {
+                  // For Stamp type, also check contents format as fallback
+                  const contents = pdfAnnot.getContents() || "";
+                  if (contents) {
+                    try {
+                      const parsed = JSON.parse(contents);
+                      if (parsed.type === "stamp" && parsed.stampData) {
+                        annotationsToDelete.push(pdfAnnot);
+                      }
+                    } catch (e) {
+                      // Not JSON, might be a regular Stamp annotation - skip
+                    }
                   }
                 }
               }
@@ -1137,6 +1162,92 @@ export class PDFDocumentOperations {
       }
     }
   }
+  
+  // CRITICAL FIX: Before syncing stamps, delete ALL stamp annotations from this page
+  // This prevents duplicates when stamps are deleted and saved multiple times
+  // Same approach as text, shapes, highlights, and form fields - delete all, then recreate from store
+  const hasStamps = pageAnnotations.some(annot => annot.type === "stamp");
+  if (hasStamps) {
+    // Get fresh list of annotations (they may have changed)
+    const currentPageAnnots = page.getAnnotations();
+    const stampAnnotationsToDelete: any[] = [];
+    
+    for (const pdfAnnot of currentPageAnnots) {
+      try {
+        const pdfType = pdfAnnot.getType();
+        // Handle both FreeText (old format) and Stamp (new format) annotation types
+        if (pdfType === "FreeText" || pdfType === "Stamp") {
+          // Only delete stamp annotations (marked with StampAnnotation flag)
+          try {
+            const annotObj = pdfAnnot.getObject();
+            if (annotObj) {
+              const stampFlag = annotObj.get("StampAnnotation");
+              if (stampFlag) {
+                const flagStr = stampFlag.toString();
+                // Check if it's marked as a stamp (PDF name objects return "/true", string objects return "true")
+                if (flagStr === "true" || flagStr === "/true" || 
+                    (typeof stampFlag === 'boolean' && stampFlag === true) ||
+                    (stampFlag.valueOf && stampFlag.valueOf() === true)) {
+                  stampAnnotationsToDelete.push(pdfAnnot);
+                }
+              } else if (pdfType === "Stamp") {
+                // For Stamp type, also check contents format as fallback
+                const contents = pdfAnnot.getContents() || "";
+                if (contents) {
+                  try {
+                    const parsed = JSON.parse(contents);
+                    if (parsed.type === "stamp" && parsed.stampData) {
+                      stampAnnotationsToDelete.push(pdfAnnot);
+                    }
+                  } catch (e) {
+                    // Not JSON, might be a regular Stamp annotation - skip
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            // Skip if we can't check the flag
+          }
+        }
+      } catch (e) {
+        // Skip if we can't determine type
+      }
+    }
+    
+    // Delete all matching stamp annotations
+    let deletedCount = 0;
+    for (const pdfAnnot of stampAnnotationsToDelete) {
+      try {
+        page.deleteAnnotation(pdfAnnot);
+        deletedCount++;
+      } catch (deleteError) {
+        console.warn(`Could not delete stamp annotation:`, deleteError);
+      }
+    }
+    
+    // CRITICAL: Update the page to persist deletions
+    try {
+      // Try updating the page object directly
+      const pageObj = page.getObject();
+      if (pageObj && typeof pageObj.update === 'function') {
+        pageObj.update();
+      }
+      // Also try page.update() if available
+      if (typeof page.update === 'function') {
+        page.update();
+      }
+    } catch (e) {
+      // Some mupdf versions might not have these methods
+    }
+    
+    // Clear pdfAnnotation references for all stamp annotations we're about to sync
+    // This forces them to be recreated
+    for (const annot of pageAnnotations) {
+      if (annot.type === "stamp") {
+        annot.pdfAnnotation = undefined;
+      }
+    }
+  }
 
 
   for (const annot of pageAnnotations) {
@@ -1341,10 +1452,87 @@ export class PDFDocumentOperations {
 
 
   // Update stamp data if it's a stamp annotation
+  // CRITICAL FIX: Use the same format as when creating stamps: {"type":"stamp","stampData":{...}}
+  // This ensures stamps can be loaded correctly when the PDF is reopened
 
   if (annot.type === "stamp" && annot.stampData) {
+  const stampDataJson = JSON.stringify({
+    type: "stamp",
+    stampData: annot.stampData
+  });
+  annot.pdfAnnotation.setContents(stampDataJson);
+  
+  // CRITICAL FIX: Also set the StampAnnotation flag during updates
+  // This ensures the loader can recognize stamps when the PDF is reopened
+  try {
+    const annotObj = annot.pdfAnnotation.getObject();
+    if (annotObj) {
+      // Use newName first (like CustomAnnotation flag), fallback to newString
+      try {
+        annotObj.put("StampAnnotation", this.mupdf.newName("true"));
+      } catch (e) {
+        try {
+          annotObj.put("StampAnnotation", this.mupdf.newString("true"));
+        } catch (e2) {
+          // If both fail, try using the PDF document's method
+          const pdfDoc = document.getMupdfDocument().asPDF();
+          if (pdfDoc && pdfDoc.newName) {
+            annotObj.put("StampAnnotation", pdfDoc.newName("true"));
+          } else if (pdfDoc && pdfDoc.newString) {
+            annotObj.put("StampAnnotation", pdfDoc.newString("true"));
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore if we can't set the flag
+  }
 
-  annot.pdfAnnotation.setContents(JSON.stringify(annot.stampData));
+  // CRITICAL FIX: Update the rect to match current annotation dimensions and position
+  // This ensures stamps maintain their size and position when reopened
+  const pageBounds = page.getBounds();
+  const pageHeight = pageBounds[3] - pageBounds[1];
+  const pdfY = pageHeight - annot.y - (annot.height || 0);
+  const newRect: [number, number, number, number] = [
+    annot.x,
+    pdfY,
+    annot.x + (annot.width || 0),
+    pdfY + (annot.height || 0)
+  ];
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1491',message:'Updating stamp rect during sync',data:{annotationId:annot.id,displayCoords:{x:annot.x,y:annot.y,width:annot.width,height:annot.height},pdfCoords:{x:newRect[0],y:newRect[1],x2:newRect[2],y2:newRect[3]},pageHeight:pageHeight},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'SYNC'})}).catch(()=>{});
+  // #endregion
+  annot.pdfAnnotation.setRect(newRect);
+
+  // CRITICAL FIX: Re-embed the image appearance during updates
+  // This prevents "DRAFT" from showing in native PDF viewers
+  // CRITICAL: Set appearance AFTER rect to ensure proper sizing
+  if (annot.stampData.type === "image" && annot.stampData.imageData) {
+    try {
+      // Extract base64 data from data URL
+      const base64Data = annot.stampData.imageData.split(',')[1] || annot.stampData.imageData;
+      const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+      
+      // Create mupdf Image from buffer
+      // Use the same method that works in addImageAnnotationToPage
+      const image = this.mupdf.Image.fromBuffer(imageBytes);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1506',message:'Updating stamp appearance during sync',data:{annotationId:annot.id,imageWidth:image.getWidth(),imageHeight:image.getHeight(),rectWidth:newRect[2]-newRect[0],rectHeight:newRect[3]-newRect[1]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+      // #endregion
+      
+      // Set the image as the appearance - this makes it visible in native PDF viewers
+      // The appearance will be scaled to fit the rect automatically
+      annot.pdfAnnotation.setAppearance(image);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1516',message:'Appearance updated successfully',data:{annotationId:annot.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+      // #endregion
+    } catch (imageError) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1518',message:'Failed to update appearance',data:{annotationId:annot.id,error:imageError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+      // #endregion
+      console.warn("Could not update image appearance for stamp annotation:", imageError);
+    }
+  }
 
   }
 

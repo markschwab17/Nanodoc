@@ -2480,64 +2480,197 @@ export class PDFAnnotationOperations {
   y + (annotation.height || 0),
 
   ];
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2472',message:'Creating stamp annotation',data:{annotationId:annotation.id,displayCoords:{x:annotation.x,y:annotation.y,width:annotation.width,height:annotation.height},pdfCoords:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},pageHeight:pageHeight,stampType:annotation.stampData?.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
+  // #endregion
 
-  // Use FreeText annotation instead of Stamp to avoid default "DRAFT" appearance
-
-  // Store stamp data in JSON format in contents, marked with a special type
-
-  const annot = page.createAnnotation("FreeText");
+  // Use Stamp annotation type to embed image appearance for native PDF viewers
+  // This ensures stamps appear as images, not text, in external PDF viewers
+  const annot = page.createAnnotation("Stamp");
 
   annot.setRect(rect);
+  // #region agent log
+  const rectAfterSet = annot.getRect();
+  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2491',message:'After setRect - checking if rect changed',data:{annotationId:annotation.id,rectSet:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},rectAfterSet:{x:rectAfterSet[0],y:rectAfterSet[1],x2:rectAfterSet[2],y2:rectAfterSet[3]},rectChanged:rect[0]!==rectAfterSet[0]||rect[1]!==rectAfterSet[1]||rect[2]!==rectAfterSet[2]||rect[3]!==rectAfterSet[3]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
+  // #endregion
 
-  // Store stamp data in contents as JSON with a marker
-
+  // Store stamp data in contents as JSON for our app to read back
   if (annotation.stampData) {
+    const stampDataJson = JSON.stringify({
+      type: "stamp",
+      stampData: annotation.stampData
+    });
+    annot.setContents(stampDataJson);
 
-  const stampDataJson = JSON.stringify({
+    // Mark this as a stamp annotation in the object
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        // Use newName first (like CustomAnnotation flag), fallback to newString
+        try {
+          annotObj.put("StampAnnotation", this.mupdf.newName("true"));
+        } catch (e) {
+          try {
+            annotObj.put("StampAnnotation", this.mupdf.newString("true"));
+          } catch (e2) {
+            // If both fail, try using the PDF document's method
+            const pdfDoc = document.getMupdfDocument().asPDF();
+            if (pdfDoc && pdfDoc.newName) {
+              annotObj.put("StampAnnotation", pdfDoc.newName("true"));
+            } else if (pdfDoc && pdfDoc.newString) {
+              annotObj.put("StampAnnotation", pdfDoc.newString("true"));
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore if we can't set the marker
+    }
 
-  type: "stamp",
+    // For image stamps, embed the actual image as the appearance
+    // CRITICAL: Set appearance AFTER rect to ensure proper sizing
+    if (annotation.stampData.type === "image" && annotation.stampData.imageData) {
+      try {
+        // Extract base64 data from data URL
+        const base64Data = annotation.stampData.imageData.split(',')[1] || annotation.stampData.imageData;
+        const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+        
+        // Create mupdf Image from buffer
+        // CRITICAL FIX: Try multiple approaches to create Image
+        // PDFDocumentOperations uses Image.fromBuffer(imageBytes) directly, but it fails here
+        // Try using Buffer first, or try accessing through document
+        let image;
+        // #region agent log
+        const hasBuffer = !!this.mupdf.Buffer;
+        const bufferMethods = this.mupdf.Buffer ? Object.keys(this.mupdf.Buffer).slice(0,10).join(',') : 'none';
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2538',message:'Trying to create Image',data:{annotationId:annotation.id,hasBuffer:hasBuffer,bufferMethods:bufferMethods,imageBytesType:typeof imageBytes,imageBytesLength:imageBytes.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+        // #endregion
+        
+        // CRITICAL FIX: Use the document's mupdf instance which has Image.fromBuffer
+        // The mupdf instance in constructor might not have the same API
+        // Get it from the document which should have full mupdf API
+        const mupdfDoc = document.getMupdfDocument();
+        const pdfDoc = mupdfDoc.asPDF();
+        
+        // Try approach 1: Direct Image.fromBuffer from constructor's mupdf (same as PDFDocumentOperations)
+        if (this.mupdf.Image && typeof this.mupdf.Image.fromBuffer === 'function') {
+          image = this.mupdf.Image.fromBuffer(imageBytes);
+        }
+        // Try approach 2: Use Buffer.fromArrayBuffer then Image.fromBuffer
+        else if (this.mupdf.Buffer && typeof this.mupdf.Buffer.fromArrayBuffer === 'function') {
+          const buffer = this.mupdf.Buffer.fromArrayBuffer(imageBytes.buffer);
+          if (this.mupdf.Image && typeof this.mupdf.Image.fromBuffer === 'function') {
+            image = this.mupdf.Image.fromBuffer(buffer);
+          } else if (pdfDoc && pdfDoc.Image && typeof pdfDoc.Image.fromBuffer === 'function') {
+            // Try document's Image API
+            image = pdfDoc.Image.fromBuffer(buffer);
+          } else {
+            throw new Error("Image.fromBuffer not available even with Buffer");
+          }
+        }
+        // Try approach 3: Use document's Image API directly
+        else if (pdfDoc && pdfDoc.Image && typeof pdfDoc.Image.fromBuffer === 'function') {
+          image = pdfDoc.Image.fromBuffer(imageBytes);
+        }
+        // Try approach 4: Use Buffer.fromBytes
+        else if (this.mupdf.Buffer && typeof this.mupdf.Buffer.fromBytes === 'function') {
+          const buffer = this.mupdf.Buffer.fromBytes(imageBytes);
+          if (this.mupdf.Image && typeof this.mupdf.Image.fromBuffer === 'function') {
+            image = this.mupdf.Image.fromBuffer(buffer);
+          } else if (pdfDoc && pdfDoc.Image && typeof pdfDoc.Image.fromBuffer === 'function') {
+            image = pdfDoc.Image.fromBuffer(buffer);
+          } else {
+            throw new Error("Image.fromBuffer not available even with Buffer.fromBytes");
+          }
+        } else {
+          throw new Error(`Cannot create Image. this.mupdf.Image.fromBuffer: ${!!this.mupdf.Image?.fromBuffer}, pdfDoc.Image.fromBuffer: ${!!pdfDoc?.Image?.fromBuffer}`);
+        }
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2532',message:'Setting stamp appearance',data:{annotationId:annotation.id,imageWidth:image.getWidth(),imageHeight:image.getHeight(),rectWidth:rect[2]-rect[0],rectHeight:rect[3]-rect[1]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+        // #endregion
+        
+        // Set the image as the appearance - this makes it visible in native PDF viewers
+        // The appearance will be scaled to fit the rect automatically
+        annot.setAppearance(image);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2536',message:'Appearance set successfully',data:{annotationId:annotation.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+        // #endregion
+      } catch (imageError) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2538',message:'Failed to set appearance',data:{annotationId:annotation.id,error:imageError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+        // #endregion
+        console.warn("Could not embed image for stamp annotation:", imageError);
+      }
+    }
+    // For text stamps, the JSON in contents is sufficient for our app to render
+    // Native PDF viewers may show the text from contents, but won't have the styled appearance
+    // TODO: In the future, we could render text stamps to a canvas/image and embed that for native viewers
+  }
 
-  stampData: annotation.stampData
-
-  });
-
-  annot.setContents(stampDataJson);
-
-  // Mark this as a stamp annotation in the object
-
+  // Make it invisible (no border, transparent) - appearance handles the visual
   try {
-
-  const annotObj = annot.getObject();
-
-  if (annotObj) {
-
-  annotObj.put("StampAnnotation", this.mupdf.newString("true"));
-
-  }
-
+    annot.setBorderWidth(0);
+    annot.setInteriorColor([]);
   } catch (e) {
-
-  // Ignore if we can't set the marker
-
+    // Ignore if these methods aren't available
   }
 
-  }
-
-  // Make it invisible (no border, transparent)
-
+  // CRITICAL FIX: Set rect directly in PDF object BEFORE update() to prevent modification
+  // Stamp annotations without proper appearance use default "DRAFT" which has fixed size
+  // Setting rect in object directly prevents update() from resizing it
   try {
-
-  annot.setBorderWidth(0);
-
-  annot.setInteriorColor([]);
-
+    const annotObj = annot.getObject();
+    if (annotObj) {
+      // Create array with rect coordinates using mupdf API
+      const rectArray = this.mupdf.newArray(4);
+      // Use newNumber for floats (mupdf uses newNumber for both int and float)
+      rectArray.push(this.mupdf.newNumber(rect[0]));
+      rectArray.push(this.mupdf.newNumber(rect[1]));
+      rectArray.push(this.mupdf.newNumber(rect[2]));
+      rectArray.push(this.mupdf.newNumber(rect[3]));
+      annotObj.put("Rect", rectArray);
+    }
   } catch (e) {
-
-  // Ignore if these methods aren't available
-
+    // If direct manipulation fails, use setRect
+    annot.setRect(rect);
   }
 
+  // CRITICAL: Call update() after setting rect in object to ensure it's persisted
   annot.update();
+  
+  // CRITICAL FIX: Verify and restore rect after update() if it was still modified
+  const rectAfterUpdate = annot.getRect();
+  const rectChanged = Math.abs(rectAfterUpdate[0] - rect[0]) > 0.1 || 
+                      Math.abs(rectAfterUpdate[1] - rect[1]) > 0.1 || 
+                      Math.abs(rectAfterUpdate[2] - rect[2]) > 0.1 || 
+                      Math.abs(rectAfterUpdate[3] - rect[3]) > 0.1;
+  if (rectChanged) {
+    // Rect was still modified - force it directly in object and update page
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        const rectArray = this.mupdf.newArray(4);
+        // Use newNumber for floats (mupdf uses newNumber for both int and float)
+        rectArray.push(this.mupdf.newNumber(rect[0]));
+        rectArray.push(this.mupdf.newNumber(rect[1]));
+        rectArray.push(this.mupdf.newNumber(rect[2]));
+        rectArray.push(this.mupdf.newNumber(rect[3]));
+        annotObj.put("Rect", rectArray);
+        // Update the page object to persist the change
+        const pageObj = page.getObject();
+        if (pageObj && typeof pageObj.update === 'function') {
+          pageObj.update();
+        }
+      }
+    } catch (e) {
+      // If direct manipulation fails, try setRect one more time
+      annot.setRect(rect);
+    }
+  }
+  // #region agent log
+  const finalRect = annot.getRect();
+  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2605',message:'After update() - checking rect',data:{annotationId:annotation.id,rectAfterUpdate:{x:rectAfterUpdate[0],y:rectAfterUpdate[1],x2:rectAfterUpdate[2],y2:rectAfterUpdate[3]},originalRect:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},rectChanged:rectChanged,finalRect:{x:finalRect[0],y:finalRect[1],x2:finalRect[2],y2:finalRect[3]}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
+  // #endregion
 
   // Store the PDF annotation object for future updates
 
@@ -2957,6 +3090,52 @@ export class PDFAnnotationOperations {
 
   }
 
+  }
+
+  // Match stamp annotations (stored as FreeText with StampAnnotation flag, or Stamp type)
+  if (annotation.type === "stamp" && (annotType === "FreeText" || annotType === "Stamp")) {
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        const stampFlag = annotObj.get("StampAnnotation");
+        if (stampFlag) {
+          const flagStr = stampFlag.toString();
+          // Check if it's marked as a stamp
+          if (flagStr === "true" || flagStr === "/true" || 
+              (typeof stampFlag === 'boolean' && stampFlag === true) ||
+              (stampFlag.valueOf && stampFlag.valueOf() === true)) {
+            // Match by position and stamp ID if available
+            const rect = annot.getRect();
+            const contents = annot.getContents() || "";
+            
+            // Try to match by position (stamps have x, y, width, height)
+            const matchesPosition = annotation.x !== undefined && annotation.y !== undefined &&
+              Math.abs(rect[0] - annotation.x) < 10 && 
+              Math.abs(rect[1] - annotation.y) < 10;
+            
+            // Also try to match by stamp ID in contents if available
+            let matchesStampId = false;
+            if (annotation.stampId && contents) {
+              try {
+                const parsed = JSON.parse(contents);
+                if (parsed.type === "stamp" && parsed.stampData && parsed.stampData.id === annotation.stampId) {
+                  matchesStampId = true;
+                }
+              } catch (e) {
+                // Not JSON, ignore
+              }
+            }
+            
+            if (matchesPosition || matchesStampId) {
+              page.deleteAnnotation(annot);
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore errors in stamp matching
+    }
   }
 
   // Match highlight annotations

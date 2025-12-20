@@ -526,9 +526,78 @@ export class PDFAnnotationLoader {
 
   continue; // Skip to next annotation
 
-  } else if (type === "FreeText") {
+  } else if (type === "Stamp") {
+  // Handle Stamp annotation type (new format with embedded image appearance)
+  // Check if this is a stamp annotation by looking for StampAnnotation flag or contents format
+  const annotObj = pdfAnnot.getObject();
+  let isStampAnnotation = false;
 
-  // First check if this is a stamp annotation stored as FreeText
+  try {
+    if (annotObj) {
+      const stampFlag = annotObj.get("StampAnnotation");
+      if (stampFlag && stampFlag.toString() === "true") {
+        isStampAnnotation = true;
+      }
+    }
+  } catch (e) {
+    // Ignore errors
+  }
+
+  // Also check contents format as fallback
+  if (!isStampAnnotation && contents) {
+    try {
+      const testParsed = JSON.parse(contents);
+      if (testParsed.type === "stamp" && testParsed.stampData) {
+        isStampAnnotation = true;
+      }
+    } catch (e) {
+      // Not JSON, ignore
+    }
+  }
+
+  // If it's a stamp annotation, load it as stamp
+  if (isStampAnnotation && contents) {
+    try {
+      const parsed = JSON.parse(contents);
+      if (parsed.type === "stamp" && parsed.stampData) {
+        const stampData = parsed.stampData as StampData;
+        if (stampData.id && stampData.name && stampData.type) {
+          if (!rect) {
+            console.warn("Stamp annotation has no rect, skipping");
+            continue;
+          }
+          const pageBounds = page.getBounds();
+          const pageHeight = pageBounds[3] - pageBounds[1];
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationLoader.ts:570',message:'Loading stamp annotation',data:{annotationId:id,pageNumber:pageNumber,pdfRect:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},pageHeight:pageHeight,calculatedDisplay:{x:rect[0],y:pageHeight-rect[3],width:rect[2]-rect[0],height:rect[3]-rect[1]},stampType:stampData.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'LOAD'})}).catch(()=>{});
+          // #endregion
+
+          annotations.push({
+            id,
+            type: "stamp",
+            pageNumber,
+            x: rect[0],
+            y: pageHeight - rect[3], // Convert to display coordinates
+            width: rect[2] - rect[0],
+            height: rect[3] - rect[1],
+            stampId: stampData.id,
+            stampData,
+            stampType: stampData.type,
+            pdfAnnotation: pdfAnnot,
+          });
+          continue; // Skip normal Stamp handling
+        }
+      }
+    } catch (e) {
+      console.warn("Could not parse stamp data from Stamp annotation:", e);
+      // Fall through - might be a regular Stamp annotation
+    }
+  }
+  // If not a stamp annotation, continue to other handlers
+  // Regular Stamp annotations (without our metadata) will be skipped
+
+  } else if (type === "FreeText") {
+  // First check if this is a stamp annotation stored as FreeText (old format)
 
   const annotObj = pdfAnnot.getObject();
 
@@ -540,7 +609,6 @@ export class PDFAnnotationLoader {
   if (annotObj) {
 
   const stampFlag = annotObj.get("StampAnnotation");
-
   if (stampFlag && stampFlag.toString() === "true") {
 
   isStampAnnotation = true;
@@ -555,6 +623,18 @@ export class PDFAnnotationLoader {
 
   }
 
+  // CRITICAL FIX: If flag check failed but contents format indicates it's a stamp, treat it as a stamp
+  // This handles cases where the flag value is "null" or incorrectly set
+  if (!isStampAnnotation && contents) {
+    try {
+      const testParsed = JSON.parse(contents);
+      if (testParsed.type === "stamp" && testParsed.stampData) {
+        isStampAnnotation = true;
+      }
+    } catch (e) {
+      // Not JSON, ignore
+    }
+  }
 
   // If it's a stamp annotation, load it as stamp
 
@@ -952,7 +1032,6 @@ export class PDFAnnotationLoader {
   // Otherwise, skip this FreeText annotation - it's a native PDF annotation
 
   } else if (type === "FreeText") {
-
   // Check if this is a stamp annotation stored as FreeText
 
   const annotObj = pdfAnnot.getObject();
@@ -965,7 +1044,6 @@ export class PDFAnnotationLoader {
   if (annotObj) {
 
   const stampFlag = annotObj.get("StampAnnotation");
-
   if (stampFlag && stampFlag.toString() === "true") {
 
   isStampAnnotation = true;
