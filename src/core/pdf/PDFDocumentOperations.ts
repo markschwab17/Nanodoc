@@ -1526,9 +1526,9 @@ export class PDFDocumentOperations {
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1516',message:'Appearance updated successfully',data:{annotationId:annot.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
       // #endregion
-    } catch (imageError) {
+    } catch (imageError: unknown) {
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1518',message:'Failed to update appearance',data:{annotationId:annot.id,error:imageError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1518',message:'Failed to update appearance',data:{annotationId:annot.id,error:imageError instanceof Error ? imageError.message : String(imageError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
       // #endregion
       console.warn("Could not update image appearance for stamp annotation:", imageError);
     }

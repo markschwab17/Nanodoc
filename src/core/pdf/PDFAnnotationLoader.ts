@@ -1856,12 +1856,10 @@ export class PDFAnnotationLoader {
 
 
   let path: Array<{ x: number; y: number }> = [];
-  let inkListLength = 0;
 
   try {
 
   const inkList = pdfAnnot.getInkList();
-  inkListLength = inkList ? (Array.isArray(inkList) ? inkList.length : 0) : 0;
 
   if (inkList && inkList.length > 0) {
 

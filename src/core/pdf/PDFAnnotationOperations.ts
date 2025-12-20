@@ -2595,11 +2595,11 @@ export class PDFAnnotationOperations {
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2536',message:'Appearance set successfully',data:{annotationId:annotation.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
         // #endregion
-      } catch (imageError) {
+      } catch (e: unknown) {
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2538',message:'Failed to set appearance',data:{annotationId:annotation.id,error:imageError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2538',message:'Failed to set appearance',data:{annotationId:annotation.id,error:e instanceof Error ? e.message : String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
         // #endregion
-        console.warn("Could not embed image for stamp annotation:", imageError);
+        console.warn("Could not embed image for stamp annotation:", e);
       }
     }
     // For text stamps, the JSON in contents is sufficient for our app to render
@@ -3195,7 +3195,7 @@ export class PDFAnnotationOperations {
   }
 
   // Match overlay highlights and drawings (both use Ink annotations)
-  if ((annotation.type === "highlight" && annotation.highlightMode === "overlay") || annotation.type === "draw") {
+  if ((annotation as Annotation).type === "draw" || ((annotation as Annotation).type === "highlight" && (annotation as Annotation).highlightMode === "overlay")) {
     if (annotType === "Ink") {
       // For Ink annotations, match by path points if available
       if (annotation.path && annotation.path.length >= 2) {
