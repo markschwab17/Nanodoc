@@ -52,30 +52,43 @@ export class BrowserFileSystem implements FileSystemInterface {
    * Saves a file by triggering a download in the browser.
    */
   async saveFile(data: Uint8Array, name: string): Promise<void> {
-    // Ensure the filename has .pdf extension
-    const fileName = name.endsWith('.pdf') ? name : `${name}.pdf`;
-    
-    // Create a new ArrayBuffer to avoid SharedArrayBuffer issues
-    const arrayBuffer = new ArrayBuffer(data.length);
-    const view = new Uint8Array(arrayBuffer);
-    view.set(data);
-    
-    // Use application/pdf MIME type so browsers recognize it as a PDF
-    const blob = new Blob([arrayBuffer], { type: "application/pdf" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    link.style.display = "none";
+    try {
+      // Ensure the filename has .pdf extension
+      const fileName = name.endsWith('.pdf') ? name : `${name}.pdf`;
+      
+      // Create a new ArrayBuffer to avoid SharedArrayBuffer issues
+      const arrayBuffer = new ArrayBuffer(data.length);
+      const view = new Uint8Array(arrayBuffer);
+      view.set(data);
+      
+      // Use application/pdf MIME type so browsers recognize it as a PDF
+      const blob = new Blob([arrayBuffer], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      link.style.display = "none";
 
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+      document.body.appendChild(link);
+      
+      // Use a small delay to ensure the link is in the DOM before clicking
+      // Some browsers require the element to be in the DOM for a moment
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      link.click();
+      
+      // Wait a bit before removing to ensure click is processed
+      await new Promise(resolve => setTimeout(resolve, 100));
+      document.body.removeChild(link);
 
-    // Clean up the object URL after a short delay
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-    }, 100);
+      // Clean up the object URL after a short delay
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+      }, 100);
+    } catch (error) {
+      console.error("Error in saveFile:", error);
+      throw error;
+    }
   }
 
   /**

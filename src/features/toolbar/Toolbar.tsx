@@ -42,6 +42,7 @@ import type { PrintSettings } from "@/shared/stores/printStore";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 
 export function Toolbar() {
   const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType } = useUIStore();
@@ -355,10 +356,16 @@ export function Toolbar() {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
-    await syncAndSavePDF(async (data) => {
-      // Always show save dialog for Save As
-      await fileSystem.saveFile(data, currentDoc.getName());
-    });
+    try {
+      await syncAndSavePDF(async (data) => {
+        // Always show save dialog for Save As
+        await fileSystem.saveFile(data, currentDoc.getName());
+        // Show success notification
+        useNotificationStore.getState().showNotification("PDF saved successfully", "success");
+      });
+    } catch (error) {
+      console.error("Error in handleSaveAs:", error);
+    }
   };
 
   // Check if we're in Tauri (desktop) or browser

@@ -26,12 +26,17 @@ export const FormTool: ToolHandler = {
       
       const size = 20; // Standard checkbox/radio size
       
+      // getPDFCoordinates returns TOP Y, but annotation.y should be BOTTOM Y
+      // For a square, bottomY = topY - height
+      const topY = coords.y; // getPDFCoordinates returns top Y
+      const bottomY = topY - size; // Convert to bottom Y
+      
       const annotation: Annotation = {
         id: `form_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         type: "formField",
         pageNumber,
         x: coords.x,
-        y: coords.y,
+        y: bottomY, // Use bottom Y (matches FormField.tsx convention)
         width: size,
         height: size,
         fieldType: currentFieldType,
@@ -99,10 +104,15 @@ export const FormTool: ToolHandler = {
     const { currentFieldType } = useUIStore.getState();
     
     // Calculate dimensions
+    // getPDFCoordinates returns TOP Y in PDF coordinates (Y increases upward)
+    // For form fields, annotation.y should be BOTTOM Y (to match FormField.tsx usage)
+    // So we need to convert: bottomY = topY - height
     const width = Math.abs(selectionEnd.x - fieldStart.x);
-    const height = Math.abs(selectionEnd.y - fieldStart.y);
+    const topY = Math.max(fieldStart.y, selectionEnd.y); // Top Y (larger Y in PDF)
+    const bottomY = Math.min(fieldStart.y, selectionEnd.y); // Bottom Y (smaller Y in PDF)
+    const height = topY - bottomY;
     const x = Math.min(fieldStart.x, selectionEnd.x);
-    const y = Math.min(fieldStart.y, selectionEnd.y);
+    const y = bottomY; // Use bottom Y for annotation (matches FormField.tsx convention)
     
     // Set minimum sizes based on field type
     let finalWidth = width;

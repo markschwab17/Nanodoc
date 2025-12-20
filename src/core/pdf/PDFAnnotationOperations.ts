@@ -120,13 +120,38 @@ export class PDFAnnotationOperations {
 
   if (annotObj) {
 
-  annotObj.put("CustomAnnotation", this.mupdf.newString("true"));
+  // Use newName for boolean flag (PDF name objects are more reliable)
+  // Fallback to newString if newName doesn't exist
+  try {
+    annotObj.put("CustomAnnotation", this.mupdf.newName("true"));
+  } catch (e) {
+    // Fallback: try newString if newName fails
+    try {
+      annotObj.put("CustomAnnotation", this.mupdf.newString("true"));
+    } catch (e2) {
+      // If both fail, try using the PDF document's method
+      const pdfDoc = document.getMupdfDocument().asPDF();
+      if (pdfDoc && pdfDoc.newName) {
+        annotObj.put("CustomAnnotation", pdfDoc.newName("true"));
+      } else if (pdfDoc && pdfDoc.newString) {
+        annotObj.put("CustomAnnotation", pdfDoc.newString("true"));
+      }
+    }
+  }
 
   // Store HTML content in a custom field
 
   if (annotation.content) {
 
-  annotObj.put("HTMLContent", this.mupdf.newString(annotation.content));
+  try {
+    annotObj.put("HTMLContent", this.mupdf.newString(annotation.content));
+  } catch (e) {
+    // Fallback: try using the PDF document's method
+    const pdfDoc = document.getMupdfDocument().asPDF();
+    if (pdfDoc && pdfDoc.newString) {
+      annotObj.put("HTMLContent", pdfDoc.newString(annotation.content));
+    }
+  }
 
   }
 
@@ -182,7 +207,11 @@ export class PDFAnnotationOperations {
 
   // Set default appearance for text rendering
 
-  annot.setDefaultAppearance(`/Helv ${fontSize} Tf ${r} ${g} ${b} rg`);
+  try {
+    annot.setDefaultAppearance(`/Helv ${fontSize} Tf ${r} ${g} ${b} rg`);
+  } catch (e) {
+    // Ignore if setDefaultAppearance is not available
+  }
 
   // Remove border/frame around text box (set border width to 0)
 
@@ -196,16 +225,77 @@ export class PDFAnnotationOperations {
 
   }
 
-  // Try to set interior color to transparent (no fill)
+  // Set interior color (background color) if hasBackground is true
 
   try {
-
-  annot.setInteriorColor([]);
-
+    if (annotation.hasBackground && annotation.backgroundColor && annotation.backgroundColor !== "null" && annotation.backgroundColor !== "rgba(255, 255, 255, 0)") {
+      // Parse backgroundColor - handle both hex and rgba formats
+      let bgR = 1, bgG = 1, bgB = 1;
+      
+      if (annotation.backgroundColor.startsWith("#")) {
+        const hex = annotation.backgroundColor.replace("#", "");
+        bgR = parseInt(hex.substring(0, 2), 16) / 255;
+        bgG = parseInt(hex.substring(2, 4), 16) / 255;
+        bgB = parseInt(hex.substring(4, 6), 16) / 255;
+      } else if (annotation.backgroundColor.startsWith("rgba") || annotation.backgroundColor.startsWith("rgb")) {
+        const match = annotation.backgroundColor.match(/[\d.]+/g);
+        if (match && match.length >= 3) {
+          bgR = parseFloat(match[0]) / 255;
+          bgG = parseFloat(match[1]) / 255;
+          bgB = parseFloat(match[2]) / 255;
+        }
+      }
+      
+      annot.setInteriorColor([bgR, bgG, bgB]);
+    } else {
+      // No background or transparent background
+      annot.setInteriorColor([]);
+    }
   } catch {
-
-  // setInteriorColor might not be available
-
+    // setInteriorColor might not be available
+  }
+  
+  // Store backgroundColor and hasBackground in annotation object for later retrieval
+  try {
+    const annotObj = annot.getObject();
+    if (annotObj) {
+      if (annotation.hasBackground !== undefined) {
+        try {
+          annotObj.put("HasBackground", annotation.hasBackground ? this.mupdf.newName("true") : this.mupdf.newName("false"));
+        } catch (e) {
+          try {
+            annotObj.put("HasBackground", this.mupdf.newString(annotation.hasBackground ? "true" : "false"));
+          } catch (e2) {
+            const pdfDoc = document.getMupdfDocument().asPDF();
+            if (pdfDoc && pdfDoc.newName) {
+              annotObj.put("HasBackground", pdfDoc.newName(annotation.hasBackground ? "true" : "false"));
+            } else if (pdfDoc && pdfDoc.newString) {
+              annotObj.put("HasBackground", pdfDoc.newString(annotation.hasBackground ? "true" : "false"));
+            }
+          }
+        }
+      }
+      
+      if (annotation.backgroundColor && annotation.backgroundColor !== "null" && annotation.backgroundColor !== "rgba(255, 255, 255, 0)") {
+        try {
+          annotObj.put("BackgroundColor", this.mupdf.newString(annotation.backgroundColor));
+        } catch (e) {
+          const pdfDoc = document.getMupdfDocument().asPDF();
+          if (pdfDoc && pdfDoc.newString) {
+            annotObj.put("BackgroundColor", pdfDoc.newString(annotation.backgroundColor));
+          }
+        }
+      }
+      
+      // CRITICAL: Update the annotation object to persist the changes
+      try {
+        annotObj.update();
+      } catch (e) {
+        // Ignore if update() is not available
+      }
+    }
+  } catch (e) {
+    // Ignore if we can't store the properties
   }
 
   // Store the PDF annotation object for future updates
@@ -272,17 +362,19 @@ export class PDFAnnotationOperations {
 
   // Each stroke is an array of [x, y] points in display coordinates
 
-  const inkPath: number[] = [];
+  // Convert path to ink list format (array of [x, y] pairs)
+  const inkPath: number[][] = [];
 
   for (const point of annotation.path) {
 
   // Convert from PDF coordinates to display coordinates
 
-  inkPath.push(point.x, pageHeight - point.y);
+  inkPath.push([point.x, pageHeight - point.y]);
 
   }
 
   // Set the ink list (array of strokes, we have one continuous stroke)
+  // Use format 2: wrapped in array [[[x, y], [x, y], ...]] (same as drawings)
 
   try {
 
@@ -290,11 +382,11 @@ export class PDFAnnotationOperations {
 
   } catch {
 
-  // Fallback: try setting as single array
+  // Fallback: try without wrapping
 
   try {
 
-  (annot as any).setInkList(inkPath);
+  annot.setInkList(inkPath);
 
   } catch (e) {
 
@@ -982,32 +1074,61 @@ export class PDFAnnotationOperations {
 
   const annot = page.createAnnotation("Ink");
 
-  // Convert path to ink list format (array of points in display coordinates)
-
-  const inkPath: number[] = [];
+  // Convert path to ink list format
+  // mupdf expects: array of strokes, each stroke is array of [x, y] pairs
+  const inkPath: number[][] = [];
 
   for (const point of annotation.path) {
-
-  inkPath.push(point.x, pageHeight - point.y);
-
+    inkPath.push([point.x, pageHeight - point.y]);
   }
-
+  // Try multiple formats - mupdf's setInkList might expect different structures
+  let inkListSet = false;
+  
+  // Format 1: Array of [x, y] pairs (one stroke)
   try {
-
-  annot.setInkList([inkPath]);
-
-  } catch {
-
-  try {
-
-  (annot as any).setInkList(inkPath);
-
-  } catch (e) {
-
-  console.warn("Could not set ink list:", e);
-
+    annot.setInkList(inkPath);
+    inkListSet = true;
+  } catch (setError1) {
+    // Format 2: Wrapped in array (array of strokes)
+    try {
+      annot.setInkList([inkPath]);
+      inkListSet = true;
+    } catch (setError2) {
+      // Format 3: Flat array wrapped
+      try {
+        const flatInkPath: number[] = [];
+        for (const point of annotation.path) {
+          flatInkPath.push(point.x, pageHeight - point.y);
+        }
+        annot.setInkList([flatInkPath]);
+        inkListSet = true;
+      } catch (setError3) {
+        // Format 4: Try setting via PDF object directly
+        try {
+          const annotObj = annot.getObject();
+          if (annotObj) {
+            // Create array of arrays for InkList
+            const inkListArray = this.mupdf.newArray();
+            const strokeArray = this.mupdf.newArray();
+            for (const point of annotation.path) {
+              const pointArray = this.mupdf.newArray();
+              pointArray.push(this.mupdf.newNumber(point.x));
+              pointArray.push(this.mupdf.newNumber(pageHeight - point.y));
+              strokeArray.push(pointArray);
+            }
+            inkListArray.push(strokeArray);
+            annotObj.put("InkList", inkListArray);
+            inkListSet = true;
+          }
+        } catch (setError4) {
+          console.warn("Could not set ink list with any format:", setError4);
+        }
+      }
+    }
   }
-
+  
+  if (!inkListSet) {
+    console.warn("Failed to set ink list for drawing annotation");
   }
 
   // Set color
@@ -1151,7 +1272,6 @@ export class PDFAnnotationOperations {
   try {
 
   annot.setLine(flatArray);
-
 
   console.log("🟢 [ARROW SAVE] Successfully set line with flat array");
 
@@ -1445,10 +1565,11 @@ export class PDFAnnotationOperations {
 
   document: PDFDocument,
 
-  annotation: Annotation
+  annotation: Annotation,
+
+  page?: any
 
   ): Promise<void> {
-
   const mupdfDoc = document.getMupdfDocument();
 
   const pdfDoc = mupdfDoc.asPDF();
@@ -1459,11 +1580,9 @@ export class PDFAnnotationOperations {
 
   }
 
-  const page = pdfDoc.loadPage(annotation.pageNumber);
-
-  const pageBounds = page.getBounds();
-
-  const pageHeight = pageBounds[3] - pageBounds[1];
+  // Use provided page object if available, otherwise load it
+  // This ensures we're working with the same page instance as the caller
+  const pageObj = page || pdfDoc.loadPage(annotation.pageNumber);
 
   if (!annotation.fieldType) {
 
@@ -1473,27 +1592,101 @@ export class PDFAnnotationOperations {
 
   }
 
-  // Convert to display coordinates (PDF uses bottom-left origin)
-
-  const y = pageHeight - annotation.y - (annotation.height || 0);
+  // CRITICAL: mupdf's setRect() expects coordinates where Y=0 is at the TOP (canvas coordinates)
+  // This is different from the standard PDF coordinate system where Y=0 is at the BOTTOM
+  // annotation.y is the BOTTOM Y in PDF coordinates
+  // We must convert to canvas coordinates: canvasY = pageHeight - (pdfY + height)
+  // This matches the conversion used in PDFDocumentOperations.ts line 961 for updating form fields
+  const pageBounds = pageObj.getBounds();
+  const pageHeight = pageBounds[3] - pageBounds[1];
+  
+  // Convert PDF bottom Y to canvas top Y
+  const canvasY = pageHeight - (annotation.y + (annotation.height || 0));
 
   const rect: [number, number, number, number] = [
 
   annotation.x,
 
-  y,
+  canvasY, // Top Y in canvas coordinates (mupdf expects Y=0 at top)
 
   annotation.x + (annotation.width || 0),
 
-  y + (annotation.height || 0),
+  canvasY + (annotation.height || 0), // Bottom Y in canvas coordinates
 
   ];
 
   // Create Widget annotation (this creates the form field)
 
-  const annot = page.createAnnotation("Widget");
+  const annot = pageObj.createAnnotation("Widget");
 
   annot.setRect(rect);
+
+  // Set field properties using annotation object
+
+  // Helper functions to create MuPDF objects with fallbacks
+  // These are defined at function scope so they're accessible throughout
+  const createString = (value: string): any => {
+    try {
+      return this.mupdf.newString(value);
+    } catch (e) {
+      try {
+        return pdfDoc.newString(value);
+      } catch (e2) {
+        console.warn("Could not create string object:", e2);
+        return value; // Fallback to plain string
+      }
+    }
+  };
+
+  // Helper function to create name objects with fallback
+  const createName = (value: string): any => {
+    try {
+      return this.mupdf.newName(value);
+    } catch (e) {
+      try {
+        return pdfDoc.newName(value);
+      } catch (e2) {
+        try {
+          return this.mupdf.newString(value);
+        } catch (e3) {
+          try {
+            return pdfDoc.newString(value);
+          } catch (e4) {
+            console.warn("Could not create name object:", e4);
+            return value; // Fallback to plain string
+          }
+        }
+      }
+    }
+  };
+
+  // Helper function to create dictionary with fallback
+  const createDictionary = (): any => {
+    try {
+      return this.mupdf.newDictionary();
+    } catch (e) {
+      try {
+        return pdfDoc.newDictionary();
+      } catch (e2) {
+        console.warn("Could not create dictionary:", e2);
+        return {};
+      }
+    }
+  };
+
+  // Helper function to create array with fallback
+  const createArray = (): any => {
+    try {
+      return this.mupdf.newArray();
+    } catch (e) {
+      try {
+        return pdfDoc.newArray();
+      } catch (e2) {
+        console.warn("Could not create array:", e2);
+        return [];
+      }
+    }
+  };
 
   // Set field properties using annotation object
 
@@ -1507,15 +1700,24 @@ export class PDFAnnotationOperations {
 
   const fieldName = annotation.fieldName || `field_${annotation.id}`;
 
-  annotObj.put("T", this.mupdf.newString(fieldName));
-
-  // Set field type and properties
+  // Try to set field name - use fallback pattern like other annotations
+  try {
+    annotObj.put("T", createString(fieldName));
+  } catch (e) {
+    // Fallback: try using the PDF document's method
+    try {
+      annotObj.put("T", pdfDoc.newString(fieldName));
+    } catch (e2) {
+      // If both fail, log but continue
+      console.warn("Could not set field name:", e2);
+    }
+  }
 
   let fieldFlags = 0;
 
   if (annotation.fieldType === "text") {
 
-  annotObj.put("FT", this.mupdf.newName("Tx"));
+  annotObj.put("FT", createName("Tx"));
 
   // Set multiline flag
 
@@ -1529,41 +1731,41 @@ export class PDFAnnotationOperations {
 
   if (annotation.fieldValue && typeof annotation.fieldValue === "string") {
 
-  annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+  annotObj.put("V", createString(annotation.fieldValue));
 
-  annotObj.put("DV", this.mupdf.newString(annotation.fieldValue)); // Default value
+  annotObj.put("DV", createString(annotation.fieldValue)); // Default value
 
   }
 
   } else if (annotation.fieldType === "checkbox") {
 
-  annotObj.put("FT", this.mupdf.newName("Btn"));
+  annotObj.put("FT", createName("Btn"));
 
   // Set checkbox value
 
   if (annotation.fieldValue === true) {
 
-  annotObj.put("V", this.mupdf.newName("Yes"));
+  annotObj.put("V", createName("Yes"));
 
-  annotObj.put("AS", this.mupdf.newName("Yes"));
+  annotObj.put("AS", createName("Yes"));
 
   } else {
 
-  annotObj.put("V", this.mupdf.newName("Off"));
+  annotObj.put("V", createName("Off"));
 
-  annotObj.put("AS", this.mupdf.newName("Off"));
+  annotObj.put("AS", createName("Off"));
 
   }
 
   // Set appearance dictionary for checkbox
 
-  const apDict = this.mupdf.newDictionary();
+  const apDict = createDictionary();
 
-  const nDict = this.mupdf.newDictionary();
+  const nDict = createDictionary();
 
-  nDict.put("Off", this.mupdf.newDictionary());
+  nDict.put("Off", createDictionary());
 
-  nDict.put("Yes", this.mupdf.newDictionary());
+  nDict.put("Yes", createDictionary());
 
   apDict.put("N", nDict);
 
@@ -1571,7 +1773,7 @@ export class PDFAnnotationOperations {
 
   } else if (annotation.fieldType === "radio") {
 
-  annotObj.put("FT", this.mupdf.newName("Btn"));
+  annotObj.put("FT", createName("Btn"));
 
   fieldFlags |= 32768; // Radio flag (bit 16)
 
@@ -1579,7 +1781,7 @@ export class PDFAnnotationOperations {
 
   if (annotation.radioGroup) {
 
-  annotObj.put("T", this.mupdf.newString(annotation.radioGroup));
+  annotObj.put("T", createString(annotation.radioGroup));
 
   }
 
@@ -1587,21 +1789,21 @@ export class PDFAnnotationOperations {
 
   if (annotation.fieldValue === true) {
 
-  annotObj.put("V", this.mupdf.newName("Yes"));
+  annotObj.put("V", createName("Yes"));
 
-  annotObj.put("AS", this.mupdf.newName("Yes"));
+  annotObj.put("AS", createName("Yes"));
 
   } else {
 
-  annotObj.put("V", this.mupdf.newName("Off"));
+  annotObj.put("V", createName("Off"));
 
-  annotObj.put("AS", this.mupdf.newName("Off"));
+  annotObj.put("AS", createName("Off"));
 
   }
 
   } else if (annotation.fieldType === "dropdown") {
 
-  annotObj.put("FT", this.mupdf.newName("Ch"));
+  annotObj.put("FT", createName("Ch"));
 
   fieldFlags |= 131072; // Combo box flag (bit 18) - makes it a dropdown, not listbox
 
@@ -1609,11 +1811,11 @@ export class PDFAnnotationOperations {
 
   if (annotation.options && annotation.options.length > 0) {
 
-  const optArray = this.mupdf.newArray();
+  const optArray = createArray();
 
   for (const opt of annotation.options) {
 
-  optArray.push(this.mupdf.newString(opt));
+  optArray.push(createString(opt));
 
   }
 
@@ -1623,7 +1825,7 @@ export class PDFAnnotationOperations {
 
   if (annotation.fieldValue && typeof annotation.fieldValue === "string") {
 
-  annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+  annotObj.put("V", createString(annotation.fieldValue));
 
   }
 
@@ -1633,7 +1835,7 @@ export class PDFAnnotationOperations {
 
   // Date fields are text fields with special formatting
 
-  annotObj.put("FT", this.mupdf.newName("Tx"));
+  annotObj.put("FT", createName("Tx"));
 
   fieldFlags |= 4096; // Multiline flag (for date picker compatibility)
 
@@ -1641,9 +1843,9 @@ export class PDFAnnotationOperations {
 
   if (annotation.fieldValue && typeof annotation.fieldValue === "string") {
 
-  annotObj.put("V", this.mupdf.newString(annotation.fieldValue));
+  annotObj.put("V", createString(annotation.fieldValue));
 
-  annotObj.put("DV", this.mupdf.newString(annotation.fieldValue));
+  annotObj.put("DV", createString(annotation.fieldValue));
 
   }
 
@@ -1664,22 +1866,49 @@ export class PDFAnnotationOperations {
   }
 
   if (fieldFlags > 0) {
-
   annotObj.put("Ff", fieldFlags);
 
+  } else if (annotation.fieldType === "checkbox") {
+    // CRITICAL: For checkboxes, we MUST write Ff=0 explicitly to distinguish from push buttons
+    // Without Ff, the loader may misidentify the field type
+    annotObj.put("Ff", 0);
   }
 
   // Set appearance characteristics for better compatibility
 
-  const mkDict = this.mupdf.newDictionary();
+  const mkDict = createDictionary();
 
   annotObj.put("MK", mkDict);
 
-  // Ensure the field is added to the AcroForm
-
-  annotObj.update();
-
+  // CRITICAL: Update the annotation object BEFORE adding to page Annots array
+  // This ensures it's properly initialized in the PDF structure
+  if (typeof annotObj.update === 'function') {
+    try {
+      annotObj.update();
+    } catch (updateError) {
+      // Ignore update errors
+    }
   }
+  
+  // CRITICAL: Ensure the annotation object is an indirect object before updating
+  // This ensures it gets an object number and is properly persisted in the PDF
+  try {
+    // Get the annotation object and ensure it's added to the PDF document's object stream
+    const annotObjForIndirect = annot.getObject();
+    if (annotObjForIndirect) {
+      // Try to ensure it's an indirect object by getting its reference
+      // If it's not already indirect, MuPDF should make it indirect when we add it to Annots
+    }
+  } catch (indirectError) {
+    // Ignore errors, continue anyway
+  }
+  
+  // Update the annotation itself - this should commit it to the PDF structure
+  annot.update();
+
+  // NOTE: AcroForm registration is moved to AFTER page Annots array update
+  // This ensures the annotation is properly initialized in the PDF structure first
+  } // End of if (annotObj) block
 
   } catch (error) {
 
@@ -1687,7 +1916,524 @@ export class PDFAnnotationOperations {
 
   }
 
-  annot.update();
+  // CRITICAL: Ensure the annotation is properly committed to the PDF structure
+  // Call update() multiple times to ensure all changes are persisted
+  try {
+    annot.update();
+    // Also update the annotation object if it exists
+    const finalAnnotObj = annot.getObject();
+    if (finalAnnotObj && typeof finalAnnotObj.update === 'function') {
+      finalAnnotObj.update();
+    }
+    // Update one more time to ensure everything is committed
+    annot.update();
+  } catch (updateError) {
+    console.warn("Could not finalize annotation update:", updateError);
+  }
+  
+  // CRITICAL: For Widget annotations, we need to ensure the page's Annots array is updated
+  // This ensures the annotation is properly linked to the page structure in the PDF
+  try {
+    // Get the annotation object - it's needed to add to the Annots array
+    const annotObj = annot.getObject();
+    if (!annotObj) {
+      return;
+    }
+    
+    const pageObjObj = pageObj.getObject();
+    if (pageObjObj) {
+      let annotsArray = pageObjObj.get("Annots");
+      if (!annotsArray) {
+        // Create Annots array if it doesn't exist
+        annotsArray = createArray();
+        pageObjObj.put("Annots", annotsArray);
+      }
+      // Check if annotsArray is a MuPDF array (has push method and length property)
+      // MuPDF arrays are objects, not JavaScript arrays, so Array.isArray() returns false
+      const isMuPDFArray = annotsArray && typeof annotsArray === 'object' && 
+                          typeof annotsArray.push === 'function' && 
+                          typeof annotsArray.length !== 'undefined';
+      const isJSArray = Array.isArray(annotsArray);
+      
+      if (isMuPDFArray || isJSArray) {
+        let alreadyInAnnots = false;
+        const arrayLength = annotsArray.length;
+        for (let i = 0; i < arrayLength; i++) {
+          try {
+            const item = annotsArray.get ? annotsArray.get(i) : annotsArray[i];
+            if (item === annotObj || 
+                (item && item.equals && item.equals(annotObj))) {
+              alreadyInAnnots = true;
+              break;
+            }
+          } catch (getError) {
+            // If get() fails, try array access
+            if (annotsArray[i] === annotObj) {
+              alreadyInAnnots = true;
+              break;
+            }
+          }
+        }
+        if (!alreadyInAnnots) {
+          // CRITICAL: For Widget annotations created with createAnnotation(), 
+          // MuPDF should automatically add them to Annots, but if it didn't, we need to add them.
+          // However, we should use page.addAnnotation() instead of manually manipulating Annots
+          // to ensure the annotation becomes an indirect object properly.
+          try {
+            // Try using page.addAnnotation() if available - this ensures proper indirect object creation
+            if (typeof pageObj.addAnnotation === 'function') {
+              pageObj.addAnnotation(annot);
+            } else {
+              // Fallback: manually add to Annots array
+              // CRITICAL: The annotation from createAnnotation() should already be in Annots
+              // But if it's not, we need to ensure it becomes an indirect object
+              // Try to get the annotation reference from page.getAnnotations() first
+              const pageAnnots = pageObj.getAnnotations();
+              let annotRefFromPage = null;
+              for (const pageAnnot of pageAnnots) {
+                try {
+                  if (pageAnnot === annot || (pageAnnot.getObject && pageAnnot.getObject() === annotObj)) {
+                    annotRefFromPage = pageAnnot;
+                    break;
+                  }
+                } catch (e) {
+                  // Ignore errors
+                }
+              }
+              
+              if (annotRefFromPage) {
+                // Annotation is already in page's Annots, use its reference
+                // Ensure it's updated
+                annot.update();
+              } else {
+                // Annotation is not in Annots, need to add it
+                // CRITICAL: Before adding, ensure the annotation is updated
+                annot.update();
+                if (typeof annotObj.update === 'function') {
+                  annotObj.update();
+                }
+                
+                // CRITICAL: Instead of pushing annotObj directly, try to get/create an indirect reference
+                // MuPDF should create an indirect object when we add to Annots, but we need to ensure it happens
+                // Try using the annotation's indirect reference if available
+                let indirectRef = null;
+                try {
+                  if (typeof annotObj.getIndirectRef === 'function') {
+                    indirectRef = annotObj.getIndirectRef();
+                  }
+                } catch (e) {
+                  // Not an indirect object yet
+                }
+                
+                if (indirectRef) {
+                  // Use the indirect reference
+                  annotsArray.push(indirectRef);
+                } else {
+                  // Push the object - MuPDF should make it indirect
+                  annotsArray.push(annotObj);
+                }
+                
+                pageObjObj.put("Annots", annotsArray);
+                
+                // Update the page object to commit the Annots array change
+                if (typeof pageObjObj.update === 'function') {
+                  pageObjObj.update();
+                }
+                if (typeof pageObj.update === 'function') {
+                  pageObj.update();
+                }
+                
+                // Update the annotation after adding to Annots - this should make it indirect
+                annot.update();
+              }
+            }
+            
+            // CRITICAL: After updating the page, reload the Annots array to get indirect references
+            // The Annots array should now contain indirect references to the annotations
+            try {
+              // Reload the page object to get the updated Annots array
+              const updatedPageObjObj = pageObj.getObject();
+              if (updatedPageObjObj) {
+                const updatedAnnotsArray = updatedPageObjObj.get("Annots");
+                if (updatedAnnotsArray) {
+                  // The last item in Annots should be our newly added annotation
+                  // Annotation is now in the Annots array
+                }
+              }
+            } catch (indirectRefError) {
+            }
+            
+            // Check if it's now an indirect object
+            const annotObjAfter = annot.getObject();
+            if (annotObjAfter) {
+              // Annotation object exists after update
+            }
+          } catch (addError) {
+          }
+        } else {
+        }
+        
+        // CRITICAL: Now that the annotation is in the page Annots array, add it to AcroForm Fields
+        // Get the annotation reference from the Annots array to ensure it's properly linked
+        try {
+          // Get the annotation's reference from the Annots array
+          // Try to find the annotation in the Annots array by matching it
+          let annotRef = null;
+          const annotsFromPage = pageObj.getAnnotations();
+          for (const pageAnnot of annotsFromPage) {
+            try {
+              if (pageAnnot === annot || (pageAnnot.getObject && pageAnnot.getObject() === annotObj)) {
+                annotRef = pageAnnot;
+                break;
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+          }
+          
+          // CRITICAL: Try to get the indirect reference from the Annots array
+          // After updating the page, the Annots array should contain indirect references
+          let indirectRefFromAnnots = null;
+          try {
+            const updatedPageObjObj = pageObj.getObject();
+            if (updatedPageObjObj) {
+              const updatedAnnotsArray = updatedPageObjObj.get("Annots");
+              if (updatedAnnotsArray && updatedAnnotsArray.length > 0) {
+                // The last item in Annots should be our newly added annotation
+                const lastIndex = updatedAnnotsArray.length - 1;
+                indirectRefFromAnnots = updatedAnnotsArray.get ? updatedAnnotsArray.get(lastIndex) : updatedAnnotsArray[lastIndex];
+              }
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+          
+          // If not found in page annotations, try to get from Annots array
+          if (!annotRef) {
+            annotRef = indirectRefFromAnnots || (annotsArray.get ? annotsArray.get(annotsArray.length - 1) : annotsArray[annotsArray.length - 1]);
+          }
+          
+          // Try to get indirect reference from annotRef
+          let indirectRef = indirectRefFromAnnots;
+          if (!indirectRef && annotRef) {
+            try {
+              const annotRefObj = annotRef.getObject ? annotRef.getObject() : annotRef;
+              if (annotRefObj && typeof annotRefObj.getIndirectRef === 'function') {
+                indirectRef = annotRefObj.getIndirectRef();
+              }
+            } catch (e) {
+              // Ignore errors
+            }
+          }
+          
+          // Ensure the field is added to the AcroForm
+          // CRITICAL: Widget annotations must be explicitly added to the AcroForm Fields array
+          // to be persisted in the PDF file
+          
+          // Use indirect reference if available, otherwise use annotRef
+          const refToUse = indirectRef || indirectRefFromAnnots || annotRef;
+          const catalogObj = pdfDoc.getTrailer().get("Root");
+          if (catalogObj) {
+            let acroFormObj = catalogObj.get("AcroForm");
+            if (!acroFormObj) {
+              // Create AcroForm dictionary if it doesn't exist
+              acroFormObj = createDictionary();
+              const fieldsArray = createArray();
+              acroFormObj.put("Fields", fieldsArray);
+              try {
+                acroFormObj.put("NeedAppearances", this.mupdf.newBoolean(true));
+              } catch (e) {
+                try {
+                  acroFormObj.put("NeedAppearances", pdfDoc.newBoolean(true));
+                } catch (e2) {
+                  acroFormObj.put("NeedAppearances", true);
+                }
+              }
+              catalogObj.put("AcroForm", acroFormObj);
+              if (typeof catalogObj.update === 'function') {
+                catalogObj.update();
+              }
+            }
+            
+            // Add the annotation reference to AcroForm Fields array
+            let fieldsArray = null;
+            let acroFormObjValid = true;
+            try {
+              // Verify acroFormObj is valid before trying to get Fields
+              if (!acroFormObj || typeof acroFormObj.get !== 'function') {
+                acroFormObjValid = false;
+              } else {
+                fieldsArray = acroFormObj.get("Fields");
+              }
+            } catch (getFieldsError) {
+              // If we can't get Fields, try to create a new AcroForm
+              fieldsArray = null;
+              acroFormObjValid = false;
+            }
+            
+            // If AcroForm is invalid, try to recreate it
+            if (!acroFormObjValid) {
+              try {
+                // Use the helper functions that are defined earlier in the function
+                // If they're not available, create objects directly
+                let newAcroFormObj: any = null;
+                try {
+                  newAcroFormObj = this.mupdf.newDictionary();
+                } catch (e1) {
+                  try {
+                    newAcroFormObj = pdfDoc.newDictionary();
+                  } catch (e2) {
+                    throw new Error("Cannot create dictionary");
+                  }
+                }
+                
+                let newFieldsArray: any = null;
+                try {
+                  newFieldsArray = this.mupdf.newArray();
+                } catch (e1) {
+                  try {
+                    newFieldsArray = pdfDoc.newArray();
+                  } catch (e2) {
+                    throw new Error("Cannot create array");
+                  }
+                }
+                
+                newAcroFormObj.put("Fields", newFieldsArray);
+                try {
+                  newAcroFormObj.put("NeedAppearances", this.mupdf.newBoolean(true));
+                } catch (e) {
+                  try {
+                    newAcroFormObj.put("NeedAppearances", pdfDoc.newBoolean(true));
+                  } catch (e2) {
+                    newAcroFormObj.put("NeedAppearances", true);
+                  }
+                }
+                catalogObj.put("AcroForm", newAcroFormObj);
+                if (typeof catalogObj.update === 'function') {
+                  catalogObj.update();
+                }
+                acroFormObj = newAcroFormObj;
+                fieldsArray = newFieldsArray;
+              } catch (recreateError) {
+                // If we can't recreate AcroForm, we can't add the annotation to Fields
+                // But we'll still set the Parent field as a fallback
+              }
+            }
+            
+            // Check if fieldsArray is valid and has array-like properties
+            let isMuPDFFieldsArray = false;
+            let isJSFieldsArray = false;
+            
+            if (fieldsArray) {
+              try {
+                // Safely check if it's a MuPDF array
+                isMuPDFFieldsArray = typeof fieldsArray === 'object' && 
+                                    typeof fieldsArray.push === 'function' && 
+                                    typeof fieldsArray.length !== 'undefined';
+                // Safely check if it's a JS array
+                isJSFieldsArray = Array.isArray(fieldsArray);
+              } catch (checkError) {
+                // If check fails, treat as no array
+                fieldsArray = null;
+              }
+            }
+            
+            if (isMuPDFFieldsArray || isJSFieldsArray) {
+              // CRITICAL: Skip the check entirely - it's causing errors with null elements
+              // The error "Cannot read properties of null" happens when fieldsArray.get(i) returns null
+              // Just try to add the annotation directly to the Fields array
+              let alreadyInFields = false;
+              
+              if (!alreadyInFields) {
+                
+                // Try multiple approaches to add the annotation to Fields array
+                let addedToFields = false;
+                
+                // Approach 1: Try using the annotation object's indirect reference method
+                try {
+                  // Get indirect reference from the annotation object
+                  let indirectRef = null;
+                  if (annotObj && typeof annotObj.getIndirectRef === 'function') {
+                    indirectRef = annotObj.getIndirectRef();
+                  } else if (annot && typeof annot.getIndirectRef === 'function') {
+                    indirectRef = annot.getIndirectRef();
+                  }
+                  
+                  if (indirectRef) {
+                    fieldsArray.push(indirectRef);
+                    acroFormObj.put("Fields", fieldsArray);
+                    if (typeof acroFormObj.update === 'function') {
+                      acroFormObj.update();
+                    }
+                    addedToFields = true;
+                  }
+                } catch (indirectRefError) {
+                }
+                
+                // Approach 2: Try using the reference from Annots array (use indirectRef if available)
+                if (!addedToFields && refToUse) {
+                  try {
+                    fieldsArray.push(refToUse);
+                    acroFormObj.put("Fields", fieldsArray);
+                    if (typeof acroFormObj.update === 'function') {
+                      acroFormObj.update();
+                    }
+                    addedToFields = true;
+                
+                // CRITICAL: For terminal fields (Widget annotations added directly to Fields),
+                // we need to ensure the annotation has proper structure.
+                // The Widget annotation should reference itself in the Fields array.
+                // However, we should NOT set Parent to AcroForm - that's incorrect.
+                // Instead, we need to ensure the annotation is properly structured as a field.
+                
+                // CRITICAL: Update the annotation, AcroForm, and catalog after adding to Fields
+                // This ensures all changes are committed to the PDF structure
+                try {
+                  // For terminal fields, the Widget annotation IS the field dictionary
+                  // So we don't need to set Parent - the annotation itself is in Fields
+                  // But we should ensure all field properties are properly set
+                  
+                  annot.update();
+                  if (typeof acroFormObj.update === 'function') {
+                    acroFormObj.update();
+                  }
+                  if (typeof catalogObj.update === 'function') {
+                    catalogObj.update();
+                  }
+                  // Update one more time to ensure everything is committed
+                  annot.update();
+                } catch (updateError) {
+                }
+                  } catch (pushError) {
+                  }
+                }
+                
+                // Approach 3: Try using annotObj directly
+                if (!addedToFields && annotObj) {
+                  try {
+                    fieldsArray.push(annotObj);
+                    acroFormObj.put("Fields", fieldsArray);
+                    if (typeof acroFormObj.update === 'function') {
+                      acroFormObj.update();
+                    }
+                    addedToFields = true;
+                  } catch (fallbackError) {
+                    console.warn("Could not add Widget to AcroForm Fields array, but annotation is in page Annots array");
+                  }
+                }
+                
+                if (!addedToFields) {
+                }
+              } else {
+              }
+            } else if (!fieldsArray) {
+              // Create new Fields array
+              let newFieldsArray: any = null;
+              try {
+                newFieldsArray = createArray();
+              } catch (createArrayError) {
+                // If createArray is not available, try to create array directly
+                try {
+                  newFieldsArray = this.mupdf.newArray();
+                } catch (e1) {
+                  try {
+                    newFieldsArray = pdfDoc.newArray();
+                  } catch (e2) {
+                    // Fallback to JavaScript array
+                    newFieldsArray = [];
+                  }
+                }
+              }
+              
+              if (!newFieldsArray) {
+                // Skip creating Fields array if we can't create one
+                return;
+              }
+              try {
+                newFieldsArray.push(annotRef);
+                acroFormObj.put("Fields", newFieldsArray);
+                if (typeof acroFormObj.update === 'function') {
+                  acroFormObj.update();
+                }
+              } catch (pushError) {
+                try {
+                  newFieldsArray.push(annotObj);
+                  acroFormObj.put("Fields", newFieldsArray);
+                  if (typeof acroFormObj.update === 'function') {
+                    acroFormObj.update();
+                  }
+                } catch (fallbackError) {
+                }
+              }
+            }
+          }
+        } catch (acroFormError) {
+          // Even if AcroForm registration fails, the annotation is still in the page Annots array
+          // Some PDF viewers may still recognize it as a form field
+          console.warn("AcroForm registration failed, but annotation is in page Annots array:", acroFormError);
+          
+          // CRITICAL: Even though we can't add to AcroForm Fields array, we should still ensure
+          // the Widget annotation has the Parent field pointing to the AcroForm
+          // This is an alternative way to link Widget annotations to AcroForm
+          try {
+            const catalogObj = pdfDoc.getTrailer().get("Root");
+            if (catalogObj) {
+              let acroFormObj = catalogObj.get("AcroForm");
+              if (!acroFormObj) {
+                // Create AcroForm if it doesn't exist
+                acroFormObj = createDictionary();
+                const fieldsArray = createArray();
+                acroFormObj.put("Fields", fieldsArray);
+                try {
+                  acroFormObj.put("NeedAppearances", this.mupdf.newBoolean(true));
+                } catch (e) {
+                  try {
+                    acroFormObj.put("NeedAppearances", pdfDoc.newBoolean(true));
+                  } catch (e2) {
+                    acroFormObj.put("NeedAppearances", true);
+                  }
+                }
+                catalogObj.put("AcroForm", acroFormObj);
+                if (typeof catalogObj.update === 'function') {
+                  catalogObj.update();
+                }
+              }
+              
+              // Set the Parent field on the Widget annotation to point to the AcroForm
+              // This is an alternative way to link Widget annotations to AcroForm
+              if (annotObj && acroFormObj) {
+                try {
+                  annotObj.put("Parent", acroFormObj);
+                  if (typeof annotObj.update === 'function') {
+                    annotObj.update();
+                  }
+                  annot.update();
+                } catch (parentError) {
+                }
+              }
+            }
+          } catch (parentLinkError) {
+          }
+        }
+      } else {
+        // Annots exists but is not an array - replace it with a new array
+        annotsArray = createArray();
+        annotsArray.push(annotObj);
+        pageObjObj.put("Annots", annotsArray);
+        // Try to update the page object dictionary if update() method exists
+        if (typeof pageObjObj.update === 'function') {
+          pageObjObj.update();
+        }
+        // Also try updating the page object itself
+        if (typeof pageObj.update === 'function') {
+          pageObj.update();
+        }
+      }
+    } else {
+    }
+  } catch (pageUpdateError) {
+    console.warn("Could not update page Annots array:", pageUpdateError);
+  }
 
   // Store the PDF annotation object for future updates
 
@@ -2144,6 +2890,26 @@ export class PDFAnnotationOperations {
   try {
 
   page.deleteAnnotation(annotation.pdfAnnotation);
+  
+  // CRITICAL: Update the annotation object and page to persist the deletion
+  // First, try to update the page object directly
+  try {
+    const pageObj = page.getObject();
+    if (pageObj && typeof pageObj.update === 'function') {
+      pageObj.update();
+    }
+  } catch (e) {
+    // Page object update might not be available
+  }
+  
+  // Also try page.update() if available
+  try {
+    if (typeof page.update === 'function') {
+      page.update();
+    }
+  } catch (e) {
+    // Some mupdf versions might not have page.update()
+  }
 
   return;
 
@@ -2249,20 +3015,93 @@ export class PDFAnnotationOperations {
 
   }
 
+  // Match overlay highlights and drawings (both use Ink annotations)
+  if ((annotation.type === "highlight" && annotation.highlightMode === "overlay") || annotation.type === "draw") {
+    if (annotType === "Ink") {
+      // For Ink annotations, match by path points if available
+      if (annotation.path && annotation.path.length >= 2) {
+        try {
+          const annotInkList = annot.getInkList();
+          if (annotInkList && annotInkList.length > 0) {
+            // Get the first stroke from the ink list
+            const annotStroke = annotInkList[0];
+            if (annotStroke && annotStroke.length >= 2) {
+              // Convert annotation path to match format (PDF coordinates)
+              const pageBounds = page.getBounds();
+              const pageHeight = pageBounds[3] - pageBounds[1];
+              
+              // Check if first and last points match (within tolerance)
+              const annotFirstPoint = annotStroke[0];
+              const annotLastPoint = annotStroke[annotStroke.length - 1];
+              
+              const annotationFirstPoint = annotation.path[0];
+              const annotationLastPoint = annotation.path[annotation.path.length - 1];
+              
+              // Convert annotation coordinates to display coordinates for comparison
+              const annotationFirstDisplay = { x: annotationFirstPoint.x, y: pageHeight - annotationFirstPoint.y };
+              const annotationLastDisplay = { x: annotationLastPoint.x, y: pageHeight - annotationLastPoint.y };
+              
+              const firstMatches = annotFirstPoint && annotFirstPoint.length >= 2 &&
+                Math.abs(annotFirstPoint[0] - annotationFirstDisplay.x) < 5 &&
+                Math.abs(annotFirstPoint[1] - annotationFirstDisplay.y) < 5;
+              
+              const lastMatches = annotLastPoint && annotLastPoint.length >= 2 &&
+                Math.abs(annotLastPoint[0] - annotationLastDisplay.x) < 5 &&
+                Math.abs(annotLastPoint[1] - annotationLastDisplay.y) < 5;
+              
+              if (firstMatches && lastMatches) {
+                page.deleteAnnotation(annot);
+                return;
+              }
+            }
+          }
+        } catch (e) {
+          // Ignore errors in path matching
+        }
+      }
+      
+      // Fallback for Ink annotations: match by position/bounds if path matching failed
+      try {
+        const rect = annot.getRect();
+        if (rect && annotation.x !== undefined && annotation.y !== undefined && annotation.width !== undefined && annotation.height !== undefined) {
+          const pageBounds = page.getBounds();
+          const pageHeight = pageBounds[3] - pageBounds[1];
+          // Convert annotation y to display coordinates for comparison
+          const annotationDisplayY = pageHeight - annotation.y - annotation.height;
+          // Compare position with more lenient tolerance for drawings (50px to account for coordinate rounding)
+          const matchesX = Math.abs(rect[0] - annotation.x) < 50;
+          const matchesY = Math.abs(rect[1] - annotationDisplayY) < 50;
+          // Also check if width/height are similar (within 50px)
+          const matchesWidth = Math.abs((rect[2] - rect[0]) - annotation.width) < 50;
+          const matchesHeight = Math.abs((rect[3] - rect[1]) - annotation.height) < 50;
+          
+          if ((matchesX && matchesY) || (matchesWidth && matchesHeight)) {
+            page.deleteAnnotation(annot);
+            return;
+          }
+        }
+      } catch (e) {
+        // Ignore errors in position matching
+      }
+    }
+  }
+
   // Fallback: try to match by approximate position
-
-  const rect = annot.getRect();
-
-  const matchesPosition = Math.abs(rect[0] - (annotation.x || 0)) < 10 && 
-
-  Math.abs(rect[1] - (annotation.y || 0)) < 10;
-
-  if (matchesPosition) {
-
-  page.deleteAnnotation(annot);
-
-  return;
-
+  // Skip this for Ink annotations (already handled above) and Highlight annotations (already handled above)
+  if (annotType !== "Ink" && annotType !== "Highlight") {
+    try {
+      const rect = annot.getRect();
+      if (rect) {
+        const matchesPosition = Math.abs(rect[0] - (annotation.x || 0)) < 10 && 
+          Math.abs(rect[1] - (annotation.y || 0)) < 10;
+        if (matchesPosition) {
+          page.deleteAnnotation(annot);
+          return;
+        }
+      }
+    } catch (e) {
+      // Ignore errors in position matching
+    }
   }
 
   }
@@ -2294,10 +3133,6 @@ export class PDFAnnotationOperations {
   const page = pdfDoc.loadPage(pageNumber);
 
   const pdfAnnotations = page.getAnnotations();
-
-  const pageBounds = page.getBounds();
-
-  const pageHeight = pageBounds[3] - pageBounds[1];
 
   const formFields: Annotation[] = [];
 
@@ -2397,7 +3232,7 @@ export class PDFAnnotationOperations {
 
   x: rect[0],
 
-  y: pageHeight - rect[3],
+  y: rect[1], // FIXED: Use rect[1] (bottom Y) directly, not pageHeight - rect[3] (top Y flipped)
 
   width: rect[2] - rect[0],
 

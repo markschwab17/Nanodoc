@@ -385,3 +385,11 @@ If you're short on time, at minimum test these critical paths:
 - Verify data persistence (save/reload)
 - Test with different PDF sources (generated, scanned, etc.)
 
+
+
+
+
+
+
+
+
