@@ -568,9 +568,26 @@ export class PDFAnnotationLoader {
           }
           const pageBounds = page.getBounds();
           const pageHeight = pageBounds[3] - pageBounds[1];
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationLoader.ts:570',message:'Loading stamp annotation',data:{annotationId:id,pageNumber:pageNumber,pdfRect:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},pageHeight:pageHeight,calculatedDisplay:{x:rect[0],y:pageHeight-rect[3],width:rect[2]-rect[0],height:rect[3]-rect[1]},stampType:stampData.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'LOAD'})}).catch(()=>{});
-          // #endregion
+
+          console.log(`[DIAGNOSTIC] Loading stamp annotation: ${id}`);
+          console.log(`[DIAGNOSTIC] Stamp type: ${stampData.type}, has imageData: ${!!stampData.imageData}`);
+          if (stampData.imageData) {
+            console.log(`[DIAGNOSTIC] Image data length: ${stampData.imageData.length}`);
+          }
+
+          // Check if the PDF annotation has an appearance
+          try {
+            const hasAppearance = pdfAnnot.getAppearance() !== null;
+            console.log(`[DIAGNOSTIC] PDF annotation has appearance: ${hasAppearance}`);
+            if (hasAppearance) {
+              console.log(`[DIAGNOSTIC] Appearance object exists on loaded stamp`);
+            } else {
+              console.log(`[DIAGNOSTIC] WARNING: No appearance found on loaded stamp - this may cause DRAFT display`);
+            }
+          } catch (e) {
+            console.error(`[DIAGNOSTIC] Could not check appearance:`, e);
+            console.error(`[DIAGNOSTIC] Error type: ${typeof e}, message: ${(e as any)?.message || 'no message'}`);
+          }
 
           annotations.push({
             id,

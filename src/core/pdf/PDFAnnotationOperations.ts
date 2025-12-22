@@ -2489,6 +2489,11 @@ export class PDFAnnotationOperations {
   const annot = page.createAnnotation("Stamp");
 
   annot.setRect(rect);
+  // CRITICAL: Update annotation after setting rect before setting appearance
+  console.log(`[DIAGNOSTIC] Updating annotation after setting rect...`);
+  annot.update();
+  console.log(`[DIAGNOSTIC] Annotation updated successfully`);
+
   // #region agent log
   const rectAfterSet = annot.getRect();
   fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2491',message:'After setRect - checking if rect changed',data:{annotationId:annotation.id,rectSet:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},rectAfterSet:{x:rectAfterSet[0],y:rectAfterSet[1],x2:rectAfterSet[2],y2:rectAfterSet[3]},rectChanged:rect[0]!==rectAfterSet[0]||rect[1]!==rectAfterSet[1]||rect[2]!==rectAfterSet[2]||rect[3]!==rectAfterSet[3]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
@@ -2527,81 +2532,8 @@ export class PDFAnnotationOperations {
       // Ignore if we can't set the marker
     }
 
-    // For image stamps, embed the actual image as the appearance
-    // CRITICAL: Set appearance AFTER rect to ensure proper sizing
-    if (annotation.stampData.type === "image" && annotation.stampData.imageData) {
-      try {
-        // Extract base64 data from data URL
-        const base64Data = annotation.stampData.imageData.split(',')[1] || annotation.stampData.imageData;
-        const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-        
-        // Create mupdf Image from buffer
-        // CRITICAL FIX: Try multiple approaches to create Image
-        // PDFDocumentOperations uses Image.fromBuffer(imageBytes) directly, but it fails here
-        // Try using Buffer first, or try accessing through document
-        let image;
-        // #region agent log
-        const hasBuffer = !!this.mupdf.Buffer;
-        const bufferMethods = this.mupdf.Buffer ? Object.keys(this.mupdf.Buffer).slice(0,10).join(',') : 'none';
-        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2538',message:'Trying to create Image',data:{annotationId:annotation.id,hasBuffer:hasBuffer,bufferMethods:bufferMethods,imageBytesType:typeof imageBytes,imageBytesLength:imageBytes.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
-        // #endregion
-        
-        // CRITICAL FIX: Use the document's mupdf instance which has Image.fromBuffer
-        // The mupdf instance in constructor might not have the same API
-        // Get it from the document which should have full mupdf API
-        const mupdfDoc = document.getMupdfDocument();
-        const pdfDoc = mupdfDoc.asPDF();
-        
-        // Try approach 1: Direct Image.fromBuffer from constructor's mupdf (same as PDFDocumentOperations)
-        if (this.mupdf.Image && typeof this.mupdf.Image.fromBuffer === 'function') {
-          image = this.mupdf.Image.fromBuffer(imageBytes);
-        }
-        // Try approach 2: Use Buffer.fromArrayBuffer then Image.fromBuffer
-        else if (this.mupdf.Buffer && typeof this.mupdf.Buffer.fromArrayBuffer === 'function') {
-          const buffer = this.mupdf.Buffer.fromArrayBuffer(imageBytes.buffer);
-          if (this.mupdf.Image && typeof this.mupdf.Image.fromBuffer === 'function') {
-            image = this.mupdf.Image.fromBuffer(buffer);
-          } else if (pdfDoc && pdfDoc.Image && typeof pdfDoc.Image.fromBuffer === 'function') {
-            // Try document's Image API
-            image = pdfDoc.Image.fromBuffer(buffer);
-          } else {
-            throw new Error("Image.fromBuffer not available even with Buffer");
-          }
-        }
-        // Try approach 3: Use document's Image API directly
-        else if (pdfDoc && pdfDoc.Image && typeof pdfDoc.Image.fromBuffer === 'function') {
-          image = pdfDoc.Image.fromBuffer(imageBytes);
-        }
-        // Try approach 4: Use Buffer.fromBytes
-        else if (this.mupdf.Buffer && typeof this.mupdf.Buffer.fromBytes === 'function') {
-          const buffer = this.mupdf.Buffer.fromBytes(imageBytes);
-          if (this.mupdf.Image && typeof this.mupdf.Image.fromBuffer === 'function') {
-            image = this.mupdf.Image.fromBuffer(buffer);
-          } else if (pdfDoc && pdfDoc.Image && typeof pdfDoc.Image.fromBuffer === 'function') {
-            image = pdfDoc.Image.fromBuffer(buffer);
-          } else {
-            throw new Error("Image.fromBuffer not available even with Buffer.fromBytes");
-          }
-        } else {
-          throw new Error(`Cannot create Image. this.mupdf.Image.fromBuffer: ${!!this.mupdf.Image?.fromBuffer}, pdfDoc.Image.fromBuffer: ${!!pdfDoc?.Image?.fromBuffer}`);
-        }
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2532',message:'Setting stamp appearance',data:{annotationId:annotation.id,imageWidth:image.getWidth(),imageHeight:image.getHeight(),rectWidth:rect[2]-rect[0],rectHeight:rect[3]-rect[1]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
-        // #endregion
-        
-        // Set the image as the appearance - this makes it visible in native PDF viewers
-        // The appearance will be scaled to fit the rect automatically
-        annot.setAppearance(image);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2536',message:'Appearance set successfully',data:{annotationId:annotation.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
-        // #endregion
-      } catch (e: unknown) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2538',message:'Failed to set appearance',data:{annotationId:annotation.id,error:e instanceof Error ? e.message : String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'APPEARANCE'})}).catch(()=>{});
-        // #endregion
-        console.warn("Could not embed image for stamp annotation:", e);
-      }
-    }
+    // For image stamps: appearance will be set during PDF saving using pdf-lib
+    // MuPDF cannot embed images properly, so we handle this in saveDocument()
     // For text stamps, the JSON in contents is sufficient for our app to render
     // Native PDF viewers may show the text from contents, but won't have the styled appearance
     // TODO: In the future, we could render text stamps to a canvas/image and embed that for native viewers

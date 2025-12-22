@@ -31,6 +31,9 @@ export class PDFEditor {
     this.annotationOps = new PDFAnnotationOperations(mupdf);
     this.annotationLoader = new PDFAnnotationLoader(mupdf);
     this.documentOps = new PDFDocumentOperations(mupdf, this.annotationOps, this.pageOps);
+
+    // Give PDFAnnotationOperations access to the working mupdf instance from PDFDocumentOperations
+    (this.annotationOps as any).workingMupdf = mupdf;
   }
 
   // Page Operations
