@@ -14,6 +14,7 @@ import { VirtualizedPageList } from "./VirtualizedPageList";
 import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { PageTools } from "@/features/toolbar/PageTools";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
@@ -21,7 +22,7 @@ import { useTabStore } from "@/shared/stores/tabStore";
 
 export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
-  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
+  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, setRenderQuality, setQualityOverride, getEffectiveRenderQuality, qualityOverride } = useUIStore();
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
   const currentDocument = getCurrentDocument();
   const [mupdf, setMupdf] = useState<any>(null);
@@ -224,11 +225,15 @@ export function PDFViewer() {
     }
   }, [currentPage, setCurrentPage]);
 
-  // Handle wheel zoom in read mode at container level
+  // Handle wheel zoom in read mode at container level with debouncing
   useEffect(() => {
     if (!readMode || !scrollContainerRef.current) return;
 
     const container = scrollContainerRef.current;
+    let zoomTimeout: NodeJS.Timeout | null = null;
+    let pendingZoom: number | null = null;
+    let pendingX: number | null = null;
+    let pendingY: number | null = null;
 
     const handleWheelNative = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
@@ -237,14 +242,27 @@ export function PDFViewer() {
       e.stopPropagation();
 
       const currentZoom = zoomLevelRef.current;
-      const delta = e.deltaY > 0 ? 0.97 : 1.03;
+      const delta = e.deltaY > 0 ? 0.92 : 1.08; // Even more aggressive zoom steps for better responsiveness
       const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
 
       if (Math.abs(newZoom - currentZoom) > 0.001) {
-        // Pass mouse cursor position to zoom to that point
-        // e.clientX and e.clientY are relative to the viewport (screen coordinates)
-        // These will be converted to scroll container coordinates in zoomToPoint
-        zoomToPoint(newZoom, e.clientX, e.clientY);
+        // Store the zoom request
+        pendingZoom = newZoom;
+        pendingX = e.clientX;
+        pendingY = e.clientY;
+
+        // Clear any existing timeout
+        if (zoomTimeout) clearTimeout(zoomTimeout);
+
+        // Debounce zoom updates to prevent excessive re-renders
+        zoomTimeout = setTimeout(() => {
+          if (pendingZoom !== null) {
+            zoomToPoint(pendingZoom, pendingX!, pendingY!);
+            pendingZoom = null;
+            pendingX = null;
+            pendingY = null;
+          }
+        }, 16); // 16ms debounce (~60fps) for very responsive zoom
       }
     };
 
@@ -252,6 +270,7 @@ export function PDFViewer() {
 
     return () => {
       container.removeEventListener("wheel", handleWheelNative);
+      if (zoomTimeout) clearTimeout(zoomTimeout);
     };
   }, [readMode, zoomToPoint]);
 
@@ -554,15 +573,18 @@ export function PDFViewer() {
             scrollBehavior: "smooth",
           }}
         >
-          <div 
+          <div
             ref={pagesContainerRef}
             className="flex justify-center"
-            style={{ 
-              transform: fitMode === "custom" ? `scale(${zoomLevel / baseFitScale})` : undefined,
+            style={{
+              transform: fitMode === "custom" ? `scale3d(${zoomLevel / baseFitScale}, ${zoomLevel / baseFitScale}, 1)` : undefined,
               transformOrigin: zoomAnchorPointRef.current && isZoomingRef.current
                 ? `${zoomAnchorPointRef.current.x}px ${zoomAnchorPointRef.current.y}px`
                 : "top left",
               willChange: "transform",
+              backfaceVisibility: "hidden",
+              perspective: 1000,
+              contain: "layout style paint", // CSS containment for better performance
             }}
           >
             {currentDocument && renderer && (
@@ -709,6 +731,70 @@ export function PDFViewer() {
           >
             <Ruler className="h-3.5 w-3.5" />
           </Button>
+          <Select
+            value={qualityOverride || 'auto'}
+            onValueChange={(value: 'low' | 'normal' | 'high' | 'ultra' | 'auto') => {
+              if (value === 'auto') {
+                setQualityOverride(null);
+              } else {
+                setRenderQuality(value);
+              }
+            }}
+          >
+            <SelectTrigger className="h-7 w-32 text-xs font-medium" title={
+              qualityOverride
+                ? `Manual Quality: ${getEffectiveRenderQuality()} (locked)`
+                : `Auto Quality: ${getEffectiveRenderQuality()} (adjusted based on zoom level)`
+            }>
+              <div className="flex items-center gap-1">
+                <div className={`w-2 h-2 rounded-full ${
+                  getEffectiveRenderQuality() === 'ultra' ? 'bg-purple-500' :
+                  getEffectiveRenderQuality() === 'high' ? 'bg-blue-500' :
+                  getEffectiveRenderQuality() === 'normal' ? 'bg-green-500' : 'bg-gray-500'
+                }`}></div>
+                <span className="capitalize">{getEffectiveRenderQuality()}</span>
+                <span className={`text-[10px] px-1 rounded ${
+                  qualityOverride
+                    ? 'bg-orange-500 text-white'
+                    : 'bg-muted text-muted-foreground'
+                }`}>
+                  {qualityOverride ? 'LOCKED' : 'AUTO'}
+                </span>
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">
+                <div className="flex items-center gap-2">
+                  <span>🤖</span>
+                  <span>Auto (zoom-based)</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="low">
+                <div className="flex items-center gap-2">
+                  <span>⚪</span>
+                  <span>Locked Low</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="normal">
+                <div className="flex items-center gap-2">
+                  <span>🟢</span>
+                  <span>Locked Normal</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="high">
+                <div className="flex items-center gap-2">
+                  <span>🔵</span>
+                  <span>Locked High</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="ultra">
+                <div className="flex items-center gap-2">
+                  <span>🟣</span>
+                  <span>Locked Ultra</span>
+                </div>
+              </SelectItem>
+            </SelectContent>
+          </Select>
           <Button
             variant="outline"
             size="icon"

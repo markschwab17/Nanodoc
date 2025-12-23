@@ -55,10 +55,50 @@ export function PageCanvas({
   const [isRendering, setIsRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
+  const [isUpgradingQuality, setIsUpgradingQuality] = useState(false); // Track if we're upgrading from low to target quality
+  const [isZooming, setIsZooming] = useState(false); // Track if we're currently in a zoom operation
   const BASE_SCALE = 1.0; // Fixed base scale for PDF rendering (1:1 mapping - canvas size = PDF size)
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
-  const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
+  const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback, renderQuality, getEffectiveRenderQuality } = useUIStore();
+
+  // Quality multiplier helper
+  const getQualityMultiplier = (quality: 'low' | 'normal' | 'high' | 'ultra'): number => {
+    switch (quality) {
+      case 'low': return 0.5;
+      case 'normal': return 1.0;
+      case 'high': return 1.5;
+      case 'ultra': return 2.0;
+      default: return 1.0;
+    }
+  };
+
+  // Clear renderer cache when render quality changes to free memory and ensure fresh renders
+  useEffect(() => {
+    if (renderer) {
+      renderer.clearCache();
+    }
+  }, [renderQuality, renderer]);
+
+  // Detect zoom operations to disable progressive loading during zoom
+  useEffect(() => {
+    setIsZooming(true);
+
+    // During zoom operations, temporarily disable rendering to prevent lag
+    const stabilizationTimeout = setTimeout(() => {
+      setIsZooming(false);
+    }, 50); // Very short stabilization period for maximum responsiveness
+
+    return () => clearTimeout(stabilizationTimeout);
+  }, [zoomLevel]);
+
+  // Set high zoom mode for better memory management
+  useEffect(() => {
+    if (renderer) {
+      const isHighZoom = zoomLevel > 2.0;
+      renderer.setHighZoomMode(isHighZoom);
+    }
+  }, [zoomLevel, renderer]);
   const { 
     getCurrentDocument, 
     getAnnotations, 
@@ -855,16 +895,37 @@ export function PageCanvas({
       try {
         const mupdfDoc = document.getMupdfDocument();
         const pageMetadata = document.getPageMetadata(pageNumber);
-        
+
         if (!pageMetadata) {
           throw new Error(`Page ${pageNumber} not found`);
         }
 
-        // Render PDF at high-DPI resolution for crisp text
+        // Get effective quality for this render (used throughout the function)
+        // During active zoom operations, slightly reduce quality for smoother performance
+        let effectiveQuality = getEffectiveRenderQuality();
+        if (isZooming && effectiveQuality === 'ultra') {
+          effectiveQuality = 'high'; // Temporarily downgrade during zoom for performance
+        }
         // The coordinate system (BASE_SCALE) stays constant for tool positioning
         // Only the render resolution is multiplied by devicePixelRatio
         const dpr = window.devicePixelRatio || 1;
-        const renderScale = BASE_SCALE * dpr;
+        let renderScale = BASE_SCALE * dpr;
+
+        // Prevent canvas size explosion at high zoom levels
+        // More lenient caps to allow higher zoom levels
+        const qualityMultiplier = getQualityMultiplier(effectiveQuality);
+        let maxRenderScale = 8.0 / qualityMultiplier; // More generous base limit
+
+        // Less restrictive limits at high zoom levels
+        if (zoomLevel > 4.0) {
+          maxRenderScale = 4.0 / qualityMultiplier; // Reasonable limit at extreme zoom
+        } else if (zoomLevel > 3.0) {
+          maxRenderScale = 5.0 / qualityMultiplier; // Less restrictive at very high zoom
+        } else if (zoomLevel > 2.0) {
+          maxRenderScale = 6.0 / qualityMultiplier; // Moderate at high zoom
+        }
+
+        renderScale = Math.min(renderScale, maxRenderScale);
         
         // Calculate initial viewport scale for fit modes
         let viewportScale = zoomLevel;
@@ -912,12 +973,75 @@ export function PageCanvas({
         // the PDF's Rotate field when loading the page. The page.getBounds() and
         // page.toPixmap() already account for the rotation specified in the PDF.
         // If we apply rotation again, we'd be double-rotating the page.
-        
-        // Render PDF at fixed base scale (rotation is already applied by mupdf)
-        const rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
-          scale: renderScale,
-          rotation: 0, // Don't apply additional rotation - PDF Rotate is already applied
-        });
+
+        // Progressive quality loading: First render at low quality for immediate display
+        // Then upgrade to target quality in background for smooth UX
+        // Skip progressive loading during zoom operations for instant quality
+        const shouldUseProgressiveLoading = effectiveQuality !== 'low' && !isZooming;
+
+        let rendered;
+        if (shouldUseProgressiveLoading) {
+          // Step 1: Render at low quality first for immediate display
+          try {
+            const lowQualityRendered = await renderer.renderPage(mupdfDoc, pageNumber, {
+              scale: renderScale,
+              rotation: 0,
+              quality: 'low',
+            });
+
+            // Draw the low quality version immediately
+            const canvas = canvasRef.current;
+            if (canvas && lowQualityRendered.imageData instanceof ImageData) {
+              // High-DPI rendering setup
+              const pdfDisplayWidth = pageMetadata.width;
+              const pdfDisplayHeight = pageMetadata.height;
+
+              // Canvas backing size = rendered size
+              canvas.width = lowQualityRendered.width;
+              canvas.height = lowQualityRendered.height;
+
+              // Canvas display size = PDF dimensions
+              canvas.style.width = `${pdfDisplayWidth}px`;
+              canvas.style.height = `${pdfDisplayHeight}px`;
+
+              const ctx = canvas.getContext("2d", {
+                willReadFrequently: false,
+                colorSpace: "srgb",
+                alpha: true,
+                desynchronized: false
+              });
+
+              if (ctx) {
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = "low";
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.globalAlpha = 1.0;
+                ctx.putImageData(lowQualityRendered.imageData, 0, 0);
+              }
+            }
+          } catch (lowQualityError) {
+            console.warn("Low quality render failed, falling back to target quality:", lowQualityError);
+          }
+
+          // Step 2: Render at target quality in background and upgrade
+          setIsUpgradingQuality(true);
+          try {
+            rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
+              scale: renderScale,
+              rotation: 0,
+              quality: effectiveQuality,
+            });
+          } finally {
+            setIsUpgradingQuality(false);
+          }
+        } else {
+          // For low quality, render directly at target quality
+          rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
+            scale: renderScale,
+            rotation: 0,
+            quality: effectiveQuality,
+          });
+        }
 
         const canvas = canvasRef.current;
         
@@ -936,14 +1060,21 @@ export function PageCanvas({
 
         const ctx = canvas.getContext("2d", {
           willReadFrequently: false,
-          colorSpace: "srgb"
+          colorSpace: "srgb",
+          // Enable hardware acceleration hints for better performance
+          alpha: true,
+          desynchronized: false
         });
-        
+
         if (ctx && rendered.imageData instanceof ImageData) {
-          // Enable smoothing for crisp downscaling on high-DPI displays
+          // Enhanced smoothing settings for crisp text rendering
           ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = "high";
-          
+          ctx.imageSmoothingQuality = effectiveQuality === 'ultra' ? 'high' : 'medium';
+
+          // Additional canvas optimization settings for text quality
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha = 1.0;
+
           // Draw the rendered image data
           ctx.putImageData(rendered.imageData, 0, 0);
         }
@@ -961,7 +1092,7 @@ export function PageCanvas({
     };
 
     renderPage();
-  }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode]);
+  }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, renderQuality]);
   
   // Effect to ensure centering when fitMode changes to "page" or "width"
   useEffect(() => {
@@ -1081,11 +1212,13 @@ export function PageCanvas({
         // High-DPI rendering for crisp text
         const dpr = window.devicePixelRatio || 1;
         const renderScale = BASE_SCALE * dpr;
-        
+        const effectiveQuality = getEffectiveRenderQuality();
+
         // Render without additional rotation (PDF Rotate is already applied by mupdf)
         const rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
           scale: renderScale,
           rotation: 0,
+          quality: effectiveQuality,
         });
         
         const canvas = canvasRef.current;
@@ -1104,17 +1237,24 @@ export function PageCanvas({
           
           const ctx = canvas.getContext("2d", {
             willReadFrequently: false,
-            colorSpace: "srgb"
+            colorSpace: "srgb",
+            // Enable hardware acceleration hints for better performance
+            alpha: true,
+            desynchronized: false
           });
-          
+
           if (ctx && rendered.imageData instanceof ImageData) {
-            // Enable smoothing for crisp downscaling on high-DPI
+            // Enhanced smoothing settings for crisp text rendering
             ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = "high";
-            
+            ctx.imageSmoothingQuality = effectiveQuality === 'ultra' ? 'high' : 'medium';
+
+            // Additional canvas optimization settings for text quality
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.globalAlpha = 1.0;
+
             // Draw the rendered image data
             ctx.putImageData(rendered.imageData, 0, 0);
-            
+
           }
         }
       } catch (err) {
@@ -2743,6 +2883,14 @@ export function PageCanvas({
       {isRendering && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
           <div className="text-muted-foreground">Rendering...</div>
+        </div>
+      )}
+
+      {/* Quality upgrade indicator - hide during zoom for instant quality */}
+      {isUpgradingQuality && !isRendering && !isZooming && (
+        <div className="absolute top-2 right-2 flex items-center gap-2 bg-background/90 rounded px-2 py-1 z-20 shadow-sm">
+          <div className="w-3 h-3 border border-primary border-t-transparent rounded-full animate-spin"></div>
+          <div className="text-xs text-muted-foreground">Enhancing quality...</div>
         </div>
       )}
       {isDragOverPage && (

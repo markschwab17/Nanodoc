@@ -13,6 +13,7 @@ export interface UIState {
   zoomLevel: number; // Current active zoom level (switches between modes)
   readModeZoomLevel: number; // Separate zoom level for read mode
   normalModeZoomLevel: number; // Separate zoom level for normal mode
+  isZooming: boolean; // Flag to indicate active zoom operation
   fitMode: "width" | "page" | "custom";
   activeTool: ToolType;
   viewMode: ViewMode;
@@ -20,7 +21,9 @@ export interface UIState {
   showToolbar: boolean;
   zoomToCenterCallback: ((newZoom: number) => void) | null;
   readMode: boolean;
-  
+  renderQuality: 'low' | 'normal' | 'high' | 'ultra';
+  qualityOverride: 'low' | 'normal' | 'high' | 'ultra' | null; // Manual quality override (null = auto)
+
   // Highlight tool settings
   highlightColor: string;
   highlightStrokeWidth: number;
@@ -55,6 +58,9 @@ export interface UIState {
   zoomToCenter: (newZoom: number) => void;
   setReadMode: (enabled: boolean) => void;
   toggleReadMode: () => void;
+  setRenderQuality: (quality: 'low' | 'normal' | 'high' | 'ultra') => void;
+  setQualityOverride: (quality: 'low' | 'normal' | 'high' | 'ultra' | null) => void;
+  getEffectiveRenderQuality: () => 'low' | 'normal' | 'high' | 'ultra';
   setHighlightColor: (color: string) => void;
   setHighlightStrokeWidth: (width: number) => void;
   setHighlightOpacity: (opacity: number) => void;
@@ -82,6 +88,9 @@ export const useUIStore = create<UIState>((set, get) => ({
   showToolbar: true,
   zoomToCenterCallback: null,
   readMode: false,
+  renderQuality: 'normal', // Default to normal quality for good balance of quality and performance
+  qualityOverride: null, // null = auto quality based on zoom
+  isZooming: false,
   
   // Highlight tool settings
   highlightColor: "#FFFF00",
@@ -149,20 +158,48 @@ export const useUIStore = create<UIState>((set, get) => ({
     }
   },
 
+  setRenderQuality: (quality) => set({ renderQuality: quality, qualityOverride: quality }),
+  setQualityOverride: (quality) => set({ qualityOverride: quality }),
+
+  getEffectiveRenderQuality: () => {
+    const state = get();
+    const zoom = state.readMode ? state.readModeZoomLevel : state.zoomLevel;
+
+    // Check for manual quality override first
+    if (state.qualityOverride !== null) {
+      return state.qualityOverride;
+    }
+
+    // Automatic quality based on zoom level for optimal performance
+    // Ultra quality triggers at 250% zoom and above for detailed work
+    let quality: 'low' | 'normal' | 'high' | 'ultra';
+    if (zoom >= 2.5) {
+      quality = 'ultra'; // High zoom - maximum quality for detail work
+    } else if (zoom >= 1.8) {
+      quality = 'high'; // Medium-high zoom - good quality
+    } else if (zoom >= 1.2) {
+      quality = 'normal'; // Medium zoom - balanced quality
+    } else {
+      quality = 'low'; // Low zoom - fast rendering
+    }
+
+    return quality;
+  },
+
   setReadMode: (enabled) => {
     const state = get();
     if (enabled && !state.readMode) {
       // Entering read mode: save current zoom to normalModeZoomLevel and reset to base fit scale (1.0)
-      set({ 
-        readMode: true, 
+      set({
+        readMode: true,
         normalModeZoomLevel: state.zoomLevel, // Save current zoom
         zoomLevel: 1.0, // Always reset to base fit scale when entering read mode
         readModeZoomLevel: 1.0, // Reset read mode zoom
-        fitMode: "width" 
+        fitMode: "width"
       });
     } else if (!enabled && state.readMode) {
       // Exiting read mode: save current zoom to readModeZoomLevel and reset to full view (fit to page)
-      set({ 
+      set({
         readMode: false,
         readModeZoomLevel: state.zoomLevel, // Save current read mode zoom
         zoomLevel: 1.0, // Reset to base zoom (will be recalculated to fit page)
