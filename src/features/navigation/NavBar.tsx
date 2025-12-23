@@ -27,6 +27,17 @@ export function NavBar() {
               Home
             </Button>
           </Link>
+          <Link to="/why">
+            <Button
+              variant={isActive("/why") ? "default" : "ghost"}
+              className={cn(
+                "transition-colors",
+                isActive("/why") && "bg-primary text-primary-foreground"
+              )}
+            >
+              Why
+            </Button>
+          </Link>
           <Link to="/editor">
             <Button
               variant={isActive("/editor") ? "default" : "ghost"}
@@ -35,7 +46,7 @@ export function NavBar() {
                 isActive("/editor") && "bg-primary text-primary-foreground"
               )}
             >
-              Editor
+              Edit PDF now
             </Button>
           </Link>
           <Link to="/faq">
@@ -47,6 +58,17 @@ export function NavBar() {
               )}
             >
               FAQ
+            </Button>
+          </Link>
+          <Link to="/compare">
+            <Button
+              variant={isActive("/compare") ? "default" : "ghost"}
+              className={cn(
+                "transition-colors",
+                isActive("/compare") && "bg-primary text-primary-foreground"
+              )}
+            >
+              Compare
             </Button>
           </Link>
         </div>

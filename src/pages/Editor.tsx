@@ -30,6 +30,7 @@ import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
 
+
 function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
   const { tabs } = useTabStore();
@@ -477,48 +478,85 @@ function Editor() {
 
   // Listen for file open events from Tauri (when PDF is opened from system)
   useEffect(() => {
-    // Check if we're in Tauri environment
-    if (typeof window !== "undefined" && (window as any).__TAURI__) {
-      const { listen } = (window as any).__TAURI__.event;
-      
-      // Listen for open-pdf-file event
-      const unlisten = listen("open-pdf-file", async (event: any) => {
-        const filePath = event.payload;
-        console.log("Received open-pdf-file event:", filePath);
-        
-        if (filePath && typeof filePath === "string") {
-          const pdfStore = usePDFStore.getState();
-          try {
-            pdfStore.setLoading(true);
-            pdfStore.clearError();
-            
-            // Read the file
-            console.log("Reading file from path:", filePath);
-            const fileData = await fileSystem.readFile(filePath);
-            console.log("File read successfully, size:", fileData.length);
-            
-            const fileName = filePath.split(/[/\\]/).pop() || "file.pdf";
-            
-            // Load the PDF
-            console.log("Loading PDF:", fileName);
-            const mupdfModule = await import("mupdf");
-            await loadPDF(fileData, fileName, mupdfModule.default, filePath);
-            console.log("PDF loaded successfully");
-          } catch (error) {
-            console.error("Error opening PDF from system:", error);
-            pdfStore.setLoading(false);
-            const errorMessage = error instanceof Error ? error.message : "Failed to open PDF file";
-            pdfStore.setError(errorMessage);
-            showNotification(errorMessage, "error");
-          }
-        } else {
-          console.warn("Invalid file path received:", filePath);
-        }
-      });
+    // Check if we're in Tauri environment - comprehensive detection
+    const hasTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+    const hasTauriInternals = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    const hasTauriInvoke = typeof window !== 'undefined' && '__TAURI_INVOKE__' in window;
+    const hasInvokeAPI = typeof window !== 'undefined' && 'invoke' in window;
+    const hasConvertFileSrc = typeof window !== 'undefined' && 'convertFileSrc' in window;
 
-      return () => {
-        unlisten.then((fn: () => void) => fn());
-      };
+    const isTauri = hasTauri || hasTauriInternals || hasTauriInvoke || hasInvokeAPI || hasConvertFileSrc;
+
+    if (isTauri) {
+      // Get the Tauri event listener - try different approaches
+      let listen: any = null;
+
+      // Try the old way first
+      if ((window as any).__TAURI__?.event?.listen) {
+        listen = (window as any).__TAURI__.event.listen;
+      }
+      // Try the new Tauri v2 way
+      else if ((window as any).__TAURI_INTERNALS__?.event?.listen) {
+        listen = (window as any).__TAURI_INTERNALS__.event.listen;
+      }
+      // Try direct window methods
+      else if ((window as any).invoke) {
+        // For newer Tauri versions, we might need to use a different approach
+        // Let's try to import the event module
+        try {
+          const tauriEvent = (window as any).event || (window as any).__TAURI_INTERNALS__?.event;
+          if (tauriEvent?.listen) {
+            listen = tauriEvent.listen;
+          }
+        } catch (e) {
+          console.warn("Could not access Tauri event API:", e);
+        }
+      }
+
+        if (listen) {
+          // Listen for open-pdf-file event
+          const unlisten = listen("open-pdf-file", async (event: any) => {
+            const filePath = event.payload;
+            console.log("Received open-pdf-file event:", filePath);
+
+            if (filePath && typeof filePath === "string") {
+              const pdfStore = usePDFStore.getState();
+              try {
+                pdfStore.setLoading(true);
+                pdfStore.clearError();
+
+                // Read the file
+                console.log("Reading file from path:", filePath);
+                const fileData = await fileSystem.readFile(filePath);
+                console.log("File read successfully, size:", fileData.length);
+
+                const fileName = filePath.split(/[/\\]/).pop() || "file.pdf";
+
+                // Load the PDF
+                console.log("Loading PDF:", fileName);
+                const mupdfModule = await import("mupdf");
+                await loadPDF(fileData, fileName, mupdfModule.default, filePath);
+                console.log("PDF loaded successfully");
+              } catch (error) {
+                console.error("Error opening PDF from system:", error);
+                pdfStore.setLoading(false);
+                const errorMessage = error instanceof Error ? error.message : "Failed to open PDF file";
+                pdfStore.setError(errorMessage);
+                showNotification(errorMessage, "error");
+              }
+            } else {
+              console.warn("Invalid file path received:", filePath);
+            }
+          });
+
+          return () => {
+            unlisten.then((fn: () => void) => fn());
+          };
+      } else {
+        console.warn("Tauri event listener not available despite Tauri detection");
+      }
+    } else {
+      console.log("Not in Tauri environment, skipping PDF file association listener");
     }
   }, [fileSystem, loadPDF]);
 

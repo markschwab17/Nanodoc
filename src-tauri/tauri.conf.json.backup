@@ -1,0 +1,95 @@
+{
+  "productName": "Nanodoc",
+  "version": "0.3.3",
+  "identifier": "com.nanodoc",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nanodoc",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "main",
+          "description": "Main window capability with file system access",
+          "windows": ["main"],
+          "permissions": [
+            "core:default",
+            "dialog:allow-open",
+            "dialog:allow-save",
+            "fs:allow-read-file",
+            "fs:allow-write-file",
+            "fs:scope-app",
+            "updater:default",
+            "process:allow-restart"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "mimeType": "application/pdf",
+        "role": "Editor",
+        "name": "PDF Document"
+      }
+    ],
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.13",
+      "exceptionDomain": "",
+      "signingIdentity": "Developer ID Application",
+      "providerShortName": "A3M3RYHFLP",
+      "entitlements": "entitlements.plist"
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
+  "plugins": {
+    "fs": {
+      "requireLiteralLeadingDot": false
+    },
+    "os": {},
+    "shell": {
+      "open": true
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhCMjA1NUY1RDg3RDAzQ0QKUldUTkEzM1k5VlVnaTU0UFlaWW1XQWplL1hsUGw3OGJqazlidWJFUE1VdEQzUzhkTUQvZzVnZ20K",
+      "endpoints": [
+        "https://github.com/markschwab17/nanodoc/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
+

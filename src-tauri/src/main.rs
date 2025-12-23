@@ -23,24 +23,27 @@ fn main() {
             eprintln!("Command line args: {:?}", args);
             
             if args.len() > 1 {
-                let file_path = &args[1];
-                eprintln!("Processing file path: {}", file_path);
-                
+                let raw_file_path = &args[1];
+                eprintln!("Processing file path: {}", raw_file_path);
+
                 // Only process if it looks like a file path (not a flag)
-                // Check if it ends with .pdf or if the path exists
-                if !file_path.starts_with('-') {
-                    let is_pdf = file_path.ends_with(".pdf");
+                if !raw_file_path.starts_with('-') {
+                    // Clean the path - remove surrounding quotes if present
+                    let file_path = raw_file_path.trim_matches('"').trim_matches('\'');
+
+                    // Check if it ends with .pdf (case insensitive) or if the path exists
+                    let is_pdf = file_path.to_lowercase().ends_with(".pdf");
                     let path_exists = std::path::Path::new(file_path).exists();
-                    
-                    eprintln!("Is PDF: {}, Path exists: {}", is_pdf, path_exists);
-                    
+
+                    eprintln!("Cleaned path: {}, Is PDF: {}, Path exists: {}", file_path, is_pdf, path_exists);
+
                     if is_pdf || path_exists {
                         // Emit event to frontend after a delay to ensure window is ready
                         let app_handle = app.handle().clone();
-                        let file_path_clone = file_path.clone();
+                        let file_path_clone = file_path.to_string();
                         std::thread::spawn(move || {
                             // Wait longer to ensure window is fully ready
-                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
                             eprintln!("Attempting to emit event for file: {}", file_path_clone);
                             if let Some(window) = app_handle.get_webview_window("main") {
                                 match window.emit("open-pdf-file", &file_path_clone) {

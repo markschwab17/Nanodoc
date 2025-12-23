@@ -368,8 +368,14 @@ export function Toolbar() {
     }
   };
 
-  // Check if we're in Tauri (desktop) or browser
-  const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+  // Check if we're in Tauri (desktop) or browser - comprehensive detection
+  const hasTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+  const hasTauriInternals = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  const hasTauriInvoke = typeof window !== 'undefined' && '__TAURI_INVOKE__' in window;
+  const hasInvokeAPI = typeof window !== 'undefined' && 'invoke' in window;
+  const hasConvertFileSrc = typeof window !== 'undefined' && 'convertFileSrc' in window;
+
+  const isTauri = hasTauri || hasTauriInternals || hasTauriInvoke || hasInvokeAPI || hasConvertFileSrc;
 
   const handlePrint = () => {
     const currentDoc = getCurrentDocument();

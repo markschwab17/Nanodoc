@@ -14,6 +14,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 
+
 // Download URLs configuration
 // Exact filenames from GitHub release: https://github.com/markschwab17/nanodoc/releases/tag/v0.1.0
 const DOWNLOAD_URLS = {
@@ -341,11 +342,17 @@ function Home() {
               <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
                 Home
               </Link>
+              <Link to="/why" className="text-sm text-muted-foreground hover:text-foreground">
+                Why
+              </Link>
               <Link to="/editor" className="text-sm text-muted-foreground hover:text-foreground">
                 Editor
               </Link>
               <Link to="/faq" className="text-sm text-muted-foreground hover:text-foreground">
                 FAQ
+              </Link>
+              <Link to="/compare" className="text-sm text-muted-foreground hover:text-foreground">
+                Compare
               </Link>
             </div>
           </div>

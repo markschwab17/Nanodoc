@@ -1,0 +1,148 @@
+// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use tauri;
+use std::sync::Mutex;
+
+const PDF_EXTENSION: &str = ".pdf";
+
+static INITIAL_FILE_PATH: Mutex<Option<String>> = Mutex::new(None);
+static APPLE_EVENT_FILE_PATH: Mutex<Option<String>> = Mutex::new(None);
+
+// External function from Objective-C code
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn setup_app_delegate(callback: extern "fn(*const i8));
+}
+
+// Callback function for Apple Events - called from Objective-C
+#[cfg(target_os = "macos")]
+extern "C" fn apple_event_callback(file_path: *const i8) {
+    if !file_path.is_null() {
+        let c_str = unsafe { std::ffi::CStr::from_ptr(file_path) };
+        if let Ok(path_str) = c_str.to_str() {
+            eprintln!("Apple Event file opened: {}", path_str);
+            *APPLE_EVENT_FILE_PATH.lock().unwrap() = Some(path_str.to_string());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn setup_apple_events_handler() {
+    eprintln!("Setting up macOS Apple Events handler for double-click file opening.");
+
+    // Set up the Objective-C app delegate
+    unsafe {
+        setup_app_delegate(apple_event_callback);
+    }
+
+    eprintln!("Apple Events handler initialized successfully.");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn setup_apple_events_handler() {
+    // No-op on non-macOS platforms
+}
+
+#[tauri::command]
+async fn get_initial_file_path() -> Result<Option<String>, String> {
+    // Return the stored initial file path
+    let path = INITIAL_FILE_PATH.lock().unwrap().clone();
+    eprintln!("get_initial_file_path called, returning: {:?}", path);
+    Ok(path)
+}
+
+#[tauri::command]
+async fn get_apple_event_file_path() -> Result<Option<String>, String> {
+    // Return any file path received via Apple Events
+    let path = APPLE_EVENT_FILE_PATH.lock().unwrap().clone();
+    if path.is_some() {
+        eprintln!("get_apple_event_file_path returning: {:?}", path);
+        // Clear the path after returning it
+        *APPLE_EVENT_FILE_PATH.lock().unwrap() = None;
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+async fn open_file_path(_file_path: String) -> Result<(), String> {
+    // This command can be called from the frontend
+    Ok(())
+}
+
+fn main() {
+    // Setup Apple Events handler on macOS for file associations
+    // #[cfg(target_os = "macos")]
+    // setup_apple_events_handler();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // Handle file opening from command line arguments
+            // When a file is opened via file association, Tauri passes it as a command-line argument
+            let args: Vec<String> = std::env::args().collect();
+
+            // Process command line arguments
+
+            // Store the first PDF argument if found
+            for arg in &args[1..] {
+                if arg.to_lowercase().contains(PDF_EXTENSION) && std::path::Path::new(arg).exists() {
+                    // PDF file detected
+                    *INITIAL_FILE_PATH.lock().unwrap() = Some(arg.clone());
+                    break;
+                }
+            }
+
+            // Check for file paths in arguments
+            for arg in &args[1..] {  // Skip the first argument (executable path)
+                // Processing potential file path
+
+                // Only process if it looks like a file path (not a flag)
+                if !arg.starts_with('-') && !arg.is_empty() {
+                    // Use the argument as-is (quote trimming can be added later if needed)
+                    let file_path = arg;
+
+                    // Check if it ends with .pdf (case insensitive) or if the path exists
+                    let is_pdf = file_path.to_lowercase().contains(PDF_EXTENSION);
+                    let path_exists = std::path::Path::new(file_path).exists();
+
+                    // Processing file path
+
+                    if is_pdf || path_exists {
+                        // Store the file path for the frontend to query
+                        // PDF file detected
+                        *INITIAL_FILE_PATH.lock().unwrap() = Some(file_path.to_string());
+                        // Stored initial file path
+                        break; // Only process the first valid file
+                    } else {
+                        // File path is not a PDF
+                    }
+                }
+            }
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![get_initial_file_path, get_apple_event_file_path, open_file_path])
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Focused(focused) => {
+                if *focused {
+                    // Window gained focus, check if we have files to open
+                    // Window focused
+                }
+            }
+            _ => {}
+        })
+        .run(tauri::generate_context!());
+}
+
+
+
+
+
+
+
+

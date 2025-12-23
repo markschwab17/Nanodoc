@@ -254,35 +254,6 @@ function App() {
     }
   }, [currentDocument, getRecentFiles]);
 
-  // Listen for file open events from Tauri (when PDF is opened from system)
-  useEffect(() => {
-    // Check if we're in Tauri environment
-    if (typeof window !== "undefined" && (window as any).__TAURI__) {
-      const { listen } = (window as any).__TAURI__.event;
-      
-      // Listen for open-pdf-file event
-      const unlisten = listen("open-pdf-file", async (event: any) => {
-        const filePath = event.payload;
-        if (filePath && typeof filePath === "string") {
-          try {
-            // Read the file
-            const fileData = await fileSystem.readFile(filePath);
-            const fileName = filePath.split(/[/\\]/).pop() || "file.pdf";
-            
-            // Load the PDF
-            const mupdfModule = await import("mupdf");
-            await loadPDF(fileData, fileName, mupdfModule.default, filePath);
-          } catch (error) {
-            console.error("Error opening PDF from system:", error);
-          }
-        }
-      });
-
-      return () => {
-        unlisten.then((fn: () => void) => fn());
-      };
-    }
-  }, [fileSystem, loadPDF]);
 
   // Get root props but override title to prevent tooltip
   const rootProps = getRootProps();
