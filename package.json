@@ -1,7 +1,7 @@
 {
   "name": "nanodoc",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "homepage": "https://Nanodoc.app",
   "type": "module",
   "scripts": {
