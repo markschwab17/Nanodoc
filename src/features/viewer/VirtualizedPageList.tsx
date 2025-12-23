@@ -7,7 +7,6 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { PageCanvas } from "./PageCanvas";
-import { useUIStore } from "@/shared/stores/uiStore";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
 
@@ -32,7 +31,6 @@ export function VirtualizedPageList({
   onPageVisible,
   scrollContainerRef,
 }: VirtualizedPageListProps) {
-  const { renderQuality, getEffectiveRenderQuality, zoomLevel } = useUIStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 0 });
@@ -138,21 +136,6 @@ export function VirtualizedPageList({
             maxRatio = combinedScore;
             visiblePage = pageNum;
           }
-
-          // Pre-cache higher quality versions when pages become visible
-          if (entry.isIntersecting && entry.intersectionRatio > 0.1) {
-            const visiblePages = [pageNum]; // Could expand to include nearby pages
-            const baseScale = 1.0; // Base scale for pre-caching
-              const effectiveQuality = getEffectiveRenderQuality();
-              renderer.preCacheHigherQuality(
-                document.getMupdfDocument(),
-                visiblePages,
-                effectiveQuality,
-                baseScale
-              ).catch(err => {
-                console.debug('Pre-cache failed:', err);
-              });
-          }
         });
 
         // Debounce updates to avoid too many rapid changes during scrolling
@@ -190,40 +173,7 @@ export function VirtualizedPageList({
       container.removeEventListener("scroll", handleScroll);
       observer.disconnect();
     };
-  }, [scrollContainerRef, pageData, onPageVisible, updateVisibleRange, renderQuality, getEffectiveRenderQuality, document, renderer]);
-
-  // Pre-cache more aggressively when zoom level changes
-  useEffect(() => {
-    if (!document || !renderer) return;
-
-    const effectiveQuality = getEffectiveRenderQuality();
-    const baseScale = 1.0;
-
-    // Adjust buffer size based on zoom level to prevent memory explosion
-    const bufferPages = zoomLevel > 2.0 ? 1 : zoomLevel > 1.5 ? 2 : 3;
-
-    // Pre-cache visible pages plus buffer pages for smooth zooming
-    const pagesToCache: number[] = [];
-    for (let i = Math.max(0, visibleRange.start - bufferPages);
-         i <= Math.min(pageCount - 1, visibleRange.end + bufferPages);
-         i++) {
-      pagesToCache.push(i);
-    }
-
-    // Debounce pre-caching during rapid zoom changes (less aggressive during zoom)
-    const timeoutId = setTimeout(() => {
-      renderer.preCacheHigherQuality(
-        document.getMupdfDocument(),
-        pagesToCache,
-        effectiveQuality,
-        baseScale
-      ).catch(err => {
-        console.debug('Zoom pre-cache failed:', err);
-      });
-    }, zoomLevel > 2.0 ? 50 : 100); // Faster pre-caching at high zoom levels
-
-    return () => clearTimeout(timeoutId);
-  }, [zoomLevel, visibleRange, document, renderer, getEffectiveRenderQuality, pageCount]);
+  }, [scrollContainerRef, pageData, onPageVisible, updateVisibleRange]);
 
   // Initial visible range calculation
   useEffect(() => {
@@ -240,7 +190,7 @@ export function VirtualizedPageList({
 
       pages.push(
         <div
-          key={`page-${i}`} // Stable key that doesn't change with zoom
+          key={i}
           ref={(el) => {
             if (el) {
               pageRefs.current.set(i, el);
@@ -274,7 +224,7 @@ export function VirtualizedPageList({
     }
 
     return pages;
-  }, [visibleRange, pageData, document, renderer, pageCount, renderQuality]);
+  }, [visibleRange, pageData, document, renderer, pageCount]);
 
   // Calculate container width based on base fit scale (transform will handle zoom)
   const containerWidth = useMemo(() => {
