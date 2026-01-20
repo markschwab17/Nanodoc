@@ -12,10 +12,13 @@ export interface CanvasSettings {
   orientation: "portrait" | "landscape";
 }
 
+export type RenderQuality = "low" | "medium" | "high" | "ultra";
+
 export interface DocumentSettingsState {
   showRulers: boolean;
   rulerUnits: "inches" | "cm" | "points";
   documentCanvasSettings: Map<string, CanvasSettings>;
+  renderQuality: RenderQuality;
 
   // Actions
   setShowRulers: (show: boolean) => void;
@@ -24,6 +27,7 @@ export interface DocumentSettingsState {
   setDocumentCanvasSettings: (documentId: string, settings: CanvasSettings) => void;
   getDocumentCanvasSettings: (documentId: string) => CanvasSettings | undefined;
   clearDocumentSettings: (documentId: string) => void;
+  setRenderQuality: (quality: RenderQuality) => void;
 }
 
 // Common page size presets in points (72 points = 1 inch)
@@ -54,10 +58,23 @@ export function cmToPoints(cm: number): number {
   return cm * POINTS_PER_CM;
 }
 
+// Render quality scale multipliers
+export const RENDER_QUALITY_SCALES: Record<RenderQuality, number> = {
+  low: 1.0,    // 1x (device pixel ratio only)
+  medium: 1.5, // 1.5x for balanced quality/performance
+  high: 2.0,   // 2x for crisp text and good quality
+  ultra: 3.0,  // 3x for maximum quality (may be slower)
+};
+
+export function getRenderQualityScale(quality: RenderQuality): number {
+  return RENDER_QUALITY_SCALES[quality];
+}
+
 export const useDocumentSettingsStore = create<DocumentSettingsState>((set, get) => ({
   showRulers: false,
   rulerUnits: "inches",
   documentCanvasSettings: new Map(),
+  renderQuality: "high", // Default to high quality for better text readability
 
   setShowRulers: (show) => set({ showRulers: show }),
 
@@ -83,6 +100,8 @@ export const useDocumentSettingsStore = create<DocumentSettingsState>((set, get)
       newSettings.delete(documentId);
       return { documentCanvasSettings: newSettings };
     }),
+
+  setRenderQuality: (quality) => set({ renderQuality: quality }),
 }));
 
 

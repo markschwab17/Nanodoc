@@ -19,6 +19,7 @@ export interface PDFDocumentMetadata {
   pages: PDFPageMetadata[];
   fileSize: number;
   lastModified: Date;
+  hasCoverPage?: boolean; // True if page 0 is a cover/title page that users don't count
 }
 
 export class PDFDocument {
@@ -79,15 +80,21 @@ export class PDFDocument {
         // Normalize rotation to 0-360 range
         rotation = ((rotation % 360) + 360) % 360;
         
-        this.metadata.pages.push({
-          pageNumber: i,
-          width: bounds[2] - bounds[0], // x1 - x0 (already rotated by mupdf)
-          height: bounds[3] - bounds[1], // y1 - y0 (already rotated by mupdf)
-          rotation: rotation,
-        });
-      }
+      this.metadata.pages.push({
+        pageNumber: i,
+        width: bounds[2] - bounds[0], // x1 - x0 (already rotated by mupdf)
+        height: bounds[3] - bounds[1], // y1 - y0 (already rotated by mupdf)
+        rotation: rotation,
+      });
+    }
 
-      this.isLoaded = true;
+    this.isLoaded = true;
+    
+    // Detect cover page: check if page 0 has significantly less text than page 1
+    // This is done asynchronously after loading to avoid blocking
+    this.detectCoverPage(mupdf).catch(err => {
+      console.warn("Error detecting cover page:", err);
+    });
     } catch (error) {
       console.error("Error loading PDF document:", error);
       throw new Error(`Failed to load PDF: ${error}`);
@@ -223,6 +230,82 @@ export class PDFDocument {
    */
   getName(): string {
     return this.metadata.name;
+  }
+
+  /**
+   * Detect if the PDF has a cover page (page 0 that users don't count)
+   * by comparing text content of page 0 vs page 1
+   */
+  private async detectCoverPage(mupdf: any): Promise<void> {
+    if (this.metadata.pageCount < 2) {
+      // Need at least 2 pages to compare
+      this.metadata.hasCoverPage = false;
+      return;
+    }
+
+    try {
+      // Extract text from page 0 and page 1
+      const page0 = this.mupdfDoc.loadPage(0);
+      const page1 = this.mupdfDoc.loadPage(1);
+      
+      const text0 = page0.toStructuredText().asText() || '';
+      const text1 = page1.toStructuredText().asText() || '';
+      
+      // If page 0 has less than 20% of page 1's text, it's likely a cover page
+      if (text0.length > 0 && text1.length > 0) {
+        const ratio = text0.length / text1.length;
+        this.metadata.hasCoverPage = ratio < 0.2;
+        
+        if (this.metadata.hasCoverPage) {
+          console.log(`Detected cover page: page 0 has ${text0.length} chars (${(ratio * 100).toFixed(1)}% of page 1's ${text1.length} chars)`);
+        }
+      } else if (text0.length === 0 && text1.length > 0) {
+        // Page 0 has no text but page 1 does - likely a cover
+        this.metadata.hasCoverPage = true;
+        console.log(`Detected cover page: page 0 has no text, page 1 has ${text1.length} chars`);
+      } else {
+        this.metadata.hasCoverPage = false;
+      }
+    } catch (error) {
+      console.warn("Error detecting cover page:", error);
+      this.metadata.hasCoverPage = false;
+    }
+  }
+
+  /**
+   * Check if PDF has a cover page
+   */
+  hasCoverPage(): boolean {
+    return this.metadata.hasCoverPage ?? false;
+  }
+
+  /**
+   * Convert mupdf page index to user-visible page number
+   * Accounts for cover page if present
+   */
+  getDisplayPageNumber(mupdfPageIndex: number): number {
+    if (this.hasCoverPage()) {
+      // With cover page: mupdf index 0 = cover (not counted), index 1 = user's page 1
+      // So mupdf index 5 = user's page 5 (no +1 needed)
+      return mupdfPageIndex;
+    } else {
+      // Without cover page: standard 0-based to 1-based conversion
+      return mupdfPageIndex + 1;
+    }
+  }
+
+  /**
+   * Convert user-visible page number to mupdf page index
+   * Accounts for cover page if present
+   */
+  getMupdfPageIndex(displayPageNumber: number): number {
+    if (this.hasCoverPage()) {
+      // With cover page: user's page 1 = mupdf index 1, user's page 5 = mupdf index 5
+      return displayPageNumber;
+    } else {
+      // Without cover page: standard 1-based to 0-based conversion
+      return displayPageNumber - 1;
+    }
   }
 
   /**

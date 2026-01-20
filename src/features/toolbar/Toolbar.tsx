@@ -43,6 +43,8 @@ import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDial
 import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { SpecExtractionButton } from "@/features/specs/SpecExtractionButton";
+import { GeminiSettings } from "@/features/settings/GeminiSettings";
 
 export function Toolbar() {
   const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType } = useUIStore();
@@ -734,6 +736,26 @@ export function Toolbar() {
           <Redo2 className={sizeClasses.icon} />
         </Button>
       </div>
+
+      <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
+
+      {/* AI Spec Extraction */}
+      {currentDocument && (
+        <div className={`flex flex-col ${sizeClasses.gap} mb-2`}>
+          <div className="w-full flex justify-center items-center">
+            <SpecExtractionButton 
+              buttonClassName={sizeClasses.button}
+              iconClassName={sizeClasses.icon}
+            />
+          </div>
+          <div className="w-full flex justify-center items-center">
+            <GeminiSettings 
+              buttonClassName={sizeClasses.button}
+              iconClassName={sizeClasses.icon}
+            />
+          </div>
+        </div>
+      )}
 
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 

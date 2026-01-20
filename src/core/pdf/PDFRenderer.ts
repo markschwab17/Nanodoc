@@ -22,7 +22,15 @@ export interface RenderedPage {
 export class PDFRenderer {
   private mupdf: any;
   private renderCache: Map<string, RenderedPage> = new Map();
-  private maxCacheSize: number = 50;
+
+  // Adaptive cache sizing based on render scale
+  private getAdaptiveCacheSize(scale: number): number {
+    // Higher scales use more memory per page, so reduce cache size
+    if (scale >= 3.0) return 20; // Ultra quality
+    if (scale >= 2.0) return 30; // High quality
+    if (scale >= 1.5) return 40; // Medium quality
+    return 50; // Low quality
+  }
 
   constructor(mupdf: any) {
     this.mupdf = mupdf;
@@ -188,8 +196,11 @@ export class PDFRenderer {
    * Cache a rendered page
    */
   private cacheRender(key: string, rendered: RenderedPage): void {
+    // Adaptive cache sizing based on render scale
+    const adaptiveMaxSize = this.getAdaptiveCacheSize(rendered.scale);
+
     // Simple LRU: remove oldest if cache is full
-    if (this.renderCache.size >= this.maxCacheSize) {
+    if (this.renderCache.size >= adaptiveMaxSize) {
       const firstKey = this.renderCache.keys().next().value;
       if (firstKey) {
         this.renderCache.delete(firstKey);

@@ -1435,7 +1435,7 @@ export function ThumbnailCarousel() {
                       }}
                     >
                       <div className="flex flex-col gap-1">
-                        <div className="font-medium">Page {match.pageNumber + 1}</div>
+                        <div className="font-medium">Page {currentDocument ? currentDocument.getDisplayPageNumber(match.pageNumber) : match.pageNumber + 1}</div>
                         <div className="text-xs text-muted-foreground">
                           Match {idx + 1}
                         </div>

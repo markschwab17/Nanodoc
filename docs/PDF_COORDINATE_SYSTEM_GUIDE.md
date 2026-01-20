@@ -46,18 +46,20 @@ This guide explains how to properly map mouse interactions to PDF coordinates an
 
 ---
 
-## High-DPI Rendering
+## High-DPI and Render Quality
 
-The canvas uses high-DPI rendering for crisp text on Retina/HiDPI displays:
+The canvas uses high-DPI rendering and adjustable render quality for crisp text:
 
-- **Canvas backing buffer**: `pageWidth * dpr` × `pageHeight * dpr` pixels
-- **Canvas display size (CSS)**: `pageWidth` × `pageHeight` pixels
+- **Canvas backing buffer**: `pageWidth * BASE_SCALE * RENDER_SCALE * dpr` × `pageHeight * BASE_SCALE * RENDER_SCALE * dpr` pixels
+- **Canvas display size (CSS)**: `pageWidth` × `pageHeight` pixels (1:1 with PDF points)
 - **Result**: Browser downscales the high-res buffer for crisp rendering
 
-**Important**: High-DPI affects the canvas backing buffer but NOT overlay positioning:
-- `getPDFCoordinates()` accounts for dpr when converting canvas pixels → PDF
-- `pdfToCanvas()` returns CSS coordinates (no dpr adjustment needed)
+**Critical**: The coordinate system is **independent of render quality** (RENDER_SCALE):
+- Coordinate conversions use **canvas display size** (CSS pixels), not backing buffer size
+- `getPDFCoordinates()` converts directly from display size to PDF coordinates
+- `pdfToCanvas()` returns 1:1 CSS coordinates (no scaling needed)
 - Overlays (selection boxes, text editors, images) are positioned in CSS space
+- Changing render quality does NOT affect coordinate calculations
 
 ---
 
@@ -79,16 +81,23 @@ const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null
   const canvasRelativeX = e.clientX - canvasRect.left;
   const canvasRelativeY = e.clientY - canvasRect.top;
   
-  // Step 3: Convert from canvas screen size to canvas pixel coordinates
-  // (canvas backing buffer may be larger than display size for high-DPI)
-  const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
-  const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
+  // Step 3: Convert directly from canvas display size (CSS pixels) to PDF coordinates
+  // Use display size (canvasRect) instead of backing buffer to make coordinates
+  // independent of RENDER_SCALE. The display size is constant regardless of render quality.
+  let mediaboxHeight: number;
+  let mediaboxWidth: number;
+  if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
+    mediaboxHeight = pageMetadata.width;
+    mediaboxWidth = pageMetadata.height;
+  } else {
+    mediaboxHeight = pageMetadata.height;
+    mediaboxWidth = pageMetadata.width;
+  }
   
-  // Step 4: Convert canvas pixels to PDF coordinates
-  // High-DPI: divide by (BASE_SCALE * dpr) since backing buffer is dpr times larger
-  const dpr = window.devicePixelRatio || 1;
-  const pdfX = canvasPixelX / (BASE_SCALE * dpr);
-  const pdfY = pageMetadata.height - (canvasPixelY / (BASE_SCALE * dpr));
+  // Convert directly from display size ratio to PDF coordinates
+  // This makes the coordinate system independent of RENDER_SCALE
+  const pdfX = (canvasRelativeX / canvasRect.width) * mediaboxWidth;
+  const pdfY = mediaboxHeight - ((canvasRelativeY / canvasRect.height) * mediaboxHeight);
   
   return { x: pdfX, y: pdfY };
 };
@@ -97,8 +106,9 @@ const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null
 **Why this works:**
 - `getBoundingClientRect()` returns the canvas's actual rendered position/size on screen
 - This automatically accounts for CSS transforms (scale, translate, etc.)
-- We scale from screen coordinates → canvas pixels → PDF points
-- The dpr adjustment accounts for the high-DPI backing buffer
+- We convert directly from display size (CSS pixels) to PDF points (1:1 mapping)
+- **No need to account for RENDER_SCALE** - display size is constant regardless of quality
+- Coordinate system is independent of render quality settings
 
 ### PDF → Canvas (Rendering Overlays)
 
@@ -107,28 +117,38 @@ const pdfToCanvas = (pdfX: number, pdfY: number): { x: number; y: number } => {
   const pageMetadata = document.getPageMetadata(pageNumber);
   
   if (!pageMetadata) {
-    return { x: pdfX * BASE_SCALE, y: pdfY * BASE_SCALE };
+    return { x: pdfX, y: pdfY };  // 1:1 mapping when metadata unavailable
   }
   
-  // PDF Y=0 is at bottom, canvas Y=0 is at top
-  // Flip Y coordinate
-  const flippedY = pageMetadata.height - pdfY;
+  // Get original mediabox dimensions for Y-axis flipping (must match getPDFCoordinates logic)
+  let mediaboxHeight: number;
+  const currentRotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
+  const isLikelyRotated = pdfY > pageMetadata.height && pageMetadata.width > pageMetadata.height;
   
-  // Convert PDF points to CSS pixels for overlay positioning
-  // Note: No dpr adjustment needed - overlays are positioned in CSS space,
-  // not canvas backing buffer space
+  if (currentRotation === 90 || currentRotation === 270 || isLikelyRotated) {
+    mediaboxHeight = pageMetadata.width;
+  } else {
+    mediaboxHeight = pageMetadata.height;
+  }
+  
+  // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis
+  const flippedY = mediaboxHeight - pdfY;
+  
+  // Return CSS coordinates (display size) for overlay positioning
+  // Canvas display size is 1:1 with PDF points (independent of RENDER_SCALE)
   return {
-    x: pdfX * BASE_SCALE,
-    y: flippedY * BASE_SCALE,
+    x: pdfX,      // 1:1 mapping with PDF points for CSS positioning
+    y: flippedY,  // 1:1 mapping with PDF points for CSS positioning
   };
 };
 ```
 
 **Why this works:**
 - Flips Y-axis to convert from PDF (bottom-origin) to canvas (top-origin)
-- Returns CSS coordinates for overlay positioning (not canvas backing pixels)
+- Returns 1:1 CSS coordinates for overlay positioning (no scaling needed)
+- Canvas display size is 1:1 with PDF points, independent of render quality
 - Canvas is inside a transformed div, so CSS handles zoom/pan automatically
-- High-DPI only affects the canvas backing buffer, not CSS positioning
+- **RENDER_SCALE only affects rendering quality, not coordinate calculations**
 
 ---
 
@@ -246,8 +266,9 @@ const handleMouseUp = () => {
     
     // Convert to canvas coordinates
     const canvasPos = pdfToCanvas(annot.x, pdfTopY);
-    const canvasWidth = redactWidth * BASE_SCALE;
-    const canvasHeight = redactHeight * BASE_SCALE;
+    // Width and height are 1:1 with PDF points (independent of RENDER_SCALE)
+    const canvasWidth = redactWidth;  // 1:1 mapping
+    const canvasHeight = redactHeight;  // 1:1 mapping
     
     return (
       <div
@@ -578,17 +599,24 @@ The text box tool preview uses this exact pattern and works correctly:
 
 ### The Golden Rule
 
-**Store coordinates in PDF space, render in canvas space, let CSS handle transforms.**
+**Store coordinates in PDF space, render in canvas space, let CSS handle transforms. Coordinate system is independent of render quality.**
+
+### Key Principles
+
+1. **Render Quality Independence**: Coordinate conversions use canvas display size (CSS pixels), not backing buffer size. This makes coordinates independent of `RENDER_SCALE` settings.
+2. **1:1 Mapping**: Canvas display size is 1:1 with PDF points, so `pdfToCanvas()` returns coordinates directly without scaling.
+3. **Display Size Reference**: Always use `canvasRect.width/height` (display size) for coordinate calculations, never `canvasElement.width/height` (backing buffer).
 
 ### Quick Reference
 
 | Operation | Method | Purpose |
 |-----------|--------|---------|
-| Mouse → PDF | `getPDFCoordinates(e)` | Capture user input |
-| PDF → Canvas | `pdfToCanvas(x, y)` | Render overlays |
+| Mouse → PDF | `getPDFCoordinates(e)` | Capture user input (uses display size) |
+| PDF → Canvas | `pdfToCanvas(x, y)` | Render overlays (1:1 CSS coordinates) |
 | Preview boxes | Use `pdfToCanvas()` | Matches mouse position |
 | Stored annotations | Use PDF coordinates | Consistent with mupdf |
-| Y-axis flip | `pageHeight - y` | Convert between systems |
+| Y-axis flip | `mediaboxHeight - y` | Convert between systems |
+| Render quality | Independent | Changing quality doesn't affect coordinates |
 
 ### Key Files
 
@@ -600,5 +628,5 @@ The text box tool preview uses this exact pattern and works correctly:
 
 ## Last Updated
 
-December 2025 - Added high-DPI rendering support for crisp text on Retina/HiDPI displays
+December 2025 - Fixed coordinate system to be independent of render quality (RENDER_SCALE). Coordinate conversions now use canvas display size instead of backing buffer size, ensuring all annotation tools work correctly regardless of render quality settings.
 

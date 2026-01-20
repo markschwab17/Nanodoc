@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { PAGE_PRESETS, pointsToInches, inchesToPoints } from "@/shared/stores/documentSettingsStore";
+import { PAGE_PRESETS, pointsToInches, inchesToPoints, type RenderQuality, useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 
 interface DocumentSettingsDialogProps {
@@ -50,6 +50,8 @@ export function DocumentSettingsDialog({
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [applyToAll, setApplyToAll] = useState(true);
   const [isApplying, setIsApplying] = useState(false);
+  const { renderQuality: currentRenderQuality, setRenderQuality: setStoreRenderQuality } = useDocumentSettingsStore();
+  const [renderQuality, setRenderQuality] = useState<RenderQuality>("high");
 
   // Initialize with current page dimensions when dialog opens
   useEffect(() => {
@@ -86,7 +88,10 @@ export function DocumentSettingsDialog({
         setPreset(matchedPreset);
       }
     }
-  }, [open, document, currentPage]);
+
+    // Initialize render quality
+    setRenderQuality(currentRenderQuality);
+  }, [open, document, currentPage, currentRenderQuality]);
 
   const handlePresetChange = (value: string) => {
     const presetKey = value as PresetKey;
@@ -142,6 +147,7 @@ export function DocumentSettingsDialog({
     setIsApplying(true);
     try {
       await onApply(widthPoints, heightPoints, applyToAll);
+      setStoreRenderQuality(renderQuality); // Save render quality setting
       onOpenChange(false);
     } catch (error) {
       console.error("Error applying document settings:", error);
@@ -153,17 +159,17 @@ export function DocumentSettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[500px]">
+      <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Document Settings</DialogTitle>
           <DialogDescription>
             Adjust canvas size and orientation for your document
           </DialogDescription>
         </DialogHeader>
-        
-        <div className="grid gap-6 py-4">
+
+        <div className="grid gap-4 py-2">
           {/* Preset Selection */}
-          <div className="grid gap-2">
+          <div className="grid gap-1">
             <Label htmlFor="preset">Page Size Preset</Label>
             <Select value={preset} onValueChange={handlePresetChange}>
               <SelectTrigger id="preset">
@@ -180,7 +186,7 @@ export function DocumentSettingsDialog({
           </div>
 
           {/* Orientation */}
-          <div className="grid gap-2">
+          <div className="grid gap-1">
             <Label>Orientation</Label>
             <RadioGroup value={orientation} onValueChange={handleOrientationChange}>
               <div className="flex items-center space-x-2">
@@ -227,7 +233,7 @@ export function DocumentSettingsDialog({
           </div>
 
           {/* Apply To */}
-          <div className="grid gap-2">
+          <div className="grid gap-1">
             <Label>Apply To</Label>
             <RadioGroup value={applyToAll ? "all" : "current"} onValueChange={(v) => setApplyToAll(v === "all")}>
               <div className="flex items-center space-x-2">
@@ -245,10 +251,29 @@ export function DocumentSettingsDialog({
             </RadioGroup>
           </div>
 
+          {/* Render Quality */}
+          <div className="grid gap-1">
+            <Label htmlFor="render-quality">Render Quality</Label>
+            <Select value={renderQuality} onValueChange={(value) => setRenderQuality(value as RenderQuality)}>
+              <SelectTrigger id="render-quality">
+                <SelectValue placeholder="Select render quality" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="low">Low (1x) - Fast, lower quality</SelectItem>
+                <SelectItem value="medium">Medium (1.5x) - Balanced performance</SelectItem>
+                <SelectItem value="high">High (2x) - Crisp text, recommended</SelectItem>
+                <SelectItem value="ultra">Ultra (3x) - Maximum quality, slower</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="text-xs text-muted-foreground">
+              Higher quality improves text readability but may be slower.
+            </div>
+          </div>
+
           {/* Preview */}
-          <div className="rounded-lg border bg-muted p-4">
-            <div className="text-sm text-muted-foreground mb-2">Preview</div>
-            <div className="flex items-center justify-center h-32">
+          <div className="rounded-lg border bg-muted p-3">
+            <div className="text-sm text-muted-foreground mb-1">Preview</div>
+            <div className="flex items-center justify-center h-20">
               <div
                 className="border-2 border-primary bg-background shadow-sm"
                 style={{

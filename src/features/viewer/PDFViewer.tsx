@@ -18,11 +18,15 @@ import { PageTools } from "@/features/toolbar/PageTools";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import { useTabStore } from "@/shared/stores/tabStore";
+import { SpecExtractionPanel } from "@/features/specs/SpecExtractionPanel";
+import { QuestionAnswerPanel } from "@/features/specs/QuestionAnswerPanel";
+import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
+  const { setSelectedSpec } = useSpecExtractionStore();
   const currentDocument = getCurrentDocument();
   const [mupdf, setMupdf] = useState<any>(null);
   const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
@@ -176,40 +180,186 @@ export function PDFViewer() {
   }, [readMode, currentDocument, setZoomLevel, setFitMode]);
 
   // Scroll to current page in read mode
-  const scrollToPage = useCallback((pageNumber: number, center: boolean = true) => {
+  const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[]) => {
     if (!readMode || !scrollContainerRef.current || !currentDocument) return;
     
-    const container = scrollContainerRef.current;
-    const firstPageMetadata = currentDocument.getPageMetadata(0);
-    if (!firstPageMetadata) return;
+    // Validate page number is within bounds
+    const pageCount = currentDocument.getPageCount();
+    if (pageNumber < 0 || pageNumber >= pageCount) {
+      console.warn(`Invalid page number: ${pageNumber}, valid range: 0-${pageCount - 1}`);
+      return;
+    }
     
-    const scale = zoomLevel / baseFitScale;
-    const pageHeight = (firstPageMetadata.height * baseFitScale) * scale;
+    const container = scrollContainerRef.current;
     const pageGap = 24;
     
-    // Calculate page position
+    // Use the stored baseFitScale (which VirtualizedPageList uses) instead of recalculating
+    // This ensures consistency with how pages are actually positioned
+    // Only recalculate if baseFitScale is invalid (0 or negative)
+    let scaleToUse = baseFitScale;
+    if (scaleToUse <= 0) {
+      // Fallback: recalculate if baseFitScale isn't set yet
+      const containerWidth = container.clientWidth || 800;
+      const firstPageMetadata = currentDocument.getPageMetadata(0);
+      if (!firstPageMetadata || containerWidth <= 0) {
+        console.warn("Cannot calculate scroll position: invalid viewport or page metadata");
+        return;
+      }
+      scaleToUse = containerWidth / firstPageMetadata.width;
+    }
+    
+    // In read mode, pages are rendered at baseFitScale, and a transform is only applied when fitMode === "custom"
+    // So the actual scale is: fitMode === "custom" ? zoomLevel : baseFitScale
+    const actualScale = fitMode === "custom" ? zoomLevel : scaleToUse;
+    
+    // Calculate page position - use actual page heights at the actual scale
+    // This matches how VirtualizedPageList calculates positions
     let pageTop = 0;
     for (let i = 0; i < pageNumber; i++) {
       const pageMetadata = currentDocument.getPageMetadata(i);
       if (pageMetadata) {
-        pageTop += (pageMetadata.height * baseFitScale) * scale + pageGap;
+        pageTop += (pageMetadata.height * actualScale) + pageGap;
       }
     }
     
-      if (center) {
-        const containerHeight = container.clientHeight;
-      const targetScroll = pageTop - (containerHeight / 2) + (pageHeight / 2);
-        container.scrollTo({
-          top: Math.max(0, targetScroll),
-          behavior: "smooth"
-        });
-      } else {
+    // Get the target page's metadata
+    const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+    if (!pageMetadata) {
+      console.warn(`Page metadata not found for page ${pageNumber}`);
+      return;
+    }
+    
+    const pageHeight = pageMetadata.height * actualScale;
+    
+    // If bbox is provided, scroll to that specific location on the page
+    if (bbox && bbox.length >= 4) {
+      const [x0, y0, x1, y1] = bbox;
+      const pageHeightPdf = pageMetadata.height;
+      
+      // Convert PDF coordinates (Y=0 at bottom) to canvas coordinates (Y=0 at top)
+      // In PDF: y0 is bottom, y1 is top (y1 > y0)
+      // In canvas: we need top coordinate (smaller Y value)
+      const bboxTopPdf = Math.min(y0, y1); // Top of bbox in PDF coords
+      const bboxBottomPdf = Math.max(y0, y1); // Bottom of bbox in PDF coords
+      const bboxHeightPdf = bboxBottomPdf - bboxTopPdf;
+      
+      // Convert to canvas coordinates (flip Y)
+      const bboxTopCanvas = pageHeightPdf - bboxBottomPdf; // Top in canvas (smaller value)
+      const bboxCenterCanvas = bboxTopCanvas + (bboxHeightPdf / 2); // Center of bbox
+      
+      // Convert to scroll coordinates using actual scale
+      const bboxScrollY = pageTop + (bboxCenterCanvas * actualScale);
+      const containerHeight = container.clientHeight;
+      const targetScroll = bboxScrollY - (containerHeight / 2);
+      
+      container.scrollTo({
+        top: Math.max(0, targetScroll),
+        behavior: "smooth"
+      });
+      return;
+    }
+    
+    if (center) {
+      const containerHeight = container.clientHeight;
+      // Center the page in the viewport
+      // pageTop is the top of the page, pageHeight is the height of the page
+      // We want the center of the page to be at the center of the viewport
+      const pageCenter = pageTop + (pageHeight / 2);
+      const viewportCenter = containerHeight / 2;
+      const targetScroll = pageCenter - viewportCenter;
+      
+      container.scrollTo({
+        top: Math.max(0, targetScroll),
+        behavior: "smooth"
+      });
+    } else {
       container.scrollTo({
         top: Math.max(0, pageTop),
         behavior: "smooth"
       });
     }
-  }, [readMode, currentDocument, zoomLevel, baseFitScale]);
+  }, [readMode, currentDocument, zoomLevel, fitMode, baseFitScale]);
+  
+  // Handle scroll-to-spec events
+  useEffect(() => {
+    const handleScrollToSpec = (event: Event) => {
+      const customEvent = event as CustomEvent<{ page: number; bbox?: number[]; specId?: string }>;
+      const { page, bbox, specId } = customEvent.detail;
+      
+      if (!currentDocument) return;
+      
+      const documentId = currentDocument.getId();
+      
+      // Set selected spec for highlighting
+      if (specId) {
+        setSelectedSpec(documentId, specId);
+      }
+      
+      // Helper function to perform the scroll
+      const performScroll = () => {
+        setCurrentPage(page);
+        // Wait for page state to update, viewport to be ready, and baseFitScale to be calculated
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            // Double-check read mode is active and container exists
+            const isReadModeActive = useUIStore.getState().readMode;
+            if (isReadModeActive && scrollContainerRef.current) {
+              // Ensure baseFitScale is calculated before scrolling
+              const container = scrollContainerRef.current;
+              const containerWidth = container.clientWidth || 800;
+              const firstPageMetadata = currentDocument.getPageMetadata(0);
+              if (firstPageMetadata && containerWidth > 0) {
+                const calculatedScale = containerWidth / firstPageMetadata.width;
+                // Update baseFitScale if it's significantly different (viewport may have changed)
+                if (Math.abs(calculatedScale - baseFitScale) > 0.01) {
+                  setBaseFitScale(calculatedScale);
+                  // Wait one more frame for state to update
+                  requestAnimationFrame(() => {
+                    scrollToPage(page, true, bbox);
+                  });
+                } else {
+                  scrollToPage(page, true, bbox);
+                }
+              } else {
+                scrollToPage(page, true, bbox);
+              }
+            }
+          });
+        });
+      };
+      
+      // Switch to read mode if not already
+      if (!readMode) {
+        toggleReadMode();
+        // Wait for read mode to fully activate - use polling to check when ready
+        let attempts = 0;
+        const maxAttempts = 30; // 1.5 seconds max wait
+        const checkReadMode = setInterval(() => {
+          attempts++;
+          const isReadModeActive = useUIStore.getState().readMode;
+          if (isReadModeActive && scrollContainerRef.current) {
+            clearInterval(checkReadMode);
+            // Wait a bit more for viewport to settle
+            setTimeout(() => {
+              performScroll();
+            }, 100);
+          } else if (attempts >= maxAttempts) {
+            clearInterval(checkReadMode);
+            // Try anyway after max attempts
+            performScroll();
+          }
+        }, 50);
+      } else {
+        // Already in read mode, scroll immediately
+        performScroll();
+      }
+    };
+    
+    window.addEventListener('scroll-to-spec', handleScrollToSpec);
+    return () => {
+      window.removeEventListener('scroll-to-spec', handleScrollToSpec);
+    };
+  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, baseFitScale]);
 
   // Handle page visibility changes from VirtualizedPageList
   // This updates the current page as the user scrolls
@@ -368,12 +518,48 @@ export function PDFViewer() {
     }
     
     // This is an external action (thumbnail click, etc.) - scroll to the page
+    // Wait for viewport to be ready, baseFitScale to be calculated, and page to be rendered
+    const performScroll = () => {
+      if (!scrollContainerRef.current || !currentDocument) return;
+      
+      const container = scrollContainerRef.current;
+      const containerWidth = container.clientWidth || 800;
+      const firstPageMetadata = currentDocument.getPageMetadata(0);
+      if (firstPageMetadata && containerWidth > 0) {
+        const calculatedScale = containerWidth / firstPageMetadata.width;
+        // Update baseFitScale if it's significantly different (viewport may have changed)
+        if (Math.abs(calculatedScale - baseFitScale) > 0.01) {
+          setBaseFitScale(calculatedScale);
+          // Wait for state update and page rendering
+          setTimeout(() => {
+            scrollToPage(currentPage, true);
+          }, 50);
+        } else {
+          // Still wait a bit to ensure page is rendered
+          setTimeout(() => {
+            scrollToPage(currentPage, true);
+          }, 50);
+        }
+      } else {
+        // Fallback: try scrolling anyway after a delay
+        setTimeout(() => {
+          scrollToPage(currentPage, true);
+        }, 100);
+      }
+    };
+    
+    // Use multiple requestAnimationFrame calls plus a small timeout to ensure DOM is ready
+    requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        scrollToPage(currentPage, true);
+        // Additional small delay to ensure VirtualizedPageList has rendered the page
+        setTimeout(() => {
+          performScroll();
+        }, 50);
       });
+    });
     
     previousPageRef.current = currentPage;
-  }, [currentPage, readMode, scrollToPage]);
+  }, [currentPage, readMode, scrollToPage, currentDocument, baseFitScale]);
 
   // Fit to page when switching pages in normal mode
   useEffect(() => {
@@ -393,14 +579,31 @@ export function PDFViewer() {
   // Calculate base fit-to-width scale when entering read mode or document changes
   useEffect(() => {
     if (readMode && currentDocument && scrollContainerRef.current) {
-      // Calculate the fit-to-width scale based on container width
-      const container = scrollContainerRef.current;
-      const containerWidth = container.clientWidth || 800;
-      const firstPageMetadata = currentDocument.getPageMetadata(0);
-      if (firstPageMetadata) {
-        const scale = containerWidth / firstPageMetadata.width;
-        setBaseFitScale(scale);
-      }
+      const recalculateBaseFitScale = () => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        
+        const containerWidth = container.clientWidth || 800;
+        const firstPageMetadata = currentDocument.getPageMetadata(0);
+        if (firstPageMetadata && containerWidth > 0) {
+          const scale = containerWidth / firstPageMetadata.width;
+          setBaseFitScale(scale);
+        }
+      };
+      
+      // Calculate immediately
+      recalculateBaseFitScale();
+      
+      // Recalculate on resize
+      const resizeObserver = new ResizeObserver(() => {
+        recalculateBaseFitScale();
+      });
+      
+      resizeObserver.observe(scrollContainerRef.current);
+      
+      return () => {
+        resizeObserver.disconnect();
+      };
     }
   }, [readMode, currentDocument]);
 
@@ -739,6 +942,12 @@ export function PDFViewer() {
         currentPage={currentPage}
         onApply={handleApplyDocumentSettings}
       />
+
+      {/* Spec Extraction Panel */}
+      {currentDocument && <SpecExtractionPanel />}
+      
+      {/* Question Answer Panel */}
+      {currentDocument && <QuestionAnswerPanel />}
     </div>
   );
 }

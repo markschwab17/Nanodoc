@@ -8,7 +8,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
-import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
+import { useDocumentSettingsStore, getRenderQualityScale } from "@/shared/stores/documentSettingsStore";
 import { cn } from "@/lib/utils";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
@@ -34,6 +34,7 @@ import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } 
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 import { useTabStore } from "@/shared/stores/tabStore";
+import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 interface PageCanvasProps {
   document: PDFDocument;
@@ -55,7 +56,9 @@ export function PageCanvas({
   const [isRendering, setIsRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
-  const BASE_SCALE = 1.0; // Fixed base scale for PDF rendering (1:1 mapping - canvas size = PDF size)
+  const { renderQuality } = useDocumentSettingsStore();
+  const BASE_SCALE = 1.0; // Fixed 1:1 mapping between canvas pixels and PDF points
+  const RENDER_SCALE = getRenderQualityScale(renderQuality); // Quality multiplier for rendering
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
   const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback } = useUIStore();
@@ -861,10 +864,10 @@ export function PageCanvas({
         }
 
         // Render PDF at high-DPI resolution for crisp text
-        // The coordinate system (BASE_SCALE) stays constant for tool positioning
-        // Only the render resolution is multiplied by devicePixelRatio
+        // High-quality rendering: BASE_SCALE (1:1) * RENDER_SCALE (quality) * dpr (device pixels)
+        // Coordinate system stays 1:1 regardless of quality for consistent tool positioning
         const dpr = window.devicePixelRatio || 1;
-        const renderScale = BASE_SCALE * dpr;
+        const renderScale = BASE_SCALE * RENDER_SCALE * dpr;
         
         // Calculate initial viewport scale for fit modes
         let viewportScale = zoomLevel;
@@ -951,7 +954,7 @@ export function PageCanvas({
         
         // Store the base scale (PDF is always rendered at this scale)
         // The viewport zoom is handled via CSS transforms
-        setActualScale(BASE_SCALE);
+        setActualScale(RENDER_SCALE);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to render page");
         console.error("Error rendering page:", err);
@@ -1080,7 +1083,7 @@ export function PageCanvas({
         
         // High-DPI rendering for crisp text
         const dpr = window.devicePixelRatio || 1;
-        const renderScale = BASE_SCALE * dpr;
+        const renderScale = BASE_SCALE * RENDER_SCALE * dpr;
         
         // Render without additional rotation (PDF Rotate is already applied by mupdf)
         const rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
@@ -1152,44 +1155,45 @@ export function PageCanvas({
     const canvasRelativeX = e.clientX - canvasRect.left;
     const canvasRelativeY = e.clientY - canvasRect.top;
     
-    // Step 3: Convert from canvas screen size to canvas pixel coordinates
-    // Use ratio conversion: (screen position / screen size) * actual pixel size
-    const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
-    const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
-    
-    // Step 4: Convert canvas pixels to PDF coordinates
-    // PDF Y=0 is at bottom, canvas Y=0 is at top - we need to flip Y-axis
+    // Step 3: Convert directly from canvas display size (CSS pixels) to PDF coordinates
+    // Use display size (canvasRect) instead of backing buffer (canvasElement) to make coordinates
+    // independent of RENDER_SCALE. The display size is constant regardless of render quality.
     // IMPORTANT: Use original mediabox dimensions (not swapped display dimensions) for coordinate conversion
     // because annotations are stored in mediabox coordinate space
     let mediaboxHeight: number;
+    let mediaboxWidth: number;
     if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
       // Display dimensions are swapped, so mediaboxHeight = displayWidth
       mediaboxHeight = pageMetadata.width;
+      mediaboxWidth = pageMetadata.height;
     } else {
       // Display dimensions match mediabox dimensions
       mediaboxHeight = pageMetadata.height;
+      mediaboxWidth = pageMetadata.width;
     }
     
-    // High-DPI: canvas backing buffer is DPR times larger than display size
-    // So we divide by (BASE_SCALE * dpr) to convert from canvas pixels to PDF points
-    const dpr = window.devicePixelRatio || 1;
-    const pdfX = canvasPixelX / (BASE_SCALE * dpr);
-    const pdfY = mediaboxHeight - (canvasPixelY / (BASE_SCALE * dpr));  // Flip Y: PDF Y=0 is at bottom
+    // Convert directly from display size ratio to PDF coordinates
+    // This makes the coordinate system independent of RENDER_SCALE
+    // canvasRect.width/height are the CSS display dimensions (independent of render quality)
+    const pdfX = (canvasRelativeX / canvasRect.width) * mediaboxWidth;
+    const pdfY = mediaboxHeight - ((canvasRelativeY / canvasRect.height) * mediaboxHeight);  // Flip Y: PDF Y=0 is at bottom
     
     return { x: pdfX, y: pdfY };
   };
 
   // Helper function to convert PDF coordinates to canvas coordinates for rendering overlays
   // Must match getPDFCoordinates - both flip Y-axis since PDF Y=0 is at bottom, canvas Y=0 is at top
-  // getPDFCoordinates: pageHeight - (canvasPixelY / BASE_SCALE) → pdfY (flipped)
-  // pdfToCanvas: (pageHeight - pdfY) * BASE_SCALE → canvasY (flipped, to match)
+  // getPDFCoordinates: mediaboxHeight - ((canvasRelativeY / canvasRect.height) * mediaboxHeight) → pdfY (flipped)
+  // pdfToCanvas: mediaboxHeight - pdfY → canvasY (flipped, to match, 1:1 mapping)
   // IMPORTANT: Use original mediabox dimensions (not swapped display dimensions) for coordinate conversion
   // because annotations are stored in mediabox coordinate space
+  // Coordinate system is independent of RENDER_SCALE - uses display size (1:1 with PDF points)
   const pdfToCanvas = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
     const pageMetadata = document.getPageMetadata(pageNumber);
     
     if (!pageMetadata) {
-      return { x: pdfX * BASE_SCALE, y: pdfY * BASE_SCALE };
+      // Return 1:1 coordinates when metadata is unavailable
+      return { x: pdfX, y: pdfY };
     }
     
     // Get original mediabox dimensions for Y-axis flipping
@@ -1220,14 +1224,18 @@ export function PageCanvas({
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
     const flippedY = mediaboxHeight - pdfY;
     
+    // Return CSS coordinates (display size) for overlay positioning
+    // Canvas display size is 1:1 with PDF points (independent of RENDER_SCALE)
+    // This makes the coordinate system independent of render quality settings
     const result = {
-      x: pdfX * BASE_SCALE,
-      y: flippedY * BASE_SCALE,  // Flip Y to match getPDFCoordinates
+      x: pdfX,      // 1:1 mapping with PDF points for CSS positioning
+      y: flippedY,  // 1:1 mapping with PDF points for CSS positioning
     };
     
     // Debug logging for arrow points specifically
     if (Math.abs(pdfX) < 10000 && Math.abs(pdfY) < 10000) { // Only log reasonable values to avoid spam
-      console.log("🔴 [pdfToCanvas] Converting:", { pdfX, pdfY, mediaboxHeight, flippedY, result });
+      // Debug log removed - was causing excessive console output
+      // console.log("🔴 [pdfToCanvas] Converting:", { pdfX, pdfY, mediaboxHeight, flippedY, result });
     }
     
     return result;
@@ -1235,6 +1243,7 @@ export function PageCanvas({
 
   // Helper function to convert PDF coordinates to container-relative (screen) coordinates
   // This is the REVERSE of getPDFCoordinates
+  // Returns CSS coordinates (display size) independent of RENDER_SCALE
   const pdfToContainer = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
     if (!canvasRef.current) {
       return { x: 0, y: 0 };
@@ -1246,25 +1255,24 @@ export function PageCanvas({
       return { x: 0, y: 0 };
     }
     
-    // Convert PDF coordinates to canvas display coordinates (in display pixels)
-    // PDF Y=0 is at bottom, canvas Y=0 is at top
-    const canvasDisplayX = pdfX * BASE_SCALE;
-    const canvasDisplayY = (pageMetadata.height - pdfY) * BASE_SCALE;
+    // Get original mediabox dimensions for Y-axis flipping (must match getPDFCoordinates logic)
+    let mediaboxHeight: number;
+    if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
+      mediaboxHeight = pageMetadata.width;
+    } else {
+      mediaboxHeight = pageMetadata.height;
+    }
     
-    // Canvas display coordinates are already in the correct coordinate system
-    // (rendered image is at BASE_SCALE resolution, canvas display size matches)
-    const screenRelativeX = canvasDisplayX;
-    const screenRelativeY = canvasDisplayY;
+    // Convert PDF coordinates to canvas display coordinates (CSS pixels, 1:1 with PDF points)
+    // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis
+    // Canvas display size is 1:1 with PDF points, independent of RENDER_SCALE
+    const canvasDisplayX = pdfX;  // 1:1 mapping
+    const canvasDisplayY = mediaboxHeight - pdfY;  // Flip Y: 1:1 mapping
     
-    // Add canvas position to get absolute screen coordinates
-    // const screenX = canvasRect.left + screenRelativeX;
-    // const screenY = canvasRect.top + screenRelativeY;
-    
-    // But we want container-relative, so just use the relative values
-    // Actually, for rendering purposes we want canvas-relative which is screen-relative
+    // Return container-relative coordinates (same as canvas-relative since canvas is in container)
     return {
-      x: screenRelativeX,
-      y: screenRelativeY,
+      x: canvasDisplayX,
+      y: canvasDisplayY,
     };
   };
 
@@ -2374,20 +2382,22 @@ export function PageCanvas({
           
           console.log("Drop position:", e.clientX, e.clientY, "Canvas relative:", canvasRelativeX, canvasRelativeY);
           
-          // Convert to canvas pixel coordinates
-          const canvasPixelX = (canvasRelativeX / canvasRect.width) * canvasElement.width;
-          const canvasPixelY = (canvasRelativeY / canvasRect.height) * canvasElement.height;
-          
-          // Convert to PDF coordinates (1:1 mapping with BASE_SCALE = 1.0)
+          // Convert directly from canvas display size (CSS pixels) to PDF coordinates
+          // Use display size (canvasRect) instead of backing buffer to make coordinates
+          // independent of RENDER_SCALE, matching getPDFCoordinates() logic
           let mediaboxHeight: number;
+          let mediaboxWidth: number;
           if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
             mediaboxHeight = pageMetadata.width;
+            mediaboxWidth = pageMetadata.height;
           } else {
             mediaboxHeight = pageMetadata.height;
+            mediaboxWidth = pageMetadata.width;
           }
           
-          const pdfX = canvasPixelX;
-          const pdfY = mediaboxHeight - canvasPixelY;
+          // Convert directly from display size ratio to PDF coordinates (1:1 mapping)
+          const pdfX = (canvasRelativeX / canvasRect.width) * mediaboxWidth;
+          const pdfY = mediaboxHeight - ((canvasRelativeY / canvasRect.height) * mediaboxHeight);
 
           // Calculate initial size (max 300x300 PDF points, maintain aspect ratio)
           const maxSize = 300;
@@ -3270,11 +3280,12 @@ export function PageCanvas({
                   
                   // mupdf search quads use Y=0 at top (screen-like coordinates)
                   // NOT Y=0 at bottom like standard PDF coordinates
-                  // So we don't need to flip Y - just scale directly with BASE_SCALE
-                  const canvasX = minX * BASE_SCALE;
-                  const canvasY = minY * BASE_SCALE;
-                  const width = (maxX - minX) * BASE_SCALE;
-                  const height = (maxY - minY) * BASE_SCALE;
+                  // So we don't need to flip Y - use 1:1 mapping for CSS positioning
+                  // Coordinate system is independent of RENDER_SCALE
+                  const canvasX = minX;  // 1:1 mapping with PDF points
+                  const canvasY = minY;  // 1:1 mapping with PDF points
+                  const width = maxX - minX;  // 1:1 mapping
+                  const height = maxY - minY;  // 1:1 mapping
                   
                   return (
                     <div
@@ -3295,6 +3306,140 @@ export function PageCanvas({
               })}
             </div>
         )}
+
+        {/* Render spec extraction highlights */}
+        {(() => {
+          const { getSpecHighlights, selectedSpecId, selectedSpecDocumentId, temporaryHighlight } = useSpecExtractionStore.getState();
+          if (!currentDocument) return null;
+          const documentId = currentDocument.getId();
+          const specHighlights = getSpecHighlights(documentId);
+          const pageSpecHighlights = specHighlights.filter((h: { page: number }) => h.page === pageNumber);
+          
+          const hasPageHighlights = pageSpecHighlights.length > 0;
+          const hasTemporaryHighlight = temporaryHighlight && temporaryHighlight.page === pageNumber;
+          
+          if (!hasPageHighlights && !hasTemporaryHighlight) return null;
+          
+          const isSelected = selectedSpecDocumentId === documentId;
+          const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+          const pageHeight = pageMetadata?.height || 792;
+          
+          return (
+            <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 45 }}>
+              {/* Regular spec highlights */}
+              {pageSpecHighlights.map((highlight: { bbox: [number, number, number, number]; specId: string; color?: string }, idx: number) => {
+                const [x0, y0, x1, y1] = highlight.bbox;
+                // Convert PDF coordinates (Y=0 at bottom) to canvas coordinates (Y=0 at top)
+                // Use 1:1 mapping - coordinate system is independent of RENDER_SCALE
+                const canvasX0 = x0;  // 1:1 mapping with PDF points
+                const canvasY0 = pageHeight - y1;  // Flip Y: 1:1 mapping
+                const canvasX1 = x1;  // 1:1 mapping
+                const canvasY1 = pageHeight - y0;  // Flip Y: 1:1 mapping
+                const width = canvasX1 - canvasX0;
+                const height = canvasY1 - canvasY0;
+                
+                const isHighlightSelected = isSelected && highlight.specId === selectedSpecId;
+                const baseColor = highlight.color || '#fbbf24';
+                
+                // Convert hex color to rgba for proper opacity
+                const hexToRgba = (hex: string, alpha: number): string => {
+                  const r = parseInt(hex.slice(1, 3), 16);
+                  const g = parseInt(hex.slice(3, 5), 16);
+                  const b = parseInt(hex.slice(5, 7), 16);
+                  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+                };
+                
+                return (
+                  <div
+                    key={`spec_${highlight.specId}_${idx}`}
+                    className="absolute pointer-events-none"
+                    style={{
+                      left: `${canvasX0}px`,
+                      top: `${canvasY0}px`,
+                      width: `${Math.max(width, 5)}px`,
+                      height: `${Math.max(height, 5)}px`,
+                      backgroundColor: isHighlightSelected 
+                        ? hexToRgba(baseColor, 0.5) // 50% opacity when selected
+                        : hexToRgba(baseColor, 0.3), // 30% opacity for normal (more transparent)
+                      border: isHighlightSelected
+                        ? `3px solid ${baseColor}` // Thicker border when selected
+                        : `1px solid ${baseColor}`,
+                      boxShadow: isHighlightSelected
+                        ? `0 0 8px ${hexToRgba(baseColor, 0.4)}` // Glow effect when selected
+                        : 'none',
+                      transition: 'all 0.2s ease-in-out',
+                    }}
+                  />
+                );
+              })}
+              
+              {/* Temporary text highlight (exact text quads) */}
+              {hasTemporaryHighlight && temporaryHighlight && (
+                <div className="absolute inset-0">
+                  {temporaryHighlight.quads.map((quad, idx) => {
+                    if (!Array.isArray(quad) || quad.length < 8) return null;
+                    
+                    // Quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
+                    const quadMinX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+                    const quadMinY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+                    const quadMaxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+                    const quadMaxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+                    
+                    // Convert PDF coordinates to canvas coordinates
+                    const quadMinCanvas = pdfToCanvas(quadMinX, quadMinY);
+                    const quadMaxCanvas = pdfToCanvas(quadMaxX, quadMaxY);
+                    
+                    // For CSS positioning, we need top-left corner and positive dimensions
+                    const quadX = Math.min(quadMinCanvas.x, quadMaxCanvas.x);
+                    const quadY = Math.min(quadMinCanvas.y, quadMaxCanvas.y);
+                    const quadWidth = Math.abs(quadMaxCanvas.x - quadMinCanvas.x);
+                    const quadHeight = Math.abs(quadMaxCanvas.y - quadMinCanvas.y);
+                    
+                    // Convert quad points to canvas coordinates for SVG path
+                    const quadPoints = [
+                      pdfToCanvas(quad[0], quad[1]),
+                      pdfToCanvas(quad[2], quad[3]),
+                      pdfToCanvas(quad[4], quad[5]),
+                      pdfToCanvas(quad[6], quad[7]),
+                    ];
+                    
+                    // Create SVG path for the quad
+                    const pathData = `M ${quadPoints[0].x - quadX} ${quadPoints[0].y - quadY} L ${quadPoints[1].x - quadX} ${quadPoints[1].y - quadY} L ${quadPoints[2].x - quadX} ${quadPoints[2].y - quadY} L ${quadPoints[3].x - quadX} ${quadPoints[3].y - quadY} Z`;
+                    
+                    return (
+                      <div
+                        key={`temp_quad_${idx}`}
+                        className="absolute pointer-events-none animate-pulse"
+                        style={{
+                          left: `${quadX}px`,
+                          top: `${quadY}px`,
+                          width: `${quadWidth}px`,
+                          height: `${quadHeight}px`,
+                        }}
+                      >
+                        <svg
+                          width={quadWidth}
+                          height={quadHeight}
+                          className="absolute inset-0"
+                          style={{ overflow: 'visible' }}
+                        >
+                          <path
+                            d={pathData}
+                            fill={temporaryHighlight.color}
+                            fillOpacity={0.6}
+                            stroke={temporaryHighlight.color}
+                            strokeWidth={2}
+                            strokeOpacity={0.9}
+                          />
+                        </svg>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Render annotations */}
         {annotations.length > 0 && (
@@ -3754,8 +3899,9 @@ export function PageCanvas({
               const end = pdfToCanvas(annot.points[1].x, annot.points[1].y);
               console.log("🔴 [ARROW RENDER] Converted to canvas:", { start, end });
               // Convert arrow head size from PDF points to canvas pixels
+              // Use 1:1 mapping - coordinate system is independent of RENDER_SCALE
               const arrowHeadSizePdf = annot.arrowHeadSize || 10;
-              const arrowHeadSize = arrowHeadSizePdf * BASE_SCALE;
+              const arrowHeadSize = arrowHeadSizePdf;  // 1:1 mapping with PDF points
               
               const dx = end.x - start.x;
               const dy = end.y - start.y;

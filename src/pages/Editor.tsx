@@ -556,7 +556,8 @@ function Editor() {
         console.warn("Tauri event listener not available despite Tauri detection");
       }
     } else {
-      console.log("Not in Tauri environment, skipping PDF file association listener");
+      // Not in Tauri environment - file association listener not needed
+      // (Silently skip - this is expected in browser environment)
     }
   }, [fileSystem, loadPDF]);
 
