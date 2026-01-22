@@ -37,9 +37,7 @@ export function PDFViewer() {
   const [baseFitScale, setBaseFitScale] = useState<number>(1.0);
   const isScrollingFromUserRef = useRef(false); // Track if page change is from user scroll vs external action
   const previousPageRef = useRef(currentPage); // Track previous page to detect actual changes
-  const pendingScrollTopRef = useRef<number | null>(null); // Store pending scroll position to apply after zoom
   const isZoomingRef = useRef(false); // Flag to prevent scroll interference during zoom
-  const zoomAnchorPointRef = useRef<{ x: number; y: number } | null>(null); // Store anchor point for transform origin
   const previousReadModeRef = useRef(readMode); // Track previous read mode state
   const [isEditingPage, setIsEditingPage] = useState(false);
   const [pageInputValue, setPageInputValue] = useState("");
@@ -81,105 +79,102 @@ export function PDFViewer() {
   // Zoom function for read mode - zooms to anchor point (mouse cursor or viewport center)
   const zoomToPoint = useCallback((
     newZoom: number,
-    anchorX?: number,  // Mouse X in screen coordinates, or undefined for center
+    _anchorX?: number,  // Mouse X in screen coordinates, or undefined for center (not used in read mode)
     anchorY?: number   // Mouse Y in screen coordinates, or undefined for center
   ) => {
-    if (!readMode || !scrollContainerRef.current || !pagesContainerRef.current || !currentDocument) return;
+    if (!readMode || !scrollContainerRef.current || !currentDocument) return;
 
     const scrollContainer = scrollContainerRef.current;
-    const pagesContainer = pagesContainerRef.current;
     const currentZoom = zoomLevelRef.current;
-    const currentBaseFitScale = baseFitScaleRef.current;
     
     // Get container dimensions and position
     const scrollRect = scrollContainer.getBoundingClientRect();
-    const pagesRect = pagesContainer.getBoundingClientRect();
-    const viewportWidth = scrollContainer.clientWidth;
     const viewportHeight = scrollContainer.clientHeight;
     
     // Determine anchor point in viewport coordinates (relative to scroll container)
-    const anchorPointX = anchorX !== undefined 
-      ? anchorX - scrollRect.left
-      : viewportWidth / 2;
     const anchorPointY = anchorY !== undefined
       ? anchorY - scrollRect.top
       : viewportHeight / 2;
     
-    // Get current scroll position
+    // Get current scroll position (in actual rendered coordinates)
     const scrollTop = scrollContainer.scrollTop;
     
-    // Current and new scale factors
-    const currentScale = currentZoom / currentBaseFitScale;
-    const newScale = newZoom / currentBaseFitScale;
+    // Calculate zoom factors relative to baseFitScale
+    const currentBaseFitScale = baseFitScaleRef.current;
+    if (currentBaseFitScale <= 0) return;
+    
+    const currentZoomFactor = currentZoom / currentBaseFitScale;
+    const newZoomFactor = newZoom / currentBaseFitScale;
     
     // Calculate the document position that is currently at the anchor point
-    // The key insight: scrollTop is the scroll position in base-scale coordinates
-    // The anchor point in the viewport (anchorPointY) is the offset from the top of the viewport
-    // The document position at the anchor = scrollTop + anchorPointY (in base-scale coordinates)
-    // const documentY = scrollTop + anchorPointY; // Reserved for future use
+    // scrollTop is the scroll position in rendered coordinates at currentZoom
+    // anchorPointY is the viewport position where we want to maintain focus
+    // Total document position at anchor in current coordinates: scrollTop + anchorPointY
+    // Convert to base scale: (scrollTop + anchorPointY) / currentZoomFactor
+    const documentYAtAnchorBase = (scrollTop + anchorPointY) / currentZoomFactor;
     
-    // Calculate new scroll position to maintain the document position at the anchor point
-    // Formula: newScrollTop = ((scrollTop + anchorPointY) * currentScale / newScale) - anchorPointY
-    // This maintains the visual position of the anchor point during zoom
-    const newScrollTop = ((scrollTop + anchorPointY) * currentScale / newScale) - anchorPointY;
+    // Calculate new scroll position to keep the same document point at the anchor
+    // After zooming, convert back to new rendered coordinates
+    // newScrollTop = (documentYAtAnchorBase * newZoomFactor) - anchorPointY
+    const newScrollTop = (documentYAtAnchorBase * newZoomFactor) - anchorPointY;
     
-    // Store the target scroll position and anchor point for transform origin
-    // The transform origin needs to be relative to the pages container, not the scroll container
-    // The pages container is centered horizontally with flex justify-center
-    // We need to calculate the base width (at baseFitScale) to find the left edge
-    // Base width = firstPageMetadata.width * baseFitScale
-    // Pages container left edge = (viewportWidth - baseWidth) / 2
-    // But pagesRect.width is the transformed width, which changes with zoom
-    // So we need to use the base width divided by currentScale to get the untransformed width
-    const firstPageMetadata = currentDocument.getPageMetadata(0);
-    const baseWidth = firstPageMetadata ? firstPageMetadata.width * currentBaseFitScale : pagesRect.width / currentScale;
-    const pagesContainerLeftInScroll = (viewportWidth - baseWidth) / 2;
-    // Transform origin is relative to the pages container's coordinate system
-    // Y coordinate must include scrollTop since the container's top is at scrollTop=0 in its own coordinates
-    const anchorPointRelativeToPages = {
-      x: anchorPointX - pagesContainerLeftInScroll,
-      y: scrollTop + anchorPointY
-    };
-    
-    pendingScrollTopRef.current = newScrollTop;
+    // Set zooming flag to prevent interference from other effects
     isZoomingRef.current = true;
-    zoomAnchorPointRef.current = anchorPointRelativeToPages;
     
-    // Update zoom state (this may trigger re-renders)
+    // Update zoom state (this triggers VirtualizedPageList to recalculate pageData)
     zoomLevelRef.current = newZoom;
     setFitMode("custom");
     setZoomLevel(newZoom);
     
-    // Apply scroll position after transform has been applied
-    setTimeout(() => {
+    // Apply scroll position immediately using requestAnimationFrame
+    // This ensures the scroll adjustment happens in the same frame as the state update
+    // but after React has processed the state change
+    requestAnimationFrame(() => {
+      if (!scrollContainer) {
+        isZoomingRef.current = false;
+        return;
+      }
+      
+      // Get current scroll height (may have changed due to zoom)
+      const currentScrollHeight = scrollContainer.scrollHeight;
+      const currentViewportHeight = scrollContainer.clientHeight;
+      
+      // Calculate max scroll position
+      const maxScroll = Math.max(0, currentScrollHeight - currentViewportHeight);
+      
+      // Clamp the target scroll position to valid range
+      const clampedTarget = Math.max(0, Math.min(maxScroll, newScrollTop));
+      // Apply scroll position immediately
+      scrollContainer.scrollTop = clampedTarget;
+      
+      // Verify and adjust once more after a brief delay to account for any layout changes
+      // This is a safety check in case VirtualizedPageList needs an extra frame to update
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (scrollContainer && pendingScrollTopRef.current !== null) {
-            const currentMaxScrollTop = Math.max(0, scrollContainer.scrollHeight - viewportHeight);
-            const targetScroll = Math.max(0, Math.min(currentMaxScrollTop, pendingScrollTopRef.current));
-            
-            scrollContainer.scrollTop = targetScroll;
-            
-            // Verify and retry if needed
-            if (Math.abs(scrollContainer.scrollTop - targetScroll) > 1) {
-              scrollContainer.scrollTop = targetScroll;
-              if (Math.abs(scrollContainer.scrollTop - targetScroll) > 1) {
-                scrollContainer.scrollTo({ top: targetScroll, behavior: 'auto' });
-              }
-            }
-            
-            setTimeout(() => {
-              pendingScrollTopRef.current = null;
-              isZoomingRef.current = false;
-              zoomAnchorPointRef.current = null;
-            }, 10);
-          }
-        });
+        if (!scrollContainer) {
+          isZoomingRef.current = false;
+          return;
+        }
+        
+        const finalScrollHeight = scrollContainer.scrollHeight;
+        const finalViewportHeight = scrollContainer.clientHeight;
+        const finalMaxScroll = Math.max(0, finalScrollHeight - finalViewportHeight);
+        const finalTarget = Math.max(0, Math.min(finalMaxScroll, newScrollTop));
+        
+        // Only adjust if significantly different to avoid unnecessary updates
+        if (Math.abs(scrollContainer.scrollTop - finalTarget) > 1) {
+          scrollContainer.scrollTop = finalTarget;
+        }
+        
+        // Clear zooming flag after a brief delay to allow any pending effects to complete
+        setTimeout(() => {
+          isZoomingRef.current = false;
+        }, 50);
       });
-    }, 50);
+    });
   }, [readMode, currentDocument, setZoomLevel, setFitMode]);
 
   // Scroll to current page in read mode
+  // Pages are positioned at zoomLevel scale, so scroll coordinates are at zoom level
   const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[]) => {
     if (!readMode || !scrollContainerRef.current || !currentDocument) return;
     
@@ -191,34 +186,34 @@ export function PDFViewer() {
     }
     
     const container = scrollContainerRef.current;
-    const pageGap = 24;
+    const pageGap = 1;
     
-    // Use the stored baseFitScale (which VirtualizedPageList uses) instead of recalculating
-    // This ensures consistency with how pages are actually positioned
-    // Only recalculate if baseFitScale is invalid (0 or negative)
-    let scaleToUse = baseFitScale;
-    if (scaleToUse <= 0) {
-      // Fallback: recalculate if baseFitScale isn't set yet
-      const containerWidth = container.clientWidth || 800;
-      const firstPageMetadata = currentDocument.getPageMetadata(0);
-      if (!firstPageMetadata || containerWidth <= 0) {
-        console.warn("Cannot calculate scroll position: invalid viewport or page metadata");
-        return;
-      }
-      scaleToUse = containerWidth / firstPageMetadata.width;
+    // Use zoomLevel and baseFitScale for positioning
+    // Calculate zoom factor relative to baseFitScale
+    if (baseFitScale <= 0 || zoomLevel <= 0) {
+      console.warn("Cannot calculate scroll position: invalid baseFitScale or zoomLevel");
+      return;
     }
     
-    // In read mode, pages are rendered at baseFitScale, and a transform is only applied when fitMode === "custom"
-    // So the actual scale is: fitMode === "custom" ? zoomLevel : baseFitScale
-    const actualScale = fitMode === "custom" ? zoomLevel : scaleToUse;
+    const zoomFactor = zoomLevel / baseFitScale;
+    const firstPageMetadata = currentDocument.getPageMetadata(0);
+    if (!firstPageMetadata) {
+      console.warn("Cannot calculate scroll position: first page metadata not found");
+      return;
+    }
     
-    // Calculate page position - use actual page heights at the actual scale
-    // This matches how VirtualizedPageList calculates positions
+    // Calculate viewport width: base width scaled by zoom factor
+    const viewportWidth = firstPageMetadata.width * baseFitScale * zoomFactor;
+    
     let pageTop = 0;
     for (let i = 0; i < pageNumber; i++) {
       const pageMetadata = currentDocument.getPageMetadata(i);
       if (pageMetadata) {
-        pageTop += (pageMetadata.height * actualScale) + pageGap;
+        // Scale each page to fit viewport width while maintaining aspect ratio
+        const pageScale = viewportWidth / pageMetadata.width;
+        const pageHeight = pageMetadata.height * pageScale;
+        // Gap is fixed in screen pixels (not scaled) for consistent visual appearance
+        pageTop += pageHeight + pageGap;
       }
     }
     
@@ -229,26 +224,24 @@ export function PDFViewer() {
       return;
     }
     
-    const pageHeight = pageMetadata.height * actualScale;
+    // Calculate target page dimensions at zoom level
+    const pageScale = viewportWidth / pageMetadata.width;
+    const pageHeight = pageMetadata.height * pageScale;
     
     // If bbox is provided, scroll to that specific location on the page
     if (bbox && bbox.length >= 4) {
-      const [x0, y0, x1, y1] = bbox;
+      const [, y0, , y1] = bbox;
       const pageHeightPdf = pageMetadata.height;
       
       // Convert PDF coordinates (Y=0 at bottom) to canvas coordinates (Y=0 at top)
-      // In PDF: y0 is bottom, y1 is top (y1 > y0)
-      // In canvas: we need top coordinate (smaller Y value)
-      const bboxTopPdf = Math.min(y0, y1); // Top of bbox in PDF coords
-      const bboxBottomPdf = Math.max(y0, y1); // Bottom of bbox in PDF coords
+      const bboxTopPdf = Math.min(y0, y1);
+      const bboxBottomPdf = Math.max(y0, y1);
       const bboxHeightPdf = bboxBottomPdf - bboxTopPdf;
+      const bboxTopCanvas = pageHeightPdf - bboxBottomPdf;
+      const bboxCenterCanvas = bboxTopCanvas + (bboxHeightPdf / 2);
       
-      // Convert to canvas coordinates (flip Y)
-      const bboxTopCanvas = pageHeightPdf - bboxBottomPdf; // Top in canvas (smaller value)
-      const bboxCenterCanvas = bboxTopCanvas + (bboxHeightPdf / 2); // Center of bbox
-      
-      // Convert to scroll coordinates using actual scale
-      const bboxScrollY = pageTop + (bboxCenterCanvas * actualScale);
+      // Convert to scroll coordinates at zoom level
+      const bboxScrollY = pageTop + (bboxCenterCanvas * pageScale);
       const containerHeight = container.clientHeight;
       const targetScroll = bboxScrollY - (containerHeight / 2);
       
@@ -260,10 +253,9 @@ export function PDFViewer() {
     }
     
     if (center) {
-      const containerHeight = container.clientHeight;
       // Center the page in the viewport
-      // pageTop is the top of the page, pageHeight is the height of the page
-      // We want the center of the page to be at the center of the viewport
+      // All calculations are at zoom level scale
+      const containerHeight = container.clientHeight;
       const pageCenter = pageTop + (pageHeight / 2);
       const viewportCenter = containerHeight / 2;
       const targetScroll = pageCenter - viewportCenter;
@@ -278,7 +270,7 @@ export function PDFViewer() {
         behavior: "smooth"
       });
     }
-  }, [readMode, currentDocument, zoomLevel, fitMode, baseFitScale]);
+  }, [readMode, currentDocument, zoomLevel, baseFitScale]);
   
   // Handle scroll-to-spec events
   useEffect(() => {
@@ -387,7 +379,7 @@ export function PDFViewer() {
       e.stopPropagation();
 
       const currentZoom = zoomLevelRef.current;
-      const delta = e.deltaY > 0 ? 0.97 : 1.03;
+      const delta = e.deltaY > 0 ? 0.99 : 1.01; // Reduced from 0.97/1.03 to 0.99/1.01 for slower zoom
       const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
 
       if (Math.abs(newZoom - currentZoom) > 0.001) {
@@ -517,7 +509,13 @@ export function PDFViewer() {
       return;
     }
     
-    // This is an external action (thumbnail click, etc.) - scroll to the page
+    // This is an external action (thumbnail click, etc.) - reset zoom and scroll to the page
+    // Reset zoom to fit-to-width for consistent navigation experience
+    if (fitMode === "custom" || zoomLevel !== baseFitScale) {
+      setFitMode("width");
+      setZoomLevel(baseFitScale);
+    }
+    
     // Wait for viewport to be ready, baseFitScale to be calculated, and page to be rendered
     const performScroll = () => {
       if (!scrollContainerRef.current || !currentDocument) return;
@@ -549,17 +547,19 @@ export function PDFViewer() {
     };
     
     // Use multiple requestAnimationFrame calls plus a small timeout to ensure DOM is ready
+    // Wait a bit longer if we reset zoom to allow transform to update
+    const delay = (fitMode === "custom" || zoomLevel !== baseFitScale) ? 100 : 50;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         // Additional small delay to ensure VirtualizedPageList has rendered the page
         setTimeout(() => {
           performScroll();
-        }, 50);
+        }, delay);
       });
     });
     
     previousPageRef.current = currentPage;
-  }, [currentPage, readMode, scrollToPage, currentDocument, baseFitScale]);
+  }, [currentPage, readMode, scrollToPage, currentDocument, baseFitScale, fitMode, zoomLevel, setFitMode, setZoomLevel]);
 
   // Fit to page when switching pages in normal mode
   useEffect(() => {
@@ -614,6 +614,22 @@ export function PDFViewer() {
       setFitMode("width");
     }
   }, [readMode, fitMode]);
+
+  // When fitMode is "width" in read mode, set zoomLevel to baseFitScale
+  // BUT: Don't reset if we're actively zooming (user-initiated zoom) or if fitMode is "custom"
+  useEffect(() => {
+    // Only reset zoom if:
+    // 1. We're in read mode
+    // 2. fitMode is "width" (not "custom" - custom means user is zooming)
+    // 3. We're not actively zooming
+    // 4. zoomLevel doesn't match baseFitScale
+    if (readMode && fitMode === "width" && baseFitScale > 0 && !isZoomingRef.current) {
+      // Only reset if zoomLevel is significantly different and we're not actively zooming
+      if (Math.abs(zoomLevel - baseFitScale) > 0.01) {
+        setZoomLevel(baseFitScale);
+      }
+    }
+  }, [readMode, fitMode, baseFitScale, zoomLevel, setZoomLevel]);
 
 
   const handlePreviousPage = () => {
@@ -760,13 +776,6 @@ export function PDFViewer() {
           <div 
             ref={pagesContainerRef}
             className="flex justify-center"
-            style={{ 
-              transform: fitMode === "custom" ? `scale(${zoomLevel / baseFitScale})` : undefined,
-              transformOrigin: zoomAnchorPointRef.current && isZoomingRef.current
-                ? `${zoomAnchorPointRef.current.x}px ${zoomAnchorPointRef.current.y}px`
-                : "top left",
-              willChange: "transform",
-            }}
           >
             {currentDocument && renderer && (
               <VirtualizedPageList
@@ -774,7 +783,7 @@ export function PDFViewer() {
                   renderer={renderer}
                 zoomLevel={zoomLevel}
                 baseFitScale={baseFitScale}
-                pageGap={24}
+                pageGap={8}
                 bufferPages={2}
                 onPageVisible={handlePageVisible}
                 scrollContainerRef={scrollContainerRef}
@@ -853,15 +862,10 @@ export function PDFViewer() {
               size="icon"
               className="h-7 w-7"
               onClick={() => {
-                const newZoom = Math.max(0.25, zoomLevel - 0.25);
-                if (readMode) {
-                  setZoomLevel(newZoom);
-                } else {
-                  zoomToCenter(newZoom);
-                }
+                const newZoom = Math.max(0.25, zoomLevel - 0.1); // Reduced from 0.25 to 0.1 for slower zoom
+                zoomToCenter(newZoom);
               }}
               title="Zoom Out"
-              disabled={readMode}
             >
               <ZoomOut className="h-3.5 w-3.5" />
             </Button>
@@ -875,15 +879,10 @@ export function PDFViewer() {
               size="icon"
               className="h-7 w-7"
               onClick={() => {
-                const newZoom = Math.min(5, zoomLevel + 0.25);
-                if (readMode) {
-                  setZoomLevel(newZoom);
-                } else {
-                  zoomToCenter(newZoom);
-                }
+                const newZoom = Math.min(5, zoomLevel + 0.1); // Reduced from 0.25 to 0.1 for slower zoom
+                zoomToCenter(newZoom);
               }}
               title="Zoom In"
-              disabled={readMode}
             >
               <ZoomIn className="h-3.5 w-3.5" />
             </Button>

@@ -14,7 +14,7 @@ import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationC
 export function useKeyboard() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
-  const { setZoomLevel, zoomLevel, toggleReadMode, activeTool, setActiveTool } = useUIStore();
+  const { setZoomLevel, zoomLevel, toggleReadMode, activeTool, setActiveTool, readMode, zoomToCenter } = useUIStore();
   const { closeCurrentDocument } = usePDF();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
   const { hasTextAnnotation } = useTextAnnotationClipboardStore();
@@ -206,19 +206,33 @@ export function useKeyboard() {
       // Zoom controls
       if ((e.metaKey || e.ctrlKey) && e.key === "=") {
         e.preventDefault();
-        setZoomLevel(zoomLevel + 0.25);
+        const newZoom = Math.min(5, zoomLevel + 0.1); // Reduced from 0.25 to 0.1 for slower zoom
+        if (readMode) {
+          zoomToCenter(newZoom);
+        } else {
+          setZoomLevel(newZoom);
+        }
         return;
       }
 
       if ((e.metaKey || e.ctrlKey) && e.key === "-") {
         e.preventDefault();
-        setZoomLevel(zoomLevel - 0.25);
+        const newZoom = Math.max(0.25, zoomLevel - 0.1); // Reduced from 0.25 to 0.1 for slower zoom
+        if (readMode) {
+          zoomToCenter(newZoom);
+        } else {
+          setZoomLevel(newZoom);
+        }
         return;
       }
 
       if ((e.metaKey || e.ctrlKey) && e.key === "0") {
         e.preventDefault();
-        setZoomLevel(1.0);
+        if (readMode) {
+          zoomToCenter(1.0);
+        } else {
+          setZoomLevel(1.0);
+        }
         return;
       }
 
@@ -273,6 +287,8 @@ export function useKeyboard() {
     activeTool,
     hasTextAnnotation,
     setActiveTool,
+    readMode,
+    zoomToCenter,
   ]);
 }
 

@@ -24,9 +24,9 @@ interface VirtualizedPageListProps {
 export function VirtualizedPageList({
   document,
   renderer,
-  zoomLevel: _zoomLevel, // Reserved for future use
+  zoomLevel,
   baseFitScale,
-  pageGap = 24,
+  pageGap = 1,
   bufferPages = 2,
   onPageVisible,
   scrollContainerRef,
@@ -36,14 +36,21 @@ export function VirtualizedPageList({
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 0 });
   const pageCount = document.getPageCount();
 
-  // Calculate page dimensions and positions at base fit scale
-  // The transform scale on the parent container will handle zoom
+  // Calculate page dimensions and positions at actual zoom level
+  // Each page is scaled to fit the viewport width while maintaining aspect ratio
+  // Pages are scaled directly by zoomLevel, not via CSS transform
   const pageData = useMemo(() => {
     const firstPageMetadata = document.getPageMetadata(0);
-    if (!firstPageMetadata || baseFitScale <= 0) return [];
+    if (!firstPageMetadata || zoomLevel <= 0 || baseFitScale <= 0) return [];
 
-    const baseWidth = firstPageMetadata.width * baseFitScale;
-    // const baseHeight = firstPageMetadata.height * baseFitScale; // Reserved for future use
+    // Calculate the actual scale factor relative to baseFitScale
+    // baseFitScale is the fit-to-width scale, zoomLevel is the current scale
+    // When zoomLevel === baseFitScale, we're at 100% (fit-to-width)
+    const zoomFactor = zoomLevel / baseFitScale;
+    
+    // Calculate viewport width: base width scaled by zoom factor
+    // This ensures all pages have the same visual width in the viewport
+    const viewportWidth = firstPageMetadata.width * baseFitScale * zoomFactor;
 
     const data: Array<{ top: number; height: number; width: number }> = [];
     let currentTop = 0;
@@ -51,18 +58,24 @@ export function VirtualizedPageList({
     for (let i = 0; i < pageCount; i++) {
       const pageMetadata = document.getPageMetadata(i);
       if (pageMetadata) {
-        const pageHeight = pageMetadata.height * baseFitScale;
+        // Scale each page to fit the viewport width while maintaining aspect ratio
+        // If a page has a different width, it will be scaled proportionally
+        const pageScale = viewportWidth / pageMetadata.width;
+        const pageHeight = pageMetadata.height * pageScale;
+        const pageWidth = viewportWidth; // All pages have the same visual width
+        
         data.push({
           top: currentTop,
           height: pageHeight,
-          width: baseWidth,
+          width: pageWidth,
         });
+        // Keep gap fixed in screen pixels (not scaled) for consistent visual appearance
         currentTop += pageHeight + pageGap;
       }
     }
 
     return data;
-  }, [document, pageCount, baseFitScale, pageGap]);
+  }, [document, pageCount, zoomLevel, baseFitScale, pageGap]);
 
   // Calculate total height
   const totalHeight = useMemo(() => {
@@ -72,12 +85,16 @@ export function VirtualizedPageList({
   }, [pageData]);
 
   // Update visible range based on scroll position
+  // Positions are now in actual rendered coordinates (at zoom level)
+  // Debounced to prevent excessive recalculations during zoom
   const updateVisibleRange = useCallback(() => {
     const container = scrollContainerRef?.current || containerRef.current;
     if (!container || pageData.length === 0) return;
 
+    const scrollTop = container.scrollTop; // In actual rendered coordinates
     const containerRect = container.getBoundingClientRect();
-    const scrollTop = container.scrollTop;
+    
+    // Use scrollTop and viewport height directly since positions are at zoom level
     const viewportTop = scrollTop;
     const viewportBottom = scrollTop + containerRect.height;
 
@@ -97,7 +114,6 @@ export function VirtualizedPageList({
 
     for (let i = pageData.length - 1; i >= 0; i--) {
       const pageTop = pageData[i].top;
-      // const pageBottom = pageTop + pageData[i].height; // Reserved for future use
 
       if (pageTop <= viewportBottom) {
         end = Math.min(pageData.length - 1, i + bufferPages);
@@ -105,7 +121,13 @@ export function VirtualizedPageList({
       }
     }
 
-    setVisibleRange({ start, end });
+    setVisibleRange(prev => {
+      // Only update if range actually changed to prevent unnecessary re-renders
+      if (prev.start === start && prev.end === end) {
+        return prev;
+      }
+      return { start, end };
+    });
   }, [pageData, bufferPages, scrollContainerRef]);
 
   // Track visible pages for current page detection
@@ -154,8 +176,13 @@ export function VirtualizedPageList({
       }
     );
 
+    // Debounce scroll handler to prevent excessive updates during zoom
+    let scrollTimeout: NodeJS.Timeout | null = null;
     const handleScroll = () => {
-      updateVisibleRange();
+      if (scrollTimeout) clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        updateVisibleRange();
+      }, 16); // ~60fps throttle
     };
 
     container.addEventListener("scroll", handleScroll, { passive: true });
@@ -170,17 +197,20 @@ export function VirtualizedPageList({
     return () => {
       clearTimeout(timeoutId);
       if (updateTimeout) clearTimeout(updateTimeout);
+      if (scrollTimeout) clearTimeout(scrollTimeout);
       container.removeEventListener("scroll", handleScroll);
       observer.disconnect();
     };
   }, [scrollContainerRef, pageData, onPageVisible, updateVisibleRange]);
 
-  // Initial visible range calculation
+  // Initial visible range calculation and update when zoom changes
   useEffect(() => {
     updateVisibleRange();
-  }, [updateVisibleRange]);
+  }, [updateVisibleRange, zoomLevel]);
 
   // Render pages
+  // Include zoomLevel in dependencies to force re-render when zoom changes
+  // This ensures all pages update to the correct zoom level
   const renderedPages = useMemo(() => {
     const pages: JSX.Element[] = [];
 
@@ -190,7 +220,7 @@ export function VirtualizedPageList({
 
       pages.push(
         <div
-          key={i}
+          key={i} // Use stable key - zoom changes handled via props/style, not remounting
           ref={(el) => {
             if (el) {
               pageRefs.current.set(i, el);
@@ -200,17 +230,20 @@ export function VirtualizedPageList({
           }}
           data-page-number={i}
           data-page-canvas={i}
-          className="flex justify-center"
+          className=""
           style={{
             position: "absolute",
             top: `${pageInfo.top}px`,
             left: 0,
-            width: "100%",
+            width: `${pageInfo.width}px`, // Use exact width from pageData
             height: `${pageInfo.height}px`,
             margin: 0,
             padding: 0,
             lineHeight: 0,
             fontSize: 0,
+            display: "block", // Block display to eliminate flex spacing
+            boxSizing: "border-box", // Ensure no extra spacing from borders/padding
+            overflow: "visible", // Allow gap to be visible between pages
           }}
         >
           <PageCanvas
@@ -224,14 +257,16 @@ export function VirtualizedPageList({
     }
 
     return pages;
-  }, [visibleRange, pageData, document, renderer, pageCount]);
+  }, [visibleRange, pageData, document, renderer, pageCount, zoomLevel]);
 
-  // Calculate container width based on base fit scale (transform will handle zoom)
+  // Calculate container width - use the maximum page width to accommodate all pages
+  // Each page will be positioned absolutely, so container just needs to be wide enough
   const containerWidth = useMemo(() => {
-    const firstPageMetadata = document.getPageMetadata(0);
-    if (!firstPageMetadata || baseFitScale <= 0) return "auto";
-    return `${firstPageMetadata.width * baseFitScale}px`;
-  }, [document, baseFitScale]);
+    if (pageData.length === 0) return "auto";
+    // Find the maximum page width
+    const maxWidth = Math.max(...pageData.map(p => p.width));
+    return `${maxWidth}px`;
+  }, [pageData]);
 
   return (
     <div
@@ -242,6 +277,8 @@ export function VirtualizedPageList({
         width: containerWidth,
         margin: "0 auto",
         position: "relative",
+        // Ensure background is visible to show gaps between pages
+        backgroundColor: "transparent",
       }}
     >
       {renderedPages}
