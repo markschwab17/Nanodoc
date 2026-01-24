@@ -84,11 +84,16 @@ export function ThumbnailItem({
   const aspectRatio = isLandscape ? 4 / 3 : 3 / 4;
 
   const handleDragStart = async (e: React.DragEvent) => {
-    // Stop propagation to prevent parent drag handlers from interfering
-    e.stopPropagation();
+    // Don't stop propagation - let the parent handle reordering
+    // The parent will set draggedPage for reordering, which won't interfere with export
+    // We prepare for export in the background - if user drags outside, export works
+    // If user drags within carousel, parent's reordering takes precedence
     
-    // This is a drag-out operation - prepare the page as PDF file
-    // The parent's page reordering is handled at a different level
+    // Prepare the page as PDF file for export (async, runs in background)
+    preparePageExport(e);
+  };
+  
+  const preparePageExport = async (e: React.DragEvent) => {
     try {
       // Get all annotations for this page
       const documentId = document.getId();

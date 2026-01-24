@@ -16,12 +16,12 @@ export const SelectTextTool: ToolHandler = {
     const coords = context.getPDFCoordinates(e);
     if (!coords) return;
     
-    // Only set isSelecting if we're actually going to drag (track mouse movement)
-    // For clicks, we'll handle selection in mouseUp
-    // Store initial position but don't show rectangle yet
+    // Store initial position accurately - this is where the user clicked
+    // Use the exact coordinates from the mouse event to ensure accuracy
     context.setSelectionStart(coords);
     context.setSelectionEnd(coords);
     // Don't set isSelecting=true yet - wait for mouseMove to indicate dragging
+    // This allows us to distinguish between clicks and drags
   },
 
   handleMouseMove: async (e: React.MouseEvent, context: ToolContext) => {
@@ -44,26 +44,31 @@ export const SelectTextTool: ToolHandler = {
         context.setIsSelecting(true);
       }
       
-      // Only continue if we're actively selecting (isSelecting is true)
-      // This prevents updates after mouse release sets isSelecting to false
-      if (!context.isSelecting) return;
-      
+      // Update selection end point with exact coordinates
+      // Use the exact mouse coordinates to ensure precision
       context.setSelectionEnd(coords);
       
       // Extract text in real-time for live preview (throttled to avoid too many async calls)
       const now = Date.now();
       if (context.currentDocument && context.setSelectedTextSpans && (now - lastExtractionTime) > EXTRACTION_THROTTLE_MS) {
         lastExtractionTime = now;
+        // Capture coordinates at this moment to use in async callback
+        const startCoords = context.selectionStart;
+        const endCoords = coords;
         // Use requestAnimationFrame to ensure UI updates smoothly
         requestAnimationFrame(async () => {
           try {
-            const result = await getSpansInSelectionFromPage(
-              context.currentDocument!,
-              context.pageNumber,
-              start,
-              coords
-            );
-            context.setSelectedTextSpans!(result.spans);
+            // Only extract if we're still selecting (check after async delay)
+            // This prevents updates after mouse release
+            if (context.isSelecting && startCoords) {
+              const result = await getSpansInSelectionFromPage(
+                context.currentDocument!,
+                context.pageNumber,
+                startCoords,
+                endCoords
+              );
+              context.setSelectedTextSpans!(result.spans);
+            }
           } catch (error) {
             console.error("Error extracting text for live preview:", error);
           }

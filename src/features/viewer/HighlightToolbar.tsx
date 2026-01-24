@@ -9,6 +9,7 @@ import { useState, useEffect } from "react";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
 import {
   Popover,
   PopoverContent,
@@ -50,6 +51,28 @@ export function HighlightToolbar() {
     const newOpacity = value[0];
     setLocalOpacity(newOpacity);
     setHighlightOpacity(newOpacity);
+  };
+
+  const handleOpacityInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = parseFloat(e.target.value);
+    if (!isNaN(value) && value >= 0 && value <= 100) {
+      const opacity = Math.max(0.1, Math.min(1.0, value / 100));
+      setLocalOpacity(opacity);
+      setHighlightOpacity(opacity);
+    }
+  };
+
+  const handleOpacityInputBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    const value = parseFloat(e.target.value);
+    if (isNaN(value) || value < 10) {
+      const opacity = 0.1;
+      setLocalOpacity(opacity);
+      setHighlightOpacity(opacity);
+    } else if (value > 100) {
+      const opacity = 1.0;
+      setLocalOpacity(opacity);
+      setHighlightOpacity(opacity);
+    }
   };
 
   const handleColorChange = (newColor: string) => {
@@ -100,19 +123,29 @@ export function HighlightToolbar() {
       <div className="h-6 w-px bg-border" />
 
       {/* Opacity Slider */}
-      <div className="flex items-center gap-2 min-w-[120px]">
-        <span className="text-xs text-muted-foreground whitespace-nowrap">Opacity</span>
+      <div className="flex items-center gap-2 min-w-[200px]">
+        <span className="text-xs text-muted-foreground whitespace-nowrap font-medium">Opacity</span>
         <Slider
           value={[localOpacity]}
           onValueChange={handleOpacityChange}
           min={0.1}
           max={1.0}
-          step={0.1}
-          className="flex-1"
+          step={0.05}
+          className="w-32"
         />
-        <span className="text-xs text-muted-foreground w-12">
-          {Math.round(localOpacity * 100)}%
-        </span>
+        <div className="flex items-center gap-1">
+          <Input
+            type="number"
+            min={10}
+            max={100}
+            step={5}
+            value={Math.round(localOpacity * 100)}
+            onChange={handleOpacityInputChange}
+            onBlur={handleOpacityInputBlur}
+            className="h-7 w-12 text-xs text-center px-1"
+          />
+          <span className="text-xs text-muted-foreground font-medium">%</span>
+        </div>
       </div>
     </div>
   );

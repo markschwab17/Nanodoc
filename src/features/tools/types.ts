@@ -30,6 +30,8 @@ export interface ToolContext {
   setIsCreatingTextBox: (isCreating: boolean) => void;
   setTextBoxStart: (coords: { x: number; y: number } | null) => void;
   overlayHighlightPath?: Array<{ x: number; y: number }>; // Path for overlay highlights from PageCanvas
+  setOverlayHighlightPath?: (path: Array<{ x: number; y: number }>) => void; // Setter for overlay highlight path
+  setIsHighlightTextMode?: (isTextMode: boolean) => void; // For highlight tool text mode detection
   editor: any; // PDFEditor instance
   renderer: any; // PDFRenderer instance
   canvasRef: React.RefObject<HTMLCanvasElement>;

@@ -43,6 +43,7 @@ export function ThumbnailCarousel() {
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isDragOverPDF, setIsDragOverPDF] = useState(false);
   const [pdfDragOverIndex, setPdfDragOverIndex] = useState<number | null>(null);
+  const [reorderVersion, setReorderVersion] = useState(0); // Force re-render after reordering
   const [activeTab, setActiveTab] = useState<TabType>("pages");
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
@@ -125,6 +126,7 @@ export function ThumbnailCarousel() {
 
     try {
       const documentId = currentDocument.getId();
+      const oldCurrentPage = currentPage;
       
       // Wrap with undo/redo
       await wrapPageOperation(
@@ -143,12 +145,20 @@ export function ThumbnailCarousel() {
           const sortedPages = [...pageNumbers].sort((a, b) => b - a);
           const maxDeleted = Math.max(...sortedPages);
           
+          let newCurrentPage = currentPage;
           if (currentPage >= maxDeleted && newPageCount > 0) {
             // If current page was deleted or after deleted pages, adjust
             const deletedBeforeCurrent = sortedPages.filter(p => p < currentPage).length;
-            setCurrentPage(Math.max(0, currentPage - deletedBeforeCurrent));
+            newCurrentPage = Math.max(0, currentPage - deletedBeforeCurrent);
+            setCurrentPage(newCurrentPage);
           } else if (newPageCount > 0 && currentPage >= newPageCount) {
-            setCurrentPage(newPageCount - 1);
+            newCurrentPage = newPageCount - 1;
+            setCurrentPage(newCurrentPage);
+          } else if (pageNumbers.some(p => p < currentPage)) {
+            // If we deleted pages before the current one, adjust the current page index
+            const deletedBeforeCurrent = sortedPages.filter(p => p < currentPage).length;
+            newCurrentPage = Math.max(0, currentPage - deletedBeforeCurrent);
+            setCurrentPage(newCurrentPage);
           }
           
           // Remove annotations for deleted pages
@@ -170,6 +180,22 @@ export function ThumbnailCarousel() {
           const currentAnnotations = new Map(pdfStore.annotations);
           currentAnnotations.set(documentId, updatedAnnotations);
           usePDFStore.setState({ annotations: currentAnnotations });
+          
+          // Force viewport refresh by dispatching a custom event
+          // This ensures the viewer updates even if the page number didn't change
+          window.dispatchEvent(new CustomEvent('pdf-pages-changed', {
+            detail: { documentId, newPageCount, newCurrentPage }
+          }));
+          
+          // Also trigger a small delay to ensure the viewport refreshes
+          setTimeout(() => {
+            // Force a re-render by updating current page again if it changed
+            const finalPageCount = currentDocument.getPageCount();
+            const finalCurrentPage = usePDFStore.getState().currentPage;
+            if (finalCurrentPage >= finalPageCount && finalPageCount > 0) {
+              setCurrentPage(finalPageCount - 1);
+            }
+          }, 50);
         },
         "deletePages",
         documentId,
@@ -471,25 +497,25 @@ export function ThumbnailCarousel() {
   };
 
   const handleDragStart = (e: React.DragEvent, pageNumber: number) => {
-    // Check if this is a drag-out (user wants to export page)
-    // We detect this by checking if the drag is starting from a thumbnail
-    // and not from a selected page reorder operation
+    // Always set draggedPage for reordering
+    setDraggedPage(pageNumber);
+    
+    // Check if this is a page reorder operation (selected pages or single page)
     const isPageReorder = selectedPages.size > 0 && selectedPages.has(pageNumber);
     
-    if (!isPageReorder) {
-      // This might be a drag-out - let ThumbnailItem handle it
-      // We'll still set draggedPage for potential reordering, but allow drag-out
-      setDraggedPage(pageNumber);
-      return;
+    if (isPageReorder) {
+      // This is a page reorder operation with selected pages
+      const pagesToDrag = Array.from(selectedPages).sort((a, b) => a - b);
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", pagesToDrag.join(","));
+      e.dataTransfer.setData("application/x-pdf-page-reorder", "true");
+    } else {
+      // Single page reorder - allow both reordering and export
+      // The drag handlers will determine which one based on drop target
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(pageNumber));
+      e.dataTransfer.setData("application/x-pdf-page-reorder", "true");
     }
-    
-    // This is a page reorder operation
-    const pagesToDrag = Array.from(selectedPages).sort((a, b) => a - b);
-    
-    setDraggedPage(pageNumber);
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", pagesToDrag.join(","));
-    e.dataTransfer.setData("application/x-pdf-page-reorder", "true");
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
@@ -501,16 +527,44 @@ export function ThumbnailCarousel() {
         ? Array.from(selectedPages).sort((a, b) => a - b)
         : [draggedPage];
       
-      // Calculate insertion point
-      const targetIndex = index;
       const draggedIndices = pagesToDrag;
       
       // Don't show drop indicator if dragging over selected pages
-      if (!draggedIndices.includes(index)) {
-        setDragOverIndex(targetIndex);
-      } else {
+      if (draggedIndices.includes(index)) {
         setDragOverIndex(null);
+        return;
       }
+      
+      // Calculate insertion point based on mouse position within the thumbnail
+      const thumbnailElement = e.currentTarget as HTMLElement;
+      const rect = thumbnailElement.getBoundingClientRect();
+      const mouseY = e.clientY;
+      const thumbnailTop = rect.top;
+      const thumbnailHeight = rect.height;
+      const thumbnailCenter = thumbnailTop + thumbnailHeight / 2;
+      
+      // If mouse is in top half, insert before (at index)
+      // If mouse is in bottom half, insert after (at index + 1)
+      const targetIndex = mouseY < thumbnailCenter ? index : index + 1;
+      
+      // Adjust target index if dragging from before to after
+      const maxDragged = Math.max(...draggedIndices);
+      const minDragged = Math.min(...draggedIndices);
+      
+      // If target is after the dragged pages, adjust for pages being removed
+      let adjustedTargetIndex = targetIndex;
+      if (targetIndex > maxDragged) {
+        adjustedTargetIndex = targetIndex - draggedIndices.length;
+      }
+      // If target is before dragged pages, no adjustment needed
+      
+      // Don't allow dropping on the same position
+      if (adjustedTargetIndex === minDragged && targetIndex <= maxDragged) {
+        setDragOverIndex(null);
+        return;
+      }
+      
+      setDragOverIndex(targetIndex);
     }
   };
 
@@ -518,7 +572,7 @@ export function ThumbnailCarousel() {
     setDragOverIndex(null);
   };
 
-  const handleDragEnd = () => {
+  const handleDragEnd = async () => {
     if (draggedPage !== null && dragOverIndex !== null && currentDocument && editor) {
       const pagesToDrag = selectedPages.size > 0 && selectedPages.has(draggedPage)
         ? Array.from(selectedPages).sort((a, b) => a - b)
@@ -537,14 +591,137 @@ export function ThumbnailCarousel() {
         // Target is before dragged pages, no adjustment needed
       }
       
-      // Reorder pages
-      const operations = pagesToDrag.map((fromIdx, i) => ({
-        fromIndex: fromIdx,
-        toIndex: targetIndex + i,
-      }));
+      // Don't reorder if target is the same as source
+      if (targetIndex === minDragged && targetIndex <= maxDragged) {
+        setDraggedPage(null);
+        setDragOverIndex(null);
+        setSelectedPages(new Set());
+        return;
+      }
       
-      editor.reorderPages(currentDocument, operations);
+      const documentId = currentDocument.getId();
+      
+      // Wrap with undo/redo
+      await wrapPageOperation(
+        async () => {
+          const pageCount = currentDocument.getPageCount();
+          
+          // Build the final page order
+          const newPageOrder: number[] = Array.from({ length: pageCount }, (_, i) => i);
+          
+          // Remove dragged pages from their current positions (remove from highest to lowest to maintain indices)
+          const sortedDragged = [...draggedIndices].sort((a, b) => b - a);
+          for (const idx of sortedDragged) {
+            newPageOrder.splice(idx, 1);
+          }
+          
+          // Insert dragged pages at target position (in their original order)
+          for (let i = 0; i < draggedIndices.length; i++) {
+            newPageOrder.splice(targetIndex + i, 0, draggedIndices[i]);
+          }
+          
+          // Build operations: The reorderPages function applies operations sequentially on a pageOrder array
+          // We need to generate operations that will result in newPageOrder
+          // Since operations are applied sequentially, we need to account for index shifts
+          
+          // Simple approach: For each dragged page, create an operation to move it to its target position
+          // But we need to account for the fact that when we remove pages, indices shift
+          const operations: Array<{ fromIndex: number; toIndex: number }> = [];
+          
+          // For single page moves, this is straightforward
+          if (draggedIndices.length === 1) {
+            const pageToMove = draggedIndices[0];
+            operations.push({
+              fromIndex: pageToMove,
+              toIndex: targetIndex
+            });
+          } else {
+            // For multiple pages, we need to move them one at a time
+            // Move pages starting from the highest index to avoid index conflicts
+            const sortedDragged = [...draggedIndices].sort((a, b) => b - a);
+            for (let i = 0; i < sortedDragged.length; i++) {
+              const pageToMove = sortedDragged[i];
+              const adjustedTarget = targetIndex + i;
+              operations.push({
+                fromIndex: pageToMove,
+                toIndex: adjustedTarget
+              });
+            }
+          }
+          
+          // Execute reorder - reorderPages will apply operations sequentially and call rearrangePages with final order
+          await editor.reorderPages(currentDocument, operations);
+          
+          // Refresh document metadata
+          if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
+            (currentDocument as any).refreshPageMetadata();
+          }
+          
+          // Clear renderer cache to force fresh thumbnails
+          if (renderer) {
+            renderer.clearCache();
+          }
+          
+          // Remap annotations to new page numbers
+          const docAnnotations = getAnnotations(documentId);
+          
+          // Create a mapping: old page index -> new page index
+          const pageMapping = new Map<number, number>();
+          for (let i = 0; i < newPageOrder.length; i++) {
+            pageMapping.set(newPageOrder[i], i);
+          }
+          
+          // Update annotations with new page numbers
+          const remappedAnnotations = docAnnotations.map((ann) => {
+            const newPageNumber = pageMapping.get(ann.pageNumber);
+            if (newPageNumber !== undefined) {
+              return {
+                ...ann,
+                pageNumber: newPageNumber,
+              };
+            }
+            return ann;
+          });
+          
+          // Update annotations in store
+          const pdfStore = usePDFStore.getState();
+          const currentAnnotations = new Map(pdfStore.annotations);
+          currentAnnotations.set(documentId, remappedAnnotations);
+          usePDFStore.setState({ annotations: currentAnnotations });
+          
+          // Update current page if it was affected
+          const newCurrentPage = pageMapping.get(currentPage);
+          if (newCurrentPage !== undefined && newCurrentPage !== currentPage) {
+            setCurrentPage(newCurrentPage);
+          }
+          
+          // Force viewport refresh
+          window.dispatchEvent(new CustomEvent('pdf-pages-changed', {
+            detail: { documentId, newPageCount: pageCount, newCurrentPage: newCurrentPage ?? currentPage }
+          }));
+        },
+        "reorderPages",
+        documentId,
+        pagesToDrag,
+        targetIndex
+      );
+      
       setSelectedPages(new Set());
+      
+      // Force thumbnail re-render by incrementing reorder version
+      // This changes the keys, forcing React to re-render all thumbnails
+      setReorderVersion(prev => prev + 1);
+      
+      showNotification(
+        `Reordered ${pagesToDrag.length} page${pagesToDrag.length > 1 ? "s" : ""}`,
+        "success"
+      );
+      
+      // Force a re-render by updating a state that affects the thumbnail list
+      // The pageCount change should trigger a re-render, but let's be explicit
+      if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
+        (currentDocument as any).refreshPageMetadata();
+      }
     }
     setDraggedPage(null);
     setDragOverIndex(null);
@@ -1263,8 +1440,12 @@ export function ThumbnailCarousel() {
             {pdfDragOverIndex === 0 && isDragOverPDF && (
               <div className="h-1 bg-primary rounded-full shadow-lg -mb-2 z-20" />
             )}
+            {/* Drop indicator for page reordering at position 0 */}
+            {dragOverIndex === 0 && draggedPage !== null && (
+              <div className="h-1 bg-primary rounded-full shadow-lg -mb-2 z-20" />
+            )}
             {Array.from({ length: pageCount }, (_, i) => (
-              <div key={`${i}-${pageCount}`} className="relative w-full flex justify-center">
+              <div key={`${i}-${pageCount}-${reorderVersion}`} className="relative w-full flex justify-center">
                 {/* Clean drop indicator bar for PDF insertion - shows between thumbnails */}
                 {/* Show indicator before this thumbnail if targetIndex is i */}
                 {pdfDragOverIndex === i && isDragOverPDF && (
@@ -1274,19 +1455,21 @@ export function ThumbnailCarousel() {
                 {pdfDragOverIndex === i + 1 && isDragOverPDF && (
                   <div className="absolute -bottom-2 left-0 right-0 h-1 bg-primary z-20 rounded-full shadow-lg" />
                 )}
-                {/* Drop indicator line for page reordering */}
+                {/* Drop indicator line for page reordering - show before this thumbnail */}
                 {dragOverIndex === i && draggedPage !== null && (
-                  <div className="absolute -top-1.5 left-0 right-0 h-1 bg-primary z-10 rounded" />
+                  <div className="absolute -top-2 left-0 right-0 h-1 bg-primary z-20 rounded-full shadow-lg" />
+                )}
+                {/* Drop indicator line for page reordering - show after this thumbnail */}
+                {dragOverIndex === i + 1 && draggedPage !== null && (
+                  <div className="absolute -bottom-2 left-0 right-0 h-1 bg-primary z-20 rounded-full shadow-lg" />
                 )}
                 
                 <div
                   draggable
                   onDragStart={(e) => {
-                    // Only handle page reordering if this is not a page export drag
-                    // Page export drags are handled by ThumbnailItem
-                    if (!e.dataTransfer.types.includes('application/x-page-export')) {
-                      handleDragStart(e, i);
-                    }
+                    // Always handle drag start for page reordering
+                    // ThumbnailItem will check for application/x-pdf-page-reorder and skip export if present
+                    handleDragStart(e, i);
                   }}
                   onDragOver={(e) => {
                     // Check if this is a tab drag first

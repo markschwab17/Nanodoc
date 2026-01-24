@@ -114,7 +114,7 @@ export function PageCanvas({
   const zoomLevelRef = useRef(zoomLevel);
   const fitModeRef = useRef(fitMode);
   const isMiddleMouseDownRef = useRef(false); // Track middle mouse button for horizontal scroll
-  const renderDebounceTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Track debounce timeout for read mode
+  const renderDebounceTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Track debounce timeout for PDF rendering (both read and normal mode)
   
   // Keep refs in sync with state
   useEffect(() => {
@@ -184,6 +184,8 @@ export function PageCanvas({
   const [isHoveringOverText, setIsHoveringOverText] = useState(false);
   // Overlay highlight path for preview
   const [overlayHighlightPath, setOverlayHighlightPath] = useState<Array<{ x: number; y: number }>>([]);
+  // Track if highlight tool is in text mode (text detected at start) vs overlay mode (no text)
+  const [isHighlightTextMode, setIsHighlightTextMode] = useState(false);
   // Mouse position for cursor preview and paste location
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
   const mousePositionRef = useRef<{ x: number; y: number } | null>(null);
@@ -1041,14 +1043,32 @@ export function PageCanvas({
         }
       };
     } else {
-      // In normal mode, render immediately - no debouncing to prevent staggered rendering
-      renderPage();
+      // In normal mode, debounce PDF rendering during zoom for smooth operation
+      // CSS transform updates immediately for visual feedback, but expensive PDF re-rendering is debounced
+      // Clear any pending render
+      if (renderDebounceTimeoutRef.current) {
+        clearTimeout(renderDebounceTimeoutRef.current);
+      }
+      
+      // Debounce PDF rendering - CSS transform already provides immediate visual feedback
+      renderDebounceTimeoutRef.current = setTimeout(() => {
+        renderPage();
+        renderDebounceTimeoutRef.current = null;
+      }, 150); // Slightly longer delay for normal mode to allow zoom to settle
+      
+      return () => {
+        if (renderDebounceTimeoutRef.current) {
+          clearTimeout(renderDebounceTimeoutRef.current);
+          renderDebounceTimeoutRef.current = null;
+        }
+      };
     }
   }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode]);
   
   // Effect to ensure centering when fitMode changes to "page" or "width"
+  // Don't run while actively panning to prevent resetting the view
   useEffect(() => {
-    if (readMode || !containerRef.current || !document.isDocumentLoaded()) return;
+    if (readMode || !containerRef.current || !document.isDocumentLoaded() || isDragging) return;
     
     const pageMetadata = document.getPageMetadata(pageNumber);
     if (!pageMetadata) return;
@@ -1081,7 +1101,7 @@ export function PageCanvas({
         });
       }
     }
-  }, [fitMode, readMode, document, pageNumber, zoomLevel]);
+  }, [fitMode, readMode, document, pageNumber, zoomLevel, isDragging]);
   
   // Get page metadata to watch for rotation and dimension changes
   const pageMetadata = document?.getPageMetadata(pageNumber);
@@ -1268,6 +1288,7 @@ export function PageCanvas({
   // IMPORTANT: Use original mediabox dimensions (not swapped display dimensions) for coordinate conversion
   // because annotations are stored in mediabox coordinate space
   // Coordinate system is independent of RENDER_SCALE - uses display size (1:1 with PDF points)
+  // In read mode, we need to account for the actual canvas display size which may differ from PDF dimensions
   const pdfToCanvas = (pdfX: number, pdfY: number, _useRefs: boolean = false): { x: number; y: number } => {
     const pageMetadata = document.getPageMetadata(pageNumber);
     
@@ -1285,6 +1306,7 @@ export function PageCanvas({
     // which is originalWidth (2592) when rotated 90/270, or originalHeight (1735) when rotated 0/180.
     const currentRotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
     let mediaboxHeight: number;
+    let mediaboxWidth: number;
     
     // If the annotation's Y coordinate is greater than the original height, it's likely in the rotated coordinate system
     // This handles the case where pageMetadata.rotation hasn't updated yet but annotations have been transformed
@@ -1295,21 +1317,43 @@ export function PageCanvas({
       // After 90° rotation, the rotated coordinate system's Y-axis is the original width
       // So we use pageMetadata.width (which is the original width = 2592) for Y-axis flipping
       mediaboxHeight = pageMetadata.width;
+      mediaboxWidth = pageMetadata.height;
     } else {
       // Display dimensions match mediabox dimensions
       // Y-axis range is the original height
       mediaboxHeight = pageMetadata.height;
+      mediaboxWidth = pageMetadata.width;
     }
     
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
     const flippedY = mediaboxHeight - pdfY;
     
+    // In read mode, we need to scale coordinates based on the actual canvas display size
+    // The canvas may be scaled to match the viewport width (based on first page), not this page's width
+    // We need to match the scaling used in getPDFCoordinates, which uses canvasRect dimensions
+    let scaleX = 1;
+    let scaleY = 1;
+    
+    if (readMode && canvasRef.current) {
+      const canvasRect = canvasRef.current.getBoundingClientRect();
+      // Calculate scale based on actual canvas display size vs PDF dimensions
+      // This ensures annotations are positioned at the same scale as coordinate calculations
+      // getPDFCoordinates uses: pdfX = (canvasRelativeX / canvasRect.width) * mediaboxWidth
+      // So we need: canvasX = (pdfX / mediaboxWidth) * canvasRect.width = pdfX * (canvasRect.width / mediaboxWidth)
+      if (canvasRect.width > 0 && mediaboxWidth > 0) {
+        scaleX = canvasRect.width / mediaboxWidth;
+      }
+      if (canvasRect.height > 0 && mediaboxHeight > 0) {
+        scaleY = canvasRect.height / mediaboxHeight;
+      }
+    }
+    
     // Return CSS coordinates (display size) for overlay positioning
-    // Canvas display size is 1:1 with PDF points (independent of RENDER_SCALE)
-    // This makes the coordinate system independent of render quality settings
+    // Apply scaling in read mode to account for canvas display size differences
+    // This ensures annotations align with the actual canvas rendering
     const result = {
-      x: pdfX,      // 1:1 mapping with PDF points for CSS positioning
-      y: flippedY,  // 1:1 mapping with PDF points for CSS positioning
+      x: pdfX * scaleX,      // Scale X in read mode to match canvas display size
+      y: flippedY * scaleY,  // Scale Y in read mode to match canvas display size
     };
     
     // Debug logging for arrow points specifically
@@ -1435,25 +1479,34 @@ export function PageCanvas({
     }
     
     // Middle mouse button or space+drag for pan
-    if (e.button === 1 || (e.button === 0 && (isSpacePressed || activeTool === "pan"))) {
+    // In read mode, don't handle pan here - let native scrolling work
+    if (!readMode && (e.button === 1 || (e.button === 0 && (isSpacePressed || activeTool === "pan")))) {
       e.preventDefault();
       e.stopPropagation();
       if (e.nativeEvent && 'stopImmediatePropagation' in e.nativeEvent) {
         e.nativeEvent.stopImmediatePropagation();
       }
       setIsDragging(true);
+      
+      // Switch to custom mode when panning starts to prevent centering effect from interfering
+      if (fitMode !== "custom") {
+        fitModeRef.current = "custom";
+        setFitMode("custom");
+      }
+      
       // Use ref value in custom mode to avoid stale state
       const currentPanForDrag = fitMode === "custom" ? panOffsetRef.current : panOffset;
       setDragStart({ x: e.clientX - currentPanForDrag.x, y: e.clientY - currentPanForDrag.y });
       return;
     }
 
-    // Initialize overlay path for highlight tool - start immediately
+    // Initialize overlay path for highlight tool - will be set based on text detection
     if (activeTool === "highlight") {
       const coords = getPDFCoordinates(e);
       if (coords) {
-        // Initialize path immediately so preview shows right away
-        setOverlayHighlightPath([coords]);
+        // Clear previous state
+        setOverlayHighlightPath([]);
+        setIsHighlightTextMode(false);
         // Hide cursor preview when starting to draw
         setMousePosition(null);
       }
@@ -1494,6 +1547,9 @@ export function PageCanvas({
           isSelecting,
           selectionStart,
           setSelectedTextSpans,
+          overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
+          setOverlayHighlightPath: activeTool === "highlight" ? setOverlayHighlightPath : undefined,
+          setIsHighlightTextMode,
         };
         
         const result = await toolHandler.handleMouseDown(e, toolContext);
@@ -1504,32 +1560,18 @@ export function PageCanvas({
       }
     }
 
-    // Handle selectText tool - clear previous selection only if clicking outside current selection
+    // Handle selectText tool - always clear previous selection when starting a new drag
+    // This ensures clicking and dragging again ends the previous selection and starts fresh
     if (activeTool === "selectText" && currentDocument) {
       const coords = getPDFCoordinates(e);
-      let shouldClearSelection = true;
       
-      // Check if click is within current selection bounds
-      if (coords && selectedTextSpans.length > 0 && selectionStart && selectionEnd) {
-        const minX = Math.min(selectionStart.x, selectionEnd.x);
-        const maxX = Math.max(selectionStart.x, selectionEnd.x);
-        const minY = Math.min(selectionStart.y, selectionEnd.y);
-        const maxY = Math.max(selectionStart.y, selectionEnd.y);
-        
-        // Check if click is within selection rectangle
-        if (coords.x >= minX && coords.x <= maxX && coords.y >= minY && coords.y <= maxY) {
-          shouldClearSelection = false;
-        }
-      }
-      
-      // Only clear if clicking outside selection or if no selection exists
-      if (shouldClearSelection) {
-        setSelectedTextSpans([]);
-        selectedTextRef.current = "";
-        setIsSelecting(false);
-        setSelectionStart(null);
-        setSelectionEnd(null);
-      }
+      // Always clear previous selection when starting a new drag
+      // The user expects clicking and dragging to start a fresh selection
+      setSelectedTextSpans([]);
+      selectedTextRef.current = "";
+      setIsSelecting(false);
+      setSelectionStart(null);
+      setSelectionEnd(null);
       
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler) {
@@ -1564,6 +1606,7 @@ export function PageCanvas({
           isSelecting,
           selectionStart,
           setSelectedTextSpans,
+          setIsHighlightTextMode,
         };
         
         await toolHandler.handleMouseDown(e, toolContext);
@@ -1820,11 +1863,23 @@ export function PageCanvas({
           });
         }
       }
-    } else if (isDragging) {
-      setPanOffset({
-        x: e.clientX - dragStart.x,
-        y: e.clientY - dragStart.y,
-      });
+    } else if (isDragging && !readMode) {
+      // Pan dragging - update pan offset and ensure we're in custom mode
+      // Skip in read mode - native scrolling handles panning there
+      const newPanX = e.clientX - dragStart.x;
+      const newPanY = e.clientY - dragStart.y;
+      
+      // Update ref immediately for smooth operation
+      panOffsetRef.current = { x: newPanX, y: newPanY };
+      
+      // Switch to custom mode if needed (only once, not on every move)
+      if (fitMode !== "custom") {
+        fitModeRef.current = "custom";
+        setFitMode("custom");
+      }
+      
+      // Update pan offset state
+      setPanOffset({ x: newPanX, y: newPanY });
     } else if (isCreatingTextBox && textBoxStart) {
       // User is dragging to create a text box - update preview
       const coords = getPDFCoordinates(e);
@@ -2081,13 +2136,33 @@ export function PageCanvas({
           setSelectionEnd: (coords: { x: number; y: number } | null) => {
             setSelectionEnd(coords);
             // Track overlay path using the updated selectionEnd (includes shift-locked coordinates)
-            if (coords && activeTool === "highlight") {
+            // Only add to overlay path if NOT in text mode (text mode shows text selection preview instead)
+            if (coords && activeTool === "highlight" && !isHighlightTextMode) {
               setOverlayHighlightPath(prev => {
-                // Always add the new point for smooth continuous preview
-                // Only skip if it's exactly the same (within very small tolerance)
-                if (prev.length === 0 || 
-                    Math.abs(prev[prev.length - 1].x - coords.x) > 0.01 || 
-                    Math.abs(prev[prev.length - 1].y - coords.y) > 0.01) {
+                // Always add the first point if path is empty
+                if (prev.length === 0) {
+                  return [coords];
+                }
+                
+                // For subsequent points, add if coordinates changed significantly
+                // Use a very small tolerance (0.05 points) to avoid duplicate points but allow smooth drawing
+                // Also check if this exact point already exists in the path to avoid duplicates
+                const lastPoint = prev[prev.length - 1];
+                const dx = Math.abs(lastPoint.x - coords.x);
+                const dy = Math.abs(lastPoint.y - coords.y);
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const shouldAdd = distance > 0.05;
+                
+                // Also check if this exact point (within tolerance) already exists in the path
+                const pointExists = prev.some(p => {
+                  const pDx = Math.abs(p.x - coords.x);
+                  const pDy = Math.abs(p.y - coords.y);
+                  return Math.sqrt(pDx * pDx + pDy * pDy) <= 0.05;
+                });
+                
+                const finalShouldAdd = shouldAdd && !pointExists;
+                
+                if (finalShouldAdd) {
                   return [...prev, coords];
                 }
                 return prev;
@@ -2108,6 +2183,9 @@ export function PageCanvas({
           isSelecting,
           selectionStart,
           setSelectedTextSpans,
+          overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
+          setOverlayHighlightPath: activeTool === "highlight" ? setOverlayHighlightPath : undefined,
+          setIsHighlightTextMode,
         };
         
         toolHandler.handleMouseMove(e, toolContext);
@@ -2598,47 +2676,40 @@ export function PageCanvas({
       try {
         const isClick = Math.abs(selectionStart.x - selectionEnd.x) < 1 && Math.abs(selectionStart.y - selectionEnd.y) < 1;
         
-        let result: { spans: TextSpan[]; text: string };
-        
+        // Single clicks should not select anything - only drags should select text
         if (isClick) {
-          // For clicks, expand to a small area around the point to find text
-          const expandSize = 10; // 10 points in each direction
-          const expandedStart = { x: selectionStart.x - expandSize, y: selectionStart.y - expandSize };
-          const expandedEnd = { x: selectionStart.x + expandSize, y: selectionStart.y + expandSize };
-          result = await getSpansInSelectionFromPage(
-            currentDocument,
-            pageNumber,
-            expandedStart,
-            expandedEnd
-          );
-        } else {
-          // For drags, use the actual selection
-          result = await getSpansInSelectionFromPage(
-            currentDocument,
-            pageNumber,
-            selectionStart,
-            selectionEnd
-          );
+          // Clear any previous selection and reset state
+          setSelectedTextSpans([]);
+          selectedTextRef.current = "";
+          setIsSelecting(false);
+          setSelectionStart(null);
+          setSelectionEnd(null);
+          return;
         }
         
+        // For drags, use the actual selection
+        const result = await getSpansInSelectionFromPage(
+          currentDocument,
+          pageNumber,
+          selectionStart,
+          selectionEnd
+        );
+        
+        // Store the final selection spans and text
         setSelectedTextSpans(result.spans);
         selectedTextRef.current = result.text;
         
-        // Always clear isSelecting after mouseUp, regardless of result
+        // Stop the selection process (set isSelecting=false) but keep the spans visible
+        // The selectedTextSpans will remain visible until user clicks and drags again
         setIsSelecting(false);
         
-        // For drags (not clicks), clear selectionStart/selectionEnd to stop handleMouseMove from continuing
+        // Clear selectionStart/selectionEnd to stop handleMouseMove from continuing
         // The selectedTextSpans are already stored, so we don't need these anymore
-        if (!isClick) {
-          setSelectionStart(null);
-          setSelectionEnd(null);
-        }
+        setSelectionStart(null);
+        setSelectionEnd(null);
         
         if (!result.text) {
           console.warn("No text selected");
-          // Clear selection state if no text found (for clicks)
-          setSelectionStart(null);
-          setSelectionEnd(null);
         }
       } catch (error) {
         console.error("Error extracting text selection:", error);
@@ -2684,6 +2755,8 @@ export function PageCanvas({
           selectionStart,
           setSelectedTextSpans,
           overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
+          setOverlayHighlightPath: activeTool === "highlight" ? setOverlayHighlightPath : undefined,
+          setIsHighlightTextMode,
         };
         
         // For highlight tool, ensure we have selectionEnd from the path if it's missing
@@ -2716,6 +2789,7 @@ export function PageCanvas({
       // Give it a longer delay to ensure the tool handler has finished
       setTimeout(() => {
         setOverlayHighlightPath([]);
+        setIsHighlightTextMode(false);
         setMousePosition(null);
         setIsShiftPressed(false);
       }, 100);
@@ -2836,8 +2910,8 @@ export function PageCanvas({
         </>
       )}
       
-      {isRendering && (
-        <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
+      {isRendering && (readMode || fitMode !== "custom") && (
+        <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10 pointer-events-none">
           <div className="text-muted-foreground">Rendering...</div>
         </div>
       )}
@@ -2919,8 +2993,9 @@ export function PageCanvas({
           })()
         )}
 
-        {/* Render overlay highlight preview - always show while drawing for visual feedback */}
-        {activeTool === "highlight" && overlayHighlightPath.length > 0 && (isSelecting || selectionStart) && (() => {
+        {/* Render overlay highlight preview - only show in overlay mode (not text mode) */}
+        {/* Need at least 2 points for a polyline to be visible */}
+        {activeTool === "highlight" && !isHighlightTextMode && overlayHighlightPath.length >= 2 && (isSelecting || selectionStart) && (() => {
           const { highlightColor, highlightStrokeWidth, highlightOpacity } = useUIStore.getState();
           
           // If shift is pressed and we have start and end, show straight line preview
@@ -2928,11 +3003,16 @@ export function PageCanvas({
           if (isShiftPressed && selectionStart && selectionEnd) {
             // Use selectionStart and selectionEnd (which are locked) for straight line preview
             pathToRender = [selectionStart, selectionEnd];
-          } else if (isShiftPressed && selectionStart && overlayHighlightPath.length > 0) {
+          } else if (isShiftPressed && selectionStart && overlayHighlightPath.length >= 2) {
             // Fallback: use first and last point from path
             const start = overlayHighlightPath[0];
             const end = overlayHighlightPath[overlayHighlightPath.length - 1];
             pathToRender = [start, end];
+          }
+          
+          // Ensure we have at least 2 points to render
+          if (pathToRender.length < 2) {
+            return null;
           }
           
           // Calculate bounding box for SVG positioning with padding for stroke width
@@ -3374,10 +3454,25 @@ export function PageCanvas({
                   // NOT Y=0 at bottom like standard PDF coordinates
                   // So we don't need to flip Y - use 1:1 mapping for CSS positioning
                   // Coordinate system is independent of RENDER_SCALE
-                  const canvasX = minX;  // 1:1 mapping with PDF points
-                  const canvasY = minY;  // 1:1 mapping with PDF points
-                  const width = maxX - minX;  // 1:1 mapping
-                  const height = maxY - minY;  // 1:1 mapping
+                  // BUT: In read mode, canvas is scaled, so we need to scale coordinates
+                  let canvasX = minX;  // 1:1 mapping with PDF points (default)
+                  let canvasY = minY;  // 1:1 mapping with PDF points (default)
+                  let width = maxX - minX;  // 1:1 mapping
+                  let height = maxY - minY;  // 1:1 mapping
+                  
+                  // In read mode, scale coordinates to match canvas display size
+                  const pageMetadata = document.getPageMetadata(pageNumber);
+                  if (readMode && canvasRef.current && pageMetadata) {
+                    const canvasRect = canvasRef.current.getBoundingClientRect();
+                    if (canvasRect.width > 0 && pageMetadata.width > 0) {
+                      const scaleX = canvasRect.width / pageMetadata.width;
+                      const scaleY = canvasRect.height / pageMetadata.height;
+                      canvasX = minX * scaleX;
+                      canvasY = minY * scaleY;
+                      width = (maxX - minX) * scaleX;
+                      height = (maxY - minY) * scaleY;
+                    }
+                  }
                   
                   return (
                     <div
@@ -3555,6 +3650,15 @@ export function PageCanvas({
             const highlightColor = annot.color || "#FFFF00";
             const opacity = annot.opacity !== undefined ? annot.opacity : 0.5;
             const strokeWidth = annot.strokeWidth || 15;
+            
+            // Convert hex color to rgba for proper opacity blending
+            const hexToRgba = (hex: string, alpha: number): string => {
+              const hexClean = hex.replace("#", "");
+              const r = parseInt(hexClean.substring(0, 2), 16);
+              const g = parseInt(hexClean.substring(2, 4), 16);
+              const b = parseInt(hexClean.substring(4, 6), 16);
+              return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+            };
             
             // Render overlay highlights (freehand path)
             // Always render overlay highlights if they have a path or quads
@@ -3801,8 +3905,7 @@ export function PageCanvas({
                           top: `${relativeTop}px`,
                           width: `${quadCanvasWidth}px`,
                           height: `${quadCanvasHeight}px`,
-                          backgroundColor: highlightColor,
-                          opacity: opacity,
+                          backgroundColor: hexToRgba(highlightColor, opacity),
                         }}
                       />
                     );

@@ -136,7 +136,7 @@ function calculateLockedEndPoint(
 }
 
 export const HighlightTool: ToolHandler = {
-  handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
+  handleMouseDown: async (e: React.MouseEvent, context: ToolContext) => {
     const coords = context.getPDFCoordinates(e);
     if (!coords) return;
     
@@ -150,14 +150,67 @@ export const HighlightTool: ToolHandler = {
       context.setSelectedTextSpans([]);
     }
     
-    // Check if we have selected text spans (text selection mode)
-    // We'll detect mode on mouseUp based on whether we can extract text quads
-    isOverlayMode = false; // Will be determined on mouseUp
-    overlayPath = [coords];
+    // Detect if there's text at the initial mouse position
+    // Use a small area around the click point to detect text
+    let hasTextAtStart = false;
+    if (context.currentDocument) {
+      try {
+        const expandSize = 5; // 5 points in each direction
+        const expandedStart = { x: coords.x - expandSize, y: coords.y - expandSize };
+        const expandedEnd = { x: coords.x + expandSize, y: coords.y + expandSize };
+        
+        const result = await getSpansInSelectionFromPage(
+          context.currentDocument,
+          context.pageNumber,
+          expandedStart,
+          expandedEnd
+        );
+        
+        // If we found text spans, we're in text mode
+        hasTextAtStart = result.spans.length > 0 && result.text.trim().length > 0;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:170',message:'Text detection result',data:{hasText:hasTextAtStart,spansCount:result.spans.length,textLength:result.text.trim().length,coords},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+      } catch (error) {
+        // If detection fails, default to overlay mode
+        hasTextAtStart = false;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:173',message:'Text detection error',data:{error:error instanceof Error?error.message:String(error),coords},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+      }
+    }
+    
+    // Set text mode flag in PageCanvas
+    if (context.setIsHighlightTextMode) {
+      context.setIsHighlightTextMode(hasTextAtStart);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:179',message:'Setting text mode flag',data:{hasText:hasTextAtStart},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+    }
+    
+    // If text mode, clear overlay path (we'll use text selection preview instead)
+    // If overlay mode, initialize path
+    if (hasTextAtStart) {
+      overlayPath = [];
+      isOverlayMode = false;
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:186',message:'Text mode - clearing overlay path',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+    } else {
+      overlayPath = [coords];
+      isOverlayMode = true;
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:190',message:'Overlay mode - initializing path',data:{coords,pathLength:overlayPath.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+    }
+    
     dragStartCoords = coords;
     
     context.setIsSelecting(true);
     context.setSelectionStart(coords);
+    // Always set selection end - this will add the first point to overlayHighlightPath
+    // For overlay mode, this ensures the path starts with the initial point
+    // For text mode, this is needed for the selection preview
     context.setSelectionEnd(coords);
   },
 
@@ -197,12 +250,22 @@ export const HighlightTool: ToolHandler = {
     // Update selection end (always use the calculated end point, which may be locked)
     context.setSelectionEnd(endPoint);
     
-    // Add to overlay path (use the end point, which may be locked)
-    overlayPath.push(endPoint);
-    
-    // Limit path length for performance
-    if (overlayPath.length > 100) {
-      overlayPath = overlayPath.slice(-100);
+    // Only add to overlay path if we're in overlay mode (not text mode)
+    // In text mode, we show text selection preview instead of the line
+    if (isOverlayMode) {
+      overlayPath.push(endPoint);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:202',message:'Adding to overlay path',data:{endPoint,pathLength:overlayPath.length,isOverlayMode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      
+      // Limit path length for performance
+      if (overlayPath.length > 100) {
+        overlayPath = overlayPath.slice(-100);
+      }
+    } else {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'HighlightTool.ts:210',message:'Skipping overlay path (text mode)',data:{isOverlayMode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
     }
     
     // Extract text in real-time for live preview (throttled to avoid too many async calls)

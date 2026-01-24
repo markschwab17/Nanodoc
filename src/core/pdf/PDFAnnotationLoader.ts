@@ -196,7 +196,8 @@ export class PDFAnnotationLoader {
 
 
   // Get opacity if available
-
+  // For highlights, we want them to be semi-transparent so text is visible
+  // Even if PDF stores opacity as 1.0, we cap it to a reasonable value
   let opacity = 0.5;
 
   try {
@@ -206,6 +207,12 @@ export class PDFAnnotationLoader {
   if (opacityObj !== null && opacityObj !== undefined) {
 
   opacity = typeof opacityObj === 'number' ? opacityObj : opacityObj.valueOf();
+  
+  // For highlights, if opacity is 1.0 (solid), cap it to 0.4 for semi-transparency
+  // This ensures highlights are always see-through, which is expected behavior
+  if (opacity >= 0.99) {
+    opacity = 0.4; // Semi-transparent highlight
+  }
 
   }
 
@@ -1914,9 +1921,10 @@ export class PDFAnnotationLoader {
             const x = point[0];
             const y = point[1];
             if (typeof x === 'number' && typeof y === 'number' && !isNaN(x) && !isNaN(y)) {
+              const convertedY = pageHeight - y; // Convert from display coordinates (Y=0 at top) to PDF coordinates (Y=0 at bottom)
               path.push({
                 x: x,
-                y: pageHeight - y // Convert to display coordinates
+                y: convertedY
               });
             }
           }
@@ -1928,9 +1936,10 @@ export class PDFAnnotationLoader {
             const x = strokeArray[i];
             const y = strokeArray[i + 1];
             if (typeof x === 'number' && typeof y === 'number' && !isNaN(x) && !isNaN(y)) {
+              const convertedY = pageHeight - y; // Convert from display coordinates (Y=0 at top) to PDF coordinates (Y=0 at bottom)
               path.push({
                 x: x,
-                y: pageHeight - y // Convert to display coordinates
+                y: convertedY
               });
             }
           }
@@ -2013,6 +2022,11 @@ export class PDFAnnotationLoader {
       const opacityObj = pdfAnnot.getOpacity ? pdfAnnot.getOpacity() : null;
       if (opacityObj !== null && opacityObj !== undefined) {
         opacity = typeof opacityObj === 'number' ? opacityObj : opacityObj.valueOf();
+        // For highlights, if opacity is 1.0 (solid), cap it to 0.4 for semi-transparency
+        // This ensures highlights are always see-through, which is expected behavior
+        if (opacity >= 0.99) {
+          opacity = 0.4; // Semi-transparent highlight
+        }
       } else {
         // Try to get from CA field
         try {
@@ -2021,6 +2035,11 @@ export class PDFAnnotationLoader {
             const ca = annotObj.get("CA");
             if (ca !== null && ca !== undefined) {
               opacity = typeof ca === 'number' ? ca : ca.valueOf();
+              // For highlights, if opacity is 1.0 (solid), cap it to 0.4 for semi-transparency
+              // This ensures highlights are always see-through, which is expected behavior
+              if (opacity >= 0.99) {
+                opacity = 0.4; // Semi-transparent highlight
+              }
             }
           }
         } catch (e) {

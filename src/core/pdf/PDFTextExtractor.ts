@@ -547,8 +547,14 @@ export async function getSpansInSelectionFromPage(
       }
       
       // Match quad spans with character spans
-      // IMPORTANT: Only use quads for filtering, NOT a bounding rectangle
-      // This allows proper text selection across lines (like in a word processor)
+      // IMPORTANT: Filter by selection rectangle Y bounds to prevent selecting adjacent lines
+      // Calculate selection rectangle bounds in PDF coordinates
+      const minY = Math.min(selectionStart.y, selectionEnd.y);
+      const maxY = Math.max(selectionStart.y, selectionEnd.y);
+      
+      // Use a tight vertical tolerance to prevent selecting adjacent lines
+      // Only include text whose Y bounds overlap with the selection rectangle
+      // This prevents mupdf's highlight() from including text from lines above/below
       const characterSpans: TextSpan[] = [];
       const addedSpans = new Set<string>(); // Prevent duplicates
       
@@ -558,14 +564,23 @@ export async function getSpansInSelectionFromPage(
         // Find character spans that intersect with this quad
         for (const charSpan of allCharacterSpans) {
           const [spanX0, spanY0, spanX1, spanY1] = charSpan.bbox;
-          // Check if span intersects with quad (NOT with selection rectangle)
+          
+          // Check if span intersects with quad
           if (!(spanX1 < quadX0 || spanX0 > quadX1 || spanY1 < quadY0 || spanY0 > quadY1)) {
-            // Use bbox as key to prevent duplicates
-            const key = `${spanX0},${spanY0},${spanX1},${spanY1}`;
-            if (!addedSpans.has(key)) {
-              addedSpans.add(key);
-              characterSpans.push(charSpan);
-              fullText += charSpan.text;
+            // ADDITIONAL FILTER: Check if span's Y bounds overlap with selection rectangle
+            // This prevents selecting text from adjacent lines that mupdf's highlight() might include
+            // Use a very tight tolerance (0.5 points) to account for minor coordinate rounding
+            // This ensures only text actually within the selection rectangle is included
+            const spanOverlapsSelection = !(spanY1 < minY - 0.5 || spanY0 > maxY + 0.5);
+            
+            if (spanOverlapsSelection) {
+              // Use bbox as key to prevent duplicates
+              const key = `${spanX0},${spanY0},${spanX1},${spanY1}`;
+              if (!addedSpans.has(key)) {
+                addedSpans.add(key);
+                characterSpans.push(charSpan);
+                fullText += charSpan.text;
+              }
             }
           }
         }

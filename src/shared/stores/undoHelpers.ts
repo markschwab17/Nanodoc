@@ -162,7 +162,7 @@ export function wrapAnnotationOperation(
  */
 export async function wrapPageOperation(
   operation: () => Promise<void>,
-  type: "deletePages" | "insertPages" | "pastePages" | "rotatePages",
+  type: "deletePages" | "insertPages" | "pastePages" | "rotatePages" | "reorderPages",
   documentId: string,
   pageIndices: number[],
   targetIndex?: number,

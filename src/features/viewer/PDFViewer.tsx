@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import { flushSync } from "react-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
@@ -39,6 +40,7 @@ export function PDFViewer() {
   const previousPageRef = useRef(currentPage); // Track previous page to detect actual changes
   const isZoomingRef = useRef(false); // Flag to prevent scroll interference during zoom
   const previousReadModeRef = useRef(readMode); // Track previous read mode state
+  const isProgrammaticScrollRef = useRef(false); // Track if we're programmatically scrolling to prevent IntersectionObserver from overwriting currentPage
   const [isEditingPage, setIsEditingPage] = useState(false);
   const [pageInputValue, setPageInputValue] = useState("");
   const pageInputRef = useRef<HTMLInputElement>(null);
@@ -121,55 +123,104 @@ export function PDFViewer() {
     // Set zooming flag to prevent interference from other effects
     isZoomingRef.current = true;
     
-    // Update zoom state (this triggers VirtualizedPageList to recalculate pageData)
-    zoomLevelRef.current = newZoom;
-    setFitMode("custom");
-    setZoomLevel(newZoom);
+    // Temporarily disable smooth scrolling to prevent browser auto-adjustment
+    const originalScrollBehavior = scrollContainer.style.scrollBehavior;
+    scrollContainer.style.scrollBehavior = 'auto';
     
-    // Apply scroll position immediately using requestAnimationFrame
-    // This ensures the scroll adjustment happens in the same frame as the state update
-    // but after React has processed the state change
-    requestAnimationFrame(() => {
+    // Use flushSync to force synchronous state updates and layout recalculation
+    // This allows us to set scroll position in the same frame, preventing browser auto-adjustment
+    flushSync(() => {
+      zoomLevelRef.current = newZoom;
+      setFitMode("custom");
+      setZoomLevel(newZoom);
+    });
+    
+    // Immediately after flushSync, the layout should be recalculated
+    // Set scroll position synchronously in the same frame to prevent browser auto-adjustment
+    // Use a microtask to ensure DOM has updated but before browser can auto-adjust
+    Promise.resolve().then(() => {
       if (!scrollContainer) {
         isZoomingRef.current = false;
         return;
       }
       
-      // Get current scroll height (may have changed due to zoom)
+      // Force a synchronous layout read to ensure DOM is updated
+      void scrollContainer.offsetHeight;
+      
       const currentScrollHeight = scrollContainer.scrollHeight;
       const currentViewportHeight = scrollContainer.clientHeight;
       
-      // Calculate max scroll position
-      const maxScroll = Math.max(0, currentScrollHeight - currentViewportHeight);
-      
-      // Clamp the target scroll position to valid range
-      const clampedTarget = Math.max(0, Math.min(maxScroll, newScrollTop));
-      // Apply scroll position immediately
-      scrollContainer.scrollTop = clampedTarget;
-      
-      // Verify and adjust once more after a brief delay to account for any layout changes
-      // This is a safety check in case VirtualizedPageList needs an extra frame to update
-      requestAnimationFrame(() => {
-        if (!scrollContainer) {
-          isZoomingRef.current = false;
-          return;
+      if (currentScrollHeight > 0) {
+        const maxScroll = Math.max(0, currentScrollHeight - currentViewportHeight);
+        const clampedTarget = Math.max(0, Math.min(maxScroll, newScrollTop));
+        
+        // Apply scroll position immediately and synchronously
+        scrollContainer.scrollTop = clampedTarget;
+        
+        // Maintain horizontal center
+        if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+          scrollContainer.scrollLeft = (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2;
+        } else {
+          scrollContainer.scrollLeft = 0;
         }
         
-        const finalScrollHeight = scrollContainer.scrollHeight;
-        const finalViewportHeight = scrollContainer.clientHeight;
-        const finalMaxScroll = Math.max(0, finalScrollHeight - finalViewportHeight);
-        const finalTarget = Math.max(0, Math.min(finalMaxScroll, newScrollTop));
-        
-        // Only adjust if significantly different to avoid unnecessary updates
-        if (Math.abs(scrollContainer.scrollTop - finalTarget) > 1) {
-          scrollContainer.scrollTop = finalTarget;
-        }
-        
-        // Clear zooming flag after a brief delay to allow any pending effects to complete
-        setTimeout(() => {
+        // Verify and correct if needed in the next frame
+        requestAnimationFrame(() => {
+          if (!scrollContainer) {
+            isZoomingRef.current = false;
+            return;
+          }
+          
+          const finalScrollHeight = scrollContainer.scrollHeight;
+          const finalViewportHeight = scrollContainer.clientHeight;
+          const finalMaxScroll = Math.max(0, finalScrollHeight - finalViewportHeight);
+          const finalTarget = Math.max(0, Math.min(finalMaxScroll, newScrollTop));
+          
+          // Only correct if significantly off (browser may have adjusted slightly)
+          if (Math.abs(scrollContainer.scrollTop - finalTarget) > 2) {
+            scrollContainer.scrollTop = finalTarget;
+            
+            if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+              scrollContainer.scrollLeft = (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2;
+            } else {
+              scrollContainer.scrollLeft = 0;
+            }
+          }
+          
+          // Restore smooth scrolling
+          scrollContainer.style.scrollBehavior = originalScrollBehavior || 'smooth';
           isZoomingRef.current = false;
-        }, 50);
-      });
+        });
+      } else {
+        // Layout not ready yet, wait for it
+        let attempts = 0;
+        const checkLayout = () => {
+          if (!scrollContainer || attempts >= 5) {
+            isZoomingRef.current = false;
+            return;
+          }
+          
+          const scrollHeight = scrollContainer.scrollHeight;
+          if (scrollHeight > 0) {
+            const maxScroll = Math.max(0, scrollHeight - scrollContainer.clientHeight);
+            const clampedTarget = Math.max(0, Math.min(maxScroll, newScrollTop));
+            scrollContainer.scrollTop = clampedTarget;
+            
+            if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+              scrollContainer.scrollLeft = (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2;
+            } else {
+              scrollContainer.scrollLeft = 0;
+            }
+            
+            scrollContainer.style.scrollBehavior = originalScrollBehavior || 'smooth';
+            isZoomingRef.current = false;
+          } else {
+            attempts++;
+            requestAnimationFrame(checkLayout);
+          }
+        };
+        requestAnimationFrame(checkLayout);
+      }
     });
   }, [readMode, currentDocument, setZoomLevel, setFitMode]);
 
@@ -245,10 +296,22 @@ export function PDFViewer() {
       const containerHeight = container.clientHeight;
       const targetScroll = bboxScrollY - (containerHeight / 2);
       
+      // Set flag to prevent IntersectionObserver from overwriting currentPage during programmatic scroll
+      isProgrammaticScrollRef.current = true;
       container.scrollTo({
         top: Math.max(0, targetScroll),
         behavior: "smooth"
       });
+      // Re-enable IntersectionObserver updates after scroll completes
+      let scrollEndTimeout: NodeJS.Timeout | null = null;
+      const scrollEndHandler = () => {
+        if (scrollEndTimeout) clearTimeout(scrollEndTimeout);
+        scrollEndTimeout = setTimeout(() => {
+          isProgrammaticScrollRef.current = false;
+          container.removeEventListener('scroll', scrollEndHandler);
+        }, 100);
+      };
+      container.addEventListener('scroll', scrollEndHandler, { passive: true });
       return;
     }
     
@@ -260,15 +323,41 @@ export function PDFViewer() {
       const viewportCenter = containerHeight / 2;
       const targetScroll = pageCenter - viewportCenter;
       
+      // Set flag to prevent IntersectionObserver from overwriting currentPage during programmatic scroll
+      isProgrammaticScrollRef.current = true;
       container.scrollTo({
         top: Math.max(0, targetScroll),
         behavior: "smooth"
       });
+      
+      // Listen for scroll end to re-enable IntersectionObserver updates
+      let scrollEndTimeout: NodeJS.Timeout | null = null;
+      const scrollEndHandler = () => {
+        if (scrollEndTimeout) clearTimeout(scrollEndTimeout);
+        scrollEndTimeout = setTimeout(() => {
+          // Re-enable IntersectionObserver updates after scroll completes
+          isProgrammaticScrollRef.current = false;
+          container.removeEventListener('scroll', scrollEndHandler);
+        }, 100);
+      };
+      container.addEventListener('scroll', scrollEndHandler, { passive: true });
     } else {
+      // Set flag to prevent IntersectionObserver from overwriting currentPage during programmatic scroll
+      isProgrammaticScrollRef.current = true;
       container.scrollTo({
         top: Math.max(0, pageTop),
         behavior: "smooth"
       });
+      // Re-enable IntersectionObserver updates after scroll completes
+      let scrollEndTimeout: NodeJS.Timeout | null = null;
+      const scrollEndHandler = () => {
+        if (scrollEndTimeout) clearTimeout(scrollEndTimeout);
+        scrollEndTimeout = setTimeout(() => {
+          isProgrammaticScrollRef.current = false;
+          container.removeEventListener('scroll', scrollEndHandler);
+        }, 100);
+      };
+      container.addEventListener('scroll', scrollEndHandler, { passive: true });
     }
   }, [readMode, currentDocument, zoomLevel, baseFitScale]);
   
@@ -356,6 +445,10 @@ export function PDFViewer() {
   // Handle page visibility changes from VirtualizedPageList
   // This updates the current page as the user scrolls
   const handlePageVisible = useCallback((pageNumber: number) => {
+    // Don't update if we're in the middle of a programmatic scroll - wait for it to complete
+    if (isProgrammaticScrollRef.current) {
+      return;
+    }
     if (pageNumber !== currentPage) {
       isScrollingFromUserRef.current = true; // Mark as user scroll
       setCurrentPage(pageNumber);
@@ -379,21 +472,33 @@ export function PDFViewer() {
       e.stopPropagation();
 
       const currentZoom = zoomLevelRef.current;
-      const delta = e.deltaY > 0 ? 0.99 : 1.01; // Reduced from 0.97/1.03 to 0.99/1.01 for slower zoom
+      const delta = e.deltaY > 0 ? 0.988 : 1.012; // 1.2x faster than previous 0.99/1.01
       const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
 
       if (Math.abs(newZoom - currentZoom) > 0.001) {
-        // Pass mouse cursor position to zoom to that point
-        // e.clientX and e.clientY are relative to the viewport (screen coordinates)
-        // These will be converted to scroll container coordinates in zoomToPoint
-        zoomToPoint(newZoom, e.clientX, e.clientY);
+        // In read mode, zoom to viewport center instead of mouse cursor position
+        // This provides a more predictable zoom experience
+        const containerRect = container.getBoundingClientRect();
+        const viewportCenterX = containerRect.left + container.clientWidth / 2;
+        const viewportCenterY = containerRect.top + container.clientHeight / 2;
+        
+        zoomToPoint(newZoom, viewportCenterX, viewportCenterY);
       }
     };
 
+    // Track scroll events during zoom to detect unexpected changes
+    let lastScrollTop = container.scrollTop;
+    const handleScroll = () => {
+      const currentScrollTop = container.scrollTop;
+      lastScrollTop = currentScrollTop;
+    };
+
     container.addEventListener("wheel", handleWheelNative, { passive: false });
+    container.addEventListener("scroll", handleScroll, { passive: true });
 
     return () => {
       container.removeEventListener("wheel", handleWheelNative);
+      container.removeEventListener("scroll", handleScroll);
     };
   }, [readMode, zoomToPoint]);
 
@@ -407,8 +512,11 @@ export function PDFViewer() {
         if (!scrollContainerRef.current) return;
         const container = scrollContainerRef.current;
         const containerRect = container.getBoundingClientRect();
-        const viewportCenterX = containerRect.left + containerRect.width / 2;
-        const viewportCenterY = containerRect.top + containerRect.height / 2;
+        // Use clientHeight instead of containerRect.height to get the actual viewport height
+        // containerRect.height might include scrollbars or other elements
+        const viewportCenterX = containerRect.left + container.clientWidth / 2;
+        const viewportCenterY = containerRect.top + container.clientHeight / 2;
+        
         zoomToPoint(newZoom, viewportCenterX, viewportCenterY);
       };
       setZoomToCenterCallback(zoomToCenterWrapper);
@@ -509,12 +617,9 @@ export function PDFViewer() {
       return;
     }
     
-    // This is an external action (thumbnail click, etc.) - reset zoom and scroll to the page
-    // Reset zoom to fit-to-width for consistent navigation experience
-    if (fitMode === "custom" || zoomLevel !== baseFitScale) {
-      setFitMode("width");
-      setZoomLevel(baseFitScale);
-    }
+    // This is an external action (thumbnail click, keyboard navigation, etc.)
+    // Preserve the current zoom level when switching pages in read mode
+    // Only scroll to the new page without resetting zoom
     
     // Wait for viewport to be ready, baseFitScale to be calculated, and page to be rendered
     const performScroll = () => {
@@ -547,8 +652,7 @@ export function PDFViewer() {
     };
     
     // Use multiple requestAnimationFrame calls plus a small timeout to ensure DOM is ready
-    // Wait a bit longer if we reset zoom to allow transform to update
-    const delay = (fitMode === "custom" || zoomLevel !== baseFitScale) ? 100 : 50;
+    const delay = 50;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         // Additional small delay to ensure VirtualizedPageList has rendered the page
@@ -575,6 +679,98 @@ export function PDFViewer() {
     
     previousPageRef.current = currentPage;
   }, [currentPage, readMode, currentDocument, setFitMode]);
+
+  // Listen for page deletion events and refresh the viewport
+  useEffect(() => {
+    const handlePagesChanged = (event: Event) => {
+      const customEvent = event as CustomEvent<{ documentId: string; newPageCount: number; newCurrentPage: number }>;
+      const { documentId } = customEvent.detail;
+      
+      // Only handle if it's for the current document
+      if (!currentDocument || currentDocument.getId() !== documentId) {
+        return;
+      }
+      
+      // Clear renderer cache to force fresh rendering
+      if (renderer) {
+        renderer.clearCache();
+      }
+      
+      // Force viewport refresh
+      if (readMode) {
+        // In read mode, wait for VirtualizedPageList to remount and update before scrolling
+        // The key change will force a remount, so we need to wait for that
+        const performScroll = () => {
+          if (!scrollContainerRef.current || !currentDocument) return;
+          
+          // Use current page from store (more reliable than event detail)
+          const storeCurrentPage = usePDFStore.getState().currentPage;
+          const pageCount = currentDocument.getPageCount();
+          if (pageCount === 0) return;
+          
+          const targetPage = Math.min(storeCurrentPage, Math.max(0, pageCount - 1));
+          
+          // Verify the page exists by checking metadata
+          const pageMetadata = currentDocument.getPageMetadata(targetPage);
+          if (!pageMetadata) {
+            // Page not ready yet, try again after a short delay
+            setTimeout(() => {
+              requestAnimationFrame(() => {
+                requestAnimationFrame(performScroll);
+              });
+            }, 50);
+            return;
+          }
+          
+          // Recalculate baseFitScale in case viewport changed
+          const container = scrollContainerRef.current;
+          const containerWidth = container.clientWidth || 800;
+          const firstPageMetadata = currentDocument.getPageMetadata(0);
+          if (firstPageMetadata && containerWidth > 0) {
+            const calculatedScale = containerWidth / firstPageMetadata.width;
+            if (Math.abs(calculatedScale - baseFitScale) > 0.01) {
+              setBaseFitScale(calculatedScale);
+              // Wait for baseFitScale to update and VirtualizedPageList to remount
+              setTimeout(() => {
+                scrollToPage(targetPage, true);
+              }, 150);
+            } else {
+              // Still wait a bit for VirtualizedPageList to remount
+              setTimeout(() => {
+                scrollToPage(targetPage, true);
+              }, 150);
+            }
+          } else {
+            setTimeout(() => {
+              scrollToPage(targetPage, true);
+            }, 150);
+          }
+        };
+        
+        // Wait for VirtualizedPageList to remount (key change triggers remount)
+        // Use multiple animation frames and a delay to ensure React has remounted the component
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            // Wait for remount to complete
+            setTimeout(() => {
+              requestAnimationFrame(() => {
+                performScroll();
+              });
+            }, 100);
+          });
+        });
+      } else {
+        // In normal mode, force a re-render by updating fit mode
+        // This will trigger the page canvas to refresh
+        setFitMode("page");
+      }
+    };
+    
+    window.addEventListener('pdf-pages-changed', handlePagesChanged);
+    return () => {
+      window.removeEventListener('pdf-pages-changed', handlePagesChanged);
+    };
+  }, [currentDocument, readMode, renderer, scrollToPage, setFitMode, baseFitScale, setBaseFitScale]);
 
   // Calculate base fit-to-width scale when entering read mode or document changes
   useEffect(() => {
@@ -771,6 +967,7 @@ export function PDFViewer() {
           }`}
           style={{ 
             scrollBehavior: "smooth",
+            overflowAnchor: "none", // Prevent browser from auto-adjusting scroll position during layout changes
           }}
         >
           <div 
@@ -779,8 +976,9 @@ export function PDFViewer() {
           >
             {currentDocument && renderer && (
               <VirtualizedPageList
-                  document={currentDocument}
-                  renderer={renderer}
+                key={`${currentDocument.getId()}-${currentDocument.getPageCount()}`}
+                document={currentDocument}
+                renderer={renderer}
                 zoomLevel={zoomLevel}
                 baseFitScale={baseFitScale}
                 pageGap={8}

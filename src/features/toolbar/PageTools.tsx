@@ -67,6 +67,7 @@ export function PageTools() {
     if (!currentDocument || !editor) return;
 
     try {
+      const deletedPage = currentPage;
       await editor.deletePages(currentDocument, [currentPage]);
       
       // Refresh document metadata to update page count and page info
@@ -82,11 +83,34 @@ export function PageTools() {
       
       // Adjust current page if needed
       const newPageCount = currentDocument.getPageCount();
+      let newCurrentPage = currentPage;
       if (currentPage >= newPageCount && newPageCount > 0) {
-        setCurrentPage(newPageCount - 1);
+        newCurrentPage = newPageCount - 1;
+        setCurrentPage(newCurrentPage);
       } else if (newPageCount === 0) {
+        newCurrentPage = 0;
         setCurrentPage(0);
+      } else if (deletedPage < newPageCount) {
+        // If we deleted a page before the current one, the current page index shifts down
+        // But if we deleted the current page, we already handled it above
+        // This case handles when we're viewing a page after the deleted one
+        newCurrentPage = Math.max(0, currentPage - 1);
+        setCurrentPage(newCurrentPage);
       }
+      
+      // Force viewport refresh by dispatching a custom event
+      // This ensures the viewer updates even if the page number didn't change
+      window.dispatchEvent(new CustomEvent('pdf-pages-changed', {
+        detail: { documentId: currentDocument.getId(), newPageCount, newCurrentPage }
+      }));
+      
+      // Also trigger a small delay to ensure the viewport refreshes
+      setTimeout(() => {
+        // Force a re-render by updating current page again (if it changed)
+        if (newCurrentPage !== deletedPage) {
+          setCurrentPage(newCurrentPage);
+        }
+      }, 50);
     } catch (error) {
       console.error("Error deleting page:", error);
     }
