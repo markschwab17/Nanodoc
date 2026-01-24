@@ -321,7 +321,10 @@ export function RichTextEditor({
         }
       };
     }
-  }, [isEditing, scale, onResize, annotation.fontSize, annotation.fontFamily]);
+    // Note: scale is NOT in dependencies - scale changes are visual only and shouldn't trigger resize
+    // The updateSize function uses scale internally for measurements, but we don't want to
+    // recalculate size when scale changes (e.g., during zoom operations)
+  }, [isEditing, onResize, annotation.fontSize, annotation.fontFamily, annotation.autoFit]);
 
   // Handle keyboard shortcuts and ESC key
   useEffect(() => {

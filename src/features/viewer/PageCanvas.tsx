@@ -1328,23 +1328,25 @@ export function PageCanvas({
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
     const flippedY = mediaboxHeight - pdfY;
     
-    // In read mode, we need to scale coordinates based on the actual canvas display size
-    // The canvas may be scaled to match the viewport width (based on first page), not this page's width
-    // We need to match the scaling used in getPDFCoordinates, which uses canvasRect dimensions
+    // In read mode, we need to scale coordinates based on zoomLevel directly
+    // This matches how the canvas is sized in the render function
+    // VirtualizedPageList calculates: viewportWidth = firstPage.width * zoomLevel
+    // Then each page: pageScale = viewportWidth / pageMetadata.width
+    // So we use zoomLevel directly to calculate the scale for this page
     let scaleX = 1;
     let scaleY = 1;
     
-    if (readMode && canvasRef.current) {
-      const canvasRect = canvasRef.current.getBoundingClientRect();
-      // Calculate scale based on actual canvas display size vs PDF dimensions
-      // This ensures annotations are positioned at the same scale as coordinate calculations
-      // getPDFCoordinates uses: pdfX = (canvasRelativeX / canvasRect.width) * mediaboxWidth
-      // So we need: canvasX = (pdfX / mediaboxWidth) * canvasRect.width = pdfX * (canvasRect.width / mediaboxWidth)
-      if (canvasRect.width > 0 && mediaboxWidth > 0) {
-        scaleX = canvasRect.width / mediaboxWidth;
-      }
-      if (canvasRect.height > 0 && mediaboxHeight > 0) {
-        scaleY = canvasRect.height / mediaboxHeight;
+    if (readMode) {
+      // In read mode, calculate scale directly from zoomLevel, matching render logic
+      // This ensures annotations stay aligned during zoom/pan operations
+      const firstPageMetadata = document.getPageMetadata(0);
+      if (firstPageMetadata) {
+        // Calculate viewport width: firstPage.width * zoomLevel
+        const viewportWidth = firstPageMetadata.width * zoomLevel;
+        // Calculate scale for this page: viewportWidth / pageMetadata.width
+        const pageScale = viewportWidth / mediaboxWidth;
+        scaleX = pageScale;
+        scaleY = pageScale; // Maintain aspect ratio
       }
     }
     
@@ -4377,11 +4379,27 @@ export function PageCanvas({
             const isHovered = hoveredAnnotationId === annot.id && activeTool === "select" && !isCurrentlyEditing;
           
           return (() => {
-            // Get current viewport transform values (use refs for real-time updates during zoom)
-            const currentZoom = zoomLevelRef.current;
+            // Get current viewport transform values
+            // Use zoomLevel from state to ensure re-renders when zoom changes
+            const currentZoom = zoomLevel;
             
             // Ensure zoom is valid
             if (currentZoom <= 0) return null;
+            
+            // Calculate scale for annotations
+            // In read mode, use the page scale (same as displayScale in render function)
+            // In normal mode, use 1.0 because the container transform handles scaling
+            let annotationScale = 1.0;
+            if (readMode) {
+              const firstPageMetadata = document.getPageMetadata(0);
+              const pageMetadata = document.getPageMetadata(pageNumber);
+              if (firstPageMetadata && pageMetadata) {
+                // Calculate viewport width: firstPage.width * zoomLevel (matches render function)
+                const viewportWidth = firstPageMetadata.width * currentZoom;
+                // Calculate scale for this page: viewportWidth / pageMetadata.width (matches displayScale)
+                annotationScale = viewportWidth / pageMetadata.width;
+              }
+            }
             
             // Since RichTextEditor is inside the transformed div, use canvas display coordinates
             // Ensure coordinates are valid numbers
@@ -4569,7 +4587,7 @@ export function PageCanvas({
                   top: `${canvasPos.y}px`,
                   zIndex: 50, // Higher than annotations and canvas
                 }}
-                scale={1.0}
+                scale={annotationScale}
                 onResize={(width, height) => {
                   if (currentDocument) {
                     // If this is the start of a resize, capture initial size
@@ -4758,8 +4776,24 @@ export function PageCanvas({
               const isHovered = hoveredAnnotationId === annot.id && activeTool === "select" && !isSelected;
               
               // Get current viewport transform values
-              const currentZoom = zoomLevelRef.current;
+              // Use zoomLevel from state to ensure re-renders when zoom changes
+              const currentZoom = zoomLevel;
               if (currentZoom <= 0) return null;
+              
+              // Calculate scale for annotations
+              // In read mode, use the page scale (same as displayScale in render function)
+              // In normal mode, use 1.0 because the container transform handles scaling
+              let annotationScale = 1.0;
+              if (readMode) {
+                const firstPageMetadata = document.getPageMetadata(0);
+                const pageMetadata = document.getPageMetadata(pageNumber);
+                if (firstPageMetadata && pageMetadata) {
+                  // Calculate viewport width: firstPage.width * zoomLevel (matches render function)
+                  const viewportWidth = firstPageMetadata.width * currentZoom;
+                  // Calculate scale for this page: viewportWidth / pageMetadata.width (matches displayScale)
+                  annotationScale = viewportWidth / pageMetadata.width;
+                }
+              }
               
               // Convert PDF coordinates to canvas display coordinates (same as text annotations)
               // annot.y is the BOTTOM edge in PDF coordinates
@@ -4772,7 +4806,7 @@ export function PageCanvas({
                 <ImageAnnotation
                   key={annot.id}
                   annotation={annot}
-                  scale={1.0}
+                  scale={annotationScale}
                   style={{
                     position: "absolute",
                     left: `${canvasPos.x}px`,
@@ -5075,11 +5109,27 @@ export function PageCanvas({
               const isSelected = editingAnnotation?.id === annot.id;
               const isHovered = hoveredAnnotationId === annot.id && activeTool === "select" && !isSelected;
               
-              const currentZoom = zoomLevelRef.current;
+              // Use zoomLevel from state to ensure re-renders when zoom changes
+              const currentZoom = zoomLevel;
               if (currentZoom <= 0) return null;
               
-              // Use actualScale for coordinate conversion (accounts for fit modes)
-              const currentScale = actualScaleRef.current > 0 ? actualScaleRef.current : currentZoom;
+              // Calculate scale for annotations
+              // In read mode, use the page scale (same as displayScale in render function)
+              // In normal mode, use actualScale or zoomLevel (accounts for fit modes)
+              let annotationScale = 1.0;
+              if (readMode) {
+                const firstPageMetadata = document.getPageMetadata(0);
+                const pageMetadata = document.getPageMetadata(pageNumber);
+                if (firstPageMetadata && pageMetadata) {
+                  // Calculate viewport width: firstPage.width * zoomLevel (matches render function)
+                  const viewportWidth = firstPageMetadata.width * currentZoom;
+                  // Calculate scale for this page: viewportWidth / pageMetadata.width (matches displayScale)
+                  annotationScale = viewportWidth / pageMetadata.width;
+                }
+              } else {
+                // In normal mode, use actualScale for coordinate conversion (accounts for fit modes)
+                annotationScale = actualScale > 0 ? actualScale : currentZoom;
+              }
               
               const pdfTopY = annot.y + (annot.height || 0);
               const canvasPos = pdfToCanvas(annot.x, pdfTopY);
@@ -5088,7 +5138,7 @@ export function PageCanvas({
                 <StampAnnotation
                   key={annot.id}
                   annotation={annot}
-                  scale={currentScale}
+                  scale={annotationScale}
                   style={{
                     position: "absolute",
                     left: `${canvasPos.x}px`,
