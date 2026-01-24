@@ -33,7 +33,7 @@ export function SpecExtractionPanel() {
     setTemporaryHighlight,
   } = useSpecExtractionStore();
   
-  const { getCurrentDocument, setCurrentPage } = usePDFStore();
+  const { getCurrentDocument } = usePDFStore();
   const [isOpen, setIsOpen] = useState(false);
   const [extractionType, setExtractionType] = useState<"specs" | "geotechnical">("specs");
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");

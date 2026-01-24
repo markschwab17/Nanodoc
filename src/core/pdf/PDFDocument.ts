@@ -92,7 +92,7 @@ export class PDFDocument {
     
     // Detect cover page: check if page 0 has significantly less text than page 1
     // This is done asynchronously after loading to avoid blocking
-    this.detectCoverPage(mupdf).catch(err => {
+    this.detectCoverPage().catch(err => {
       console.warn("Error detecting cover page:", err);
     });
     } catch (error) {
@@ -236,7 +236,7 @@ export class PDFDocument {
    * Detect if the PDF has a cover page (page 0 that users don't count)
    * by comparing text content of page 0 vs page 1
    */
-  private async detectCoverPage(mupdf: any): Promise<void> {
+  private async detectCoverPage(): Promise<void> {
     if (this.metadata.pageCount < 2) {
       // Need at least 2 pages to compare
       this.metadata.hasCoverPage = false;

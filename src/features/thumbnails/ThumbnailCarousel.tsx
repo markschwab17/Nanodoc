@@ -126,7 +126,6 @@ export function ThumbnailCarousel() {
 
     try {
       const documentId = currentDocument.getId();
-      const oldCurrentPage = currentPage;
       
       // Wrap with undo/redo
       await wrapPageOperation(

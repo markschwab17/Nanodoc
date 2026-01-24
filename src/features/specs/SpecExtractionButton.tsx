@@ -14,7 +14,6 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
-import { estimateTokenCount } from "@/core/ai/EmbeddingService";
 
 export type ExtractionType = "specs" | "geotechnical";
 

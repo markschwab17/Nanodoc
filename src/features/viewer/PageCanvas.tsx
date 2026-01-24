@@ -1565,8 +1565,6 @@ export function PageCanvas({
     // Handle selectText tool - always clear previous selection when starting a new drag
     // This ensures clicking and dragging again ends the previous selection and starts fresh
     if (activeTool === "selectText" && currentDocument) {
-      const coords = getPDFCoordinates(e);
-      
       // Always clear previous selection when starting a new drag
       // The user expects clicking and dragging to start a fresh selection
       setSelectedTextSpans([]);

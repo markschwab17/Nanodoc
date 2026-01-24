@@ -487,10 +487,9 @@ export function PDFViewer() {
     };
 
     // Track scroll events during zoom to detect unexpected changes
-    let lastScrollTop = container.scrollTop;
     const handleScroll = () => {
-      const currentScrollTop = container.scrollTop;
-      lastScrollTop = currentScrollTop;
+      // Track scroll position for potential future use
+      container.scrollTop;
     };
 
     container.addEventListener("wheel", handleWheelNative, { passive: false });

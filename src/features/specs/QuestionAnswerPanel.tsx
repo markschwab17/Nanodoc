@@ -13,13 +13,13 @@ import { answerQuestion, type QuestionAnswer } from "@/core/ai/QuestionAnswering
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function QuestionAnswerPanel() {
-  const { getCurrentDocument, setCurrentPage } = usePDFStore();
-  const { isExtracting, startExtraction, finishExtraction, setExtractionError } = useSpecExtractionStore();
+  const { getCurrentDocument } = usePDFStore();
+  const { finishExtraction, setExtractionError } = useSpecExtractionStore();
   const [isOpen, setIsOpen] = useState(false);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<QuestionAnswer | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [panelWidth, setPanelWidth] = useState(384); // w-96 = 384px
+  const [panelWidth] = useState(384); // w-96 = 384px
   
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() || null;
@@ -51,9 +51,9 @@ export function QuestionAnswerPanel() {
       }
     };
     
-    window.addEventListener('ask-document-request', handleAskRequest as EventListener);
+    window.addEventListener('ask-document-request', handleAskRequest as unknown as EventListener);
     return () => {
-      window.removeEventListener('ask-document-request', handleAskRequest as EventListener);
+      window.removeEventListener('ask-document-request', handleAskRequest as unknown as EventListener);
     };
   }, [documentId, currentDocument, finishExtraction, setExtractionError]);
   
