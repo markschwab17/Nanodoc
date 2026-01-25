@@ -7,8 +7,7 @@
 import type { PDFDocument } from "../pdf/PDFDocument";
 import { createChunks } from "./PDFContentChunker";
 import { getEmbeddingService, findTopKChunks } from "./EmbeddingService";
-import { getGeminiApiKey, listAvailableModels } from "./GeminiService";
-import type { GeminiConfig } from "./GeminiService";
+import { generateText, hasConfiguredAPIKey } from "./AIService";
 
 export interface QuestionAnswer {
   answer: string;
@@ -28,9 +27,8 @@ export async function answerQuestion(
   question: string,
   customPrompt?: string
 ): Promise<QuestionAnswer> {
-  const apiKey = getGeminiApiKey();
-  if (!apiKey) {
-    throw new Error("Please configure your Gemini API key in settings.");
+  if (!hasConfiguredAPIKey()) {
+    throw new Error("Please configure your AI API key in settings.");
   }
   
   // Step 1: Create chunks from the document
@@ -99,14 +97,8 @@ ${chunksText}
 
 Now answer the question with proper citations. Remember: every fact must be cited with [Page X: "quote"] format, where X is ALWAYS 1-based (first page = 1, second page = 2, etc.). Always add 1 to the chunk's "PDF Page Index" to get the correct page number for citations.`;
 
-  // Step 4: Call Gemini API
-  // Try newer model names first, fall back to older ones if needed
-  const config: GeminiConfig = {
-    apiKey,
-    model: 'gemini-1.5-flash', // Will try variants in callGeminiAPI if this fails
-  };
-  
-  const response = await callGeminiAPI(basePrompt, config);
+  // Step 4: Call AI API (Gemini or ChatGPT)
+  const response = await generateText(basePrompt);
   
   // Step 5: Parse response and extract citations
   const { answer, citations } = parseAnswerWithCitations(response, selectedChunks, hasCoverPage);
@@ -115,95 +107,6 @@ Now answer the question with proper citations. Remember: every fact must be cite
     answer,
     citations,
   };
-}
-
-/**
- * Call Gemini API with the question prompt
- */
-async function callGeminiAPI(
-  prompt: string,
-  config: GeminiConfig
-): Promise<string> {
-  const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
-  
-  // Start with hardcoded model list, then try to discover available models
-  let modelVariants = [
-    'gemini-1.5-flash',      // Try requested model first
-    'gemini-1.5-flash-latest', // Variant with -latest suffix
-    'gemini-2.0-flash-exp',  // Newer experimental model
-    'gemini-2.0-flash',      // Newer model
-    'gemini-1.5-pro',        // Pro variant
-    'gemini-pro',            // Legacy model name
-  ];
-  
-  // Try to discover available models from API
-  try {
-    const availableModels = await listAvailableModels(config.apiKey, baseUrl);
-    if (availableModels.length > 0) {
-      // Prefer discovered models, but keep fallbacks
-      modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
-      console.log(`Using discovered models for question answering:`, availableModels.slice(0, 3), availableModels.length > 3 ? '...' : '');
-    }
-  } catch (e) {
-    console.warn('Could not discover models for question answering, using hardcoded list:', e);
-  }
-  
-  const apiVersions = ['v1beta', 'v1'];
-  let lastError: string | null = null;
-  
-  for (const model of modelVariants) {
-    for (const apiVersion of apiVersions) {
-      try {
-        // Ensure model name doesn't have 'models/' prefix
-        const cleanModelName = model.replace(/^models\//, '');
-        const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{ text: prompt }],
-            }],
-            generationConfig: {
-              temperature: 0.1,
-              topP: 0.8,
-              topK: 40,
-            },
-          }),
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          if (data.candidates && data.candidates[0] && data.candidates[0].content) {
-            console.log(`✓ Successfully using model for question answering: ${cleanModelName} with API ${apiVersion}`);
-            return data.candidates[0].content.parts[0].text;
-          }
-        } else {
-          const errorText = await response.text();
-          lastError = errorText;
-          // Silently skip 404s - model doesn't exist in this API version
-          try {
-            const errorData = JSON.parse(errorText);
-            if (errorData.error?.code !== 404) {
-              console.warn(`⚠ Failed with ${cleanModelName} (${apiVersion}):`, errorText.substring(0, 200));
-            }
-          } catch (e) {
-            // Not JSON, continue silently
-          }
-          // Continue to next model/version combination
-          continue;
-        }
-      } catch (error) {
-        // Continue to next model/version combination
-        continue;
-      }
-    }
-  }
-  
-  throw new Error(`Failed to call Gemini API with any model variant. Last error: ${lastError || 'Unknown error'}`);
 }
 
 /**

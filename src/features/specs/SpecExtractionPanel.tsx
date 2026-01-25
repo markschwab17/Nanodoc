@@ -10,12 +10,11 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
-import { getGeminiApiKey } from "@/core/ai/GeminiService";
+import { extractSpecsFromChunks, hasConfiguredAPIKey } from "@/core/ai/AIService";
 import { createChunks } from "@/core/ai/PDFContentChunker";
-import { extractSpecsFromChunks } from "@/core/ai/GeminiService";
 import { getEmbeddingService, findTopKChunks } from "@/core/ai/EmbeddingService";
 import { filterChunksBySpecProbability } from "@/core/ai/SpecCandidateDetector";
-import type { SpecExtractionResult } from "@/core/ai/GeminiService";
+import type { SpecExtractionResult } from "@/core/ai/types";
 
 export function SpecExtractionPanel() {
   const {
@@ -86,9 +85,8 @@ export function SpecExtractionPanel() {
   }, [isExtracting, isOpen]);
   
   const performExtraction = async (document: any, extractionType: "specs" | "geotechnical" = "specs", customPrompt?: string) => {
-    const apiKey = getGeminiApiKey();
-    if (!apiKey) {
-      setExtractionError("Please configure your Gemini API key in settings.");
+    if (!hasConfiguredAPIKey()) {
+      setExtractionError("Please configure your AI API key in settings.");
       return;
     }
     
@@ -129,18 +127,15 @@ export function SpecExtractionPanel() {
       const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
       const selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
       
-      // Step 4: Extract specs using Gemini (60-90% progress)
+      // Step 4: Extract specs using AI provider (60-90% progress)
       setExtractionProgress(60);
-      const chunksForGemini = selectedChunks.map(c => ({
+      const chunksForAI = selectedChunks.map(c => ({
         text: c.text,
         page: c.pageRange[0],
         sectionPath: c.sectionPath,
       }));
       
-      const specs = await extractSpecsFromChunks(chunksForGemini, {
-        apiKey,
-        model: 'gemini-1.5-flash',
-      }, extractionType, customPrompt);
+      const specs = await extractSpecsFromChunks(chunksForAI, extractionType, customPrompt);
       
       setExtractionProgress(90);
       

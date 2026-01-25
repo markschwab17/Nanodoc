@@ -44,7 +44,7 @@ import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { SpecExtractionButton } from "@/features/specs/SpecExtractionButton";
-import { GeminiSettings } from "@/features/settings/GeminiSettings";
+import { AISettings } from "@/features/settings/AISettings";
 
 export function Toolbar() {
   const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType } = useUIStore();
@@ -749,7 +749,7 @@ export function Toolbar() {
             />
           </div>
           <div className="w-full flex justify-center items-center">
-            <GeminiSettings 
+            <AISettings 
               buttonClassName={sizeClasses.button}
               iconClassName={sizeClasses.icon}
             />

@@ -14,17 +14,10 @@ export interface GeminiConfig {
   baseUrl?: string;
 }
 
-export interface SpecExtractionResult {
-  spec_id?: string;
-  category: string;
-  parameter: string;
-  value: string;
-  unit?: string | null;
-  page: number;
-  bbox?: number[];
-  section_heading?: string;
-  quote_text: string;
-}
+import type { SpecExtractionResult } from './types';
+
+// Re-export for backward compatibility
+export type { SpecExtractionResult };
 
 export interface SpecExtractionResponse {
   specs: SpecExtractionResult[];
@@ -689,6 +682,109 @@ Return results as JSON matching the schema with fields: category, parameter, val
   }
   
   return [];
+}
+
+/**
+ * Call Gemini API for text generation
+ */
+export async function callGeminiAPI(
+  prompt: string,
+  config: GeminiConfig
+): Promise<string> {
+  const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
+  
+  // Start with hardcoded model list, then try to discover available models
+  let modelVariants = [
+    'gemini-1.5-flash',      // Try requested model first
+    'gemini-1.5-flash-latest', // Variant with -latest suffix
+    'gemini-2.0-flash-exp',  // Newer experimental model
+    'gemini-2.0-flash',      // Newer model
+    'gemini-1.5-pro',        // Pro variant
+    'gemini-pro',            // Legacy model name
+  ];
+  
+  // Try to discover available models from API
+  try {
+    const availableModels = await listAvailableModels(config.apiKey, baseUrl);
+    if (availableModels.length > 0) {
+      // Prefer discovered models, but keep fallbacks
+      modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
+      console.log(`Using discovered models for text generation:`, availableModels.slice(0, 3), availableModels.length > 3 ? '...' : '');
+    }
+  } catch (e) {
+    console.warn('Could not discover models for text generation, using hardcoded list:', e);
+  }
+  
+  const apiVersions = ['v1beta', 'v1'];
+  let lastError: string | null = null;
+  
+  for (const model of modelVariants) {
+    for (const apiVersion of apiVersions) {
+      try {
+        // Ensure model name doesn't have 'models/' prefix
+        const cleanModelName = model.replace(/^models\//, '');
+        const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
+        
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{ text: prompt }],
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              topP: 0.8,
+              topK: 40,
+            },
+          }),
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+            console.log(`✓ Successfully using model for text generation: ${cleanModelName} with API ${apiVersion}`);
+            return data.candidates[0].content.parts[0].text;
+          }
+        } else {
+          const errorText = await response.text();
+          lastError = errorText;
+          // Silently skip 404s - model doesn't exist in this API version
+          try {
+            const errorData = JSON.parse(errorText);
+            if (errorData.error?.code !== 404) {
+              console.warn(`⚠ Failed with ${cleanModelName} (${apiVersion}):`, errorText.substring(0, 200));
+            }
+          } catch (e) {
+            // Not JSON, continue silently
+          }
+          // Continue to next model/version combination
+          continue;
+        }
+      } catch (error) {
+        // Continue to next model/version combination
+        continue;
+      }
+    }
+  }
+  
+  throw new Error(`Failed to call Gemini API with any model variant. Last error: ${lastError || 'Unknown error'}`);
+}
+
+/**
+ * Validate Gemini API key
+ */
+export async function validateGeminiApiKey(apiKey: string): Promise<boolean> {
+  try {
+    const testUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey.trim()}`;
+    const response = await fetch(testUrl);
+    return response.ok;
+  } catch (error) {
+    console.error('API key validation error:', error);
+    return false;
+  }
 }
 
 /**

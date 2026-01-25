@@ -5,7 +5,7 @@
  */
 
 import { create } from "zustand";
-import type { SpecExtractionResult } from "@/core/ai/GeminiService";
+import type { SpecExtractionResult } from "@/core/ai/types";
 
 export interface SpecHighlight {
   page: number;
