@@ -37,6 +37,9 @@ export function ThumbnailItem({
   const [isLoading, setIsLoading] = useState(true);
   const [isLandscape, setIsLandscape] = useState<boolean>(false);
   const { getAnnotations } = usePDFStore();
+  const horizontalFlip = usePDFStore((state) =>
+    state.getPageHorizontalFlip(document?.getId?.() ?? "", pageNumber)
+  );
 
   useEffect(() => {
     const loadThumbnail = async () => {
@@ -172,6 +175,7 @@ export function ThumbnailItem({
           src={thumbnailUrl}
           alt={`Page ${pageNumber + 1}`}
           className="w-full h-full object-contain rounded"
+          style={horizontalFlip ? { transform: "scaleX(-1)" } : undefined}
           onError={() => {
             console.error(`Failed to load thumbnail image for page ${pageNumber}`);
             setThumbnailUrl(null);

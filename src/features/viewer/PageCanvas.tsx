@@ -120,6 +120,11 @@ export function PageCanvas({
     setCurrentPage, 
     currentPage
   } = usePDFStore();
+  const horizontalFlip = usePDFStore((state) => {
+    const docId = document?.getId?.() ?? "";
+    const set = state.pageHorizontalFlips.get(docId);
+    return set ? set.has(pageNumber) : false;
+  });
   
   // Use separate selector for search state to ensure reactivity
   const currentSearchResult = usePDFStore(state => state.currentSearchResult);
@@ -2972,24 +2977,32 @@ export function PageCanvas({
             position: readMode ? "relative" : undefined,
           }}
         >
-          <canvas
-            ref={canvasRef}
-            className={cn("block", !readMode && "shadow-2xl")}
-            style={{
-              position: "relative",
-              zIndex: 1,
-              margin: 0,
-              padding: 0,
-              display: "block",
-              verticalAlign: "top",
-              border: "none",
-              outline: "none",
-              width: readMode && pageMetadata ? pageMetadata.width : undefined,
-              height: readMode && pageMetadata ? pageMetadata.height : undefined,
-              boxSizing: "border-box",
-              flexShrink: 0,
-            }}
-          />
+          <div
+            style={
+              horizontalFlip
+                ? { transform: "scaleX(-1)", transformOrigin: "0 0", display: "block" }
+                : { display: "block" }
+            }
+          >
+            <canvas
+              ref={canvasRef}
+              className={cn("block", !readMode && "shadow-2xl")}
+              style={{
+                position: "relative",
+                zIndex: 1,
+                margin: 0,
+                padding: 0,
+                display: "block",
+                verticalAlign: "top",
+                border: "none",
+                outline: "none",
+                width: readMode && pageMetadata ? pageMetadata.width : undefined,
+                height: readMode && pageMetadata ? pageMetadata.height : undefined,
+                boxSizing: "border-box",
+                flexShrink: 0,
+              }}
+            />
+          </div>
           {/* Render text box creation preview */}
         {isCreatingTextBox && textBoxStart && selectionEnd && activeTool === "text" && (
           (() => {

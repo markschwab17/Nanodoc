@@ -913,6 +913,34 @@ export function PDFViewer() {
     }
   };
 
+  const handleHorizontalFlipPages = async (pageNumbers: number[]) => {
+    if (!currentDocument || pageNumbers.length === 0) return;
+    try {
+      const mupdfModule = await import("mupdf");
+      const editor = new PDFEditor(mupdfModule.default);
+      const documentId = currentDocument.getId();
+      const pdfStore = usePDFStore.getState();
+      await wrapPageOperation(
+        async () => {
+          for (const pageNum of pageNumbers) {
+            pdfStore.togglePageHorizontalFlip(documentId, pageNum);
+            await editor.flipPageHorizontal(currentDocument, pageNum);
+          }
+        },
+        "rotatePages",
+        documentId,
+        pageNumbers
+      );
+      if (renderer) renderer.clearCache();
+      const tab = useTabStore.getState().getTabByDocumentId(documentId);
+      if (tab) useTabStore.getState().setTabModified(tab.id, true);
+      showNotification(`Flipped ${pageNumbers.length} page${pageNumbers.length > 1 ? "s" : ""} horizontally`);
+    } catch (error) {
+      console.error("Error flipping pages:", error);
+      showNotification("Failed to flip pages", "error");
+    }
+  };
+
   const handleConfirmRotate = () => {
     let pagesToRotateFinal: number[] = [];
     if (applyToRange && currentDocument) {
@@ -922,15 +950,18 @@ export function PDFViewer() {
     } else {
       pagesToRotateFinal = pagesToRotate;
     }
-    // UI degrees: clockwise adds 90 (page rotates CW); counterclockwise adds 270 (page rotates CCW).
-    const rotationMap: Record<typeof rotationType, number> = {
-      clockwise: 90,
-      counterclockwise: 270,
-      vertical: 180,
-      horizontal: 180,
-    };
-    const degrees = rotationMap[rotationType];
-    handleRotatePages(pagesToRotateFinal, degrees);
+    if (rotationType === "horizontal") {
+      handleHorizontalFlipPages(pagesToRotateFinal);
+    } else {
+      // UI degrees: clockwise 90, counterclockwise 270, vertical = 180° rotation
+      const rotationMap: Record<"clockwise" | "counterclockwise" | "vertical", number> = {
+        clockwise: 90,
+        counterclockwise: 270,
+        vertical: 180,
+      };
+      const degrees = rotationMap[rotationType];
+      handleRotatePages(pagesToRotateFinal, degrees);
+    }
     setShowRotateDialog(false);
     setPagesToRotate([]);
   };

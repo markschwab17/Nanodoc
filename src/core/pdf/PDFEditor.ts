@@ -77,6 +77,17 @@ export class PDFEditor {
     return this.pageOps.rotatePage(document, pageNumber, degrees);
   }
 
+  /**
+   * Flip a page horizontally (mirror left-right). Toggles flip state in store and mirrors annotations.
+   * The actual mirror is applied at render time; PDF Rotate is not changed.
+   */
+  async flipPageHorizontal(
+    document: PDFDocument,
+    pageNumber: number
+  ): Promise<void> {
+    return this.pageOps.flipPageAnnotationsHorizontal(document, pageNumber);
+  }
+
   async resizePage(
     document: PDFDocument,
     pageNumber: number,

@@ -394,13 +394,22 @@ export class PDFPageOperations {
 
     // Helper: rotate a point (x, y) in PDF coordinates (bottom-left origin) by relativeRotation
     // UI "clockwise" adds 90 → relativeRotation 90 → use CW formulas (NW→NE). UI "counterclockwise" adds 270 → use CCW formulas.
+    // For 270°: from 0° the transform is (x,y)→(y,x); from 90°/180°/270° we use the inverse-style transform.
     const rotatePoint = (px: number, py: number): { x: number; y: number } => {
       if (relativeRotation === 90) {
-        // User chose clockwise: NW→NE
+        // User chose clockwise: NW→NE. (x,y) → (y, pageWidth - x)
         return { x: py, y: pageWidth - px };
       }
       if (relativeRotation === 270) {
-        // User chose counter-clockwise: NW→SW. (x,y) → (pageHeight - y, pageWidth - x)
+        if (oldRotation === 0) {
+          // From 0° to 270°: 90° CCW → (x,y) → (y, x)
+          return { x: py, y: px };
+        }
+        if (oldRotation === 90) {
+          // Undoing 90° CW (90°→0°): inverse of (x,y)→(y, pageWidth_0 - x) is (pageWidth_0 - y, x). pageWidth_0 = pageHeight when at 90°.
+          return { x: pageHeight - py, y: px };
+        }
+        // From 180°/270°: inverse-style (pageHeight - y, pageWidth - x)
         return { x: pageHeight - py, y: pageWidth - px };
       }
       if (relativeRotation === 180) {
@@ -439,11 +448,24 @@ export class PDFPageOperations {
           newHeight = tempWidth;
           
         } else if (relativeRotation === 270) {
-          // User chose counter-clockwise (add 270): NW→SW. New bottom-left = (pageHeight - oldY - annHeight, pageWidth - oldX - annWidth).
-          const tempX = newX;
-          const tempY = newY;
-          newX = pageHeight - tempY - annHeight;
-          newY = pageWidth - tempX - annWidth;
+          if (oldRotation === 0) {
+            // From 0° to 270°: 90° CCW. New bottom-left = (oldY, oldX).
+            const tempX = newX;
+            newX = newY;
+            newY = tempX;
+          } else if (oldRotation === 90) {
+            // Undoing 90° CW (90°→0°): inverse of (x,y)→(y, pageWidth_0 - x - w) is newX = pageWidth_0 - y_90 - h_90, newY = x_90. pageWidth_0 = pageHeight when at 90°.
+            const tempX = newX;
+            const tempY = newY;
+            newX = pageHeight - tempY - annHeight;
+            newY = tempX;
+          } else {
+            // From 180°/270°: inverse-style. New bottom-left = (pageHeight - oldY - annHeight, pageWidth - oldX - annWidth).
+            const tempX = newX;
+            const tempY = newY;
+            newX = pageHeight - tempY - annHeight;
+            newY = pageWidth - tempX - annWidth;
+          }
           // Swap width and height
           const tempWidth = newWidth;
           newWidth = newHeight;
@@ -480,7 +502,20 @@ export class PDFPageOperations {
               quad[7], pageWidth - quad[6], // x3, y3
             ];
           } else if (relativeRotation === 270) {
-            // User counter-clockwise: (x, y) -> (pageHeight - y, pageWidth - x)
+            if (oldRotation === 0) {
+              // From 0° to 270°: (x, y) → (y, x)
+              return [
+                quad[1], quad[0], quad[3], quad[2], quad[5], quad[4], quad[7], quad[6],
+              ];
+            }
+            if (oldRotation === 90) {
+              // Undoing 90° CW: (x, y) → (pageHeight - y, x)
+              return [
+                pageHeight - quad[1], quad[0], pageHeight - quad[3], quad[2],
+                pageHeight - quad[5], quad[4], pageHeight - quad[7], quad[6],
+              ];
+            }
+            // From 180°/270°: (x, y) → (pageHeight - y, pageWidth - x)
             return [
               pageHeight - quad[1], pageWidth - quad[0], // x0, y0
               pageHeight - quad[3], pageWidth - quad[2], // x1, y1
@@ -510,11 +545,19 @@ export class PDFPageOperations {
             y: pageWidth - annotation.arrowPoint.x,
           };
         } else if (relativeRotation === 270) {
-          // User counter-clockwise: (pageHeight - y, pageWidth - x)
-          updates.arrowPoint = {
-            x: pageHeight - annotation.arrowPoint.y,
-            y: pageWidth - annotation.arrowPoint.x,
-          };
+          if (oldRotation === 0) {
+            updates.arrowPoint = { x: annotation.arrowPoint.y, y: annotation.arrowPoint.x };
+          } else if (oldRotation === 90) {
+            updates.arrowPoint = {
+              x: pageHeight - annotation.arrowPoint.y,
+              y: annotation.arrowPoint.x,
+            };
+          } else {
+            updates.arrowPoint = {
+              x: pageHeight - annotation.arrowPoint.y,
+              y: pageWidth - annotation.arrowPoint.x,
+            };
+          }
         } else if (relativeRotation === 180) {
           updates.arrowPoint = {
             x: pageWidth - annotation.arrowPoint.x,
@@ -531,11 +574,19 @@ export class PDFPageOperations {
             y: pageWidth - annotation.boxPosition.x,
           };
         } else if (relativeRotation === 270) {
-          // User counter-clockwise: (pageHeight - y, pageWidth - x)
-          updates.boxPosition = {
-            x: pageHeight - annotation.boxPosition.y,
-            y: pageWidth - annotation.boxPosition.x,
-          };
+          if (oldRotation === 0) {
+            updates.boxPosition = { x: annotation.boxPosition.y, y: annotation.boxPosition.x };
+          } else if (oldRotation === 90) {
+            updates.boxPosition = {
+              x: pageHeight - annotation.boxPosition.y,
+              y: annotation.boxPosition.x,
+            };
+          } else {
+            updates.boxPosition = {
+              x: pageHeight - annotation.boxPosition.y,
+              y: pageWidth - annotation.boxPosition.x,
+            };
+          }
         } else if (relativeRotation === 180) {
           updates.boxPosition = {
             x: pageWidth - annotation.boxPosition.x,
@@ -570,6 +621,117 @@ export class PDFPageOperations {
       
       // Update annotation in store
       pdfStore.updateAnnotation(documentId, annotation.id, updates);
+
+      // Update native PDF Widget rect for form fields so the control stays in sync (e.g. on save/export).
+      // mupdf setRect expects canvas coords: Y=0 at top, so canvasY = pageHeight - (pdfY + height).
+      if (annotation.type === "formField" && annotation.pdfAnnotation) {
+        try {
+          const mupdfDoc = document.getMupdfDocument();
+          const pdfDoc = mupdfDoc.asPDF();
+          if (pdfDoc) {
+            const page = pdfDoc.loadPage(pageNumber);
+            const pageBounds = page.getBounds();
+            const rotPageHeight = pageBounds[3] - pageBounds[1];
+            const canvasY = rotPageHeight - (newY + (newHeight ?? 0));
+            const rect: [number, number, number, number] = [
+              newX,
+              canvasY,
+              newX + (newWidth ?? 0),
+              canvasY + (newHeight ?? 0),
+            ];
+            annotation.pdfAnnotation.setRect(rect);
+            if (typeof annotation.pdfAnnotation.update === "function") {
+              annotation.pdfAnnotation.update();
+            }
+          }
+        } catch (e) {
+          console.warn("Could not update PDF Widget rect after rotation:", e);
+        }
+      }
+    }
+  }
+
+  /**
+   * Mirror all annotations on a page horizontally (left-right). Used for "Horizontal flip" which
+   * cannot be represented by PDF Rotate; the flip is applied at render time and annotations are updated here.
+   */
+  async flipPageAnnotationsHorizontal(
+    document: PDFDocument,
+    pageNumber: number
+  ): Promise<void> {
+    const pdfStore = (await import("@/shared/stores/pdfStore")).usePDFStore.getState();
+    const documentId = document.getId();
+    const pageMetadata = document.getPageMetadata(pageNumber);
+    if (!pageMetadata) return;
+    const pageWidth = pageMetadata.width;
+    const allAnnotations = pdfStore.getAnnotations(documentId);
+    const pageAnnotations = allAnnotations.filter((ann) => ann.pageNumber === pageNumber);
+    if (pageAnnotations.length === 0) return;
+
+    const mirrorX = (x: number) => pageWidth - x;
+
+    for (const annotation of pageAnnotations) {
+      const annWidth = annotation.width ?? 0;
+      const updates: Partial<typeof annotation> = {
+        x: pageWidth - annotation.x - annWidth,
+        y: annotation.y,
+      };
+
+      if (annotation.quads && annotation.quads.length > 0) {
+        updates.quads = annotation.quads.map((quad) => {
+          if (quad.length < 8) return quad;
+          return [
+            mirrorX(quad[0]), quad[1], mirrorX(quad[2]), quad[3],
+            mirrorX(quad[4]), quad[5], mirrorX(quad[6]), quad[7],
+          ];
+        });
+      }
+      if (annotation.arrowPoint) {
+        updates.arrowPoint = { x: mirrorX(annotation.arrowPoint.x), y: annotation.arrowPoint.y };
+      }
+      if (annotation.boxPosition) {
+        updates.boxPosition = { x: mirrorX(annotation.boxPosition.x), y: annotation.boxPosition.y };
+      }
+      if (annotation.path?.length) {
+        updates.path = annotation.path.map((p) => ({ x: mirrorX(p.x), y: p.y }));
+      }
+      if (annotation.points?.length) {
+        updates.points = annotation.points.map((p) => ({ x: mirrorX(p.x), y: p.y }));
+      }
+      if (annotation.stampData?.signaturePath?.length) {
+        updates.stampData = {
+          ...annotation.stampData,
+          signaturePath: annotation.stampData.signaturePath.map((p) => ({ x: mirrorX(p.x), y: p.y })),
+        };
+      }
+      if (annotation.rotation !== undefined) {
+        updates.rotation = (360 - annotation.rotation) % 360;
+      }
+      pdfStore.updateAnnotation(documentId, annotation.id, updates);
+
+      // Update native PDF Widget rect for form fields so the control stays in sync
+      if (annotation.type === "formField" && annotation.pdfAnnotation) {
+        try {
+          const newX = updates.x ?? annotation.x;
+          const newY = updates.y ?? annotation.y;
+          const newW = annotation.width ?? 0;
+          const newH = annotation.height ?? 0;
+          const mupdfDoc = document.getMupdfDocument();
+          const pdfDoc = mupdfDoc.asPDF();
+          if (pdfDoc) {
+            const page = pdfDoc.loadPage(pageNumber);
+            const pageBounds = page.getBounds();
+            const pageHeight = pageBounds[3] - pageBounds[1];
+            const canvasY = pageHeight - (newY + newH);
+            annotation.pdfAnnotation.setRect([newX, canvasY, newX + newW, canvasY + newH]);
+            if (typeof annotation.pdfAnnotation.update === "function") {
+              annotation.pdfAnnotation.update();
+            }
+          }
+        } catch (e) {
+          console.warn("Could not update PDF Widget rect after horizontal flip:", e);
+        }
+      }
     }
   }
 

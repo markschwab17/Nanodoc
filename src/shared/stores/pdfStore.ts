@@ -32,10 +32,15 @@ export interface PDFStoreState {
   bookmarks: Map<string, Bookmark[]>; // documentId -> bookmarks
   searchResults: Map<string, SearchResultData>; // documentId -> search results
   currentSearchResult: number; // Index into the flattened matches array
+  /** Per-document, per-page horizontal flip (mirror). PDF Rotate cannot represent mirror, so we store it in UI state. */
+  pageHorizontalFlips: Map<string, Set<number>>; // documentId -> set of page numbers
   loading: boolean;
   error: string | null;
 
   // Actions
+  getPageHorizontalFlip: (documentId: string, pageNumber: number) => boolean;
+  setPageHorizontalFlip: (documentId: string, pageNumber: number, flipped: boolean) => void;
+  togglePageHorizontalFlip: (documentId: string, pageNumber: number) => boolean;
   addDocument: (document: PDFDocument, originalPath?: string | null) => void;
   removeDocument: (id: string) => void;
   setCurrentDocument: (id: string) => void;
@@ -73,8 +78,30 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
   bookmarks: new Map(),
   searchResults: new Map(),
   currentSearchResult: -1,
+  pageHorizontalFlips: new Map(),
   loading: false,
   error: null,
+
+  getPageHorizontalFlip: (documentId, pageNumber) => {
+    const set = get().pageHorizontalFlips.get(documentId);
+    return set ? set.has(pageNumber) : false;
+  },
+
+  setPageHorizontalFlip: (documentId, pageNumber, flipped) =>
+    set((state) => {
+      const next = new Map(state.pageHorizontalFlips);
+      const set = new Set(next.get(documentId) || []);
+      if (flipped) set.add(pageNumber);
+      else set.delete(pageNumber);
+      next.set(documentId, set);
+      return { pageHorizontalFlips: next };
+    }),
+
+  togglePageHorizontalFlip: (documentId, pageNumber) => {
+    const current = get().getPageHorizontalFlip(documentId, pageNumber);
+    get().setPageHorizontalFlip(documentId, pageNumber, !current);
+    return !current;
+  },
 
   addDocument: (document, originalPath = null) =>
     set((state) => {
@@ -99,7 +126,9 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
       newPaths.delete(id);
       const newAnnotations = new Map(state.annotations);
       newAnnotations.delete(id);
-      
+      const newPageHorizontalFlips = new Map(state.pageHorizontalFlips);
+      newPageHorizontalFlips.delete(id);
+
       let newCurrentId = state.currentDocumentId;
       if (newCurrentId === id) {
         newCurrentId =
@@ -110,6 +139,7 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
         documents: newDocuments,
         documentPaths: newPaths,
         annotations: newAnnotations,
+        pageHorizontalFlips: newPageHorizontalFlips,
         currentDocumentId: newCurrentId,
         currentPage: 0,
       };
