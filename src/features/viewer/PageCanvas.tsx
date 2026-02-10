@@ -1296,18 +1296,17 @@ export function PageCanvas({
     // Step 3: Convert directly from canvas display size (CSS pixels) to PDF coordinates
     // Use display size (canvasRect) instead of backing buffer (canvasElement) to make coordinates
     // independent of RENDER_SCALE. The display size is constant regardless of render quality.
-    // IMPORTANT: Use original mediabox dimensions (not swapped display dimensions) for coordinate conversion
-    // because annotations are stored in mediabox coordinate space
+    // When rotated 90/270, getBounds() returns display dimensions (width x height = short x long).
+    // Use display dimensions for 1:1 mapping so overlay coordinates align with the canvas.
     let mediaboxHeight: number;
     let mediaboxWidth: number;
     if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
-      // Display dimensions are swapped, so mediaboxHeight = displayWidth
-      mediaboxHeight = pageMetadata.width;
-      mediaboxWidth = pageMetadata.height;
-    } else {
-      // Display dimensions match mediabox dimensions
-      mediaboxHeight = pageMetadata.height;
+      // 1:1 with display: mediabox = display width/height so canvas position maps directly to stored coords
       mediaboxWidth = pageMetadata.width;
+      mediaboxHeight = pageMetadata.height;
+    } else {
+      mediaboxWidth = pageMetadata.width;
+      mediaboxHeight = pageMetadata.height;
     }
     
     // Convert directly from display size ratio to PDF coordinates
@@ -1335,32 +1334,17 @@ export function PageCanvas({
       return { x: pdfX, y: pdfY };
     }
     
-    // Get original mediabox dimensions for Y-axis flipping
-    // CRITICAL: After rotation, annotation coordinates are transformed to the rotated coordinate system.
-    // The rotated coordinate system has:
-    // - X range: 0 to originalHeight (1735) when rotated 90/270
-    // - Y range: 0 to originalWidth (2592) when rotated 90/270
-    // For Y-axis flipping, we need to use the Y-axis range of the rotated coordinate system,
-    // which is originalWidth (2592) when rotated 90/270, or originalHeight (1735) when rotated 0/180.
+    // Use display dimensions for 1:1 mapping (same as getPDFCoordinates).
+    // When rotated 90/270, pageMetadata.width/height are already the display dimensions.
     const currentRotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
     let mediaboxHeight: number;
     let mediaboxWidth: number;
-    
-    // If the annotation's Y coordinate is greater than the original height, it's likely in the rotated coordinate system
-    // This handles the case where pageMetadata.rotation hasn't updated yet but annotations have been transformed
-    // After 90° rotation, Y range becomes 0 to originalWidth (2592), so pdfY > originalHeight (1735) indicates rotated coords
-    const isLikelyRotated = pdfY > pageMetadata.height && pageMetadata.width > pageMetadata.height;
-    
-    if (currentRotation === 90 || currentRotation === 270 || isLikelyRotated) {
-      // After 90° rotation, the rotated coordinate system's Y-axis is the original width
-      // So we use pageMetadata.width (which is the original width = 2592) for Y-axis flipping
-      mediaboxHeight = pageMetadata.width;
-      mediaboxWidth = pageMetadata.height;
-    } else {
-      // Display dimensions match mediabox dimensions
-      // Y-axis range is the original height
-      mediaboxHeight = pageMetadata.height;
+    if (currentRotation === 90 || currentRotation === 270) {
       mediaboxWidth = pageMetadata.width;
+      mediaboxHeight = pageMetadata.height;
+    } else {
+      mediaboxWidth = pageMetadata.width;
+      mediaboxHeight = pageMetadata.height;
     }
     
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
@@ -1401,7 +1385,7 @@ export function PageCanvas({
     const pageMetadata = document.getPageMetadata(pageNumber);
     if (!pageMetadata) return 1;
     const rotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
-    const mediaboxWidth = rotation === 90 || rotation === 270 ? pageMetadata.height : pageMetadata.width;
+    const mediaboxWidth = pageMetadata.width;
     if (mediaboxWidth <= 0) return 1;
     if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
       return displayWidthProp / mediaboxWidth;
@@ -1425,10 +1409,10 @@ export function PageCanvas({
       return { x: 0, y: 0 };
     }
     
-    // Get original mediabox dimensions for Y-axis flipping (must match getPDFCoordinates logic)
+    // Must match getPDFCoordinates: use display dimensions for 1:1 mapping
     let mediaboxHeight: number;
     if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
-      mediaboxHeight = pageMetadata.width;
+      mediaboxHeight = pageMetadata.height;
     } else {
       mediaboxHeight = pageMetadata.height;
     }
@@ -2585,17 +2569,9 @@ export function PageCanvas({
           console.log("Drop position:", e.clientX, e.clientY, "Canvas relative:", canvasRelativeX, canvasRelativeY);
           
           // Convert directly from canvas display size (CSS pixels) to PDF coordinates
-          // Use display size (canvasRect) instead of backing buffer to make coordinates
-          // independent of RENDER_SCALE, matching getPDFCoordinates() logic
-          let mediaboxHeight: number;
-          let mediaboxWidth: number;
-          if (pageMetadata.rotation === 90 || pageMetadata.rotation === 270) {
-            mediaboxHeight = pageMetadata.width;
-            mediaboxWidth = pageMetadata.height;
-          } else {
-            mediaboxHeight = pageMetadata.height;
-            mediaboxWidth = pageMetadata.width;
-          }
+          // Use display dimensions for 1:1 mapping (match getPDFCoordinates)
+          const mediaboxWidth = pageMetadata.width;
+          const mediaboxHeight = pageMetadata.height;
           
           // Convert directly from display size ratio to PDF coordinates (1:1 mapping)
           const pdfX = (canvasRelativeX / canvasRect.width) * mediaboxWidth;

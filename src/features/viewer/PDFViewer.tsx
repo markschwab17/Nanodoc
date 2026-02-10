@@ -12,13 +12,25 @@ import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore"
 import { PageCanvas } from "./PageCanvas";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { VirtualizedPageList } from "./VirtualizedPageList";
-import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize } from "lucide-react";
+import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize, RotateCw, FlipVertical, FlipHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 import { PageTools } from "@/features/toolbar/PageTools";
 import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDialog";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import { useTabStore } from "@/shared/stores/tabStore";
+import { wrapPageOperation } from "@/shared/stores/undoHelpers";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { SpecExtractionPanel } from "@/features/specs/SpecExtractionPanel";
 import { QuestionAnswerPanel } from "@/features/specs/QuestionAnswerPanel";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
@@ -28,6 +40,7 @@ export function PDFViewer() {
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
   const { setSelectedSpec } = useSpecExtractionStore();
+  const { showNotification } = useNotificationStore();
   const currentDocument = getCurrentDocument();
   const [mupdf, setMupdf] = useState<any>(null);
   const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
@@ -45,6 +58,12 @@ export function PDFViewer() {
   const [isEditingPage, setIsEditingPage] = useState(false);
   const [pageInputValue, setPageInputValue] = useState("");
   const pageInputRef = useRef<HTMLInputElement>(null);
+  const [showRotateDialog, setShowRotateDialog] = useState(false);
+  const [pagesToRotate, setPagesToRotate] = useState<number[]>([]);
+  const [rotationType, setRotationType] = useState<"clockwise" | "counterclockwise" | "vertical" | "horizontal">("clockwise");
+  const [applyToRange, setApplyToRange] = useState(false);
+  const [rangeStart, setRangeStart] = useState(0);
+  const [rangeEnd, setRangeEnd] = useState(0);
   
   // Use refs for smooth zoom to avoid stale closures
   const zoomLevelRef = useRef(zoomLevel);
@@ -865,6 +884,67 @@ export function PDFViewer() {
     }
   };
 
+  const handleRotatePages = async (pageNumbers: number[], rotationDegrees: number) => {
+    if (!currentDocument || pageNumbers.length === 0) return;
+    try {
+      const mupdfModule = await import("mupdf");
+      const editor = new PDFEditor(mupdfModule.default);
+      const documentId = currentDocument.getId();
+      await wrapPageOperation(
+        async () => {
+          for (const pageNum of pageNumbers) {
+            await editor.rotatePage(currentDocument, pageNum, rotationDegrees);
+          }
+          currentDocument.refreshPageMetadata();
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          currentDocument.refreshPageMetadata();
+        },
+        "rotatePages",
+        documentId,
+        pageNumbers
+      );
+      if (renderer) renderer.clearCache();
+      const tab = useTabStore.getState().getTabByDocumentId(documentId);
+      if (tab) useTabStore.getState().setTabModified(tab.id, true);
+      showNotification(`Rotated ${pageNumbers.length} page${pageNumbers.length > 1 ? "s" : ""}`);
+    } catch (error) {
+      console.error("Error rotating pages:", error);
+      showNotification("Failed to rotate pages", "error");
+    }
+  };
+
+  const handleConfirmRotate = () => {
+    let pagesToRotateFinal: number[] = [];
+    if (applyToRange && currentDocument) {
+      const start = Math.min(rangeStart, rangeEnd);
+      const end = Math.max(rangeStart, rangeEnd);
+      pagesToRotateFinal = Array.from({ length: end - start + 1 }, (_, i) => start + i);
+    } else {
+      pagesToRotateFinal = pagesToRotate;
+    }
+    // UI degrees: clockwise adds 90 (page rotates CW); counterclockwise adds 270 (page rotates CCW).
+    const rotationMap: Record<typeof rotationType, number> = {
+      clockwise: 90,
+      counterclockwise: 270,
+      vertical: 180,
+      horizontal: 180,
+    };
+    const degrees = rotationMap[rotationType];
+    handleRotatePages(pagesToRotateFinal, degrees);
+    setShowRotateDialog(false);
+    setPagesToRotate([]);
+  };
+
+  const openRotateDialog = () => {
+    if (!currentDocument || pageCount === 0) return;
+    setPagesToRotate([currentPage]);
+    setRangeStart(currentPage);
+    setRangeEnd(currentPage);
+    setApplyToRange(false);
+    setRotationType("clockwise");
+    setShowRotateDialog(true);
+  };
+
   // Focus input when editing starts
   useEffect(() => {
     if (isEditingPage && pageInputRef.current) {
@@ -1053,6 +1133,21 @@ export function PDFViewer() {
         </div>
         
         <div className="flex items-center gap-1">
+          {!readMode && (
+            <>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-7 w-7"
+                onClick={openRotateDialog}
+                disabled={!currentDocument || pageCount === 0}
+                title="Rotate page"
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+              </Button>
+              <div className="h-5 w-px bg-border mx-0.5" />
+            </>
+          )}
           {/* Zoom Controls - Grouped with better styling */}
           <div className="flex items-center gap-0.5 px-1 py-0.5 rounded-md border bg-muted/50">
             <Button
@@ -1130,6 +1225,161 @@ export function PDFViewer() {
           </Button>
         </div>
       </div>
+
+      {/* Rotate Page Dialog */}
+      <Dialog open={showRotateDialog} onOpenChange={setShowRotateDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Rotate Page{pagesToRotate.length > 1 ? "s" : ""}</DialogTitle>
+            <DialogDescription>
+              {pagesToRotate.length === 1
+                ? `Rotate page ${pagesToRotate[0] + 1}`
+                : `Rotate ${pagesToRotate.length} selected pages`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-6 py-4">
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">Select Rotation</Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div
+                  onClick={() => setRotationType("clockwise")}
+                  className={cn(
+                    "relative p-4 border-2 rounded-lg cursor-pointer transition-all hover:border-primary/50",
+                    rotationType === "clockwise" ? "border-primary bg-primary/5" : "border-border"
+                  )}
+                >
+                  <div className="flex flex-col items-center space-y-2">
+                    <div className={cn("p-2 rounded-full transition-colors", rotationType === "clockwise" ? "bg-primary/10" : "bg-muted")}>
+                      <RotateCw className={cn("h-6 w-6 transition-colors", rotationType === "clockwise" ? "text-primary" : "text-muted-foreground")} />
+                    </div>
+                    <div className="text-center">
+                      <div className="text-sm font-medium">Clockwise</div>
+                      <div className="text-xs text-muted-foreground">90°</div>
+                    </div>
+                  </div>
+                  {rotationType === "clockwise" && <div className="absolute top-2 right-2 h-2 w-2 rounded-full bg-primary" />}
+                </div>
+                <div
+                  onClick={() => setRotationType("counterclockwise")}
+                  className={cn(
+                    "relative p-4 border-2 rounded-lg cursor-pointer transition-all hover:border-primary/50",
+                    rotationType === "counterclockwise" ? "border-primary bg-primary/5" : "border-border"
+                  )}
+                >
+                  <div className="flex flex-col items-center space-y-2">
+                    <div className={cn("p-2 rounded-full transition-colors", rotationType === "counterclockwise" ? "bg-primary/10" : "bg-muted")}>
+                      <RotateCw className={cn("h-6 w-6 rotate-180 transition-colors", rotationType === "counterclockwise" ? "text-primary" : "text-muted-foreground")} />
+                    </div>
+                    <div className="text-center">
+                      <div className="text-sm font-medium">Counter-clockwise</div>
+                      <div className="text-xs text-muted-foreground">90°</div>
+                    </div>
+                  </div>
+                  {rotationType === "counterclockwise" && <div className="absolute top-2 right-2 h-2 w-2 rounded-full bg-primary" />}
+                </div>
+                <div
+                  onClick={() => setRotationType("vertical")}
+                  className={cn(
+                    "relative p-4 border-2 rounded-lg cursor-pointer transition-all hover:border-primary/50",
+                    rotationType === "vertical" ? "border-primary bg-primary/5" : "border-border"
+                  )}
+                >
+                  <div className="flex flex-col items-center space-y-2">
+                    <div className={cn("p-2 rounded-full transition-colors", rotationType === "vertical" ? "bg-primary/10" : "bg-muted")}>
+                      <FlipVertical className={cn("h-6 w-6 transition-colors", rotationType === "vertical" ? "text-primary" : "text-muted-foreground")} />
+                    </div>
+                    <div className="text-center">
+                      <div className="text-sm font-medium">Vertical Flip</div>
+                      <div className="text-xs text-muted-foreground">180°</div>
+                    </div>
+                  </div>
+                  {rotationType === "vertical" && <div className="absolute top-2 right-2 h-2 w-2 rounded-full bg-primary" />}
+                </div>
+                <div
+                  onClick={() => setRotationType("horizontal")}
+                  className={cn(
+                    "relative p-4 border-2 rounded-lg cursor-pointer transition-all hover:border-primary/50",
+                    rotationType === "horizontal" ? "border-primary bg-primary/5" : "border-border"
+                  )}
+                >
+                  <div className="flex flex-col items-center space-y-2">
+                    <div className={cn("p-2 rounded-full transition-colors", rotationType === "horizontal" ? "bg-primary/10" : "bg-muted")}>
+                      <FlipHorizontal className={cn("h-6 w-6 transition-colors", rotationType === "horizontal" ? "text-primary" : "text-muted-foreground")} />
+                    </div>
+                    <div className="text-center">
+                      <div className="text-sm font-medium">Horizontal Flip</div>
+                      <div className="text-xs text-muted-foreground">180°</div>
+                    </div>
+                  </div>
+                  {rotationType === "horizontal" && <div className="absolute top-2 right-2 h-2 w-2 rounded-full bg-primary" />}
+                </div>
+              </div>
+            </div>
+            <div className="space-y-3 border-t pt-4">
+              <div className="flex items-center space-x-3">
+                <input
+                  type="checkbox"
+                  id="applyToRangeViewer"
+                  checked={applyToRange}
+                  onChange={(e) => setApplyToRange(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                />
+                <Label htmlFor="applyToRangeViewer" className="text-sm font-medium cursor-pointer">
+                  Apply to range of pages
+                </Label>
+              </div>
+              {applyToRange && currentDocument && (
+                <div className="grid grid-cols-2 gap-3 ml-7">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="rangeStartViewer" className="text-xs font-medium text-muted-foreground">From Page</Label>
+                    <Input
+                      id="rangeStartViewer"
+                      type="number"
+                      min={1}
+                      max={currentDocument.getPageCount()}
+                      value={rangeStart + 1}
+                      onChange={(e) => {
+                        const val = Math.max(1, Math.min(currentDocument.getPageCount(), parseInt(e.target.value) || 1));
+                        setRangeStart(val - 1);
+                      }}
+                      className="h-9"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="rangeEndViewer" className="text-xs font-medium text-muted-foreground">To Page</Label>
+                    <Input
+                      id="rangeEndViewer"
+                      type="number"
+                      min={1}
+                      max={currentDocument.getPageCount()}
+                      value={rangeEnd + 1}
+                      onChange={(e) => {
+                        const val = Math.max(1, Math.min(currentDocument.getPageCount(), parseInt(e.target.value) || 1));
+                        setRangeEnd(val - 1);
+                      }}
+                      className="h-9"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowRotateDialog(false);
+                setPagesToRotate([]);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleConfirmRotate} className="min-w-[100px]">
+              Apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Document Settings Dialog */}
       <DocumentSettingsDialog

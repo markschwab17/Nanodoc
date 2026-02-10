@@ -1256,25 +1256,12 @@ export function ThumbnailCarousel() {
       pagesToRotateFinal = pagesToRotate;
     }
     
-    // Map rotation type to relative degrees to add/subtract
-    // PDF Rotate field: 0=0°, 90=90° counter-clockwise, 180=180°, 270=270° counter-clockwise
-    // IMPORTANT: PDF Rotate is counter-clockwise, but visually:
-    // - Rotate 90° = page appears rotated 90° counter-clockwise (top→left)
-    // - Rotate 270° = page appears rotated 90° clockwise (top→right)
-    // So for user-facing "clockwise" rotation, we need Rotate = 90° (add 90°)
-    // For "counter-clockwise", we need Rotate = 270° (add 270°)
-    // Wait, that's backwards. Let me think:
-    // If current is 0° and we want clockwise 90°, we want the page to rotate so top→right
-    // That's Rotate = 90° in PDF (90° counter-clockwise = 90° clockwise visually)
-    // Actually no, Rotate 90° means rotate 90° counter-clockwise, which visually appears as counter-clockwise
-    // Rotate 270° means rotate 270° counter-clockwise, which is 90° clockwise visually
-    // So clockwise should be 270°, counter-clockwise should be 90°
-    // But the user says clockwise is rotating counter-clockwise, so we need to swap them
+    // UI degrees: clockwise adds 90 (page rotates CW); counterclockwise adds 270 (page rotates CCW).
     const rotationMap: Record<typeof rotationType, number> = {
-      clockwise: 90,       // Add 90° (Rotate = 90° = 90° counter-clockwise = 90° clockwise visually)
-      counterclockwise: 270, // Add 270° (Rotate = 270° = 270° counter-clockwise = 90° counter-clockwise visually)
-      vertical: 180,       // Add 180° (flip)
-      horizontal: 180,     // Add 180° (flip)
+      clockwise: 90,
+      counterclockwise: 270,
+      vertical: 180,
+      horizontal: 180,
     };
     
     const degrees = rotationMap[rotationType];

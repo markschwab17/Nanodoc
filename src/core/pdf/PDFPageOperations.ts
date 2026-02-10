@@ -386,26 +386,28 @@ export class PDFPageOperations {
       return;
     }
     
-    // Get original mediabox dimensions (before rotation swap)
-    // page.getBounds() returns rotated bounds, so we need to reverse the swap based on oldRotation
-    // to get the original mediabox dimensions
-    let mediaboxWidth: number;
-    let mediaboxHeight: number;
-    
-    if (oldRotation === 90 || oldRotation === 270) {
-      // Old rotation was 90° or 270°, so display dimensions are swapped
-      // Original mediabox: width = displayHeight, height = displayWidth
-      mediaboxWidth = pageMetadata.height;
-      mediaboxHeight = pageMetadata.width;
-    } else {
-      // Old rotation was 0° or 180°, so display dimensions match mediabox
-      mediaboxWidth = pageMetadata.width;
-      mediaboxHeight = pageMetadata.height;
-    }
-    
-    const pageWidth = mediaboxWidth;
-    const pageHeight = mediaboxHeight;
-    
+    // Use current page dimensions (display size) for coordinate transform.
+    // Annotations are stored in the coordinate system of the current rotation,
+    // so we always use pageMetadata.width/height (the canvas dimensions).
+    const pageWidth = pageMetadata.width;
+    const pageHeight = pageMetadata.height;
+
+    // Helper: rotate a point (x, y) in PDF coordinates (bottom-left origin) by relativeRotation
+    // UI "clockwise" adds 90 → relativeRotation 90 → use CW formulas (NW→NE). UI "counterclockwise" adds 270 → use CCW formulas.
+    const rotatePoint = (px: number, py: number): { x: number; y: number } => {
+      if (relativeRotation === 90) {
+        // User chose clockwise: NW→NE
+        return { x: py, y: pageWidth - px };
+      }
+      if (relativeRotation === 270) {
+        // User chose counter-clockwise: NW→SW. (x,y) → (pageHeight - y, pageWidth - x)
+        return { x: pageHeight - py, y: pageWidth - px };
+      }
+      if (relativeRotation === 180) {
+        return { x: pageWidth - px, y: pageHeight - py };
+      }
+      return { x: px, y: py };
+    };
     
       // Transform each annotation's coordinates based on rotation
       // Note: PDF coordinates use bottom-left origin, but our annotations use top-left
@@ -426,66 +428,22 @@ export class PDFPageOperations {
         const annHeight = newHeight || 0;
         
         if (relativeRotation === 90) {
-          // Rotate 90° counter-clockwise
-          // When page rotates 90° CCW, the coordinate system rotates
-          // To keep annotation in same visual position relative to page content:
-          // 
-          // CRITICAL: Annotations are stored with (x, y) as bottom-left corner in PDF coordinates
-          // After 90° CCW rotation, we need to find the new bottom-left corner position
-          //
-          // Original coordinate system: X=0 at left, Y=0 at bottom
-          // Rotated coordinate system: X=0 at left (was bottom), Y=0 at bottom (was right)
-          //
-          // For 90° CCW rotation:
-          // - Old bottom-left (x, y) → New bottom-left position
-          // - newX = oldY (old vertical position becomes new horizontal)
-          // - newY = oldX (old horizontal position becomes new vertical, at bottom)
-          //
-          // After 90° rotation, the rotated coordinate system has:
-          // - X range: 0 to originalHeight (pageHeight = 1735)
-          // - Y range: 0 to originalWidth (pageWidth = 2592)
-          // So the transformed coordinates are in this rotated coordinate system
-          //
-          // CRITICAL: The old left edge (x=0) becomes the new bottom edge (y=0 in rotated system)
-          // So oldX directly maps to newY (the distance from left becomes distance from bottom)
-          // However, we need to account for the fact that the annotation's visual position
-          // should remain the same. The old X coordinate (distance from left) should become
-          // the new Y coordinate (distance from bottom), but we need to flip it because
-          // the coordinate system has rotated.
-          //
-          // Actually, let's think about this more carefully:
-          // - Old left edge (x=0) → New bottom edge (y=0)
-          // - Old right edge (x=pageWidth) → New top edge (y=pageWidth in rotated system)
-          // So for a point at oldX, the distance from left is oldX
-          // After rotation, this becomes the distance from bottom, which is newY
-          // Therefore: newY = oldX
-          // For 90° CCW rotation, transform coordinates to keep annotation in same visual position
-          // CRITICAL: Think about the coordinate system transformation geometrically
-          // When page rotates 90° CCW:
-          // - Old left edge (x=0) → New bottom edge (y=0 in rotated system)
-          // - Old right edge (x=pageWidth) → New top edge (y=pageWidth in rotated system)
-          // - Old bottom edge (y=0) → New left edge (x=0 in rotated system)
-          // - Old top edge (y=pageHeight) → New right edge (x=pageHeight in rotated system)
-          //
-          // For a point at (oldX, oldY) to stay in same visual position:
-          // - newX = oldY (old vertical position becomes new horizontal)
-          // - newY = pageWidth - oldX (old horizontal position, flipped, becomes new vertical)
-          const tempX = newX; // Save oldX
-          newX = newY; // oldY becomes newX
-          newY = pageWidth - tempX; // oldX becomes newY, flipped
+          // User chose clockwise (add 90): NW→NE. New bottom-left = (oldY, pageWidth - oldX - annWidth).
+          const tempX = newX;
+          const tempY = newY;
+          newX = tempY; // oldY → new x
+          newY = pageWidth - tempX - annWidth;
           // Swap width and height
           const tempWidth = newWidth;
           newWidth = newHeight;
           newHeight = tempWidth;
           
         } else if (relativeRotation === 270) {
-          // Rotate 270° counter-clockwise (90° clockwise)
-          // For 90° clockwise (270° CCW), the transformation is:
-          // - newX = mediaboxHeight - oldY - annotationHeight
-          // - newY = oldX
+          // User chose counter-clockwise (add 270): NW→SW. New bottom-left = (pageHeight - oldY - annHeight, pageWidth - oldX - annWidth).
           const tempX = newX;
-          newX = pageHeight - newY - annHeight;
-          newY = tempX;
+          const tempY = newY;
+          newX = pageHeight - tempY - annHeight;
+          newY = pageWidth - tempX - annWidth;
           // Swap width and height
           const tempWidth = newWidth;
           newWidth = newHeight;
@@ -514,20 +472,20 @@ export class PDFPageOperations {
           if (quad.length < 8) return quad; // Invalid quad
           
           if (relativeRotation === 90) {
-            // Rotate 90° counter-clockwise: (x, y) -> (pageHeight - y, x)
-            return [
-              pageHeight - quad[1], quad[0], // x0, y0
-              pageHeight - quad[3], quad[2], // x1, y1
-              pageHeight - quad[5], quad[4], // x2, y2
-              pageHeight - quad[7], quad[6], // x3, y3
-            ];
-          } else if (relativeRotation === 270) {
-            // Rotate 270° counter-clockwise (90° clockwise): (x, y) -> (y, pageWidth - x)
+            // User clockwise: (x, y) -> (y, pageWidth - x)
             return [
               quad[1], pageWidth - quad[0], // x0, y0
               quad[3], pageWidth - quad[2], // x1, y1
               quad[5], pageWidth - quad[4], // x2, y2
               quad[7], pageWidth - quad[6], // x3, y3
+            ];
+          } else if (relativeRotation === 270) {
+            // User counter-clockwise: (x, y) -> (pageHeight - y, pageWidth - x)
+            return [
+              pageHeight - quad[1], pageWidth - quad[0], // x0, y0
+              pageHeight - quad[3], pageWidth - quad[2], // x1, y1
+              pageHeight - quad[5], pageWidth - quad[4], // x2, y2
+              pageHeight - quad[7], pageWidth - quad[6], // x3, y3
             ];
           } else if (relativeRotation === 180) {
             // Rotate 180°: (x, y) -> (pageWidth - x, pageHeight - y)
@@ -546,13 +504,15 @@ export class PDFPageOperations {
       // Transform callout arrow and box positions
       if (annotation.arrowPoint) {
         if (relativeRotation === 90) {
-          updates.arrowPoint = {
-            x: pageHeight - annotation.arrowPoint.y,
-            y: annotation.arrowPoint.x,
-          };
-        } else if (relativeRotation === 270) {
+          // User clockwise: (y, pageWidth - x)
           updates.arrowPoint = {
             x: annotation.arrowPoint.y,
+            y: pageWidth - annotation.arrowPoint.x,
+          };
+        } else if (relativeRotation === 270) {
+          // User counter-clockwise: (pageHeight - y, pageWidth - x)
+          updates.arrowPoint = {
+            x: pageHeight - annotation.arrowPoint.y,
             y: pageWidth - annotation.arrowPoint.x,
           };
         } else if (relativeRotation === 180) {
@@ -565,13 +525,15 @@ export class PDFPageOperations {
       
       if (annotation.boxPosition) {
         if (relativeRotation === 90) {
-          updates.boxPosition = {
-            x: pageHeight - annotation.boxPosition.y,
-            y: annotation.boxPosition.x,
-          };
-        } else if (relativeRotation === 270) {
+          // User clockwise: (y, pageWidth - x)
           updates.boxPosition = {
             x: annotation.boxPosition.y,
+            y: pageWidth - annotation.boxPosition.x,
+          };
+        } else if (relativeRotation === 270) {
+          // User counter-clockwise: (pageHeight - y, pageWidth - x)
+          updates.boxPosition = {
+            x: pageHeight - annotation.boxPosition.y,
             y: pageWidth - annotation.boxPosition.x,
           };
         } else if (relativeRotation === 180) {
@@ -580,6 +542,30 @@ export class PDFPageOperations {
             y: pageHeight - annotation.boxPosition.y,
           };
         }
+      }
+
+      // Transform path (draw and overlay highlight annotations)
+      if (annotation.path && annotation.path.length > 0) {
+        updates.path = annotation.path.map((p) => rotatePoint(p.x, p.y));
+      }
+
+      // Transform points (shape annotations: arrows, etc.)
+      if (annotation.points && annotation.points.length > 0) {
+        updates.points = annotation.points.map((p) => rotatePoint(p.x, p.y));
+      }
+
+      // Transform stamp signature path (signature stamps)
+      if (annotation.stampData?.signaturePath && annotation.stampData.signaturePath.length > 0) {
+        updates.stampData = {
+          ...annotation.stampData,
+          signaturePath: annotation.stampData.signaturePath.map((p) => rotatePoint(p.x, p.y)),
+        };
+      }
+
+      // Update annotation rotation property for text/image annotations so they display correctly
+      if (annotation.rotation !== undefined) {
+        const rotated = (annotation.rotation + relativeRotation) % 360;
+        updates.rotation = rotated < 0 ? rotated + 360 : rotated;
       }
       
       // Update annotation in store
