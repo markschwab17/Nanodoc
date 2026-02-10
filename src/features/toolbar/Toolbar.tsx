@@ -61,9 +61,16 @@ export function Toolbar() {
   const [showShapeMenu, setShowShapeMenu] = useState(false);
   const recentFilesButtonRef = useRef<HTMLButtonElement>(null);
   const shapeMenuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  
+
   // Get current tab for save state
   const activeTab = useTabStore.getState().getActiveTab();
+
+  // Cleanup shape menu hover timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (shapeMenuTimeoutRef.current) clearTimeout(shapeMenuTimeoutRef.current);
+    };
+  }, []);
 
   // Listen for help dialog open event
   useEffect(() => {
@@ -73,15 +80,6 @@ export function Toolbar() {
     window.addEventListener("openHelp", handleOpenHelp);
     return () => {
       window.removeEventListener("openHelp", handleOpenHelp);
-    };
-  }, []);
-  
-  // Cleanup shape menu timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (shapeMenuTimeoutRef.current) {
-        clearTimeout(shapeMenuTimeoutRef.current);
-      }
     };
   }, []);
   
@@ -595,12 +593,12 @@ export function Toolbar() {
         >
           <Pencil className={sizeClasses.icon} />
         </Button>
+        {/* Shape tool: click to draw; hover to open menu to the left (no arrow) */}
         <Popover open={showShapeMenu} onOpenChange={setShowShapeMenu}>
           <PopoverTrigger asChild>
             <div
               className="relative"
               onMouseEnter={() => {
-                // Clear any pending close timeout
                 if (shapeMenuTimeoutRef.current) {
                   clearTimeout(shapeMenuTimeoutRef.current);
                   shapeMenuTimeoutRef.current = null;
@@ -608,17 +606,17 @@ export function Toolbar() {
                 setShowShapeMenu(true);
               }}
               onMouseLeave={() => {
-                // Add delay before closing to allow mouse movement to popover
                 shapeMenuTimeoutRef.current = setTimeout(() => {
                   setShowShapeMenu(false);
                   shapeMenuTimeoutRef.current = null;
-                }, 300); // 300ms delay for better UX
+                }, 300);
               }}
             >
               <Button
                 variant={activeTool === "shape" ? "default" : "outline"}
                 size="icon"
-                title="Shapes (Arrow, Rectangle, Circle)"
+                onClick={() => setActiveTool("shape")}
+                title={`Shapes – draw ${currentShapeType === "rectangle" ? "rectangle" : currentShapeType === "circle" ? "circle" : "arrow"} (hover to change)`}
                 className={sizeClasses.button}
               >
                 {currentShapeType === "rectangle" && <Square className={sizeClasses.icon} />}
@@ -627,13 +625,12 @@ export function Toolbar() {
               </Button>
             </div>
           </PopoverTrigger>
-          <PopoverContent 
-            className="w-auto p-1" 
-            side="left" 
+          <PopoverContent
+            className="w-auto p-1"
+            side="left"
             align="start"
-            style={{ marginLeft: '8px' }} // Add gap between button and popover
+            style={{ marginLeft: "8px" }}
             onMouseEnter={() => {
-              // Clear any pending close timeout
               if (shapeMenuTimeoutRef.current) {
                 clearTimeout(shapeMenuTimeoutRef.current);
                 shapeMenuTimeoutRef.current = null;
@@ -641,11 +638,10 @@ export function Toolbar() {
               setShowShapeMenu(true);
             }}
             onMouseLeave={() => {
-              // Add delay before closing to allow mouse movement
               shapeMenuTimeoutRef.current = setTimeout(() => {
                 setShowShapeMenu(false);
                 shapeMenuTimeoutRef.current = null;
-              }, 300); // 300ms delay for better UX
+              }, 300);
             }}
           >
             <div className="flex flex-col gap-0.5">
@@ -659,7 +655,7 @@ export function Toolbar() {
                 }}
                 className="h-7 px-2 justify-start text-xs"
               >
-                <Square className="h-3.5 w-3.5 mr-1.5" />
+                <Square className="h-3.5 w-3.5 mr-1.5 shrink-0" />
                 Rectangle
               </Button>
               <Button
@@ -672,7 +668,7 @@ export function Toolbar() {
                 }}
                 className="h-7 px-2 justify-start text-xs"
               >
-                <Circle className="h-3.5 w-3.5 mr-1.5" />
+                <Circle className="h-3.5 w-3.5 mr-1.5 shrink-0" />
                 Circle
               </Button>
               <Button
@@ -685,7 +681,7 @@ export function Toolbar() {
                 }}
                 className="h-7 px-2 justify-start text-xs"
               >
-                <ArrowRight className="h-3.5 w-3.5 mr-1.5" />
+                <ArrowRight className="h-3.5 w-3.5 mr-1.5 shrink-0" />
                 Arrow
               </Button>
             </div>
