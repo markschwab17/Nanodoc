@@ -16,7 +16,7 @@ interface AIProviderStore {
   setApiKey: (provider: AIProvider, apiKey: string) => void;
 }
 
-export const useAIProviderStore = create<AIProviderStore>((set, get) => {
+export const useAIProviderStore = create<AIProviderStore>((set, _get) => {
   // Initialize active provider from localStorage or default to 'gemini'
   const savedProvider = typeof window !== 'undefined' 
     ? (localStorage.getItem('ai_provider') as AIProvider | null) || 'gemini'

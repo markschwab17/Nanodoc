@@ -6,6 +6,7 @@
 
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
+import type { ToolType } from "@/shared/stores/uiStore";
 
 export interface ToolContext {
   document: PDFDocument;
@@ -29,7 +30,7 @@ export interface ToolContext {
   setSelectedTextSpans?: (spans: any[]) => void; // For live text selection preview
   setIsCreatingTextBox: (isCreating: boolean) => void;
   setTextBoxStart: (coords: { x: number; y: number } | null) => void;
-  setActiveTool?: (tool: string) => void;
+  setActiveTool?: (tool: ToolType) => void;
   overlayHighlightPath?: Array<{ x: number; y: number }>; // Path for overlay highlights from PageCanvas
   setOverlayHighlightPath?: (path: Array<{ x: number; y: number }>) => void; // Setter for overlay highlight path
   setIsHighlightTextMode?: (isTextMode: boolean) => void; // For highlight tool text mode detection

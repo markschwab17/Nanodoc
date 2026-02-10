@@ -17,67 +17,6 @@ export interface OpenAIConfig {
 }
 
 /**
- * JSON Schema for structured output
- * OpenAI uses standard JSON Schema format
- */
-const SPEC_EXTRACTION_SCHEMA = {
-  type: "object",
-  properties: {
-    specs: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          spec_id: { 
-            type: "string",
-            description: "Unique identifier for the spec"
-          },
-          category: { 
-            type: "string",
-            description: "Category of the specification"
-          },
-          parameter: { 
-            type: "string",
-            description: "Parameter name or property being specified"
-          },
-          value: { 
-            type: "string",
-            description: "The value of the specification"
-          },
-          unit: { 
-            type: "string",
-            description: "Unit of measurement (optional)"
-          },
-          page: { 
-            type: "integer",
-            description: "Page number where the spec was found (0-based PDF index)"
-          },
-          bbox: { 
-            type: "array",
-            description: "Bounding box coordinates [x0, y0, x1, y1]",
-            items: {
-              type: "number"
-            },
-            minItems: 4,
-            maxItems: 4
-          },
-          section_heading: { 
-            type: "string",
-            description: "Section heading where the spec was found"
-          },
-          quote_text: { 
-            type: "string",
-            description: "Exact quote from the document"
-          },
-        },
-        required: ["parameter", "value", "page", "quote_text"],
-      },
-    },
-  },
-  required: ["specs"],
-};
-
-/**
  * Create extraction prompt with few-shot examples
  */
 function createExtractionPrompt(
@@ -284,7 +223,6 @@ export async function extractSpecsFromChunks(
   customPrompt?: string
 ): Promise<SpecExtractionResult[]> {
   const baseUrl = config.baseUrl || 'https://api.openai.com/v1';
-  const model = config.model || 'gpt-4o-mini';
   
   // Limit chunks to stay within token limits
   // GPT-4o-mini: 128k context, GPT-4o: 128k context
@@ -467,7 +405,6 @@ export async function generateText(
   config: AIConfig
 ): Promise<string> {
   const baseUrl = config.baseUrl || 'https://api.openai.com/v1';
-  const model = config.model || 'gpt-4o-mini';
   
   // Model variants to try
   const modelVariants = [

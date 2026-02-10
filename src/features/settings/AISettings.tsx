@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { Settings, Key, CheckCircle2, AlertCircle, ExternalLink, ChevronRight } from "lucide-react";
+import { Settings, Key, CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
 import { useAIProviderStore } from "@/shared/stores/aiProviderStore";
 import { validateGeminiApiKey } from "@/core/ai/GeminiService";
 import { validateApiKey as validateOpenAIApiKey } from "@/core/ai/OpenAIService";

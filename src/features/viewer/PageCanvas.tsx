@@ -102,7 +102,7 @@ export function PageCanvas({
 }: PageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isRendering, setIsRendering] = useState(false);
+  const [isRendering, _setIsRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
   const { renderQuality } = useDocumentSettingsStore();
@@ -948,7 +948,6 @@ export function PageCanvas({
       const pageMetadata = document.getPageMetadata(pageNumber);
       if (!pageMetadata) return null;
 
-      const dpr = window.devicePixelRatio || 1;
       let viewportScale = zoomLevel;
       let displayScale = zoomLevel;
 
@@ -1341,16 +1340,7 @@ export function PageCanvas({
     
     // Use display dimensions for 1:1 mapping (same as getPDFCoordinates).
     // When rotated 90/270, pageMetadata.width/height are already the display dimensions.
-    const currentRotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
-    let mediaboxHeight: number;
-    let mediaboxWidth: number;
-    if (currentRotation === 90 || currentRotation === 270) {
-      mediaboxWidth = pageMetadata.width;
-      mediaboxHeight = pageMetadata.height;
-    } else {
-      mediaboxWidth = pageMetadata.width;
-      mediaboxHeight = pageMetadata.height;
-    }
+    const mediaboxHeight = pageMetadata.height;
     
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
     const flippedY = mediaboxHeight - pdfY;
@@ -1389,7 +1379,6 @@ export function PageCanvas({
     if (!readMode) return 1;
     const pageMetadata = document.getPageMetadata(pageNumber);
     if (!pageMetadata) return 1;
-    const rotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
     const mediaboxWidth = pageMetadata.width;
     if (mediaboxWidth <= 0) return 1;
     if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
@@ -3548,7 +3537,6 @@ export function PageCanvas({
           if (!hasPageHighlights && !hasTemporaryHighlight) return null;
           
           const isSelected = selectedSpecDocumentId === documentId;
-          const pageMetadata = currentDocument.getPageMetadata(pageNumber);
           
           return (
             <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 45 }}>
