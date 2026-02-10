@@ -8,10 +8,10 @@
   - Rectangles are rotating in the wrong direction
   - Need to correct rotation logic
 
-- [ ] **Fix text box sizing and font scaling**
-  - Allow for smaller text boxes to be created
-  - Text font should automatically resize to fit the size of the text box when clicked and drawn
-  - Implement dynamic font scaling based on box dimensions
+- [x] **Fix text box sizing (flexible resize, font independent)** *(done)*
+  - Text boxes can be resized from any corner down to a small minimum (8 PDF units).
+  - Font size and text box size are independent (like Figma/Canva/PDF-XChange); resizing does not change font size.
+  - Creation by drag and resize no longer enforce the previous 50×30 minimum.
 
 - [ ] **All tools need to work in read mode**
   - Currently not all tools function properly in read mode

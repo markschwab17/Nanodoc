@@ -8,6 +8,7 @@ import { useRef, useEffect, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { MIN_TEXT_BOX_SIZE } from "@/shared/constants";
 // Circular rotation handle component
 const RotationHandle = ({ 
   size, 
@@ -728,20 +729,20 @@ export function RichTextEditor({
       
       switch (resizeCorner) {
         case "nw": // Top-left - dragging away decreases size
-          newWidth = Math.max(50, startWidth - deltaX);
-          newHeight = Math.max(30, startHeight - deltaY);
+          newWidth = Math.max(MIN_TEXT_BOX_SIZE, startWidth - deltaX);
+          newHeight = Math.max(MIN_TEXT_BOX_SIZE, startHeight - deltaY);
           break;
         case "ne": // Top-right - X increases width, Y decreases height
-          newWidth = Math.max(50, startWidth + deltaX);
-          newHeight = Math.max(30, startHeight - deltaY);
+          newWidth = Math.max(MIN_TEXT_BOX_SIZE, startWidth + deltaX);
+          newHeight = Math.max(MIN_TEXT_BOX_SIZE, startHeight - deltaY);
           break;
         case "sw": // Bottom-left - X decreases width, Y increases height
-          newWidth = Math.max(50, startWidth - deltaX);
-          newHeight = Math.max(30, startHeight + deltaY);
+          newWidth = Math.max(MIN_TEXT_BOX_SIZE, startWidth - deltaX);
+          newHeight = Math.max(MIN_TEXT_BOX_SIZE, startHeight + deltaY);
           break;
         case "se": // Bottom-right - dragging away increases size
-          newWidth = Math.max(50, startWidth + deltaX);
-          newHeight = Math.max(30, startHeight + deltaY);
+          newWidth = Math.max(MIN_TEXT_BOX_SIZE, startWidth + deltaX);
+          newHeight = Math.max(MIN_TEXT_BOX_SIZE, startHeight + deltaY);
           break;
       }
       
@@ -965,7 +966,9 @@ export function RichTextEditor({
           e.stopPropagation();
         }}
         className={cn(
-          "px-3 py-2 outline-none rounded-lg",
+          "outline-none rounded-lg",
+          // Use minimal padding for very small boxes so content fits; normal padding otherwise
+          (size.width * scale >= 24 && size.height * scale >= 24) ? "px-3 py-2" : "px-1 py-0.5",
           // Disable transitions during resize/rotate/drag for instant feedback
           !isResizing && !isRotating && !isDragging && "transition-all duration-200",
           isSelected && "border border-primary/30 hover:border-primary/60 focus:border-primary",
@@ -991,6 +994,7 @@ export function RichTextEditor({
           whiteSpace: annotation.autoFit ? "nowrap" : "pre-wrap", // No wrap for auto-fit, wrap for fixed box
           wordWrap: annotation.autoFit ? "normal" : "break-word", // Break long words only in fixed mode
           overflowWrap: annotation.autoFit ? "normal" : "break-word", // Break words only in fixed mode
+          lineHeight: 1.4, // Explicit so read-mode container (lineHeight: 0) never affects text positioning
         } as React.CSSProperties}
         suppressContentEditableWarning
         data-rich-text-editor="true"

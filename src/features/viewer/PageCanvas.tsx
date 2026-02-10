@@ -110,7 +110,7 @@ export function PageCanvas({
   const RENDER_SCALE = getRenderQualityScale(renderQuality); // Quality multiplier for rendering
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
-  const { zoomLevel, fitMode, activeTool, setZoomLevel, setFitMode, setZoomToCenterCallback, readMode: globalReadMode } = useUIStore();
+  const { zoomLevel, fitMode, activeTool, setActiveTool, setZoomLevel, setFitMode, setZoomToCenterCallback, readMode: globalReadMode } = useUIStore();
   const { 
     getCurrentDocument, 
     getAnnotations, 
@@ -2786,6 +2786,7 @@ export function PageCanvas({
           setSelectionEnd,
           setIsCreatingTextBox,
           setTextBoxStart,
+          setActiveTool,
           editor,
           renderer,
           canvasRef,
@@ -3023,15 +3024,15 @@ export function PageCanvas({
             const minY = Math.min(startCanvas.y, endCanvas.y);
             const width = Math.abs(endCanvas.x - startCanvas.x);
             const height = Math.abs(endCanvas.y - startCanvas.y);
-            
+            const minPreviewPx = 8;
             return (
               <div
                 className="absolute border-2 border-dashed border-primary bg-primary/10 pointer-events-none z-40"
                 style={{
                   left: `${minX}px`,
                   top: `${minY}px`,
-                  width: `${Math.max(50, width)}px`,
-                  height: `${Math.max(30, height)}px`,
+                  width: `${Math.max(minPreviewPx, width)}px`,
+                  height: `${Math.max(minPreviewPx, height)}px`,
                   borderRadius: "4px",
                 }}
               />
@@ -4620,6 +4621,8 @@ export function PageCanvas({
                   left: `${canvasPos.x}px`,
                   top: `${canvasPos.y}px`,
                   zIndex: 50, // Higher than annotations and canvas
+                  // Reset line-height so text box content isn't affected by read-mode container (lineHeight: 0)
+                  ...(readMode ? { lineHeight: "normal" } : {}),
                 }}
                 scale={annotationScale}
                 onResize={(width, height) => {

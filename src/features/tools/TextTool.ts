@@ -6,6 +6,7 @@
 
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
+import { MIN_TEXT_BOX_SIZE } from "@/shared/constants";
 
 export const TextTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -109,8 +110,8 @@ export const TextTool: ToolHandler = {
       const maxY = Math.max(textBoxStart.y, selectionEnd.y); // Larger Y = higher (closer to top)
       boxX = minX;
       boxY = maxY; // Use maxY for top position in PDF coordinates
-      width = Math.max(50, maxX - minX);
-      height = Math.max(30, maxY - minY); // Height is positive (top - bottom)
+      width = Math.max(MIN_TEXT_BOX_SIZE, maxX - minX);
+      height = Math.max(MIN_TEXT_BOX_SIZE, maxY - minY); // Height is positive (top - bottom)
     } else {
       return;
     }
@@ -139,6 +140,9 @@ export const TextTool: ToolHandler = {
     context.setTextBoxStart(null);
     context.setSelectionStart(null);
     context.setSelectionEnd(null);
+    if (context.setActiveTool) {
+      context.setActiveTool("select");
+    }
   },
 };
 
