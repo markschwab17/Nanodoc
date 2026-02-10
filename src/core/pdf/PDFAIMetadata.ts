@@ -194,8 +194,7 @@ export async function readAIMetadataFromEmbeddedFile(
           ? (streamObj as any).getContents()
           : (streamObj as any)?.contents;
       if (!streamObj?.dict || !(contents instanceof Uint8Array)) continue;
-      const rawStream = { dict: (streamObj as any).dict, contents };
-      const decoded = decodePDFRawStream(rawStream).decode();
+      const decoded = decodePDFRawStream({ dict: (streamObj as any).dict, contents } as any).decode();
       const json = new TextDecoder().decode(decoded);
       const payload = JSON.parse(json) as PDFAIMetadataPayload;
       if (payload != null && typeof payload.version === "number") return payload;

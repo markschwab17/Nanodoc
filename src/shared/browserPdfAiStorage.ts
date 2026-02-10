@@ -27,7 +27,8 @@ function openDB(): Promise<IDBDatabase> {
 export async function hashPdfBytes(bytes: Uint8Array): Promise<string> {
   if (typeof crypto === "undefined" || !crypto.subtle) return "";
   try {
-    const buffer = await crypto.subtle.digest("SHA-256", bytes);
+    const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const buffer = await crypto.subtle.digest("SHA-256", ab);
     const arr = new Uint8Array(buffer);
     return Array.from(arr)
       .map((b) => b.toString(16).padStart(2, "0"))

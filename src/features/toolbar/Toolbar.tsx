@@ -242,9 +242,10 @@ export function Toolbar() {
 
       // Build AI metadata (extracted specs, conversation) so it persists when PDF is re-opened
       const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(currentDoc.getId());
-      // TODO: when we have a per-document conversation store, set conversationHistory and include it below
-      const conversationHistory: { messages: { role: "user" | "assistant"; content: string }[] } | undefined = undefined;
-      const hasConversation = (conversationHistory?.messages?.length ?? 0) > 0;
+      // TODO: when we have a per-document conversation store, pass it here and include in aiMetadata
+      const conversationHistory: { messages: { role: "user" | "assistant"; content: string }[] } | undefined =
+        undefined as { messages: { role: "user" | "assistant"; content: string }[] } | undefined;
+      const hasConversation = conversationHistory != null && conversationHistory.messages.length > 0;
       const aiMetadata =
         extractedSpecs.length > 0 || hasConversation
           ? { version: 1, extractedSpecs, ...(hasConversation && conversationHistory ? { conversationHistory } : {}) }
