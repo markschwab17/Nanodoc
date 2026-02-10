@@ -25,12 +25,12 @@ import type { PDFAIMetadataPayload } from './PDFAIMetadata';
 import { encodeAIMetadataForKeywords, AI_EMBEDDED_FILE_NAME } from './PDFAIMetadata';
 
 /** PDF position for a stamp: x is left edge, y is bottom edge (PDF coords: origin bottom-left). */
-function stampPosition(page: any, stamp: Annotation): { x: number; y: number; width: number; height: number } {
+function stampPosition(_page: any, stamp: Annotation): { x: number; y: number; width: number; height: number } {
   const w = stamp.width || 100;
   const h = stamp.height || 100;
   const x = stamp.x;
-  // stamp.y is the PDF y of the click (top of stamp); PDF origin is bottom-left, so bottom = top - height
-  const y = stamp.y - h;
+  // stamp.y is the PDF y of the bottom edge (matches overlay: pdfTopY = annot.y + height)
+  const y = stamp.y;
   return { x, y, width: w, height: h };
 }
 
@@ -160,7 +160,7 @@ export class ImageStampEmbedder {
   }
 
   private async embedSingleSignatureStamp(
-    pdfDoc: any,
+    _pdfDoc: any,
     pages: any[],
     stamp: Annotation,
     rgb: (r: number, g: number, b: number) => any

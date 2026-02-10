@@ -30,6 +30,7 @@ import { toolHandlers } from "@/features/tools";
 import { getSelectedStamp, getStampPreviewPosition, setPreviewUpdateCallback } from "@/features/tools/StampTool";
 import { getDrawingPath, isCurrentlyDrawing, setDrawPreviewCallback } from "@/features/tools/DrawTool";
 import { useStampStore } from "@/shared/stores/stampStore";
+import { getStampPlacementDimensions } from "@/features/stamps/stampUtils";
 import { StampEditor } from "@/features/stamps/StampEditor";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
@@ -5292,79 +5293,15 @@ export function PageCanvas({
           const stamp = getStamp(selectedStampId);
           if (!stamp) return null;
           
-          // Calculate preview dimensions the same way as actual stamp
-          let previewWidth = 100;
-          let previewHeight = 60;
-          
-          if (stamp.thumbnail) {
-            // Calculate from thumbnail dimensions (same logic as StampTool)
-            const img = new Image();
-            img.src = stamp.thumbnail;
-            if (img.complete && img.width && img.height) {
-              // Thumbnail is generated at scale 6, so convert to PDF points
-              const scale = 6; // Thumbnail generation scale
-              const thumbnailWidthInPoints = img.width / scale;
-              const thumbnailHeightInPoints = img.height / scale;
-              
-              // Use the actual thumbnail dimensions (scaled down) to match exactly what's rendered
-              previewWidth = thumbnailWidthInPoints;
-              previewHeight = thumbnailHeightInPoints;
-              
-              // Apply size multiplier
-              previewWidth *= stampSizeMultiplier;
-              previewHeight *= stampSizeMultiplier;
-              
-              if (previewWidth < 50) previewWidth = 50;
-              if (previewHeight < 30) previewHeight = 30;
-            }
-          } else if (stamp.type === "text" && stamp.text) {
-            // Calculate from text content (same logic as StampTool)
-            const lines = stamp.text.split('\n');
-            const fontSize = 12;
-            const lineHeight = fontSize * 1.2;
-            const borderOffset = stamp.borderOffset || 8;
-            const borderThickness = stamp.borderEnabled ? (stamp.borderThickness || 2) : 0;
-            const contentPadding = borderOffset;
-            
-            const canvas = window.document.createElement("canvas");
-            const ctx = canvas.getContext("2d");
-            if (ctx) {
-              ctx.font = `${fontSize}px ${stamp.font || "Arial"}`;
-              let maxTextWidth = 0;
-              lines.forEach((line) => {
-                const metrics = ctx.measureText(line);
-                if (metrics.width > maxTextWidth) {
-                  maxTextWidth = metrics.width;
-                }
-              });
-              
-              // Calculate content dimensions (text + padding)
-              const textBlockHeight = lines.length * lineHeight;
-              const contentWidth = maxTextWidth + contentPadding * 2;
-              const contentHeight = textBlockHeight + contentPadding * 2;
-              
-              // Total dimensions include border thickness
-              previewWidth = contentWidth + borderThickness;
-              previewHeight = contentHeight + borderThickness;
-              
-              // Apply size multiplier
-              previewWidth *= stampSizeMultiplier;
-              previewHeight *= stampSizeMultiplier;
-              
-              if (previewWidth < 50) previewWidth = 50;
-              if (previewHeight < 30) previewHeight = 30;
-            }
-          }
-          
-          // Calculate scale the same way as stamp annotations
-          const currentZoom = zoomLevelRef.current;
-          const currentScale = actualScaleRef.current > 0 ? actualScaleRef.current : currentZoom;
+          // Use shared dimensions so preview matches placement size exactly (no jump when image loads)
+          const { width: previewWidth, height: previewHeight } = getStampPlacementDimensions(stamp, stampSizeMultiplier);
           
           // Position preview: stampPreviewPosition is the bottom-left corner in PDF coordinates
-          // Convert to canvas coordinates for top-left positioning
+          // Convert to canvas coordinates for top-left positioning (same as StampAnnotation)
           const pdfTopY = stampPreviewPosition.y + previewHeight;
           const canvasPos = pdfToCanvas(stampPreviewPosition.x, pdfTopY);
           
+          // Use same coordinate system as stamp overlays: 1:1 with PDF points (container scale applies to both)
           return (
             <div
               key="stamp-preview"
@@ -5372,8 +5309,8 @@ export function PageCanvas({
               style={{
                 left: `${canvasPos.x}px`,
                 top: `${canvasPos.y}px`,
-                width: `${previewWidth * currentScale}px`,
-                height: `${previewHeight * currentScale}px`,
+                width: `${previewWidth}px`,
+                height: `${previewHeight}px`,
                 zIndex: 50,
               }}
             >
@@ -5432,67 +5369,11 @@ export function PageCanvas({
           onSave={async (updatedStampData) => {
             if (!currentDocument || !editingStampAnnotation) return;
 
-            // Recalculate stamp size based on updated data
-            let newWidth = editingStampAnnotation.width || 100;
-            let newHeight = editingStampAnnotation.height || 60;
-
-            if (updatedStampData.type === "text" && updatedStampData.text) {
-              const lines = updatedStampData.text.split('\n');
-              const fontSize = 12;
-              const lineHeight = fontSize * 1.2;
-              const borderOffset = updatedStampData.borderOffset || 8;
-              const borderThickness = updatedStampData.borderEnabled ? (updatedStampData.borderThickness || 2) : 0;
-              const contentPadding = borderOffset;
-              
-              const canvas = window.document.createElement("canvas");
-              const ctx = canvas.getContext("2d");
-              if (ctx) {
-                ctx.font = `${fontSize}px ${updatedStampData.font || "Arial"}`;
-                let maxTextWidth = 0;
-                lines.forEach((line) => {
-                  const metrics = ctx.measureText(line);
-                  if (metrics.width > maxTextWidth) {
-                    maxTextWidth = metrics.width;
-                  }
-                });
-                
-                const textBlockHeight = lines.length * lineHeight;
-                const contentWidth = maxTextWidth + contentPadding * 2;
-                const contentHeight = textBlockHeight + contentPadding * 2;
-                
-                const totalWidth = contentWidth + borderThickness;
-                const totalHeight = contentHeight + borderThickness;
-                
-                newWidth = totalWidth * stampSizeMultiplier;
-                newHeight = totalHeight * stampSizeMultiplier;
-                
-                if (newWidth < 50) newWidth = 50;
-                if (newHeight < 30) newHeight = 30;
-              }
-            } else if (updatedStampData.thumbnail) {
-              const img = new Image();
-              img.src = updatedStampData.thumbnail;
-              await new Promise<void>((resolve) => {
-                if (img.complete) {
-                  resolve();
-                } else {
-                  img.onload = () => resolve();
-                  img.onerror = () => resolve();
-                }
-              });
-              
-              if (img.width && img.height) {
-                const scale = 6;
-                const thumbnailWidthInPoints = img.width / scale;
-                const thumbnailHeightInPoints = img.height / scale;
-                
-                newWidth = thumbnailWidthInPoints * stampSizeMultiplier;
-                newHeight = thumbnailHeightInPoints * stampSizeMultiplier;
-                
-                if (newWidth < 50) newWidth = 50;
-                if (newHeight < 30) newHeight = 30;
-              }
-            }
+            // Use shared dimensions so size matches preview and placement
+            const { width: newWidth, height: newHeight } = getStampPlacementDimensions(
+              updatedStampData,
+              stampSizeMultiplier
+            );
 
             // Update annotation with new stamp data and size
             wrapAnnotationUpdate(

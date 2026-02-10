@@ -320,15 +320,15 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
     }
   };
 
-  const generateThumbnail = (): string => {
+  type ThumbnailResult = { dataUrl: string; widthPoints?: number; heightPoints?: number };
+
+  const generateThumbnail = (): ThumbnailResult => {
     // Use higher resolution for crisp stamps
     const scale = 6; // 6x resolution for high DPI (2400x1440 base, up to 9600x5760 for very large stamps)
     
     if (activeTab === "image" && imageData) {
-      // For image stamps, return the original image data
-      // The browser will handle scaling with imageRendering: "auto"
-      // For better quality, users should upload high-resolution images
-      return imageData;
+      // For image stamps, return the original image data; dimensions set in handleSave after load
+      return { dataUrl: imageData };
     }
 
     if (activeTab === "signature" && signaturePath.length > 0) {
@@ -357,7 +357,7 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
         });
         ctx.stroke();
       }
-      return canvas.toDataURL("image/png");
+      return { dataUrl: canvas.toDataURL("image/png"), widthPoints: 400, heightPoints: 240 };
     }
 
     if (activeTab === "text" && text) {
@@ -378,8 +378,8 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
       
       // First, calculate content dimensions to determine canvas size
       const tempCanvas = document.createElement("canvas");
-      const tempCtx = tempCanvas.getContext("2d");
-      if (!tempCtx) return "";
+    const tempCtx = tempCanvas.getContext("2d");
+    if (!tempCtx) return { dataUrl: "" };
       
       tempCtx.font = `${56 * scale}px ${font}`;
       tempCtx.textAlign = "center";
@@ -419,8 +419,8 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
       canvas.width = totalWidth;
       canvas.height = totalHeight;
       
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return "";
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return { dataUrl: "" };
       
       // Transparent background
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -491,13 +491,17 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
         ctx.fillText(line, textCenterX, startY + index * lineHeight);
       });
       
-      return canvas.toDataURL("image/png");
+      return {
+        dataUrl: canvas.toDataURL("image/png"),
+        widthPoints: totalWidth / scale,
+        heightPoints: totalHeight / scale,
+      };
     }
 
-    return "";
+    return { dataUrl: "" };
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!stampName.trim()) {
       alert("Please enter a stamp name");
       return;
@@ -518,12 +522,15 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
       return;
     }
 
+    const thumb = generateThumbnail();
     const stamp: StampData = {
       id: `stamp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       name: stampName,
       type: activeTab,
       createdAt: Date.now(),
-      thumbnail: generateThumbnail(),
+      thumbnail: thumb.dataUrl,
+      thumbnailWidthPoints: thumb.widthPoints,
+      thumbnailHeightPoints: thumb.heightPoints,
     };
 
     if (activeTab === "text") {
@@ -540,6 +547,17 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
       stamp.borderOffset = borderOffset;
     } else if (activeTab === "image") {
       stamp.imageData = imageData;
+      // Set placement dimensions from image so preview and placement size match
+      if (imageData) {
+        const dims = await new Promise<{ w: number; h: number }>((resolve) => {
+          const img = new window.Image();
+          img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+          img.onerror = () => resolve({ w: 600, h: 400 });
+          img.src = imageData;
+        });
+        stamp.thumbnailWidthPoints = dims.w / 6;
+        stamp.thumbnailHeightPoints = dims.h / 6;
+      }
     } else if (activeTab === "signature") {
       stamp.signaturePath = signaturePath;
     }

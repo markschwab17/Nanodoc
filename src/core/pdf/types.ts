@@ -85,6 +85,9 @@ export interface StampData {
   type: "text" | "image" | "signature";
   createdAt: number;
   thumbnail?: string; // base64 thumbnail
+  /** Width/height in PDF points (at scale 1). Used so preview and placement size match without loading the thumbnail. */
+  thumbnailWidthPoints?: number;
+  thumbnailHeightPoints?: number;
   // For text stamps
   text?: string;
   font?: string;

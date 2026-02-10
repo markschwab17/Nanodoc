@@ -108,10 +108,10 @@ export function StampEditor({ open, onClose, stampData, onSave }: StampEditorPro
     }
   }, [open, text, textColor, font, backgroundEnabled, backgroundColor, backgroundOpacity, borderEnabled, borderStyle, borderThickness, borderColor, borderOffset]);
 
-  const generateThumbnail = (): string => {
+  const generateThumbnail = (): { dataUrl: string; widthPoints?: number; heightPoints?: number } => {
     const scale = 6;
     
-    if (!text) return "";
+    if (!text) return { dataUrl: "" };
 
     const drawRoundedRect = (ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) => {
       ctx.beginPath();
@@ -129,7 +129,7 @@ export function StampEditor({ open, onClose, stampData, onSave }: StampEditorPro
     
     const tempCanvas = document.createElement("canvas");
     const tempCtx = tempCanvas.getContext("2d");
-    if (!tempCtx) return "";
+    if (!tempCtx) return { dataUrl: "" };
 
     tempCtx.font = `${56 * scale}px ${font}`;
     tempCtx.textAlign = "center";
@@ -163,7 +163,7 @@ export function StampEditor({ open, onClose, stampData, onSave }: StampEditorPro
     canvas.height = totalHeight;
     
     const ctx = canvas.getContext("2d");
-    if (!ctx) return "";
+    if (!ctx) return { dataUrl: "" };
     
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
@@ -227,13 +227,17 @@ export function StampEditor({ open, onClose, stampData, onSave }: StampEditorPro
       ctx.fillText(line, textCenterX, startY + index * lineHeight);
     });
     
-    return canvas.toDataURL("image/png");
+    return {
+      dataUrl: canvas.toDataURL("image/png"),
+      widthPoints: totalWidth / scale,
+      heightPoints: totalHeight / scale,
+    };
   };
 
   const handleSave = () => {
     if (!stampData || !text.trim() || !stampName.trim()) return;
 
-    const thumbnail = generateThumbnail();
+    const thumb = generateThumbnail();
     const updatedStampData: StampData = {
       ...stampData,
       name: stampName,
@@ -248,7 +252,9 @@ export function StampEditor({ open, onClose, stampData, onSave }: StampEditorPro
       borderThickness,
       borderColor,
       borderOffset,
-      thumbnail,
+      thumbnail: thumb.dataUrl,
+      thumbnailWidthPoints: thumb.widthPoints,
+      thumbnailHeightPoints: thumb.heightPoints,
     };
 
     onSave(updatedStampData);
