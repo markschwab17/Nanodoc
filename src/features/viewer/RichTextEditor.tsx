@@ -591,14 +591,12 @@ export function RichTextEditor({
       if (moveDistance > 3) {
         e.preventDefault();
         
-        // Convert screen pixel delta to PDF coordinate delta
-        // Overlay positioning uses CSS space, independent of canvas backing buffer
-        // (high-DPI rendering only affects canvas backing, not CSS positioning)
-        // The text box is inside a container with CSS transform: scale(zoomLevel)
-        // So: pdfDelta = screenDelta / zoomLevel
-        // Y is negated because pdfToCanvas flips Y (PDF Y=0 at bottom, canvas Y=0 at top)
-        const pdfDeltaX = screenDeltaX / zoomLevel;
-        const pdfDeltaY = -screenDeltaY / zoomLevel; // Negate Y because pdfToCanvas flips Y
+        // Convert screen pixel delta to PDF coordinate delta.
+        // In read mode the overlay is scaled by scale (no container transform), so use scale.
+        // In single-page mode the container has transform scale(zoomLevel), so use zoomLevel.
+        const deltaScale = scale !== 1 ? scale : zoomLevel;
+        const pdfDeltaX = screenDeltaX / deltaScale;
+        const pdfDeltaY = -screenDeltaY / deltaScale; // Negate Y because pdfToCanvas flips Y
         
         if (onMove) {
           onMove(pdfDeltaX, pdfDeltaY);
@@ -625,7 +623,7 @@ export function RichTextEditor({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging, isEditing, scale, onMove, onDragEnd, activeTool, isSpacePressed]);
+  }, [isDragging, isEditing, scale, zoomLevel, onMove, onDragEnd, activeTool, isSpacePressed]);
 
   // Prevent blur when clicking outside (like on toolbar)
   const handleBlur = useCallback((e: React.FocusEvent) => {

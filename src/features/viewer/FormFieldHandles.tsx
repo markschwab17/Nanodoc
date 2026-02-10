@@ -12,6 +12,8 @@ interface FormFieldHandlesProps {
   pdfToCanvas: (pdfX: number, pdfY: number) => { x: number; y: number };
   onUpdate: (updates: Partial<Annotation>) => void;
   zoomLevel: number;
+  /** In read mode, overlay scale; use for screen→PDF delta conversion. */
+  scale?: number;
 }
 
 export function FormFieldHandles({
@@ -19,7 +21,9 @@ export function FormFieldHandles({
   pdfToCanvas,
   onUpdate,
   zoomLevel,
+  scale: scaleProp,
 }: FormFieldHandlesProps) {
+  const deltaScale = scaleProp != null && scaleProp !== 1 ? scaleProp : zoomLevel;
   const [isDragging, setIsDragging] = useState(false);
   const [dragType, setDragType] = useState<"move" | "nw" | "ne" | "sw" | "se" | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; annotX: number; annotY: number; annotW: number; annotH: number } | null>(null);
@@ -69,10 +73,8 @@ export function FormFieldHandles({
       const screenDx = e.clientX - dragStart.x;
       const screenDy = e.clientY - dragStart.y;
       
-      // Convert screen delta to PDF delta using zoom level (same as RichTextEditor)
-      // Divide by zoomLevel to convert screen pixels to PDF units
-      const pdfDx = screenDx / zoomLevel;
-      const pdfDy = -screenDy / zoomLevel; // Flip Y axis for PDF coordinates
+      const pdfDx = screenDx / deltaScale;
+      const pdfDy = -screenDy / deltaScale; // Flip Y axis for PDF coordinates
 
       if (dragType === "move") {
         // Move entire field - 1:1 with mouse movement
@@ -128,7 +130,7 @@ export function FormFieldHandles({
         }
       }
     },
-    [isDragging, dragStart, dragType, onUpdate, zoomLevel]
+    [isDragging, dragStart, dragType, onUpdate, deltaScale]
   );
 
   const handleMouseUp = useCallback(() => {

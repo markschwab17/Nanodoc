@@ -22,6 +22,8 @@ interface FormFieldProps {
   onClick?: () => void;
   onMove?: (deltaX: number, deltaY: number) => void;
   zoomLevel?: number;
+  /** In read mode, overlay scale (displayWidth/pageWidth). Applied to width, height, and font so field matches canvas. */
+  scale?: number;
   activeTool?: string; // Current active tool - prevents interaction when non-select tools are active
 }
 
@@ -42,6 +44,7 @@ export function FormField({
   onClick,
   onMove,
   zoomLevel = 1,
+  scale: scaleProp,
   activeTool = "select",
 }: FormFieldProps) {
   const [value, setValue] = useState<string | boolean>(annotation.fieldValue || "");
@@ -62,15 +65,20 @@ export function FormField({
 
   if (!annotation.width || !annotation.height || !annotation.fieldType) return null;
 
+  // In read mode, scale is passed so overlay size matches canvas; otherwise 1
+  const scale = scaleProp ?? 1;
+  const displayWidth = annotation.width * scale;
+  const displayHeight = annotation.height * scale;
+
   // Convert PDF coordinates to canvas coordinates
   // Don't apply zoom here - the parent container is already transformed
   const topLeft = pdfToCanvas(annotation.x, annotation.y + annotation.height);
   
-  // Calculate dynamic font size based on field height
-  const fontSize = calculateFontSize(annotation.height);
+  // Font size scales with the box (use display height so it matches visual size)
+  const fontSize = calculateFontSize(displayHeight);
   
   // For very small heights, reduce or remove padding to prevent overflow
-  const isVerySmall = annotation.height < 10;
+  const isVerySmall = displayHeight < 10;
   const horizontalPadding = isVerySmall ? "1px" : "8px";
   const verticalPadding = isVerySmall ? "0px" : "4px";
   
@@ -78,8 +86,8 @@ export function FormField({
     position: "absolute",
     left: `${topLeft.x}px`,
     top: `${topLeft.y}px`,
-    width: `${annotation.width}px`,
-    height: `${annotation.height}px`,
+    width: `${displayWidth}px`,
+    height: `${displayHeight}px`,
     zIndex: 500,
     boxSizing: "border-box",
     display: "flex",
@@ -146,14 +154,11 @@ export function FormField({
       // Calculate screen pixel delta
       const screenDx = e.clientX - dragStartRef.current.x;
       const screenDy = e.clientY - dragStartRef.current.y;
-      
-      // Convert screen delta to PDF delta using zoom level (same as RichTextEditor)
-      const pdfDx = screenDx / zoomLevel;
-      const pdfDy = -screenDy / zoomLevel; // Flip Y for PDF coordinates
-      
+      // In read mode use scale (overlay scale); otherwise zoomLevel (container transform)
+      const deltaScale = scale !== 1 ? scale : zoomLevel;
+      const pdfDx = screenDx / deltaScale;
+      const pdfDy = -screenDy / deltaScale; // Flip Y for PDF coordinates
       onMove(pdfDx, pdfDy);
-      
-      // Update drag start for next incremental delta
       dragStartRef.current = { x: e.clientX, y: e.clientY };
     };
 
@@ -169,7 +174,7 @@ export function FormField({
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging, onMove, zoomLevel]);
+  }, [isDragging, onMove, zoomLevel, scale]);
 
   // Text input field
   if (annotation.fieldType === "text") {

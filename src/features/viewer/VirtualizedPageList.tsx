@@ -251,6 +251,8 @@ export function VirtualizedPageList({
             pageNumber={i}
             renderer={renderer}
             readMode={true}
+            displayWidth={pageInfo.width}
+            displayHeight={pageInfo.height}
           />
         </div>
       );

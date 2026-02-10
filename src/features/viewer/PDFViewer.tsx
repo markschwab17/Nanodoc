@@ -39,6 +39,7 @@ export function PDFViewer() {
   const isScrollingFromUserRef = useRef(false); // Track if page change is from user scroll vs external action
   const previousPageRef = useRef(currentPage); // Track previous page to detect actual changes
   const isZoomingRef = useRef(false); // Flag to prevent scroll interference during zoom
+  const hasUserZoomedInReadModeRef = useRef(false); // Once user zooms in read mode, don't reset zoom to baseFitScale
   const previousReadModeRef = useRef(readMode); // Track previous read mode state
   const isProgrammaticScrollRef = useRef(false); // Track if we're programmatically scrolling to prevent IntersectionObserver from overwriting currentPage
   const [isEditingPage, setIsEditingPage] = useState(false);
@@ -122,7 +123,7 @@ export function PDFViewer() {
     
     // Set zooming flag to prevent interference from other effects
     isZoomingRef.current = true;
-    
+    hasUserZoomedInReadModeRef.current = true; // So reset effect won't overwrite this zoom
     // Temporarily disable smooth scrolling to prevent browser auto-adjustment
     const originalScrollBehavior = scrollContainer.style.scrollBehavior;
     scrollContainer.style.scrollBehavior = 'auto';
@@ -810,19 +811,19 @@ export function PDFViewer() {
     }
   }, [readMode, fitMode]);
 
-  // When fitMode is "width" in read mode, set zoomLevel to baseFitScale
-  // BUT: Don't reset if we're actively zooming (user-initiated zoom) or if fitMode is "custom"
+  // When entering read mode, allow reset-to-fit once; after user zooms we stop resetting (hasUserZoomedInReadModeRef).
   useEffect(() => {
-    // Only reset zoom if:
-    // 1. We're in read mode
-    // 2. fitMode is "width" (not "custom" - custom means user is zooming)
-    // 3. We're not actively zooming
-    // 4. zoomLevel doesn't match baseFitScale
-    if (readMode && fitMode === "width" && baseFitScale > 0 && !isZoomingRef.current) {
-      // Only reset if zoomLevel is significantly different and we're not actively zooming
-      if (Math.abs(zoomLevel - baseFitScale) > 0.01) {
-        setZoomLevel(baseFitScale);
-      }
+    const justEnteredReadMode = !previousReadModeRef.current && readMode;
+    if (justEnteredReadMode) {
+      hasUserZoomedInReadModeRef.current = false; // Allow initial fit-to-width when entering read mode
+    }
+  }, [readMode]);
+
+  // When fitMode is "width" in read mode, set zoomLevel to baseFitScale only if user hasn't manually zoomed
+  useEffect(() => {
+    if (!readMode || fitMode !== "width" || baseFitScale <= 0 || isZoomingRef.current || hasUserZoomedInReadModeRef.current) return;
+    if (Math.abs(zoomLevel - baseFitScale) > 0.01) {
+      setZoomLevel(baseFitScale);
     }
   }, [readMode, fitMode, baseFitScale, zoomLevel, setZoomLevel]);
 

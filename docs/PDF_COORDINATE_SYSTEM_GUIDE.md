@@ -63,6 +63,29 @@ The canvas uses high-DPI rendering and adjustable render quality for crisp text:
 
 ---
 
+## Read Mode (Virtualized Scrolling)
+
+In **read mode**, pages are rendered in a virtualized list with dynamic scrolling. The page’s **display size in pixels** is no longer derived from the single-page container; it comes from **VirtualizedPageList**, which computes each page’s width and height from `baseFitScale`, `zoomLevel`, and the first page’s width.
+
+### Single source of truth
+
+- **VirtualizedPageList** computes `pageData` (per-page `width`, `height`, `top`) and passes **`displayWidth`** and **`displayHeight`** into **PageCanvas** for each visible page.
+- **PageCanvas** uses these values only when `readMode === true` and the props are provided:
+  - **Canvas CSS size**: `canvas.style.width` and `canvas.style.height` are set to `displayWidth` and `displayHeight` so the canvas exactly matches the parent div.
+  - **`pdfToCanvas`**: Scale is computed as `scaleX = displayWidth / mediaboxWidth`, `scaleY = displayHeight / mediaboxHeight` (with the same mediabox/rotation logic as in single-page mode). Overlay coordinates are therefore in the same pixel space as the div.
+- If `readMode` is true but `displayWidth`/`displayHeight` are not provided (e.g. tests), PageCanvas falls back to deriving scale from `zoomLevel` and the first page’s metadata.
+
+### Overlay alignment
+
+- All overlays that use **`pdfToCanvas`** (highlights, shapes, text, forms, stamps, callouts, images) automatically align in read mode because `pdfToCanvas` uses the same display dimensions as the canvas.
+- **Spec highlights** and **search highlights** use the same scale (either via `pdfToCanvas` or the same `displayWidth`/`displayHeight`-based scale) so they stay aligned and are not sensitive to layout timing (e.g. avoiding `getBoundingClientRect()` for scale in read mode).
+
+### Mouse → PDF
+
+- `getPDFCoordinates()` still uses `canvas.getBoundingClientRect()` and ratios. Once the canvas is sized from `displayWidth`/`displayHeight`, the canvas rect matches the overlay coordinate space, so mouse→PDF remains correct with no extra logic.
+
+---
+
 ## The Conversion Pipeline
 
 ### Mouse → PDF (Capturing User Input)

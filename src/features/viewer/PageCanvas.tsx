@@ -4,7 +4,7 @@
  * Renders a single PDF page with enhanced zoom and pan support.
  */
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -42,6 +42,52 @@ interface PageCanvasProps {
   renderer: PDFRenderer;
   onPageClick?: (x: number, y: number) => void;
   readMode?: boolean;
+  /** When in read mode, display dimensions from VirtualizedPageList (single source of truth for overlay scale) */
+  displayWidth?: number;
+  displayHeight?: number;
+}
+
+/** Stable wrapper so React doesn't remount canvas on every render. Uses display dimensions for layout so the cell is filled. */
+function ReadModeScaleWrapper({
+  active,
+  pageWidth,
+  pageHeight,
+  displayWidth,
+  displayHeight,
+  scale,
+  children,
+}: {
+  active: boolean;
+  pageWidth: number;
+  pageHeight: number;
+  displayWidth: number;
+  displayHeight: number;
+  scale: number;
+  children: React.ReactNode;
+}) {
+  if (!active) return <>{children}</>;
+  return (
+    <div
+      style={{
+        width: displayWidth,
+        height: displayHeight,
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          width: pageWidth,
+          height: pageHeight,
+          transform: `scale(${scale})`,
+          transformOrigin: "0 0",
+          position: "relative",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
 }
 
 export function PageCanvas({
@@ -50,6 +96,8 @@ export function PageCanvas({
   renderer,
   onPageClick,
   readMode = false,
+  displayWidth: displayWidthProp,
+  displayHeight: displayHeightProp,
 }: PageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -851,6 +899,26 @@ export function PageCanvas({
     };
   }, [setZoomLevel, setFitMode, readMode]);
 
+  // In read mode, set canvas display size before paint so it matches overlay scale in the same frame (avoids bounce when zoom changes)
+  useLayoutEffect(() => {
+    if (!readMode || !canvasRef.current || !document.isDocumentLoaded()) return;
+    const pageMetadata = document.getPageMetadata(pageNumber);
+    if (!pageMetadata) return;
+    let w: number;
+    let h: number;
+    if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
+      w = displayWidthProp;
+      h = displayHeightProp;
+    } else {
+      const first = document.getPageMetadata(0);
+      const scale = first ? (first.width * zoomLevel) / pageMetadata.width : zoomLevel;
+      w = pageMetadata.width * scale;
+      h = pageMetadata.height * scale;
+    }
+    canvasRef.current.style.width = `${w}px`;
+    canvasRef.current.style.height = `${h}px`;
+  }, [readMode, pageNumber, document, displayWidthProp, displayHeightProp, zoomLevel]);
+
   useEffect(() => {
     // Early return: if global read mode is active but this is the normal mode canvas
     // Skip rendering to prevent unnecessary work during zoom
@@ -882,70 +950,69 @@ export function PageCanvas({
         let viewportScale = zoomLevel;
         let displayScale = zoomLevel; // Scale for canvas display size
         
-        // In read mode, calculate display scale to match VirtualizedPageList calculation
-        // VirtualizedPageList calculates: viewportWidth = firstPage.width * baseFitScale * (zoomLevel / baseFitScale)
-        // Which simplifies to: viewportWidth = firstPage.width * zoomLevel
-        // Then each page: pageScale = viewportWidth / pageMetadata.width
+        // In read mode, use display dimensions from VirtualizedPageList when provided (single source of truth).
+        // Otherwise fall back to zoomLevel + first page metadata for backward compatibility.
         if (readMode) {
-          // In read mode, calculate directly from zoomLevel - don't wait for container measurement
-          // VirtualizedPageList sizes the parent div, and PageCanvas fills it (100% width/height)
-          // The canvas should be sized to match the container, which is calculated from zoomLevel
-          const firstPageMetadata = document.getPageMetadata(0);
-          if (firstPageMetadata) {
-            // Calculate viewport width: firstPage.width * zoomLevel
-            // Then calculate scale for this page: viewportWidth / pageMetadata.width
-            const viewportWidth = firstPageMetadata.width * zoomLevel;
-            displayScale = viewportWidth / pageMetadata.width;
+          if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
+            displayScale = displayWidthProp / pageMetadata.width;
           } else {
-            displayScale = zoomLevel;
+            const firstPageMetadata = document.getPageMetadata(0);
+            if (firstPageMetadata) {
+              const viewportWidth = firstPageMetadata.width * zoomLevel;
+              displayScale = viewportWidth / pageMetadata.width;
+            } else {
+              displayScale = zoomLevel;
+            }
           }
         } else {
-          if (fitMode === "width" && containerRef.current) {
-            await new Promise(resolve => requestAnimationFrame(resolve));
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const currentFitMode = fitModeRef.current;
+          const currentZoomLevel = zoomLevelRef.current;
+          if (currentFitMode === "width" && containerRef.current) {
             const containerWidth = containerRef.current.clientWidth;
             if (containerWidth > 0) {
               viewportScale = containerWidth / pageMetadata.width;
-              if (Math.abs(viewportScale - zoomLevel) > 0.01) {
+              if (Math.abs(viewportScale - currentZoomLevel) > 0.01) {
                 setZoomLevel(viewportScale);
               }
             }
-          } else if (fitMode === "page" && containerRef.current) {
-            let containerWidth = containerRef.current.clientWidth;
-            let containerHeight = containerRef.current.clientHeight;
+          } else if (currentFitMode === "page" && containerRef.current) {
+            const containerWidth = containerRef.current.clientWidth;
+            const containerHeight = containerRef.current.clientHeight;
             const scaleX = containerWidth / pageMetadata.width;
             const scaleY = containerHeight / pageMetadata.height;
             viewportScale = Math.min(scaleX, scaleY);
             setZoomLevel(viewportScale);
           }
           
-          // Center canvas in container when fitting (normal mode only)
-          if ((fitMode === "page" || fitMode === "width") && containerRef.current) {
+          if ((currentFitMode === "page" || currentFitMode === "width") && containerRef.current) {
             const containerWidth = containerRef.current.clientWidth;
             const containerHeight = containerRef.current.clientHeight;
             const scaledWidth = pageMetadata.width * viewportScale;
             const scaledHeight = pageMetadata.height * viewportScale;
-            
             const centerX = (containerWidth - scaledWidth) / 2;
             const centerY = (containerHeight - scaledHeight) / 2;
-            
             if (Math.abs(panOffset.x - centerX) > 1 || Math.abs(panOffset.y - centerY) > 1) {
               setTimeout(() => {
                 setPanOffset({ x: centerX, y: centerY });
               }, 0);
             }
+            displayScale = viewportScale;
           }
         }
 
-        // In read mode, calculate display size based on zoomLevel directly
-        // The container is sized by VirtualizedPageList based on pageData which uses zoomLevel
-        // So we use zoomLevel directly - no need to measure container (which might be stale)
-        let canvasDisplayWidth = pageMetadata.width * displayScale;
-        let canvasDisplayHeight = pageMetadata.height * displayScale;
-        
-        // In read mode, use zoomLevel directly - container will match this size
-        // This ensures canvas renders at the correct zoom level immediately
+        // Canvas display size: 1:1 PDF so overlay coordinates match (container scale(zoomLevel) handles zoom in single mode; wrapper in read mode)
+        let canvasDisplayWidth: number;
+        let canvasDisplayHeight: number;
+        if (readMode) {
+          canvasDisplayWidth = pageMetadata.width;
+          canvasDisplayHeight = pageMetadata.height;
+        } else {
+          canvasDisplayWidth = pageMetadata.width;
+          canvasDisplayHeight = pageMetadata.height;
+        }
 
-        // Calculate render scale: display scale * quality * DPR for high-DPI rendering
+        // Calculate render scale: display scale * quality * DPR for high-DPI rendering (we still render at displayScale for crisp output)
         const renderScale = displayScale * RENDER_SCALE * dpr;
 
         // Note: We do NOT pass rotation to the renderer because mupdf already applies
@@ -965,17 +1032,9 @@ export function PageCanvas({
         canvas.width = rendered.width;
         canvas.height = rendered.height;
         
-        // Canvas display size - set to exact pixel dimensions to prevent stretching
-        if (readMode) {
-          // In read mode, set canvas to exact container dimensions
-          // This prevents stretching when container size changes with zoom
-          canvas.style.width = `${canvasDisplayWidth}px`;
-          canvas.style.height = `${canvasDisplayHeight}px`;
-        } else {
-          // In normal mode, use PDF dimensions (browser downscales crisply)
-          canvas.style.width = `${pageMetadata.width}px`;
-          canvas.style.height = `${pageMetadata.height}px`;
-        }
+        // Canvas display size: 1:1 PDF in read mode (wrapper scale handles zoom); 1:1 in normal mode
+        canvas.style.width = `${canvasDisplayWidth}px`;
+        canvas.style.height = `${canvasDisplayHeight}px`;
 
         const ctx = canvas.getContext("2d", {
           willReadFrequently: false,
@@ -1009,20 +1068,10 @@ export function PageCanvas({
     if (readMode && canvasRef.current && document.isDocumentLoaded()) {
       const pageMetadata = document.getPageMetadata(pageNumber);
       if (pageMetadata) {
-        // Calculate new canvas size immediately based on zoomLevel
-        const firstPageMetadata = document.getPageMetadata(0);
-        let displayScale = zoomLevel;
-        if (firstPageMetadata) {
-          const viewportWidth = firstPageMetadata.width * zoomLevel;
-          displayScale = viewportWidth / pageMetadata.width;
-        }
-        const canvasDisplayWidth = pageMetadata.width * displayScale;
-        const canvasDisplayHeight = pageMetadata.height * displayScale;
-        
-        // Update canvas size immediately for smooth visual feedback
+        // Read mode: canvas is 1:1 PDF; scale wrapper handles zoom
         const canvas = canvasRef.current;
-        canvas.style.width = `${canvasDisplayWidth}px`;
-        canvas.style.height = `${canvasDisplayHeight}px`;
+        canvas.style.width = `${pageMetadata.width}px`;
+        canvas.style.height = `${pageMetadata.height}px`;
       }
       
       // Clear any pending render
@@ -1063,7 +1112,7 @@ export function PageCanvas({
         }
       };
     }
-  }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode]);
+  }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode, displayWidthProp, displayHeightProp]);
   
   // Effect to ensure centering when fitMode changes to "page" or "width"
   // Don't run while actively panning to prevent resetting the view
@@ -1328,29 +1377,19 @@ export function PageCanvas({
     // PDF Y=0 is at bottom, canvas Y=0 is at top - flip Y-axis using mediabox height
     const flippedY = mediaboxHeight - pdfY;
     
-    // In read mode, we need to scale coordinates based on zoomLevel directly
-    // This matches how the canvas is sized in the render function
-    // VirtualizedPageList calculates: viewportWidth = firstPage.width * zoomLevel
-    // Then each page: pageScale = viewportWidth / pageMetadata.width
-    // So we use zoomLevel directly to calculate the scale for this page
+    // In read mode we use a scale wrapper (same coordinate scale as single-page: 1:1 PDF inside, one scale on wrapper).
+    // So return 1:1 here; the wrapper's transform handles zoom.
     let scaleX = 1;
     let scaleY = 1;
-    
-    if (readMode) {
-      // In read mode, calculate scale directly from zoomLevel, matching render logic
-      // This ensures annotations stay aligned during zoom/pan operations
-      const firstPageMetadata = document.getPageMetadata(0);
-      if (firstPageMetadata) {
-        // Calculate viewport width: firstPage.width * zoomLevel
-        const viewportWidth = firstPageMetadata.width * zoomLevel;
-        // Calculate scale for this page: viewportWidth / pageMetadata.width
-        const pageScale = viewportWidth / mediaboxWidth;
-        scaleX = pageScale;
-        scaleY = pageScale; // Maintain aspect ratio
-      }
+    if (!readMode) {
+      // single-page: keep 1:1 (container has scale(zoomLevel))
+    } else {
+      // read mode: 1:1 so overlays match single-page coordinate scale; wrapper applies readModeAnnotationScale
+      scaleX = 1;
+      scaleY = 1;
     }
     
-    // Return CSS coordinates (display size) for overlay positioning
+    // Return CSS coordinates for overlay positioning (1:1 PDF in read mode, same as single)
     // Apply scaling in read mode to account for canvas display size differences
     // This ensures annotations align with the actual canvas rendering
     const result = {
@@ -1366,6 +1405,22 @@ export function PageCanvas({
     
     return result;
   };
+
+  // Single source of truth for read-mode scale: must match pdfToCanvas scaleX/scaleY so overlay dimensions match at any zoom
+  const readModeAnnotationScale = useMemo(() => {
+    if (!readMode) return 1;
+    const pageMetadata = document.getPageMetadata(pageNumber);
+    if (!pageMetadata) return 1;
+    const rotation = pageRotation !== undefined ? pageRotation : (pageMetadata.rotation ?? 0);
+    const mediaboxWidth = rotation === 90 || rotation === 270 ? pageMetadata.height : pageMetadata.width;
+    if (mediaboxWidth <= 0) return 1;
+    if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
+      return displayWidthProp / mediaboxWidth;
+    }
+    const firstPageMetadata = document.getPageMetadata(0);
+    if (!firstPageMetadata) return zoomLevel;
+    return (firstPageMetadata.width * zoomLevel) / mediaboxWidth;
+  }, [readMode, pageNumber, document, pageRotation, displayWidthProp, displayHeightProp, zoomLevel]);
 
   // Helper function to convert PDF coordinates to container-relative (screen) coordinates
   // This is the REVERSE of getPDFCoordinates
@@ -2924,50 +2979,52 @@ export function PageCanvas({
           </div>
         </div>
       )}
-      <div
-        className={readMode ? "block relative" : "inline-block relative"}
-        style={{
-          // In read mode, no transform - zoom is handled at the pages container level
-          // In normal mode, apply viewport transform: scale then translate
-          // Always use panOffset state (not ref) for consistency - refs are for internal calculations
-          transform: readMode 
-            ? undefined
-            : `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
-          transformOrigin: "0 0",
-          margin: 0, // No margin in read mode - parent handles positioning
-          padding: 0,
-          lineHeight: readMode ? 0 : undefined,
-          fontSize: readMode ? 0 : undefined,
-          // In read mode, fill parent container completely
-          width: readMode ? "100%" : undefined,
-          height: readMode ? "100%" : undefined,
-          display: readMode ? 'block' : undefined, // Block display to remove inline spacing
-          boxSizing: readMode ? 'border-box' : undefined, // Ensure padding/border included in size
-          overflow: readMode ? 'hidden' : undefined, // Prevent overflow gaps
-          position: readMode ? 'relative' : undefined, // Ensure proper positioning
-        }}
+      <ReadModeScaleWrapper
+        active={readMode && pageMetadata != null}
+        pageWidth={pageMetadata?.width ?? 0}
+        pageHeight={pageMetadata?.height ?? 0}
+        displayWidth={displayWidthProp ?? pageMetadata?.width ?? 0}
+        displayHeight={displayHeightProp ?? pageMetadata?.height ?? 0}
+        scale={readModeAnnotationScale}
       >
-        <canvas 
-          ref={canvasRef} 
-          className={cn("block", !readMode && "shadow-2xl")} 
-          style={{ 
-            position: "relative", 
-            zIndex: 1, 
-            margin: 0, 
-            padding: 0, 
-            display: "block", 
-            verticalAlign: "top", 
-            border: "none", 
-            outline: "none",
-            // In read mode, canvas fills its container (sized by VirtualizedPageList)
+        <div
+          className={readMode ? "block relative" : "inline-block relative"}
+          style={{
+            transform: readMode
+              ? undefined
+              : `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
+            transformOrigin: "0 0",
+            margin: 0,
+            padding: 0,
+            lineHeight: readMode ? 0 : undefined,
+            fontSize: readMode ? 0 : undefined,
             width: readMode ? "100%" : undefined,
             height: readMode ? "100%" : undefined,
-            boxSizing: "border-box", // Ensure no extra spacing from borders
-            flexShrink: 0, // Prevent flex shrinking
-          }} 
-        />
-        
-        {/* Render text box creation preview */}
+            display: readMode ? "block" : undefined,
+            boxSizing: readMode ? "border-box" : undefined,
+            overflow: readMode ? "hidden" : undefined,
+            position: readMode ? "relative" : undefined,
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            className={cn("block", !readMode && "shadow-2xl")}
+            style={{
+              position: "relative",
+              zIndex: 1,
+              margin: 0,
+              padding: 0,
+              display: "block",
+              verticalAlign: "top",
+              border: "none",
+              outline: "none",
+              width: readMode && pageMetadata ? pageMetadata.width : undefined,
+              height: readMode && pageMetadata ? pageMetadata.height : undefined,
+              boxSizing: "border-box",
+              flexShrink: 0,
+            }}
+          />
+          {/* Render text box creation preview */}
         {isCreatingTextBox && textBoxStart && selectionEnd && activeTool === "text" && (
           (() => {
             const startCanvas = pdfToCanvas(textBoxStart.x, textBoxStart.y);
@@ -3450,28 +3507,32 @@ export function PageCanvas({
                   const maxX = Math.max(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
                   const maxY = Math.max(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
                   
-                  // mupdf search quads use Y=0 at top (screen-like coordinates)
-                  // NOT Y=0 at bottom like standard PDF coordinates
-                  // So we don't need to flip Y - use 1:1 mapping for CSS positioning
-                  // Coordinate system is independent of RENDER_SCALE
-                  // BUT: In read mode, canvas is scaled, so we need to scale coordinates
-                  let canvasX = minX;  // 1:1 mapping with PDF points (default)
-                  let canvasY = minY;  // 1:1 mapping with PDF points (default)
-                  let width = maxX - minX;  // 1:1 mapping
-                  let height = maxY - minY;  // 1:1 mapping
+                  // mupdf search quads use Y=0 at top (screen-like), so no Y flip; just scale in read mode
+                  let canvasX = minX;
+                  let canvasY = minY;
+                  let width = maxX - minX;
+                  let height = maxY - minY;
                   
-                  // In read mode, scale coordinates to match canvas display size
+                  // In read mode, use same scale as pdfToCanvas (display props or zoom fallback) for alignment
                   const pageMetadata = document.getPageMetadata(pageNumber);
-                  if (readMode && canvasRef.current && pageMetadata) {
-                    const canvasRect = canvasRef.current.getBoundingClientRect();
-                    if (canvasRect.width > 0 && pageMetadata.width > 0) {
-                      const scaleX = canvasRect.width / pageMetadata.width;
-                      const scaleY = canvasRect.height / pageMetadata.height;
-                      canvasX = minX * scaleX;
-                      canvasY = minY * scaleY;
-                      width = (maxX - minX) * scaleX;
-                      height = (maxY - minY) * scaleY;
+                  if (readMode && pageMetadata && pageMetadata.width > 0 && pageMetadata.height > 0) {
+                    let scaleX = 1;
+                    let scaleY = 1;
+                    if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
+                      scaleX = displayWidthProp / pageMetadata.width;
+                      scaleY = displayHeightProp / pageMetadata.height;
+                    } else {
+                      const firstPageMetadata = document.getPageMetadata(0);
+                      if (firstPageMetadata) {
+                        const viewportWidth = firstPageMetadata.width * zoomLevel;
+                        scaleX = viewportWidth / pageMetadata.width;
+                        scaleY = scaleX;
+                      }
                     }
+                    canvasX = minX * scaleX;
+                    canvasY = minY * scaleY;
+                    width = (maxX - minX) * scaleX;
+                    height = (maxY - minY) * scaleY;
                   }
                   
                   return (
@@ -3509,21 +3570,19 @@ export function PageCanvas({
           
           const isSelected = selectedSpecDocumentId === documentId;
           const pageMetadata = currentDocument.getPageMetadata(pageNumber);
-          const pageHeight = pageMetadata?.height || 792;
           
           return (
             <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 45 }}>
               {/* Regular spec highlights */}
               {pageSpecHighlights.map((highlight: { bbox: [number, number, number, number]; specId: string; color?: string }, idx: number) => {
                 const [x0, y0, x1, y1] = highlight.bbox;
-                // Convert PDF coordinates (Y=0 at bottom) to canvas coordinates (Y=0 at top)
-                // Use 1:1 mapping - coordinate system is independent of RENDER_SCALE
-                const canvasX0 = x0;  // 1:1 mapping with PDF points
-                const canvasY0 = pageHeight - y1;  // Flip Y: 1:1 mapping
-                const canvasX1 = x1;  // 1:1 mapping
-                const canvasY1 = pageHeight - y0;  // Flip Y: 1:1 mapping
-                const width = canvasX1 - canvasX0;
-                const height = canvasY1 - canvasY0;
+                // Convert PDF bbox (Y=0 at bottom) to canvas coordinates via pdfToCanvas so read-mode scale is correct
+                const topLeft = pdfToCanvas(x0, y1);
+                const bottomRight = pdfToCanvas(x1, y0);
+                const canvasX0 = topLeft.x;
+                const canvasY0 = topLeft.y;
+                const width = Math.abs(bottomRight.x - topLeft.x);
+                const height = Math.abs(bottomRight.y - topLeft.y);
                 
                 const isHighlightSelected = isSelected && highlight.specId === selectedSpecId;
                 const baseColor = highlight.color || '#fbbf24';
@@ -4384,20 +4443,8 @@ export function PageCanvas({
             // Ensure zoom is valid
             if (currentZoom <= 0) return null;
             
-            // Calculate scale for annotations
-            // In read mode, use the page scale (same as displayScale in render function)
-            // In normal mode, use 1.0 because the container transform handles scaling
-            let annotationScale = 1.0;
-            if (readMode) {
-              const firstPageMetadata = document.getPageMetadata(0);
-              const pageMetadata = document.getPageMetadata(pageNumber);
-              if (firstPageMetadata && pageMetadata) {
-                // Calculate viewport width: firstPage.width * zoomLevel (matches render function)
-                const viewportWidth = firstPageMetadata.width * currentZoom;
-                // Calculate scale for this page: viewportWidth / pageMetadata.width (matches displayScale)
-                annotationScale = viewportWidth / pageMetadata.width;
-              }
-            }
+            // Read mode: 1:1 overlay space (wrapper scale handles zoom)
+            const annotationScale = readMode ? 1.0 : 1.0;
             
             // Since RichTextEditor is inside the transformed div, use canvas display coordinates
             // Ensure coordinates are valid numbers
@@ -4778,20 +4825,7 @@ export function PageCanvas({
               const currentZoom = zoomLevel;
               if (currentZoom <= 0) return null;
               
-              // Calculate scale for annotations
-              // In read mode, use the page scale (same as displayScale in render function)
-              // In normal mode, use 1.0 because the container transform handles scaling
-              let annotationScale = 1.0;
-              if (readMode) {
-                const firstPageMetadata = document.getPageMetadata(0);
-                const pageMetadata = document.getPageMetadata(pageNumber);
-                if (firstPageMetadata && pageMetadata) {
-                  // Calculate viewport width: firstPage.width * zoomLevel (matches render function)
-                  const viewportWidth = firstPageMetadata.width * currentZoom;
-                  // Calculate scale for this page: viewportWidth / pageMetadata.width (matches displayScale)
-                  annotationScale = viewportWidth / pageMetadata.width;
-                }
-              }
+              const annotationScale = readMode ? 1.0 : 1.0;
               
               // Convert PDF coordinates to canvas display coordinates (same as text annotations)
               // annot.y is the BOTTOM edge in PDF coordinates
@@ -4978,6 +5012,7 @@ export function PageCanvas({
                   <FormField
                     annotation={annot}
                     pdfToCanvas={pdfToCanvas}
+                    scale={readMode ? 1 : undefined}
                     onValueChange={(value) => {
                       if (!currentDocument) return;
                       updateAnnotation(
@@ -5035,6 +5070,7 @@ export function PageCanvas({
                         );
                       }}
                       zoomLevel={zoomLevel}
+                      scale={readMode ? 1 : undefined}
                     />
                   )}
                 </div>
@@ -5111,23 +5147,7 @@ export function PageCanvas({
               const currentZoom = zoomLevel;
               if (currentZoom <= 0) return null;
               
-              // Calculate scale for annotations
-              // In read mode, use the page scale (same as displayScale in render function)
-              // In normal mode, use actualScale or zoomLevel (accounts for fit modes)
-              let annotationScale = 1.0;
-              if (readMode) {
-                const firstPageMetadata = document.getPageMetadata(0);
-                const pageMetadata = document.getPageMetadata(pageNumber);
-                if (firstPageMetadata && pageMetadata) {
-                  // Calculate viewport width: firstPage.width * zoomLevel (matches render function)
-                  const viewportWidth = firstPageMetadata.width * currentZoom;
-                  // Calculate scale for this page: viewportWidth / pageMetadata.width (matches displayScale)
-                  annotationScale = viewportWidth / pageMetadata.width;
-                }
-              } else {
-                // In normal mode, use actualScale for coordinate conversion (accounts for fit modes)
-                annotationScale = actualScale > 0 ? actualScale : currentZoom;
-              }
+              const annotationScale = readMode ? 1 : (actualScale > 0 ? actualScale : currentZoom);
               
               const pdfTopY = annot.y + (annot.height || 0);
               const canvasPos = pdfToCanvas(annot.x, pdfTopY);
@@ -5513,7 +5533,8 @@ export function PageCanvas({
             setEditingStampAnnotation(null);
           }}
         />
-      </div>
+        </div>
+      </ReadModeScaleWrapper>
     </div>
   );
 }
