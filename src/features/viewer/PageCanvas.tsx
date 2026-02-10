@@ -750,7 +750,8 @@ export function PageCanvas({
     };
   }, []);
 
-  // Handle keyboard for space+drag pan
+  // Handle keyboard for space+drag pan (temporary hand/pan - does NOT change selected tool)
+  // Use capture: true so we run before focused toolbar buttons; Space must not re-activate the last tool.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't prevent space if user is typing in an input field
@@ -775,6 +776,7 @@ export function PageCanvas({
       if (e.code === "Space" && !e.repeat) {
         setIsSpacePressed(true);
         e.preventDefault();
+        e.stopPropagation();
       }
     };
 
@@ -784,12 +786,13 @@ export function PageCanvas({
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
+    const capture = true;
+    window.addEventListener("keydown", handleKeyDown, capture);
+    window.addEventListener("keyup", handleKeyUp, capture);
 
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("keydown", handleKeyDown, capture);
+      window.removeEventListener("keyup", handleKeyUp, capture);
     };
   }, []);
 
