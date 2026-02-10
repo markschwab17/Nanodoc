@@ -43,6 +43,7 @@ import { DocumentSettingsDialog } from "@/features/settings/DocumentSettingsDial
 import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { SpecExtractionButton } from "@/features/specs/SpecExtractionButton";
 import { AISettings } from "@/features/settings/AISettings";
 
@@ -231,14 +232,20 @@ export function Toolbar() {
     try {
       // Get all annotations for this document
       const annotations = usePDFStore.getState().getAnnotations(currentDoc.getId());
-      
+
+      // Build AI metadata (extracted specs, conversation) so it persists when PDF is re-opened
+      const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(currentDoc.getId());
+      const aiMetadata =
+        extractedSpecs.length > 0
+          ? { version: 1, extractedSpecs }
+          : undefined;
       
       // Initialize mupdf and PDFEditor
       const mupdfModule = await import("mupdf");
       const editor = new PDFEditor(mupdfModule.default);
       
-      // Save document with annotations synced
-      const pdfData = await editor.saveDocument(currentDoc, annotations);
+      // Save document with annotations and AI metadata synced
+      const pdfData = await editor.saveDocument(currentDoc, annotations, aiMetadata);
       
       // CRITICAL FIX: After syncing, update store annotations with pdfAnnotation references
       // This ensures that when the PDF is reloaded, the duplicate check can match by pdfAnnotation reference

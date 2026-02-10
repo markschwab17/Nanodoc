@@ -20,9 +20,11 @@ export function SpecExtractionPanel() {
   const {
     isExtracting,
     extractionProgress,
+    extractionPhase,
     extractionError,
     startExtraction,
     setExtractionProgress,
+    setExtractionPhase,
     setExtractionError,
     setExtractedSpecs,
     setSpecHighlights,
@@ -38,6 +40,7 @@ export function SpecExtractionPanel() {
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
   const [panelWidth, setPanelWidth] = useState(384); // w-96 = 384px
   const [isResizing, setIsResizing] = useState(false);
+  const [extractionInProgress, setExtractionInProgress] = useState(false);
   const highlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const currentDocument = getCurrentDocument();
@@ -53,7 +56,10 @@ export function SpecExtractionPanel() {
         const selectedType = type || "specs";
         setExtractionType(selectedType);
         setIsOpen(true);
-        performExtraction(currentDocument, selectedType, customPrompt);
+        setExtractionInProgress(true);
+        performExtraction(currentDocument, selectedType, customPrompt).finally(() => {
+          setExtractionInProgress(false);
+        });
       }
     };
     
@@ -97,6 +103,7 @@ export function SpecExtractionPanel() {
     
     try {
       // Step 1: Create chunks (10% progress)
+      setExtractionPhase("preparing");
       setExtractionProgress(10);
       const chunks = await createChunks(document, {
         maxChunkTokens: 1200,
@@ -110,6 +117,7 @@ export function SpecExtractionPanel() {
       const filteredChunks = filterChunksBySpecProbability(chunkTexts, 20); // threshold
       
       // Step 3: Generate embeddings and retrieve top-K (40% progress)
+      setExtractionPhase("finding");
       setExtractionProgress(40);
       const embeddingService = getEmbeddingService();
       const queryText = extractionType === "geotechnical"
@@ -127,16 +135,30 @@ export function SpecExtractionPanel() {
       const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
       const selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
       
-      // Step 4: Extract specs using AI provider (60-90% progress)
+      // Step 4: Extract specs using AI provider — show "AI is thinking" and nudge progress
+      setExtractionPhase("thinking");
       setExtractionProgress(60);
       const chunksForAI = selectedChunks.map(c => ({
         text: c.text,
         page: c.pageRange[0],
         sectionPath: c.sectionPath,
       }));
-      
+
+      // Nudge progress every 2s during AI call so the bar doesn't look stuck (cap at 88)
+      const progressInterval = setInterval(() => {
+        const state = useSpecExtractionStore.getState();
+        if (!state.isExtracting || state.extractionPhase !== "thinking") {
+          return;
+        }
+        const current = state.extractionProgress;
+        if (current < 88) {
+          useSpecExtractionStore.getState().setExtractionProgress(Math.min(88, current + 6));
+        }
+      }, 2000);
+
       const specs = await extractSpecsFromChunks(chunksForAI, extractionType, customPrompt);
-      
+      clearInterval(progressInterval);
+
       setExtractionProgress(90);
       
       // Step 5: Create highlights from specs
@@ -183,8 +205,14 @@ export function SpecExtractionPanel() {
     // Set selected spec for highlighting
     const specId = spec.spec_id || `spec_${specs.indexOf(spec)}`;
     setSelectedSpec(documentId, specId);
-    
-    // Get exact text quads using mupdf's highlight() method (like HighlightTool does)
+
+    const setHighlightAndTimeout = (quads: number[][], color: string) => {
+      setTemporaryHighlight({ page: spec.page, quads, color, specId });
+      highlightTimeoutRef.current = setTimeout(() => setTemporaryHighlight(null), 3000);
+    };
+    let didSetHighlight = false;
+
+    // Get exact text quads using mupdf's highlight() method when we have bbox (like HighlightTool does)
     if (spec.bbox && spec.bbox.length >= 4) {
       try {
         const mupdfDoc = currentDocument.getMupdfDocument();
@@ -231,26 +259,65 @@ export function SpecExtractionPanel() {
               rawQuad[6], pageHeight - rawQuad[7], // point 3
             ];
           });
-          
-          // Set temporary highlight with exact text quads
           const highlightColor = getColorForCategory(spec.category);
-          setTemporaryHighlight({
-            page: spec.page,
-            quads: quadArray,
-            color: highlightColor,
-            specId: specId,
-          });
-          
-          // Clear temporary highlight after 3 seconds
-          highlightTimeoutRef.current = setTimeout(() => {
-            setTemporaryHighlight(null);
-          }, 3000);
+          setHighlightAndTimeout(quadArray, highlightColor);
+          didSetHighlight = true;
         }
       } catch (error) {
         console.warn("Error getting text quads for spec:", error);
       }
     }
-    
+
+    // When we didn't set a highlight (no bbox, or bbox path failed), try highlighting by searching for quote_text on the page
+    if (!didSetHighlight) {
+      const quoteText = (spec.quote_text || "").trim();
+      if (quoteText.length > 0) {
+        try {
+          const mupdfDoc = currentDocument.getMupdfDocument();
+          const page = mupdfDoc.loadPage(spec.page);
+          const pageMetadata = currentDocument.getPageMetadata(spec.page);
+          const pageHeight = pageMetadata?.height || 792;
+          // Search with a reasonable snippet (mupdf search may have length limits); try full quote first, then shorter
+          const searchCandidates = [
+            quoteText.slice(0, 300),
+            quoteText.slice(0, 150),
+            quoteText.slice(0, 80),
+            quoteText.split(/\s+/).slice(0, 10).join(" "),
+          ].filter(Boolean);
+          let quadArray: number[][] = [];
+          for (const searchText of searchCandidates) {
+            if (searchText.length < 2) continue;
+            const matches = page.search(searchText, 20);
+            if (matches && matches.length > 0) {
+              // Normalize to array of quads: each match can be one quad (8 numbers) or array of quads
+              const first = matches[0];
+              const quadsRaw = Array.isArray(first) && typeof first[0] === "number"
+                ? [first as number[]]
+                : (Array.isArray(first) ? (first as number[][]) : []);
+              quadArray = quadsRaw
+                .filter((q) => Array.isArray(q) && q.length >= 8)
+                .map((rawQuad: number[]) => {
+                  // mupdf search quads use Y=0 at top (display); convert to PDF (Y=0 at bottom)
+                  return [
+                    rawQuad[0], pageHeight - rawQuad[1],
+                    rawQuad[2], pageHeight - rawQuad[3],
+                    rawQuad[4], pageHeight - rawQuad[5],
+                    rawQuad[6], pageHeight - rawQuad[7],
+                  ];
+                });
+              if (quadArray.length > 0) break;
+            }
+          }
+          if (quadArray.length > 0) {
+            const highlightColor = getColorForCategory(spec.category);
+            setHighlightAndTimeout(quadArray, highlightColor);
+          }
+        } catch (err) {
+          console.warn("Error highlighting spec by quote search:", err);
+        }
+      }
+    }
+
     // Dispatch scroll-to-spec event - this will handle page navigation and scrolling
     // Don't call setCurrentPage directly - let the event handler manage it
     const event = new CustomEvent('scroll-to-spec', {
@@ -316,7 +383,7 @@ export function SpecExtractionPanel() {
       escapeCSV(s.parameter),
       escapeCSV(s.value),
       escapeCSV(s.unit),
-      escapeCSV(s.page),
+      escapeCSV((s.page ?? 0) + 1),
       escapeCSV(s.section_heading),
       escapeCSV(s.spec_id),
       escapeCSV(s.quote_text),
@@ -368,19 +435,34 @@ export function SpecExtractionPanel() {
       
       <ScrollArea className="flex-1">
         <div className="p-4 space-y-4">
-          {isExtracting && (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span className="text-sm">Extracting specifications...</span>
+          {(isExtracting || extractionInProgress) && (
+            <div className="space-y-4 py-4">
+              <div className={`flex items-center gap-3 ${extractionPhase === "thinking" ? "rounded-lg border bg-muted/50 p-4" : ""}`}>
+                <Loader2 className={`animate-spin text-primary flex-shrink-0 ${extractionPhase === "thinking" ? "h-6 w-6" : "h-4 w-4"}`} />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">
+                    {extractionPhase === "thinking"
+                      ? "AI is thinking…"
+                      : extractionPhase === "finding"
+                        ? "Finding relevant sections…"
+                        : "Preparing document…"}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {extractionPhase === "thinking"
+                      ? "Extracting specs from the report. This may take a minute."
+                      : `${extractionProgress}% complete`}
+                  </p>
+                </div>
               </div>
-              <div className="w-full bg-muted rounded-full h-2">
+              <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
                 <div
-                  className="bg-primary h-2 rounded-full transition-all"
+                  className="bg-primary h-2 rounded-full transition-all duration-500 ease-out"
                   style={{ width: `${extractionProgress}%` }}
                 />
               </div>
-              <p className="text-xs text-muted-foreground">{extractionProgress}% complete</p>
+              {extractionPhase !== "thinking" && (
+                <p className="text-xs text-muted-foreground">{extractionProgress}% complete</p>
+              )}
             </div>
           )}
           
@@ -390,14 +472,14 @@ export function SpecExtractionPanel() {
             </div>
           )}
           
-          {!isExtracting && specs.length === 0 && (
+          {!isExtracting && !extractionInProgress && specs.length === 0 && (
             <div className="text-center py-8 text-muted-foreground">
               <p>No data extracted yet.</p>
               <p className="text-sm mt-2">Select extraction type and click the button to begin.</p>
             </div>
           )}
           
-          {!isExtracting && specs.length > 0 && (
+          {!isExtracting && !extractionInProgress && specs.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium">
@@ -447,7 +529,7 @@ export function SpecExtractionPanel() {
                             </span>
                             <span className="text-xs text-muted-foreground">•</span>
                             <span className="text-xs text-muted-foreground">
-                              Page {spec.page}
+                              Page {(spec.page ?? 0) + 1}
                             </span>
                           </div>
                           <p className="font-medium text-sm">{spec.parameter}</p>
@@ -514,7 +596,7 @@ export function SpecExtractionPanel() {
                                 <td className="p-2 border-b font-medium">{spec.parameter}</td>
                                 <td className="p-2 border-b">{spec.value}</td>
                                 <td className="p-2 border-b">{spec.unit || "-"}</td>
-                                <td className="p-2 border-b">{spec.page}</td>
+                                <td className="p-2 border-b">{(spec.page ?? 0) + 1}</td>
                                 <td className="p-2 border-b text-xs text-muted-foreground">
                                   {spec.section_heading || "-"}
                                 </td>

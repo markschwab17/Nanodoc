@@ -9,8 +9,10 @@ import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { PDFDocument } from "@/core/pdf/PDFDocument";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
+import { readAIMetadata } from "@/core/pdf/PDFAIMetadata";
 
 export function usePDF() {
   const pdfStore = usePDFStore();
@@ -45,6 +47,17 @@ export function usePDF() {
         
         pdfStore.addDocument(document, filePath || null);
         pdfStore.setCurrentDocument(documentId);
+
+        // Restore AI metadata (extracted specs, conversation) from PDF so user can continue
+        try {
+          const mupdfDoc = document.getMupdfDocument();
+          const aiPayload = readAIMetadata(mupdfDoc);
+          if (aiPayload?.extractedSpecs?.length) {
+            useSpecExtractionStore.getState().setExtractedSpecs(documentId, aiPayload.extractedSpecs);
+          }
+        } catch (e) {
+          // Non-fatal: PDF may have no AI metadata or old format
+        }
 
         // Add to recent files if we have a file path
         if (filePath) {

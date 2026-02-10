@@ -9,6 +9,7 @@ import type { Annotation } from "./types";
 import { PDFAnnotationOperations } from "./PDFAnnotationOperations";
 import { PDFPageOperations } from "./PDFPageOperations";
 import { parseColor } from "./utils/colorUtils";
+import { writeAIMetadata, type PDFAIMetadataPayload } from "./PDFAIMetadata";
 
 export class PDFDocumentOperations {
   constructor(
@@ -120,11 +121,9 @@ export class PDFDocumentOperations {
 
 
   async saveDocument(
-
   document: PDFDocument,
-
-  annotations?: Annotation[]
-
+  annotations?: Annotation[],
+  aiMetadata?: PDFAIMetadataPayload
   ): Promise<Uint8Array> {
     console.log(`[PDFDocumentOperations] saveDocument called with annotations:`, annotations ? annotations.length : 'undefined');
   const mupdfDoc = document.getMupdfDocument();
@@ -504,6 +503,13 @@ export class PDFDocumentOperations {
     } catch (err) {
       console.error(`Error checking page ${pageNumber} before save:`, err);
     }
+  }
+
+  // Write AI metadata (extracted specs, conversation) into PDF Info so it persists on save/reopen.
+  // Write to the PDF object that is being saved so the metadata is included in the buffer.
+  if (aiMetadata) {
+    writeAIMetadata(pdfDoc, aiMetadata);
+    writeAIMetadata(mupdfDoc, aiMetadata);
   }
 
   // saveToBuffer() writes the entire PDF including all annotations to a binary buffer

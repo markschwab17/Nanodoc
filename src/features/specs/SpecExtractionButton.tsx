@@ -8,7 +8,7 @@
 import { useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Sparkles, FileText, MessageSquare, DollarSign } from "lucide-react";
+import { Sparkles, FileText, MessageSquare, DollarSign, Loader2 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -149,9 +149,10 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
           title={isExtracting ? "Extracting..." : "Extract Specifications or Geotechnical Data"}
           className={`relative ${buttonClassName || ''}`}
         >
-          <Sparkles className={iconClassName || "h-4 w-4"} />
-          {isExtracting && (
-            <span className="absolute -top-1 -right-1 h-2 w-2 bg-primary rounded-full animate-pulse" />
+          {isExtracting ? (
+            <Loader2 className={`animate-spin ${iconClassName || "h-4 w-4"}`} />
+          ) : (
+            <Sparkles className={iconClassName || "h-4 w-4"} />
           )}
         </Button>
       </PopoverTrigger>
@@ -246,7 +247,11 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
                 className="w-full"
                 size="sm"
               >
-                <Sparkles className="h-4 w-4 mr-2" />
+                {isExtracting ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4 mr-2" />
+                )}
                 {isExtracting 
                   ? "Extracting..." 
                   : `Extract ${extractionType === "specs" ? "Specs" : "Geotechnical Data"}`}

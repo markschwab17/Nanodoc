@@ -230,9 +230,10 @@ export class PDFEditor {
 
   async saveDocument(
     document: PDFDocument,
-    annotations?: Annotation[]
+    annotations?: Annotation[],
+    aiMetadata?: import("./PDFAIMetadata").PDFAIMetadataPayload
   ): Promise<Uint8Array> {
-    return this.documentOps.saveDocument(document, annotations);
+    return this.documentOps.saveDocument(document, annotations, aiMetadata);
   }
 
   async exportPageAsPDF(

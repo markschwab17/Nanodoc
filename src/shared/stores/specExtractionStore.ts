@@ -21,10 +21,13 @@ export interface TemporaryTextHighlight {
   specId: string;
 }
 
+export type ExtractionPhase = "preparing" | "finding" | "thinking" | null;
+
 export interface SpecExtractionState {
   // Extraction state
   isExtracting: boolean;
   extractionProgress: number; // 0-100
+  extractionPhase: ExtractionPhase; // for loading message
   extractionError: string | null;
   
   // Results
@@ -44,6 +47,7 @@ export interface SpecExtractionState {
   // Actions
   startExtraction: (documentId: string) => void;
   setExtractionProgress: (progress: number) => void;
+  setExtractionPhase: (phase: ExtractionPhase) => void;
   setExtractionError: (error: string | null) => void;
   setExtractedSpecs: (documentId: string, specs: SpecExtractionResult[]) => void;
   setSpecHighlights: (documentId: string, highlights: SpecHighlight[]) => void;
@@ -58,6 +62,7 @@ export interface SpecExtractionState {
 export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => ({
   isExtracting: false,
   extractionProgress: 0,
+  extractionPhase: null,
   extractionError: null,
   extractedSpecs: new Map(),
   specHighlights: new Map(),
@@ -76,6 +81,7 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
     set({
       isExtracting: true,
       extractionProgress: 0,
+      extractionPhase: "preparing",
       extractionError: null,
       currentDocumentId: documentId,
     }),
@@ -83,8 +89,11 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
   setExtractionProgress: (progress: number) =>
     set({ extractionProgress: Math.max(0, Math.min(100, progress)) }),
   
+  setExtractionPhase: (phase: ExtractionPhase) =>
+    set({ extractionPhase: phase }),
+  
   setExtractionError: (error: string | null) =>
-    set({ extractionError: error, isExtracting: false }),
+    set({ extractionError: error, isExtracting: false, extractionPhase: null }),
   
   setExtractedSpecs: (documentId: string, specs: SpecExtractionResult[]) =>
     set((state) => {
@@ -104,6 +113,7 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
     set({
       isExtracting: false,
       extractionProgress: 100,
+      extractionPhase: null,
     }),
   
   clearExtraction: (documentId: string) =>

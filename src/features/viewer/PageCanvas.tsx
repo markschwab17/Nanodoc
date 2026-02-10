@@ -3586,7 +3586,7 @@ export function PageCanvas({
                 );
               })}
               
-              {/* Temporary text highlight (exact text quads) */}
+              {/* Temporary text highlight (exact text quads) — natural highlighter style */}
               {hasTemporaryHighlight && temporaryHighlight && (
                 <div className="absolute inset-0">
                   {temporaryHighlight.quads.map((quad, idx) => {
@@ -3608,21 +3608,30 @@ export function PageCanvas({
                     const quadWidth = Math.abs(quadMaxCanvas.x - quadMinCanvas.x);
                     const quadHeight = Math.abs(quadMaxCanvas.y - quadMinCanvas.y);
                     
-                    // Convert quad points to canvas coordinates for SVG path
+                    // Convert quad points to canvas coordinates
                     const quadPoints = [
                       pdfToCanvas(quad[0], quad[1]),
                       pdfToCanvas(quad[2], quad[3]),
                       pdfToCanvas(quad[4], quad[5]),
                       pdfToCanvas(quad[6], quad[7]),
                     ];
+                    // Sort by angle from centroid so the path is a proper quadrilateral (no X/bow-tie)
+                    const cx = (quadPoints[0].x + quadPoints[1].x + quadPoints[2].x + quadPoints[3].x) / 4;
+                    const cy = (quadPoints[0].y + quadPoints[1].y + quadPoints[2].y + quadPoints[3].y) / 4;
+                    const sorted = [...quadPoints].sort(
+                      (a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
+                    );
+                    const pathData = sorted
+                      .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x - quadX} ${p.y - quadY}`)
+                      .join(" ") + " Z";
                     
-                    // Create SVG path for the quad
-                    const pathData = `M ${quadPoints[0].x - quadX} ${quadPoints[0].y - quadY} L ${quadPoints[1].x - quadX} ${quadPoints[1].y - quadY} L ${quadPoints[2].x - quadX} ${quadPoints[2].y - quadY} L ${quadPoints[3].x - quadX} ${quadPoints[3].y - quadY} Z`;
+                    // Natural highlighter style: yellow/amber semi-transparent fill, no stroke
+                    const fillColor = 'rgba(253, 224, 71, 0.4)'; // highlighter yellow
                     
                     return (
                       <div
                         key={`temp_quad_${idx}`}
-                        className="absolute pointer-events-none animate-pulse"
+                        className="absolute pointer-events-none"
                         style={{
                           left: `${quadX}px`,
                           top: `${quadY}px`,
@@ -3638,11 +3647,8 @@ export function PageCanvas({
                         >
                           <path
                             d={pathData}
-                            fill={temporaryHighlight.color}
-                            fillOpacity={0.6}
-                            stroke={temporaryHighlight.color}
-                            strokeWidth={2}
-                            strokeOpacity={0.9}
+                            fill={fillColor}
+                            stroke="none"
                           />
                         </svg>
                       </div>

@@ -222,103 +222,61 @@ Output: {
 
   if (extractionType === "geotechnical") {
     const geotechnicalExamples = `
-Example 1:
-Input: "The soil classification is CL (Clay, Low plasticity) with liquid limit of 45 and plasticity index of 18."
+Example (with location citation):
+Input: [Chunk 1, PDF Page Index: 4 (0-based)] "Optimum moisture content (OMC) for the fill is 12.5% per ASTM D1557."
 Output: {
   "specs": [{
-    "category": "Soil Classification",
-    "parameter": "Soil Type",
-    "value": "CL (Clay, Low plasticity)",
-    "page": 5,
-    "quote_text": "The soil classification is CL (Clay, Low plasticity) with liquid limit of 45 and plasticity index of 18."
-  }, {
-    "category": "Soil Properties",
-    "parameter": "Liquid Limit",
-    "value": "45",
-    "page": 5,
-    "quote_text": "The soil classification is CL (Clay, Low plasticity) with liquid limit of 45 and plasticity index of 18."
-  }, {
-    "category": "Soil Properties",
-    "parameter": "Plasticity Index",
-    "value": "18",
-    "page": 5,
-    "quote_text": "The soil classification is CL (Clay, Low plasticity) with liquid limit of 45 and plasticity index of 18."
+    "category": "Compaction",
+    "parameter": "Optimum Moisture Content",
+    "value": "12.5",
+    "unit": "%",
+    "page": 4,
+    "section_heading": "Page 5, Section 4.2 - Compaction",
+    "quote_text": "Optimum moisture content (OMC) for the fill is 12.5% per ASTM D1557."
   }]
 }
 
-Example 2:
-Input: "Bearing capacity: 2000 psf at 3 feet depth. Recommended foundation type: Spread footings."
-Output: {
+Example (not found - do not hallucinate):
+If the document does not mention shrinkage, output: {
   "specs": [{
-    "category": "Bearing Capacity",
-    "parameter": "Allowable Bearing Capacity",
-    "value": "2000",
-    "unit": "psf",
-    "page": 12,
-    "quote_text": "Bearing capacity: 2000 psf at 3 feet depth."
-  }, {
-    "category": "Foundation",
-    "parameter": "Recommended Foundation Type",
-    "value": "Spread footings",
-    "page": 12,
-    "quote_text": "Recommended foundation type: Spread footings."
-  }]
-}
-
-Example 3:
-Input: "Groundwater table: 8 feet below grade. Permeability: 1x10^-6 cm/s (low)."
-Output: {
-  "specs": [{
-    "category": "Groundwater",
-    "parameter": "Groundwater Table Depth",
-    "value": "8",
-    "unit": "feet",
-    "page": 15,
-    "quote_text": "Groundwater table: 8 feet below grade."
-  }, {
-    "category": "Hydraulic Properties",
-    "parameter": "Permeability",
-    "value": "1x10^-6",
-    "unit": "cm/s",
-    "page": 15,
-    "quote_text": "Permeability: 1x10^-6 cm/s (low)."
+    "category": "Proposal-Relevant Data",
+    "parameter": "Shrinkage",
+    "value": "Could not find",
+    "page": 0,
+    "section_heading": "N/A",
+    "quote_text": "Not found in document."
   }]
 }
 `;
 
-    return `You are an AI assistant specialized in extracting geotechnical and soils information from technical reports.
+    return `You are an AI assistant helping a grading contractor prepare a competitive proposal. Review the soils report from a grading contractor's perspective.
 
-Your task: Extract all important geotechnical and soils data from the provided document chunks. Look for:
-- Soil classifications (USCS, AASHTO, etc.)
-- Soil properties (liquid limit, plasticity index, moisture content, density, etc.)
-- Bearing capacity values and recommendations
-- Foundation recommendations and design parameters
-- Groundwater information (depth, level, flow direction)
-- Permeability and hydraulic conductivity
-- Shear strength parameters (cohesion, friction angle)
-- Settlement predictions and recommendations
-- Slope stability information
-- Laboratory test results
-- Field investigation data (SPT, CPT, etc.)
+Your task: Highlight ALL information needed to put a great grading proposal together. Present results in a structured table format (as JSON specs). For every insight you MUST:
+1. Cite the location: use "section_heading" for the exact location (e.g. "Page 5, Section 3.2 - Bearing Capacity" or "Page 7, paragraph 2"). This acts as the citation/hyperlink reference.
+2. Include the exact "quote_text" from the document where you found the information.
+3. Use the PDF Page Index from the chunk metadata (shown as "PDF Page Index: X") for the "page" field — 0-based: first page = 0, second page = 1, etc. Do NOT use footer/header page numbers.
+
+REQUIRED ITEMS — you MUST include a row for each of these in your output. If you find the value, extract it with location and quote. If you do NOT find it in the document, set value to "Could not find", quote_text to "Not found in document.", section_heading to "N/A", and page to 0. Do NOT invent values.
+- Optimum moisture content (with unit, e.g. %)
+- Existing expansion index
+- Shrinkage for the project
+
+Also extract any other proposal-relevant data: soil classifications (USCS, AASHTO), bearing capacity, compaction requirements, groundwater depth, permeability, swell/shrink potential, lab test results (SPT, moisture-density, Atterberg limits), foundation recommendations, and similar grading-contractor-relevant information. For each, cite location and quote.
 
 ${geotechnicalExamples}
 
-Now extract geotechnical information from these document chunks:
+Now extract from these document chunks:
 
 ${chunksText}
 
 IMPORTANT CONSTRAINTS:
-- Only extract actual geotechnical data and recommendations (not general descriptions)
-- Include the exact quote from the document for each data point
-- CRITICAL: Use the PDF Page Index from the chunk metadata (shown as "PDF Page Index: X") for the page field
-- DO NOT use labeled page numbers that might appear in footers/headers (e.g., ignore "Page 5" text in the document)
-- The page number must match the "PDF Page Index" shown in the chunk header (0-based: first page = 0, second page = 1, etc.)
-- Include units for all numerical values
-- If data appears multiple times, include each occurrence
-- Return empty array if no geotechnical data found in the provided chunks
-- Be precise with units and values
+- Do NOT hallucinate. If information is not in the document, say "Could not find" and quote_text "Not found in document."
+- Only extract what is actually stated; include the exact quote for each data point.
+- CRITICAL: Use the PDF Page Index from the chunk header (e.g. "PDF Page Index: 4") for the page field — 0-based.
+- Include units for all numerical values where present.
+- Put location/citation in "section_heading" (e.g. "Page 5, Section 3.2").
 ${customPrompt ? `\nADDITIONAL CUSTOM INSTRUCTIONS:\n${customPrompt}\n` : ''}
-- Return ONLY valid JSON in this exact format: {"specs": [{"category": "...", "parameter": "...", "value": "...", "unit": "...", "page": 0, "quote_text": "..."}]}`;
+- Return ONLY valid JSON in this exact format: {"specs": [{"category": "...", "parameter": "...", "value": "...", "unit": "..." (optional), "page": 0, "section_heading": "..." (location citation), "quote_text": "..."}]}`;
   }
 
   return `You are an AI assistant specialized in extracting construction specifications from technical documents.
