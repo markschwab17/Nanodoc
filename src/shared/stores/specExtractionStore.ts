@@ -55,6 +55,8 @@ export interface SpecExtractionState {
   setTemporaryHighlight: (highlight: TemporaryTextHighlight | null) => void;
   finishExtraction: () => void;
   clearExtraction: (documentId: string) => void;
+  /** After pages are deleted: remove specs/highlights on those pages and remap page numbers for the rest. */
+  remapSpecsAfterPageDeletion: (documentId: string, deletedPageIndices: number[]) => void;
   getExtractedSpecs: (documentId: string) => SpecExtractionResult[];
   getSpecHighlights: (documentId: string) => SpecHighlight[];
 }
@@ -128,7 +130,35 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
         currentDocumentId: state.currentDocumentId === documentId ? null : state.currentDocumentId,
       };
     }),
-  
+
+  remapSpecsAfterPageDeletion: (documentId: string, deletedPageIndices: number[]) =>
+    set((state) => {
+      const deletedSet = new Set(deletedPageIndices);
+      const specs = state.extractedSpecs.get(documentId);
+      const highlights = state.specHighlights.get(documentId);
+      if (!specs?.length && !highlights?.length) return state;
+
+      const countDeletedBefore = (page: number) =>
+        deletedPageIndices.filter((p) => p < page).length;
+
+      const newSpecs = specs
+        ? specs
+            .filter((s) => !deletedSet.has(s.page))
+            .map((s) => ({ ...s, page: s.page - countDeletedBefore(s.page) }))
+        : [];
+      const newHighlights = highlights
+        ? highlights
+            .filter((h) => !deletedSet.has(h.page))
+            .map((h) => ({ ...h, page: h.page - countDeletedBefore(h.page) }))
+        : [];
+
+      const nextSpecs = new Map(state.extractedSpecs);
+      const nextHighlights = new Map(state.specHighlights);
+      nextSpecs.set(documentId, newSpecs);
+      nextHighlights.set(documentId, newHighlights);
+      return { extractedSpecs: nextSpecs, specHighlights: nextHighlights };
+    }),
+
   getExtractedSpecs: (documentId: string) => {
     const state = get();
     return state.extractedSpecs.get(documentId) || [];

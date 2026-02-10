@@ -46,7 +46,10 @@ export function SpecExtractionPanel() {
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() || null;
   const specs = documentId ? getExtractedSpecs(documentId) : [];
-  
+  const pageCount = currentDocument?.getPageCount() ?? 0;
+  // Only show specs that reference existing pages (dynamic tie to current document state)
+  const visibleSpecs = specs.filter((s) => (s.page ?? 0) < pageCount);
+
   const { selectedSpecId, selectedSpecDocumentId } = useSpecExtractionStore();
   
   useEffect(() => {
@@ -196,7 +199,9 @@ export function SpecExtractionPanel() {
   
   const handleSpecClick = async (spec: SpecExtractionResult) => {
     if (!documentId || !currentDocument) return;
-    
+    // Don't try to show a spec that references a deleted or out-of-range page
+    if (pageCount > 0 && (spec.page ?? 0) >= pageCount) return;
+
     // Clear any existing timeout
     if (highlightTimeoutRef.current) {
       clearTimeout(highlightTimeoutRef.current);
@@ -378,7 +383,7 @@ export function SpecExtractionPanel() {
     };
     
     const headers = ["Category", "Parameter", "Value", "Unit", "Page", "Section Heading", "Spec ID", "Quote Text"];
-    const rows = specs.map(s => [
+    const rows = visibleSpecs.map(s => [
       escapeCSV(s.category),
       escapeCSV(s.parameter),
       escapeCSV(s.value),
@@ -410,6 +415,8 @@ export function SpecExtractionPanel() {
   // Only hide panel if it's closed AND there are no specs
   // Allow closing even when specs exist
   if (!isOpen && specs.length === 0) return null;
+
+  const hasStaleSpecs = specs.length > 0 && visibleSpecs.length < specs.length;
   
   return (
     <div 
@@ -421,7 +428,7 @@ export function SpecExtractionPanel() {
           {extractionType === "geotechnical" ? "Extracted Geotechnical Data" : "Extracted Specifications"}
         </h2>
         <div className="flex gap-2">
-          {specs.length > 0 && (
+          {visibleSpecs.length > 0 && (
             <Button variant="outline" size="sm" onClick={handleExport}>
               <Download className="h-4 w-4 mr-2" />
               Export
@@ -478,12 +485,18 @@ export function SpecExtractionPanel() {
               <p className="text-sm mt-2">Select extraction type and click the button to begin.</p>
             </div>
           )}
+
+          {hasStaleSpecs && (
+            <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-md text-sm text-amber-800 dark:text-amber-200">
+              Some results referred to pages that were removed. Showing {visibleSpecs.length} of {specs.length} that still match the current document.
+            </div>
+          )}
           
-          {!isExtracting && !extractionInProgress && specs.length > 0 && (
+          {!isExtracting && !extractionInProgress && visibleSpecs.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium">
-                  Found {specs.length} {extractionType === "geotechnical" ? "data point" : "specification"}{specs.length !== 1 ? "s" : ""}
+                  Found {visibleSpecs.length} {extractionType === "geotechnical" ? "data point" : "specification"}{visibleSpecs.length !== 1 ? "s" : ""}
                 </p>
                 <div className="flex gap-1 border rounded-md p-0.5">
                   <Button
@@ -507,13 +520,13 @@ export function SpecExtractionPanel() {
               
               {viewMode === "cards" ? (
               <div className="space-y-1">
-                {specs.map((spec, idx) => {
-                  const specId = spec.spec_id || `spec_${idx}`;
+                {visibleSpecs.map((spec) => {
+                  const specId = spec.spec_id || `spec_${specs.indexOf(spec)}`;
                   const isSelected = selectedSpecDocumentId === documentId && selectedSpecId === specId;
                   
                   return (
                     <div
-                      key={idx}
+                      key={specId}
                       className={`p-3 border rounded-md cursor-pointer transition-all ${
                         isSelected 
                           ? "bg-primary/10 border-primary ring-2 ring-primary/20" 
@@ -578,13 +591,13 @@ export function SpecExtractionPanel() {
                           </tr>
                         </thead>
                         <tbody>
-                          {specs.map((spec, idx) => {
-                            const specId = spec.spec_id || `spec_${idx}`;
+                          {visibleSpecs.map((spec) => {
+                            const specId = spec.spec_id || `spec_${specs.indexOf(spec)}`;
                             const isSelected = selectedSpecDocumentId === documentId && selectedSpecId === specId;
                             
                             return (
                               <tr
-                                key={idx}
+                                key={specId}
                                 className={`cursor-pointer transition-colors ${
                                   isSelected
                                     ? "bg-primary/10 hover:bg-primary/15"

@@ -27,6 +27,7 @@ import { useEffect, useState, useRef } from "react";
 import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal } from "lucide-react";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
+import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 
@@ -179,6 +180,9 @@ export function ThumbnailCarousel() {
           const currentAnnotations = new Map(pdfStore.annotations);
           currentAnnotations.set(documentId, updatedAnnotations);
           usePDFStore.setState({ annotations: currentAnnotations });
+
+          // Keep AI spec results in sync: remove specs on deleted pages and remap page numbers
+          useSpecExtractionStore.getState().remapSpecsAfterPageDeletion(documentId, pageNumbers);
           
           // Force viewport refresh by dispatching a custom event
           // This ensures the viewer updates even if the page number didn't change

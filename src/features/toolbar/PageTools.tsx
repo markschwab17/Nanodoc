@@ -31,6 +31,7 @@ import { usePDF } from "@/shared/hooks/usePDF";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
+import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { FlattenDialog } from "@/features/export/FlattenDialog";
 
 export function PageTools() {
@@ -80,6 +81,9 @@ export function PageTools() {
       }
       
       setShowDeleteDialog(false);
+
+      // Keep AI spec results in sync: remove specs on deleted page and remap page numbers
+      useSpecExtractionStore.getState().remapSpecsAfterPageDeletion(currentDocument.getId(), [deletedPage]);
       
       // Adjust current page if needed
       const newPageCount = currentDocument.getPageCount();
