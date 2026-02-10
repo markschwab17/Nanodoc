@@ -25,6 +25,7 @@ import { HorizontalRuler } from "./HorizontalRuler";
 import { VerticalRuler } from "./VerticalRuler";
 import { wrapAnnotationUpdate, wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 import { PDFDocument as PDFDocumentClass } from "@/core/pdf/PDFDocument";
+import { enqueuePageRender } from "@/core/pdf/renderQueue";
 import { toolHandlers } from "@/features/tools";
 import { getSelectedStamp, getStampPreviewPosition, setPreviewUpdateCallback } from "@/features/tools/StampTool";
 import { getDrawingPath, isCurrentlyDrawing, setDrawPreviewCallback } from "@/features/tools/DrawTool";
@@ -163,6 +164,8 @@ export function PageCanvas({
   const fitModeRef = useRef(fitMode);
   const isMiddleMouseDownRef = useRef(false); // Track middle mouse button for horizontal scroll
   const renderDebounceTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Track debounce timeout for PDF rendering (both read and normal mode)
+  const highResRenderIdRef = useRef(0); // Incremented on effect cleanup so in-flight/queued renders are discarded
+  const scheduledRunIdRef = useRef<number | null>(null); // Cancel scheduled enqueue on cleanup (never block zoom turn)
   
   // Keep refs in sync with state
   useEffect(() => {
@@ -926,192 +929,175 @@ export function PageCanvas({
       // This is the normal mode canvas, skip rendering when read mode is globally active
       return;
     }
-    
-    const renderPage = async () => {
+
+    type ScaleParams = {
+      displayScale: number;
+      canvasDisplayWidth: number;
+      canvasDisplayHeight: number;
+    };
+
+    const computeScaleParams = async (): Promise<ScaleParams | null> => {
+      const pageMetadata = document.getPageMetadata(pageNumber);
+      if (!pageMetadata) return null;
+
+      const dpr = window.devicePixelRatio || 1;
+      let viewportScale = zoomLevel;
+      let displayScale = zoomLevel;
+
+      if (readMode) {
+        if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
+          displayScale = displayWidthProp / pageMetadata.width;
+        } else {
+          const firstPageMetadata = document.getPageMetadata(0);
+          if (firstPageMetadata) {
+            const viewportWidth = firstPageMetadata.width * zoomLevel;
+            displayScale = viewportWidth / pageMetadata.width;
+          } else {
+            displayScale = zoomLevel;
+          }
+        }
+      } else {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const currentFitMode = fitModeRef.current;
+        const currentZoomLevel = zoomLevelRef.current;
+        if (currentFitMode === "width" && containerRef.current) {
+          const containerWidth = containerRef.current.clientWidth;
+          if (containerWidth > 0) {
+            viewportScale = containerWidth / pageMetadata.width;
+            if (Math.abs(viewportScale - currentZoomLevel) > 0.01) {
+              setZoomLevel(viewportScale);
+            }
+          }
+        } else if (currentFitMode === "page" && containerRef.current) {
+          const containerWidth = containerRef.current.clientWidth;
+          const containerHeight = containerRef.current.clientHeight;
+          const scaleX = containerWidth / pageMetadata.width;
+          const scaleY = containerHeight / pageMetadata.height;
+          viewportScale = Math.min(scaleX, scaleY);
+          setZoomLevel(viewportScale);
+        }
+
+        if ((currentFitMode === "page" || currentFitMode === "width") && containerRef.current) {
+          const containerWidth = containerRef.current.clientWidth;
+          const containerHeight = containerRef.current.clientHeight;
+          const scaledWidth = pageMetadata.width * viewportScale;
+          const scaledHeight = pageMetadata.height * viewportScale;
+          const centerX = (containerWidth - scaledWidth) / 2;
+          const centerY = (containerHeight - scaledHeight) / 2;
+          if (Math.abs(panOffset.x - centerX) > 1 || Math.abs(panOffset.y - centerY) > 1) {
+            setTimeout(() => {
+              setPanOffset({ x: centerX, y: centerY });
+            }, 0);
+          }
+          displayScale = viewportScale;
+        }
+      }
+
+      const canvasDisplayWidth = pageMetadata.width;
+      const canvasDisplayHeight = pageMetadata.height;
+      return { displayScale, canvasDisplayWidth, canvasDisplayHeight };
+    };
+
+    const applyRenderedToCanvas = (
+      canvas: HTMLCanvasElement,
+      rendered: { width: number; height: number; imageData: ImageData | string },
+      canvasDisplayWidth: number,
+      canvasDisplayHeight: number
+    ) => {
+      canvas.width = rendered.width;
+      canvas.height = rendered.height;
+      canvas.style.width = `${canvasDisplayWidth}px`;
+      canvas.style.height = `${canvasDisplayHeight}px`;
+      const ctx = canvas.getContext("2d", { willReadFrequently: false, colorSpace: "srgb" });
+      if (ctx && rendered.imageData instanceof ImageData) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.putImageData(rendered.imageData, 0, 0);
+      }
+    };
+
+    const runQueuedRender = async () => {
       if (!canvasRef.current || !document.isDocumentLoaded()) return;
 
-      setIsRendering(true);
+      const thisRenderId = ++highResRenderIdRef.current;
+
       setError(null);
+      const mupdfDoc = document.getMupdfDocument();
+      const pageMetadata = document.getPageMetadata(pageNumber);
+      if (!pageMetadata) {
+        setError(`Page ${pageNumber} not found`);
+        return;
+      }
+
+      const dpr = window.devicePixelRatio || 1;
+      const params = await computeScaleParams();
+      if (!params || !canvasRef.current) return;
+      if (thisRenderId !== highResRenderIdRef.current) return;
+
+      const { displayScale, canvasDisplayWidth, canvasDisplayHeight } = params;
 
       try {
-        const mupdfDoc = document.getMupdfDocument();
-        const pageMetadata = document.getPageMetadata(pageNumber);
-        
-        if (!pageMetadata) {
-          throw new Error(`Page ${pageNumber} not found`);
-        }
-
-        // Render PDF at high-DPI resolution for crisp text
-        // High-quality rendering: BASE_SCALE (1:1) * RENDER_SCALE (quality) * dpr (device pixels)
-        // Coordinate system stays 1:1 regardless of quality for consistent tool positioning
-        const dpr = window.devicePixelRatio || 1;
-        
-        // Calculate initial viewport scale for fit modes
-        let viewportScale = zoomLevel;
-        let displayScale = zoomLevel; // Scale for canvas display size
-        
-        // In read mode, use display dimensions from VirtualizedPageList when provided (single source of truth).
-        // Otherwise fall back to zoomLevel + first page metadata for backward compatibility.
-        if (readMode) {
-          if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
-            displayScale = displayWidthProp / pageMetadata.width;
-          } else {
-            const firstPageMetadata = document.getPageMetadata(0);
-            if (firstPageMetadata) {
-              const viewportWidth = firstPageMetadata.width * zoomLevel;
-              displayScale = viewportWidth / pageMetadata.width;
-            } else {
-              displayScale = zoomLevel;
-            }
-          }
-        } else {
-          await new Promise(resolve => requestAnimationFrame(resolve));
-          const currentFitMode = fitModeRef.current;
-          const currentZoomLevel = zoomLevelRef.current;
-          if (currentFitMode === "width" && containerRef.current) {
-            const containerWidth = containerRef.current.clientWidth;
-            if (containerWidth > 0) {
-              viewportScale = containerWidth / pageMetadata.width;
-              if (Math.abs(viewportScale - currentZoomLevel) > 0.01) {
-                setZoomLevel(viewportScale);
-              }
-            }
-          } else if (currentFitMode === "page" && containerRef.current) {
-            const containerWidth = containerRef.current.clientWidth;
-            const containerHeight = containerRef.current.clientHeight;
-            const scaleX = containerWidth / pageMetadata.width;
-            const scaleY = containerHeight / pageMetadata.height;
-            viewportScale = Math.min(scaleX, scaleY);
-            setZoomLevel(viewportScale);
-          }
-          
-          if ((currentFitMode === "page" || currentFitMode === "width") && containerRef.current) {
-            const containerWidth = containerRef.current.clientWidth;
-            const containerHeight = containerRef.current.clientHeight;
-            const scaledWidth = pageMetadata.width * viewportScale;
-            const scaledHeight = pageMetadata.height * viewportScale;
-            const centerX = (containerWidth - scaledWidth) / 2;
-            const centerY = (containerHeight - scaledHeight) / 2;
-            if (Math.abs(panOffset.x - centerX) > 1 || Math.abs(panOffset.y - centerY) > 1) {
-              setTimeout(() => {
-                setPanOffset({ x: centerX, y: centerY });
-              }, 0);
-            }
-            displayScale = viewportScale;
-          }
-        }
-
-        // Canvas display size: 1:1 PDF so overlay coordinates match (container scale(zoomLevel) handles zoom in single mode; wrapper in read mode)
-        let canvasDisplayWidth: number;
-        let canvasDisplayHeight: number;
-        if (readMode) {
-          canvasDisplayWidth = pageMetadata.width;
-          canvasDisplayHeight = pageMetadata.height;
-        } else {
-          canvasDisplayWidth = pageMetadata.width;
-          canvasDisplayHeight = pageMetadata.height;
-        }
-
-        // Calculate render scale: display scale * quality * DPR for high-DPI rendering (we still render at displayScale for crisp output)
         const renderScale = displayScale * RENDER_SCALE * dpr;
-
-        // Note: We do NOT pass rotation to the renderer because mupdf already applies
-        // the PDF's Rotate field when loading the page. The page.getBounds() and
-        // page.toPixmap() already account for the rotation specified in the PDF.
-        // If we apply rotation again, we'd be double-rotating the page.
-        
-        // Render PDF at calculated scale (rotation is already applied by mupdf)
-        const rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
-          scale: renderScale,
-          rotation: 0, // Don't apply additional rotation - PDF Rotate is already applied
-        });
-
+        const rendered = await renderer.renderPage(mupdfDoc, pageNumber, { scale: renderScale, rotation: 0 });
+        if (thisRenderId !== highResRenderIdRef.current || !canvasRef.current) return;
         const canvas = canvasRef.current;
-        
-        // Canvas backing size = rendered size (high-res, e.g., 2x on Retina)
-        canvas.width = rendered.width;
-        canvas.height = rendered.height;
-        
-        // Canvas display size: 1:1 PDF in read mode (wrapper scale handles zoom); 1:1 in normal mode
-        canvas.style.width = `${canvasDisplayWidth}px`;
-        canvas.style.height = `${canvasDisplayHeight}px`;
-
-        const ctx = canvas.getContext("2d", {
-          willReadFrequently: false,
-          colorSpace: "srgb"
-        });
-        
-        if (ctx && rendered.imageData instanceof ImageData) {
-          // Enable smoothing for crisp downscaling on high-DPI displays
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = "high";
-          
-          // Draw the rendered image data
-          ctx.putImageData(rendered.imageData, 0, 0);
-        }
-        
-        
-        // Store the base scale (PDF is always rendered at this scale)
-        // In read mode, zoom is handled by sizing containers at zoomLevel
-        // In normal mode, zoom is handled via CSS transforms
+        applyRenderedToCanvas(canvas, rendered, canvasDisplayWidth, canvasDisplayHeight);
         setActualScale(RENDER_SCALE);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to render page");
-        console.error("Error rendering page:", err);
-      } finally {
-        setIsRendering(false);
+        if (thisRenderId === highResRenderIdRef.current) {
+          setError(err instanceof Error ? err.message : "Failed to render page");
+          console.error("Error rendering page:", err);
+        }
       }
     };
 
     // In read mode, update canvas size immediately for smooth visual feedback
-    // but debounce the expensive PDF rendering
     if (readMode && canvasRef.current && document.isDocumentLoaded()) {
       const pageMetadata = document.getPageMetadata(pageNumber);
       if (pageMetadata) {
-        // Read mode: canvas is 1:1 PDF; scale wrapper handles zoom
         const canvas = canvasRef.current;
         canvas.style.width = `${pageMetadata.width}px`;
         canvas.style.height = `${pageMetadata.height}px`;
       }
-      
-      // Clear any pending render
-      if (renderDebounceTimeoutRef.current) {
-        clearTimeout(renderDebounceTimeoutRef.current);
-      }
-      
-      // Debounce only the expensive PDF rendering - canvas size already updated above
-      renderDebounceTimeoutRef.current = setTimeout(() => {
-        renderPage();
-        renderDebounceTimeoutRef.current = null;
-      }, 100); // Shorter delay since visual size already updated
-      
-      return () => {
-        if (renderDebounceTimeoutRef.current) {
-          clearTimeout(renderDebounceTimeoutRef.current);
-          renderDebounceTimeoutRef.current = null;
-        }
-      };
-    } else {
-      // In normal mode, debounce PDF rendering during zoom for smooth operation
-      // CSS transform updates immediately for visual feedback, but expensive PDF re-rendering is debounced
-      // Clear any pending render
-      if (renderDebounceTimeoutRef.current) {
-        clearTimeout(renderDebounceTimeoutRef.current);
-      }
-      
-      // Debounce PDF rendering - CSS transform already provides immediate visual feedback
-      renderDebounceTimeoutRef.current = setTimeout(() => {
-        renderPage();
-        renderDebounceTimeoutRef.current = null;
-      }, 150); // Slightly longer delay for normal mode to allow zoom to settle
-      
-      return () => {
-        if (renderDebounceTimeoutRef.current) {
-          clearTimeout(renderDebounceTimeoutRef.current);
-          renderDebounceTimeoutRef.current = null;
-        }
-      };
     }
+
+    if (renderDebounceTimeoutRef.current) {
+      clearTimeout(renderDebounceTimeoutRef.current);
+    }
+
+    const scheduleRender = () => {
+      const run = () => {
+        scheduledRunIdRef.current = null;
+        enqueuePageRender(() => runQueuedRender());
+      };
+      if (typeof requestIdleCallback !== "undefined") {
+        scheduledRunIdRef.current = requestIdleCallback(run, { timeout: 100 });
+      } else {
+        scheduledRunIdRef.current = setTimeout(run, 0) as unknown as number;
+      }
+    };
+
+    const debounceMs = readMode ? 350 : 400;
+    renderDebounceTimeoutRef.current = setTimeout(() => {
+      renderDebounceTimeoutRef.current = null;
+      scheduleRender();
+    }, debounceMs);
+
+    return () => {
+      highResRenderIdRef.current += 1;
+      if (renderDebounceTimeoutRef.current) {
+        clearTimeout(renderDebounceTimeoutRef.current);
+        renderDebounceTimeoutRef.current = null;
+      }
+      if (scheduledRunIdRef.current != null) {
+        if (typeof cancelIdleCallback !== "undefined") {
+          cancelIdleCallback(scheduledRunIdRef.current);
+        } else {
+          clearTimeout(scheduledRunIdRef.current);
+        }
+        scheduledRunIdRef.current = null;
+      }
+    };
   }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode, displayWidthProp, displayHeightProp]);
   
   // Effect to ensure centering when fitMode changes to "page" or "width"
