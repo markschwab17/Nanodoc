@@ -576,26 +576,6 @@ export class PDFAnnotationLoader {
           const pageBounds = page.getBounds();
           const pageHeight = pageBounds[3] - pageBounds[1];
 
-          console.log(`[DIAGNOSTIC] Loading stamp annotation: ${id}`);
-          console.log(`[DIAGNOSTIC] Stamp type: ${stampData.type}, has imageData: ${!!stampData.imageData}`);
-          if (stampData.imageData) {
-            console.log(`[DIAGNOSTIC] Image data length: ${stampData.imageData.length}`);
-          }
-
-          // Check if the PDF annotation has an appearance
-          try {
-            const hasAppearance = pdfAnnot.getAppearance() !== null;
-            console.log(`[DIAGNOSTIC] PDF annotation has appearance: ${hasAppearance}`);
-            if (hasAppearance) {
-              console.log(`[DIAGNOSTIC] Appearance object exists on loaded stamp`);
-            } else {
-              console.log(`[DIAGNOSTIC] WARNING: No appearance found on loaded stamp - this may cause DRAFT display`);
-            }
-          } catch (e) {
-            console.error(`[DIAGNOSTIC] Could not check appearance:`, e);
-            console.error(`[DIAGNOSTIC] Error type: ${typeof e}, message: ${(e as any)?.message || 'no message'}`);
-          }
-
           annotations.push({
             id,
             type: "stamp",

@@ -51,10 +51,32 @@ export class TauriFileSystem implements FileSystemInterface {
   }
 
   /**
+   * Opens the save dialog and returns the chosen path without writing.
+   * Use for Save As when the path is needed for sidecar files before the main file is written.
+   */
+  async getSavePath(name: string): Promise<string | null> {
+    try {
+      const desktopPath = await this.getDesktopPath();
+      const filePath = await save({
+        defaultPath: `${desktopPath}/${name}`,
+        filters: [
+          { name: "PDF", extensions: ["pdf"] },
+          { name: "All Files", extensions: ["*"] },
+        ],
+      });
+      return filePath ?? null;
+    } catch (error) {
+      console.error("Error getting save path:", error);
+      return null;
+    }
+  }
+
+  /**
    * Saves a file using the native save dialog.
    * Defaults to desktop directory.
+   * Returns the chosen file path so callers can write sidecar files (e.g. .ai.json).
    */
-  async saveFile(data: Uint8Array, name: string): Promise<void> {
+  async saveFile(data: Uint8Array, name: string): Promise<string | void> {
     try {
       const desktopPath = await this.getDesktopPath();
       const filePath = await save({
@@ -76,6 +98,7 @@ export class TauriFileSystem implements FileSystemInterface {
       }
 
       await tauriWriteFile(filePath, data);
+      return filePath;
     } catch (error) {
       console.error("Error saving file:", error);
       throw error;

@@ -9,7 +9,7 @@ import type { Annotation } from "./types";
 import { PDFAnnotationOperations } from "./PDFAnnotationOperations";
 import { PDFPageOperations } from "./PDFPageOperations";
 import { parseColor } from "./utils/colorUtils";
-import { writeAIMetadata, type PDFAIMetadataPayload } from "./PDFAIMetadata";
+import { writeAIMetadata, attachAIMetadataToPdfBuffer, type PDFAIMetadataPayload } from "./PDFAIMetadata";
 
 export class PDFDocumentOperations {
   constructor(
@@ -125,7 +125,6 @@ export class PDFDocumentOperations {
   annotations?: Annotation[],
   aiMetadata?: PDFAIMetadataPayload
   ): Promise<Uint8Array> {
-    console.log(`[PDFDocumentOperations] saveDocument called with annotations:`, annotations ? annotations.length : 'undefined');
   const mupdfDoc = document.getMupdfDocument();
 
   const pdfDoc = mupdfDoc.asPDF();
@@ -444,10 +443,11 @@ export class PDFDocumentOperations {
     const catalogObj = pdfDoc.getTrailer().get("Root");
     if (catalogObj) {
       const acroFormObj = catalogObj.get("AcroForm");
-      if (acroFormObj) {
-        // Ensure AcroForm is updated to persist form fields
-        acroFormObj.update();
-        catalogObj.update();
+      if (acroFormObj && typeof (acroFormObj as any).update === "function") {
+        (acroFormObj as any).update();
+        if (typeof (catalogObj as any).update === "function") {
+          (catalogObj as any).update();
+        }
       }
     }
   } catch (acroFormError) {
@@ -512,47 +512,10 @@ export class PDFDocumentOperations {
     writeAIMetadata(mupdfDoc, aiMetadata);
   }
 
-  // saveToBuffer() writes the entire PDF including all annotations to a binary buffer
-  console.log(`[DIAGNOSTIC] Saving PDF document...`);
-
   const buffer = pdfDoc.saveToBuffer();
   const savedData = buffer.asUint8Array();
 
-  console.log(`[DIAGNOSTIC] PDF saved successfully. Buffer size: ${savedData.length} bytes`);
-  console.log(`[DIAGNOSTIC] Checking final annotation states before returning...`);
-
-  // Quick check of final annotation states
-  for (let pageNum = 0; pageNum < document.getPageCount(); pageNum++) {
-    try {
-      const page = pdfDoc.loadPage(pageNum);
-      const annotations = page.getAnnotations();
-      const stampCount = Array.from(annotations).filter((a: any) => {
-        const type = a.getType();
-        if (type === "Stamp") return true;
-        if (type === "FreeText") {
-          try {
-            const obj = a.getObject();
-            const stampFlag = obj?.get("StampAnnotation");
-            return stampFlag && stampFlag.toString() === "true";
-          } catch (e) {
-            return false;
-          }
-        }
-        return false;
-      }).length;
-
-      if (stampCount > 0) {
-        console.log(`[DIAGNOSTIC] Page ${pageNum}: Found ${stampCount} stamp annotations`);
-      }
-    } catch (e) {
-      console.warn(`[DIAGNOSTIC] Could not check page ${pageNum}:`, e);
-    }
-  }
-
-  // EMBED IMAGE STAMPS using pdf-lib for proper native PDF viewer support
-  console.log(`[PDFDocumentOperations] Processing image stamps with pdf-lib...`);
-
-  // Extract image stamps from annotations (if available)
+  // Embed image stamps with pdf-lib when present; also embeds AI metadata
   const imageStamps = annotations ? annotations.filter(annot =>
     annot.type === 'stamp' &&
     annot.stampData?.type === 'image' &&
@@ -560,23 +523,21 @@ export class PDFDocumentOperations {
   ) : [];
 
   if (imageStamps.length > 0) {
-    console.log(`[PDFDocumentOperations] Found ${imageStamps.length} image stamps to embed`);
-
     try {
-      // Import the ImageStampEmbedder dynamically to avoid bundling issues
       const { ImageStampEmbedder } = await import('./ImageStampEmbedder');
-
       const embedder = new ImageStampEmbedder();
-
-      // Embed image stamps using pdf-lib
-      const embeddedBuffer = await embedder.embedImageStamps(savedData, imageStamps);
-      console.log(`[PDFDocumentOperations] Successfully embedded ${imageStamps.length} image stamps using pdf-lib`);
-
-      return embeddedBuffer;
+      return await embedder.embedImageStamps(savedData, imageStamps, aiMetadata ?? undefined);
     } catch (embedError) {
       console.error('[PDFDocumentOperations] Failed to embed image stamps:', embedError);
-      // Fall back to original buffer if embedding fails
-      console.log('[PDFDocumentOperations] Falling back to original PDF buffer');
+    }
+  }
+
+  // When no image stamps, still attach AI metadata as embedded file so it travels with the PDF
+  if (aiMetadata) {
+    try {
+      return await attachAIMetadataToPdfBuffer(savedData, aiMetadata);
+    } catch (e) {
+      console.warn('[PDFDocumentOperations] Failed to attach AI metadata to buffer:', e);
     }
   }
 
@@ -820,11 +781,7 @@ export class PDFDocumentOperations {
 
 
   try {
-    console.log(`[DIAGNOSTIC] addImageAnnotationToPage: Creating image...`);
-    console.log(`[DIAGNOSTIC] addImageAnnotationToPage: mupdf.Image methods:`, Object.getOwnPropertyNames(this.mupdf.Image));
-
     const image = this.mupdf.Image.fromBuffer(imageBytes);
-    console.log(`[DIAGNOSTIC] addImageAnnotationToPage: Image created successfully`);
 
     const annot = page.createAnnotation("Stamp");
 
@@ -1587,85 +1544,45 @@ export class PDFDocumentOperations {
   // This prevents "DRAFT" from showing in native PDF viewers
   // CRITICAL: Set appearance AFTER rect to ensure proper sizing
   if (annot.stampData.type === "image" && annot.stampData.imageData) {
-    console.log(`[DIAGNOSTIC] Sync: Re-embedding image appearance for stamp: ${annot.id}`);
     try {
-      // Extract base64 data from data URL
-      console.log(`[DIAGNOSTIC] Sync: Original imageData length: ${annot.stampData.imageData.length}`);
       const base64Data = annot.stampData.imageData.split(',')[1] || annot.stampData.imageData;
-      console.log(`[DIAGNOSTIC] Sync: Base64 data length after split: ${base64Data.length}`);
-
-      // Declare imageBytes in outer scope
       let imageBytes: Uint8Array;
-
       try {
         imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-        console.log(`[DIAGNOSTIC] Sync: Image bytes created: ${imageBytes.length} bytes`);
       } catch (base64Error) {
-        console.error(`[DIAGNOSTIC] Sync: Base64 decoding failed:`, base64Error);
+        console.warn("Sync: base64 decode failed for stamp", annot.id, base64Error);
         throw base64Error;
       }
-
-      // Create mupdf Image from buffer - try all available methods
-      console.log(`[DIAGNOSTIC] Sync: Creating image...`);
 
       let image;
       const allMethods = Object.getOwnPropertyNames(this.mupdf.Image).filter(name =>
         typeof this.mupdf.Image[name] === 'function'
       );
-
-      console.log(`[DIAGNOSTIC] Sync: Available Image methods:`, allMethods);
-
       for (const method of allMethods) {
         try {
-          console.log(`[DIAGNOSTIC] Sync: Trying Image.${method}...`);
-
-          // Try different parameter types
           if (method.includes('Buffer') || method.includes('Bytes')) {
             image = this.mupdf.Image[method](imageBytes);
           } else if (method.includes('Pixmap')) {
-            console.log(`[DIAGNOSTIC] Sync: Skipping ${method} - requires pixmap parameter`);
             continue;
           } else {
-            // Try with bytes as a fallback
             try {
               image = this.mupdf.Image[method](imageBytes);
-            } catch (paramError) {
-              console.log(`[DIAGNOSTIC] Sync: ${method} with bytes failed, trying other approaches...`);
+            } catch {
               continue;
             }
           }
-
-          console.log(`[DIAGNOSTIC] Sync: Image created successfully using Image.${method}`);
-          console.log(`[DIAGNOSTIC] Sync: Image dimensions: ${image.getWidth()}x${image.getHeight()}`);
-          console.log(`[DIAGNOSTIC] Sync: Stamp rect dimensions: ${(newRect[2]-newRect[0]).toFixed(2)}x${(newRect[3]-newRect[1]).toFixed(2)}`);
           break;
-
-        } catch (methodError) {
-          console.log(`[DIAGNOSTIC] Sync: Image.${method} failed:`, methodError);
+        } catch {
+          // try next method
         }
       }
 
       if (!image) {
-        console.error(`[DIAGNOSTIC] Sync: All image creation methods failed`);
         throw new Error('No working image creation method found');
       }
-
-      // Set the image as the appearance - this makes it visible in native PDF viewers
-      // The appearance will be scaled to fit the rect automatically
-      console.log(`[DIAGNOSTIC] Sync: Setting appearance on annotation...`);
       annot.pdfAnnotation.setAppearance(image);
-      console.log(`[DIAGNOSTIC] Sync: Appearance updated successfully for stamp ${annot.id}`);
-
     } catch (imageError: unknown) {
-      console.error(`[DIAGNOSTIC] Sync: Failed to update image appearance for stamp ${annot.id}:`, imageError);
-      console.error(`[DIAGNOSTIC] Sync: Error details:`, {
-        annotationId: annot.id,
-        stampType: annot.stampData.type,
-        hasImageData: !!annot.stampData.imageData,
-        imageDataLength: annot.stampData.imageData?.length,
-        error: imageError instanceof Error ? imageError.message : String(imageError),
-        stack: imageError instanceof Error ? imageError.stack : undefined
-      });
+      console.warn("Sync: failed to update image appearance for stamp", annot.id, imageError);
     }
   }
 
@@ -1732,7 +1649,7 @@ export class PDFDocumentOperations {
 
   isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) {
 
-  console.warn("🟠 [ARROW UPDATE] Invalid arrow points for update:", { start, end });
+  console.warn("[ARROW UPDATE] Invalid arrow points:", { start, end });
 
   } else {
 
@@ -1745,18 +1662,16 @@ export class PDFDocumentOperations {
 
   const lineArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
 
-  console.log("🟡 [ARROW UPDATE] Updating arrow with points:", { start, end }, "to setLine(", lineArray, ")");
 
   try {
 
   annot.pdfAnnotation.setLine(lineArray);
   annot.pdfAnnotation.update(); // CRITICAL: Call update() to persist changes
 
-  console.log("🟡 [ARROW UPDATE] Successfully updated line");
 
   } catch (e) {
 
-  console.warn("🟠 [ARROW UPDATE] Could not update arrow line:", e, { start, end, lineArray });
+  console.warn("[ARROW UPDATE] Could not update arrow line:", e);
 
   }
 
@@ -1833,7 +1748,7 @@ export class PDFDocumentOperations {
 
   } catch (e) {
 
-  console.warn("🟠 [SHAPE UPDATE] Could not update rectangle/circle position:", e, { rect });
+  console.warn("[SHAPE UPDATE] Could not update rectangle/circle position:", e);
 
   }
 
@@ -1897,7 +1812,7 @@ export class PDFDocumentOperations {
 
   } catch (e) {
 
-  console.warn("🟠 [SHAPE UPDATE] Could not update fill color/opacity:", e);
+  console.warn("[SHAPE UPDATE] Could not update fill color/opacity:", e);
 
   }
 
@@ -2612,7 +2527,7 @@ export class PDFDocumentOperations {
 
   } catch (e) {
 
-  console.warn("🟠 [SHAPE UPDATE] Could not update fill color/opacity:", e);
+  console.warn("[SHAPE UPDATE] Could not update fill color/opacity:", e);
 
   }
 
@@ -2703,7 +2618,7 @@ export class PDFDocumentOperations {
     if (annot.stampData?.type !== 'image' || !annot.stampData?.imageData) {
       await this.annotationOps.addStampAnnotation(document, annot);
     } else {
-      console.log(`[PDFDocumentOperations] Skipping MuPDF annotation creation for image stamp ${annot.id} - will be handled by pdf-lib`);
+      // Image stamps are embedded via pdf-lib on save
     }
   }
 

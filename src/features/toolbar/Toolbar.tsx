@@ -46,6 +46,11 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { SpecExtractionButton } from "@/features/specs/SpecExtractionButton";
 import { AISettings } from "@/features/settings/AISettings";
+import {
+  isBrowserAiStorageAvailable,
+  hashPdfBytes,
+  setPdfAiMetadata,
+} from "@/shared/browserPdfAiStorage";
 
 export function Toolbar() {
   const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType } = useUIStore();
@@ -225,7 +230,9 @@ export function Toolbar() {
     }
   };
 
-  const syncAndSavePDF = async (saveFunction: (data: Uint8Array) => Promise<void>) => {
+  const SIDECAR_SUFFIX = ".ai.json";
+
+  const syncAndSavePDF = async (saveFunction: (data: Uint8Array) => Promise<string | void>, savePath?: string | null) => {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
@@ -235,11 +242,14 @@ export function Toolbar() {
 
       // Build AI metadata (extracted specs, conversation) so it persists when PDF is re-opened
       const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(currentDoc.getId());
+      // TODO: when we have a per-document conversation store, set conversationHistory and include it below
+      const conversationHistory: { messages: { role: "user" | "assistant"; content: string }[] } | undefined = undefined;
+      const hasConversation = (conversationHistory?.messages?.length ?? 0) > 0;
       const aiMetadata =
-        extractedSpecs.length > 0
-          ? { version: 1, extractedSpecs }
+        extractedSpecs.length > 0 || hasConversation
+          ? { version: 1, extractedSpecs, ...(hasConversation && conversationHistory ? { conversationHistory } : {}) }
           : undefined;
-      
+
       // Initialize mupdf and PDFEditor
       const mupdfModule = await import("mupdf");
       const editor = new PDFEditor(mupdfModule.default);
@@ -321,8 +331,40 @@ export function Toolbar() {
       }
       
       
-      // Call the provided save function
-      await saveFunction(pdfData);
+      // Call the provided save function (may return the chosen path for Save As)
+      const pathFromSave = await saveFunction(pdfData);
+      const pathFromSaveStr =
+        typeof pathFromSave === "string"
+          ? pathFromSave
+          : pathFromSave != null && typeof (pathFromSave as { path?: string }).path === "string"
+            ? (pathFromSave as { path: string }).path
+            : null;
+      const pathForSidecarRaw = savePath ?? pathFromSaveStr;
+      const pathForSidecar = pathForSidecarRaw
+        ? pathForSidecarRaw.trim().replace(/^file:\/\//i, "").replace(/\\/g, "/").replace(/\/+$/, "")
+        : null;
+      if (pathFromSaveStr && pathFromSaveStr.length > 0) {
+        const normalizedDocPath = pathFromSaveStr.trim().replace(/^file:\/\//i, "").replace(/\\/g, "/").replace(/\/+$/, "");
+        usePDFStore.getState().setDocumentPath(currentDoc.getId(), normalizedDocPath);
+      }
+
+      // When we have a path, write AI sidecar so re-opening restores "View Results" (works in Tauri/desktop).
+      // Sidecar is the reliable source when the PDF is encrypted (in-PDF metadata may stay encrypted).
+      if (pathForSidecar && aiMetadata) {
+        try {
+          const sidecarData = new TextEncoder().encode(JSON.stringify(aiMetadata));
+          await fileSystem.saveFileToPath(sidecarData, pathForSidecar + SIDECAR_SUFFIX);
+        } catch (e) {
+          console.warn("[Toolbar] Failed to write AI sidecar file.", e);
+        }
+      } else if (aiMetadata && !pathForSidecar && isBrowserAiStorageAvailable()) {
+        try {
+          const hash = await hashPdfBytes(pdfData);
+          if (hash) await setPdfAiMetadata(hash, aiMetadata);
+        } catch (e) {
+          console.warn("[Toolbar] Failed to store AI metadata for browser recall.", e);
+        }
+      }
       
       // Mark tab as saved
       const tab = useTabStore.getState().getTabByDocumentId(currentDoc.getId());
@@ -347,7 +389,7 @@ export function Toolbar() {
       try {
         await syncAndSavePDF(async (data) => {
           await fileSystem.saveFileToPath(data, originalPath);
-        });
+        }, originalPath);
       } catch (error) {
         // If saveFileToPath fails (e.g., in browser), fall back to Save As
         console.error("Error saving to path, falling back to Save As:", error);
@@ -363,13 +405,43 @@ export function Toolbar() {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
+    const isTauriEnv =
+      typeof window !== "undefined" &&
+      ((window as any).__TAURI__ != null ||
+        (window as any).__TAURI_INTERNALS__ != null ||
+        (window as any).__TAURI_INVOKE__ != null ||
+        (window as any).invoke != null);
+
     try {
-      await syncAndSavePDF(async (data) => {
-        // Always show save dialog for Save As
-        await fileSystem.saveFile(data, currentDoc.getName());
-        // Show success notification
-        useNotificationStore.getState().showNotification("PDF saved successfully", "success");
-      });
+      let chosenPath: string | null = null;
+      let tauriFs: { saveFileToPath: (data: Uint8Array, path: string) => Promise<void> } | null = null;
+
+      if (isTauriEnv) {
+        // In Tauri: use native dialog to get path first so we always have it for the AI sidecar.
+        // Lazy-load TauriFileSystem so browser bundle doesn't pull in Tauri plugins.
+        try {
+          const { TauriFileSystem } = await import("@/core/fs/TauriFileSystem");
+          const fs = new TauriFileSystem();
+          chosenPath = await fs.getSavePath(currentDoc.getName());
+          tauriFs = fs;
+        } catch (e) {
+          console.warn("[Toolbar] Tauri getSavePath failed, falling back to saveFile:", e);
+        }
+      }
+
+      if (chosenPath && tauriFs) {
+        await syncAndSavePDF(
+          async (data) => {
+            await tauriFs.saveFileToPath(data, chosenPath!);
+          },
+          chosenPath
+        );
+      } else {
+        await syncAndSavePDF(async (data) => {
+          return await fileSystem.saveFile(data, currentDoc.getName());
+        });
+      }
+      useNotificationStore.getState().showNotification("PDF saved successfully", "success");
     } catch (error) {
       console.error("Error in handleSaveAs:", error);
     }

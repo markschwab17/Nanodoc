@@ -274,7 +274,7 @@ export const ShapeTool: ToolHandler = {
             typeof start.x !== 'number' || typeof start.y !== 'number' ||
             typeof end.x !== 'number' || typeof end.y !== 'number' ||
             isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) {
-          console.error("🟠 [ARROW CREATE] Invalid arrow points:", { start, end, shapeStart, selectionEnd });
+          console.error("[ARROW CREATE] Invalid arrow points:", { start, end });
           return undefined;
         }
         console.log("🟣 [ARROW CREATE] Valid points, returning:", [start, end]);

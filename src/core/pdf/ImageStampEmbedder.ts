@@ -3,6 +3,8 @@
  *
  * Handles embedding image stamps into PDFs using pdf-lib library.
  * This provides proper image rendering in native PDF viewers.
+ * When aiMetadata is provided, it is written to the PDF Keywords so that
+ * AI-extracted data and conversation persist after the pdf-lib rewrite.
  */
 
 // Dynamic import of pdf-lib to handle cases where it might not be installed
@@ -12,7 +14,6 @@ async function getPdfLib() {
   if (!pdfLibModule) {
     try {
       pdfLibModule = await import('pdf-lib');
-      console.log('[ImageStampEmbedder] pdf-lib imported successfully');
     } catch (error) {
       console.error('[ImageStampEmbedder] Failed to import pdf-lib:', error);
       throw new Error('pdf-lib is not available. Please run: npm install pdf-lib');
@@ -21,28 +22,22 @@ async function getPdfLib() {
   return pdfLibModule;
 }
 import type { Annotation } from './types';
+import type { PDFAIMetadataPayload } from './PDFAIMetadata';
+import { encodeAIMetadataForKeywords, AI_EMBEDDED_FILE_NAME } from './PDFAIMetadata';
 
 export class ImageStampEmbedder {
   /**
    * Embed image stamps into a PDF buffer using pdf-lib
    * @param pdfBuffer - The PDF buffer from MuPDF
    * @param imageStamps - Array of image stamp annotations
+   * @param aiMetadata - Optional AI metadata (extracted specs, conversation) to preserve in the saved PDF
    * @returns Promise<Uint8Array> - PDF buffer with embedded images
    */
   async embedImageStamps(
     pdfBuffer: Uint8Array,
-    imageStamps: Annotation[]
+    imageStamps: Annotation[],
+    aiMetadata?: PDFAIMetadataPayload
   ): Promise<Uint8Array> {
-    console.log(`[ImageStampEmbedder] Processing ${imageStamps.length} image stamps`);
-    console.log(`[ImageStampEmbedder] PDF buffer size: ${pdfBuffer.length} bytes`);
-    console.log(`[ImageStampEmbedder] Image stamps details:`, imageStamps.map(s => ({
-      id: s.id,
-      type: s.type,
-      stampType: s.stampData?.type,
-      hasImageData: !!s.stampData?.imageData,
-      imageDataLength: s.stampData?.imageData?.length || 0
-    })));
-
     try {
       // Get pdf-lib dynamically
       const { PDFDocument } = await getPdfLib();
@@ -63,11 +58,27 @@ export class ImageStampEmbedder {
         }
       }
 
-      // Save the modified PDF
-      const modifiedPdfBytes = await pdfDoc.save();
-      console.log(`[ImageStampEmbedder] Successfully embedded ${imageStamps.length} image stamps`);
+      // Preserve AI metadata in Keywords and as an embedded file so it travels with the PDF.
+      if (aiMetadata) {
+        try {
+          if (typeof pdfDoc.setKeywords === 'function') {
+            const keywordsValue = encodeAIMetadataForKeywords(aiMetadata);
+            pdfDoc.setKeywords(keywordsValue);
+          }
+          const json = JSON.stringify({
+            ...aiMetadata,
+            version: aiMetadata.version ?? 1,
+          });
+          const jsonBytes = new TextEncoder().encode(json);
+          await pdfDoc.attach(jsonBytes, AI_EMBEDDED_FILE_NAME, { mimeType: 'application/json' });
+        } catch (e) {
+          console.warn('[ImageStampEmbedder] Failed to set AI metadata (Keywords/embed):', e);
+        }
+      }
 
-      return modifiedPdfBytes;
+      // Save the modified PDF. useObjectStreams: false for mupdf-wasm compatibility
+      // (object streams can cause "corrupt object stream" / zlib errors on reopen)
+      return await pdfDoc.save({ useObjectStreams: false });
 
     } catch (error) {
       console.error('[ImageStampEmbedder] Failed to embed image stamps:', error);
@@ -98,51 +109,29 @@ export class ImageStampEmbedder {
     const page = pages[pageIndex];
 
     try {
-      console.log(`[ImageStampEmbedder] Processing stamp ${stamp.id} on page ${pageIndex}`);
-
-      // Extract base64 image data
       const base64Data = stamp.stampData.imageData.split(',')[1] || stamp.stampData.imageData;
-      console.log(`[ImageStampEmbedder] Base64 data length: ${base64Data.length}`);
-
-      // Convert base64 to Uint8Array
       const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-      console.log(`[ImageStampEmbedder] Converted to ${imageBytes.length} bytes`);
 
-      // Determine image type and embed
       let pdfImage;
       if (stamp.stampData.imageData.startsWith('data:image/png')) {
-        console.log(`[ImageStampEmbedder] Embedding PNG image`);
         pdfImage = await pdfDoc.embedPng(imageBytes);
       } else if (stamp.stampData.imageData.startsWith('data:image/jpeg') || stamp.stampData.imageData.startsWith('data:image/jpg')) {
-        console.log(`[ImageStampEmbedder] Embedding JPEG image`);
         pdfImage = await pdfDoc.embedJpg(imageBytes);
       } else {
-        console.warn(`[ImageStampEmbedder] Unsupported image format for stamp ${stamp.id}`);
+        console.warn('[ImageStampEmbedder] Unsupported image format for stamp', stamp.id);
         return;
       }
 
-      // Calculate position (convert from PDF coordinates to pdf-lib coordinates)
-      const pageHeight = page.getHeight();
       const x = stamp.x;
-      // Use stamp.y directly as the bottom-left corner Y coordinate
       const y = stamp.y;
-
-      console.log(`[ImageStampEmbedder] Original coordinates: x=${stamp.x}, y=${stamp.y}, height=${stamp.height}`);
-      console.log(`[ImageStampEmbedder] Converted coordinates: x=${x}, y=${y}, pageHeight=${pageHeight}`);
-      console.log(`[ImageStampEmbedder] Drawing image at (${x}, ${y}) with size ${stamp.width || 100}x${stamp.height || 100}`);
-
-      // Draw the image on the page
       page.drawImage(pdfImage, {
         x,
         y,
         width: stamp.width || 100,
         height: stamp.height || 100,
       });
-
-      console.log(`[ImageStampEmbedder] Successfully embedded image stamp ${stamp.id}`);
-
     } catch (error) {
-      console.error(`[ImageStampEmbedder] Error embedding stamp ${stamp.id}:`, error);
+      console.error('[ImageStampEmbedder] Failed to embed stamp', stamp.id, error);
       throw error;
     }
   }

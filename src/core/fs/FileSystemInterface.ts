@@ -13,11 +13,18 @@ export interface FileSystemInterface {
   openFile(): Promise<{ data: Uint8Array; name: string; path: string | null } | null>;
 
   /**
-   * Saves a file with the given data and name.
-   * In browser, this will trigger a download.
-   * In Tauri, this will use the native save dialog.
+   * Opens the save dialog and returns the chosen path without writing.
+   * Use this for Save As when you need the path for sidecar files (e.g. .ai.json).
+   * In Tauri, returns the path; in browser, returns null.
    */
-  saveFile(data: Uint8Array, name: string): Promise<void>;
+  getSavePath?(name: string): Promise<string | null>;
+
+  /**
+   * Saves a file with the given data and name.
+   * In browser, this will trigger a download (returns void).
+   * In Tauri, this will use the native save dialog and return the chosen path when available.
+   */
+  saveFile(data: Uint8Array, name: string): Promise<string | void>;
 
   /**
    * Reads a file from the given path.

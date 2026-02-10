@@ -10,14 +10,23 @@ import { useTabStore } from "@/shared/stores/tabStore";
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { PDFDocument } from "@/core/pdf/PDFDocument";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
-import { readAIMetadata } from "@/core/pdf/PDFAIMetadata";
+import { readAIMetadata, readAIMetadataFromEmbeddedFile, type PDFAIMetadataPayload } from "@/core/pdf/PDFAIMetadata";
+import {
+  isBrowserAiStorageAvailable,
+  hashPdfBytes,
+  getPdfAiMetadata,
+} from "@/shared/browserPdfAiStorage";
+
+const SIDECAR_SUFFIX = ".ai.json";
 
 export function usePDF() {
   const pdfStore = usePDFStore();
   const tabStore = useTabStore();
   const recentFilesStore = useRecentFilesStore();
+  const fileSystem = useFileSystem();
   const { setActiveTool } = useUIStore();
 
   // Access loading state reactively
@@ -40,29 +49,63 @@ export function usePDF() {
         
         await document.loadFromData(data, mupdf);
         
-        // Set original file path if provided
-        if (filePath) {
-          document.setOriginalFilePath(filePath);
+        const normalizedFilePath = filePath
+          ? filePath.trim().replace(/^file:\/\//i, "").replace(/\\/g, "/").replace(/\/+$/, "")
+          : null;
+        if (normalizedFilePath) {
+          document.setOriginalFilePath(normalizedFilePath);
         }
-        
-        pdfStore.addDocument(document, filePath || null);
+        pdfStore.addDocument(document, normalizedFilePath || null);
         pdfStore.setCurrentDocument(documentId);
 
-        // Restore AI metadata (extracted specs, conversation) from PDF so user can continue
-        try {
-          const mupdfDoc = document.getMupdfDocument();
-          const aiPayload = readAIMetadata(mupdfDoc);
-          if (aiPayload?.extractedSpecs?.length) {
-            useSpecExtractionStore.getState().setExtractedSpecs(documentId, aiPayload.extractedSpecs);
+        // Restore AI metadata: sidecar (desktop) → IndexedDB (browser) → embedded file → PDF Info/Keywords
+        let aiPayload: PDFAIMetadataPayload | null = null;
+        if (normalizedFilePath) {
+          try {
+            const sidecarData = await fileSystem.readFile(normalizedFilePath + SIDECAR_SUFFIX);
+            const parsed = JSON.parse(new TextDecoder().decode(sidecarData)) as PDFAIMetadataPayload;
+            if (parsed?.version != null && Array.isArray(parsed.extractedSpecs) && parsed.extractedSpecs.length > 0) {
+              aiPayload = parsed;
+            }
+          } catch {
+            // no sidecar
           }
-        } catch (e) {
-          // Non-fatal: PDF may have no AI metadata or old format
+        }
+        if (!aiPayload && isBrowserAiStorageAvailable()) {
+          try {
+            const hash = await hashPdfBytes(data);
+            if (hash) {
+              const stored = await getPdfAiMetadata(hash);
+              if (stored?.version != null && Array.isArray(stored.extractedSpecs) && stored.extractedSpecs.length > 0) {
+                aiPayload = stored;
+              }
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+        if (!aiPayload) {
+          try {
+            aiPayload = await readAIMetadataFromEmbeddedFile(data);
+          } catch {
+            // non-fatal
+          }
+        }
+        if (!aiPayload) {
+          try {
+            aiPayload = readAIMetadata(document.getMupdfDocument());
+          } catch {
+            // non-fatal (e.g. encrypted PDF)
+          }
+        }
+        if (aiPayload?.extractedSpecs?.length) {
+          useSpecExtractionStore.getState().setExtractedSpecs(documentId, aiPayload.extractedSpecs);
         }
 
-        // Add to recent files if we have a file path
-        if (filePath) {
+        // Add to recent files if we have a file path (use normalized path for consistency with sidecar)
+        if (normalizedFilePath) {
           recentFilesStore.addRecentFile({
-            path: filePath,
+            path: normalizedFilePath,
             name: name,
             lastOpened: Date.now(),
           });
@@ -214,7 +257,7 @@ export function usePDF() {
         pdfStore.setLoading(false);
       }
     },
-    [pdfStore, tabStore, recentFilesStore, setActiveTool]
+    [pdfStore, tabStore, recentFilesStore, fileSystem, setActiveTool]
   );
 
   const closeCurrentDocument = useCallback(() => {

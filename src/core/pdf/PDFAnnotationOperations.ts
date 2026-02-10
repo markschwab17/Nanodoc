@@ -1245,7 +1245,7 @@ export class PDFAnnotationOperations {
 
   isNaN(start.x) || isNaN(start.y) || isNaN(end.x) || isNaN(end.y)) {
 
-  console.warn("🟠 [ARROW SAVE] Invalid arrow points:", { start, end });
+  console.warn("[ARROW SAVE] Invalid arrow points:", { start, end });
 
   return;
 
@@ -1363,7 +1363,7 @@ export class PDFAnnotationOperations {
 
   } catch (objError) {
 
-  console.warn("🟠 [ARROW SAVE] Could not set line with any method, deleting broken annotation:", { flatError, nestedError, objError, start, end });
+  console.warn("[ARROW SAVE] Could not set line, deleting broken annotation:", { start, end });
 
   // CRITICAL: If we can't set the line, delete the annotation to prevent a broken annotation from being saved
 
@@ -2489,15 +2489,7 @@ export class PDFAnnotationOperations {
   const annot = page.createAnnotation("Stamp");
 
   annot.setRect(rect);
-  // CRITICAL: Update annotation after setting rect before setting appearance
-  console.log(`[DIAGNOSTIC] Updating annotation after setting rect...`);
   annot.update();
-  console.log(`[DIAGNOSTIC] Annotation updated successfully`);
-
-  // #region agent log
-  const rectAfterSet = annot.getRect();
-  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2491',message:'After setRect - checking if rect changed',data:{annotationId:annotation.id,rectSet:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},rectAfterSet:{x:rectAfterSet[0],y:rectAfterSet[1],x2:rectAfterSet[2],y2:rectAfterSet[3]},rectChanged:rect[0]!==rectAfterSet[0]||rect[1]!==rectAfterSet[1]||rect[2]!==rectAfterSet[2]||rect[3]!==rectAfterSet[3]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
-  // #endregion
 
   // Store stamp data in contents as JSON for our app to read back
   if (annotation.stampData) {
