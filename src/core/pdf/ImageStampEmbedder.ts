@@ -1,10 +1,9 @@
 /**
- * Image Stamp Embedder using pdf-lib
+ * Stamp Embedder using pdf-lib
  *
- * Handles embedding image stamps into PDFs using pdf-lib library.
- * This provides proper image rendering in native PDF viewers.
- * When aiMetadata is provided, it is written to the PDF Keywords so that
- * AI-extracted data and conversation persist after the pdf-lib rewrite.
+ * Embeds image, text, and signature stamps into PDFs as page content
+ * so they render correctly in native PDF viewers.
+ * When aiMetadata is provided, it is written to the PDF Keywords.
  */
 
 // Dynamic import of pdf-lib to handle cases where it might not be installed
@@ -25,123 +24,188 @@ import type { Annotation } from './types';
 import type { PDFAIMetadataPayload } from './PDFAIMetadata';
 import { encodeAIMetadataForKeywords, AI_EMBEDDED_FILE_NAME } from './PDFAIMetadata';
 
+/** PDF position for a stamp: x is left edge, y is bottom edge (PDF coords: origin bottom-left). */
+function stampPosition(page: any, stamp: Annotation): { x: number; y: number; width: number; height: number } {
+  const w = stamp.width || 100;
+  const h = stamp.height || 100;
+  const x = stamp.x;
+  // stamp.y is the PDF y of the click (top of stamp); PDF origin is bottom-left, so bottom = top - height
+  const y = stamp.y - h;
+  return { x, y, width: w, height: h };
+}
+
 export class ImageStampEmbedder {
   /**
-   * Embed image stamps into a PDF buffer using pdf-lib
-   * @param pdfBuffer - The PDF buffer from MuPDF
-   * @param imageStamps - Array of image stamp annotations
-   * @param aiMetadata - Optional AI metadata (extracted specs, conversation) to preserve in the saved PDF
-   * @returns Promise<Uint8Array> - PDF buffer with embedded images
+   * Embed all stamp types (image, text, signature) into a PDF buffer using pdf-lib.
    */
+  async embedStamps(
+    pdfBuffer: Uint8Array,
+    stamps: Annotation[],
+    aiMetadata?: PDFAIMetadataPayload
+  ): Promise<Uint8Array> {
+    try {
+      const { PDFDocument, StandardFonts, rgb } = await getPdfLib();
+      const pdfDoc = await PDFDocument.load(pdfBuffer);
+      const pages = pdfDoc.getPages();
+
+      for (const stamp of stamps) {
+        try {
+          if (stamp.stampData?.type === 'image') {
+            await this.embedSingleImageStamp(pdfDoc, pages, stamp);
+          } else if (stamp.stampData?.type === 'text') {
+            await this.embedSingleTextStamp(pdfDoc, pages, stamp, StandardFonts, rgb);
+          } else if (stamp.stampData?.type === 'signature') {
+            await this.embedSingleSignatureStamp(pdfDoc, pages, stamp, rgb);
+          }
+        } catch (stampError) {
+          console.error(`[ImageStampEmbedder] Failed to embed stamp ${stamp.id}:`, stampError);
+        }
+      }
+
+      if (aiMetadata) {
+        try {
+          if (typeof pdfDoc.setKeywords === 'function') {
+            pdfDoc.setKeywords(encodeAIMetadataForKeywords(aiMetadata));
+          }
+          const json = JSON.stringify({ ...aiMetadata, version: aiMetadata.version ?? 1 });
+          await pdfDoc.attach(new TextEncoder().encode(json), AI_EMBEDDED_FILE_NAME, { mimeType: 'application/json' });
+        } catch (e) {
+          console.warn('[ImageStampEmbedder] Failed to set AI metadata:', e);
+        }
+      }
+
+      return await pdfDoc.save({ useObjectStreams: false });
+    } catch (error) {
+      console.error('[ImageStampEmbedder] Failed to embed stamps:', error);
+      return pdfBuffer;
+    }
+  }
+
+  /** @deprecated Use embedStamps for all stamp types */
   async embedImageStamps(
     pdfBuffer: Uint8Array,
     imageStamps: Annotation[],
     aiMetadata?: PDFAIMetadataPayload
   ): Promise<Uint8Array> {
-    try {
-      // Get pdf-lib dynamically
-      const { PDFDocument } = await getPdfLib();
-
-      // Load the PDF with pdf-lib
-      const pdfDoc = await PDFDocument.load(pdfBuffer);
-
-      // Get all pages
-      const pages = pdfDoc.getPages();
-
-      // Process each image stamp
-      for (const stamp of imageStamps) {
-        try {
-          await this.embedSingleImageStamp(pdfDoc, pages, stamp);
-        } catch (stampError) {
-          console.error(`[ImageStampEmbedder] Failed to embed stamp ${stamp.id}:`, stampError);
-          // Continue with other stamps rather than failing completely
-        }
-      }
-
-      // Preserve AI metadata in Keywords and as an embedded file so it travels with the PDF.
-      if (aiMetadata) {
-        try {
-          if (typeof pdfDoc.setKeywords === 'function') {
-            const keywordsValue = encodeAIMetadataForKeywords(aiMetadata);
-            pdfDoc.setKeywords(keywordsValue);
-          }
-          const json = JSON.stringify({
-            ...aiMetadata,
-            version: aiMetadata.version ?? 1,
-          });
-          const jsonBytes = new TextEncoder().encode(json);
-          await pdfDoc.attach(jsonBytes, AI_EMBEDDED_FILE_NAME, { mimeType: 'application/json' });
-        } catch (e) {
-          console.warn('[ImageStampEmbedder] Failed to set AI metadata (Keywords/embed):', e);
-        }
-      }
-
-      // Save the modified PDF. useObjectStreams: false for mupdf-wasm compatibility
-      // (object streams can cause "corrupt object stream" / zlib errors on reopen)
-      return await pdfDoc.save({ useObjectStreams: false });
-
-    } catch (error) {
-      console.error('[ImageStampEmbedder] Failed to embed image stamps:', error);
-      // Return original buffer if embedding fails
-      return pdfBuffer;
-    }
+    return this.embedStamps(pdfBuffer, imageStamps, aiMetadata);
   }
 
-  /**
-   * Embed a single image stamp
-   */
-  private async embedSingleImageStamp(
+  private async embedSingleImageStamp(pdfDoc: any, pages: any[], stamp: Annotation): Promise<void> {
+    if (!stamp.stampData?.imageData || stamp.stampData.type !== 'image') return;
+
+    const pageIndex = stamp.pageNumber;
+    if (pageIndex >= pages.length) return;
+    const page = pages[pageIndex];
+    const { x, y, width, height } = stampPosition(page, stamp);
+
+    const base64Data = stamp.stampData.imageData.split(',')[1] || stamp.stampData.imageData;
+    const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+
+    let pdfImage;
+    if (stamp.stampData.imageData.startsWith('data:image/png')) {
+      pdfImage = await pdfDoc.embedPng(imageBytes);
+    } else if (stamp.stampData.imageData.startsWith('data:image/jpeg') || stamp.stampData.imageData.startsWith('data:image/jpg')) {
+      pdfImage = await pdfDoc.embedJpg(imageBytes);
+    } else {
+      return;
+    }
+
+    page.drawImage(pdfImage, { x, y, width, height });
+  }
+
+  private async embedSingleTextStamp(
     pdfDoc: any,
     pages: any[],
-    stamp: Annotation
+    stamp: Annotation,
+    StandardFonts: any,
+    rgb: (r: number, g: number, b: number) => any
   ): Promise<void> {
-    if (!stamp.stampData?.imageData || stamp.stampData.type !== 'image') {
-      return;
-    }
+    const data = stamp.stampData;
+    if (data?.type !== 'text' || !data.text) return;
 
-    // Get the target page
     const pageIndex = stamp.pageNumber;
-    if (pageIndex >= pages.length) {
-      console.warn(`[ImageStampEmbedder] Page ${pageIndex} not found for stamp ${stamp.id}`);
-      return;
-    }
-
+    if (pageIndex >= pages.length) return;
     const page = pages[pageIndex];
+    const { x, y, width, height } = stampPosition(page, stamp);
 
-    try {
-      const base64Data = stamp.stampData.imageData.split(',')[1] || stamp.stampData.imageData;
-      const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    const fontName = (data.font || 'Helvetica').toLowerCase().includes('bold') ? StandardFonts.HelveticaBold : StandardFonts.Helvetica;
+    const font = await pdfDoc.embedFont(fontName);
 
-      let pdfImage;
-      if (stamp.stampData.imageData.startsWith('data:image/png')) {
-        pdfImage = await pdfDoc.embedPng(imageBytes);
-      } else if (stamp.stampData.imageData.startsWith('data:image/jpeg') || stamp.stampData.imageData.startsWith('data:image/jpg')) {
-        pdfImage = await pdfDoc.embedJpg(imageBytes);
-      } else {
-        console.warn('[ImageStampEmbedder] Unsupported image format for stamp', stamp.id);
-        return;
+    const hex = (data.textColor || '#000000').replace('#', '');
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+
+    // Match StampAnnotation.tsx scale: fontSize = min(width, height) * 0.4
+    const minDim = Math.min(width, height);
+    const fontSize = Math.max(8, Math.min(minDim * 0.4, 72));
+    const lineHeight = fontSize * 1.2;
+    const lines = data.text.split(/\r?\n/);
+    let drawY = y + height - fontSize;
+
+    for (const line of lines) {
+      if (!line.trim()) {
+        drawY -= lineHeight;
+        continue;
       }
-
-      const x = stamp.x;
-      const y = stamp.y;
-      page.drawImage(pdfImage, {
+      page.drawText(line, {
+        font,
+        size: fontSize,
+        color: rgb(r, g, b),
         x,
-        y,
-        width: stamp.width || 100,
-        height: stamp.height || 100,
+        y: drawY,
       });
-    } catch (error) {
-      console.error('[ImageStampEmbedder] Failed to embed stamp', stamp.id, error);
-      throw error;
+      drawY -= lineHeight;
     }
   }
 
-  /**
-   * Check if an annotation is an image stamp that needs embedding
-   */
+  private async embedSingleSignatureStamp(
+    pdfDoc: any,
+    pages: any[],
+    stamp: Annotation,
+    rgb: (r: number, g: number, b: number) => any
+  ): Promise<void> {
+    const path = stamp.stampData?.signaturePath;
+    if (stamp.stampData?.type !== 'signature' || !path?.length) return;
+
+    const pageIndex = stamp.pageNumber;
+    if (pageIndex >= pages.length) return;
+    const page = pages[pageIndex];
+    const { x, y, width, height } = stampPosition(page, stamp);
+
+    // Signature path is in design space 0–100 (x) and 0–60 (y). Scale to stamp rect and flip Y for PDF.
+    const scaleX = width / 100;
+    const scaleY = height / 60;
+    const black = rgb(0, 0, 0);
+
+    for (let i = 1; i < path.length; i++) {
+      const prev = path[i - 1];
+      const curr = path[i];
+      const x1 = x + prev.x * scaleX;
+      const y1 = y + height - prev.y * scaleY;
+      const x2 = x + curr.x * scaleX;
+      const y2 = y + height - curr.y * scaleY;
+      page.drawLine({
+        start: { x: x1, y: y1 },
+        end: { x: x2, y: y2 },
+        thickness: Math.max(1, (width + height) / 200),
+        color: black,
+      });
+    }
+  }
+
   static isImageStamp(annotation: Annotation): boolean {
     return annotation.type === 'stamp' &&
            annotation.stampData?.type === 'image' &&
            !!annotation.stampData.imageData;
+  }
+
+  static isStampToEmbed(annotation: Annotation): boolean {
+    if (annotation.type !== 'stamp' || !annotation.stampData) return false;
+    const t = annotation.stampData.type;
+    if (t === 'image') return !!annotation.stampData.imageData;
+    if (t === 'text') return !!annotation.stampData.text;
+    if (t === 'signature') return !!annotation.stampData.signaturePath?.length;
+    return false;
   }
 }

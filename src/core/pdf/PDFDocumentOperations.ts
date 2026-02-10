@@ -10,6 +10,7 @@ import { PDFAnnotationOperations } from "./PDFAnnotationOperations";
 import { PDFPageOperations } from "./PDFPageOperations";
 import { parseColor } from "./utils/colorUtils";
 import { writeAIMetadata, attachAIMetadataToPdfBuffer, type PDFAIMetadataPayload } from "./PDFAIMetadata";
+import { ImageStampEmbedder } from "./ImageStampEmbedder";
 
 export class PDFDocumentOperations {
   constructor(
@@ -512,28 +513,67 @@ export class PDFDocumentOperations {
     writeAIMetadata(mupdfDoc, aiMetadata);
   }
 
-  const buffer = pdfDoc.saveToBuffer();
-  const savedData = buffer.asUint8Array();
-
-  // Embed image stamps with pdf-lib when present; also embeds AI metadata
-  const imageStamps = annotations ? annotations.filter(annot =>
-    annot.type === 'stamp' &&
-    annot.stampData?.type === 'image' &&
-    !!annot.stampData.imageData
+  // Set NoView (F flag bit 6 = 32) on all stamp annotations so the saved PDF hides them; we draw content with pdf-lib.
+  const NO_VIEW_FLAG = 32;
+  const stampAnnots = annotations ? annotations.filter((a): a is Annotation =>
+    a.type === "stamp" && !!a.stampData && !!a.pdfAnnotation && ImageStampEmbedder.isStampToEmbed(a)
   ) : [];
-
-  if (imageStamps.length > 0) {
+  const stampFlagsBefore: number[] = [];
+  for (const annot of stampAnnots) {
     try {
-      const { ImageStampEmbedder } = await import('./ImageStampEmbedder');
-      const embedder = new ImageStampEmbedder();
-      return await embedder.embedImageStamps(savedData, imageStamps, aiMetadata ?? undefined);
-    } catch (embedError) {
-      console.error('[PDFDocumentOperations] Failed to embed image stamps:', embedError);
+      const annotObj = annot.pdfAnnotation!.getObject?.();
+      if (annotObj && this.mupdf?.newNumber) {
+        const fObj = annotObj.get?.("F");
+        const prev = fObj != null && typeof fObj.valueOf === "function" ? (fObj.valueOf() | 0) : 0;
+        stampFlagsBefore.push(prev);
+        annotObj.put("F", this.mupdf.newNumber(prev | NO_VIEW_FLAG));
+        if (typeof annotObj.update === "function") annotObj.update();
+      } else {
+        stampFlagsBefore.push(0);
+        if (typeof annot.pdfAnnotation!.getFlags === "function" && typeof annot.pdfAnnotation!.setFlags === "function") {
+          const flags = annot.pdfAnnotation!.getFlags();
+          annot.pdfAnnotation!.setFlags(flags | NO_VIEW_FLAG);
+        }
+      }
+    } catch (e) {
+      stampFlagsBefore.push(0);
+      console.warn("Could not set NoView on stamp annotation:", e);
     }
   }
 
-  // When no image stamps, still attach AI metadata as embedded file so it travels with the PDF
-  if (aiMetadata) {
+  const buffer = pdfDoc.saveToBuffer();
+  let savedData = buffer.asUint8Array();
+
+  for (let i = 0; i < stampAnnots.length; i++) {
+    const annot = stampAnnots[i];
+    try {
+      const annotObj = annot.pdfAnnotation!.getObject?.();
+      if (annotObj && this.mupdf?.newNumber) {
+        const prev = stampFlagsBefore[i] ?? 0;
+        annotObj.put("F", this.mupdf.newNumber(prev & ~NO_VIEW_FLAG));
+        if (typeof annotObj.update === "function") annotObj.update();
+      } else if (typeof annot.pdfAnnotation!.setFlags === "function") {
+        const flags = annot.pdfAnnotation!.getFlags();
+        annot.pdfAnnotation!.setFlags(flags & ~NO_VIEW_FLAG);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  const stampsToEmbed = annotations ? annotations.filter(annot => ImageStampEmbedder.isStampToEmbed(annot)) : [];
+
+  if (stampsToEmbed.length > 0) {
+    try {
+      const { ImageStampEmbedder } = await import('./ImageStampEmbedder');
+      const embedder = new ImageStampEmbedder();
+      savedData = await embedder.embedStamps(savedData, stampsToEmbed, aiMetadata ?? undefined);
+    } catch (embedError) {
+      console.error('[PDFDocumentOperations] Failed to embed stamps:', embedError);
+    }
+  }
+
+  if (aiMetadata && stampsToEmbed.length === 0) {
     try {
       return await attachAIMetadataToPdfBuffer(savedData, aiMetadata);
     } catch (e) {
@@ -798,7 +838,11 @@ export class PDFDocumentOperations {
 
   // Set appearance stream with image
 
-  annot.setAppearance(image);
+  if (typeof annot.setStampImage === "function") {
+    annot.setStampImage(image);
+  } else if (typeof annot.setAppearance === "function") {
+    annot.setAppearance(image);
+  }
 
   annot.update();
 
@@ -1580,7 +1624,11 @@ export class PDFDocumentOperations {
       if (!image) {
         throw new Error('No working image creation method found');
       }
-      annot.pdfAnnotation.setAppearance(image);
+      if (typeof annot.pdfAnnotation.setStampImage === "function") {
+        annot.pdfAnnotation.setStampImage(image);
+      } else if (typeof annot.pdfAnnotation.setAppearance === "function") {
+        annot.pdfAnnotation.setAppearance(image);
+      }
     } catch (imageError: unknown) {
       console.warn("Sync: failed to update image appearance for stamp", annot.id, imageError);
     }
@@ -2614,12 +2662,8 @@ export class PDFDocumentOperations {
   }
 
   } else if (annot.type === "stamp") {
-    // Skip creating MuPDF annotations for image stamps - they will be embedded via pdf-lib
-    if (annot.stampData?.type !== 'image' || !annot.stampData?.imageData) {
-      await this.annotationOps.addStampAnnotation(document, annot);
-    } else {
-      // Image stamps are embedded via pdf-lib on save
-    }
+    // Do not sync stamp annotations to the PDF. We draw them as page content with pdf-lib on save
+    // so the saved file has no stamp annotations (no RED DRAFT) and only our drawn content.
   }
 
   } catch (error) {

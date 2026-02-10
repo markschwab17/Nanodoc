@@ -2523,12 +2523,7 @@ export class PDFAnnotationOperations {
     } catch (e) {
       // Ignore if we can't set the marker
     }
-
-    // For image stamps: appearance will be set during PDF saving using pdf-lib
-    // MuPDF cannot embed images properly, so we handle this in saveDocument()
-    // For text stamps, the JSON in contents is sufficient for our app to render
-    // Native PDF viewers may show the text from contents, but won't have the styled appearance
-    // TODO: In the future, we could render text stamps to a canvas/image and embed that for native viewers
+    // Image stamp appearance is set after all update() calls (see below) so update() does not overwrite AP.
   }
 
   // Make it invisible (no border, transparent) - appearance handles the visual
@@ -2591,6 +2586,41 @@ export class PDFAnnotationOperations {
       annot.setRect(rect);
     }
   }
+
+  // Set stamp image LAST so annot.update() above cannot overwrite it.
+  // MuPDF uses setStampImage(image) for Stamp annotations; without it they show as red "DRAFT" in external viewers.
+  if (annotation.stampData?.type === "image" && annotation.stampData.imageData && typeof annot.setStampImage === "function") {
+    try {
+      const base64Data = annotation.stampData.imageData.split(",")[1] || annotation.stampData.imageData;
+      const imageBytes = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+      let image: any = null;
+      const imgCons = this.mupdf.Image;
+      if (imgCons?.fromBuffer) {
+        image = imgCons.fromBuffer(imageBytes);
+      } else if (imgCons) {
+        for (const method of Object.getOwnPropertyNames(imgCons)) {
+          if (typeof imgCons[method] !== "function") continue;
+          if (method.includes("Pixmap")) continue;
+          try {
+            if (method.includes("Buffer") || method.includes("Bytes")) {
+              image = imgCons[method](imageBytes);
+              break;
+            }
+            image = imgCons[method](imageBytes);
+            if (image) break;
+          } catch {
+            /* try next */
+          }
+        }
+      }
+      if (image) {
+        annot.setStampImage(image);
+      }
+    } catch (e) {
+      console.warn("Could not set stamp image (will show as DRAFT in external viewers):", e);
+    }
+  }
+
   // #region agent log
   const finalRect = annot.getRect();
   fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2605',message:'After update() - checking rect',data:{annotationId:annotation.id,rectAfterUpdate:{x:rectAfterUpdate[0],y:rectAfterUpdate[1],x2:rectAfterUpdate[2],y2:rectAfterUpdate[3]},originalRect:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},rectChanged:rectChanged,finalRect:{x:finalRect[0],y:finalRect[1],x2:finalRect[2],y2:finalRect[3]}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
