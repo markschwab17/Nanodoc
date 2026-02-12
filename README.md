@@ -57,6 +57,10 @@ npm run build
 npm run tauri build
 ```
 
+## Integrations
+
+- **Civiltakeoff**: Nanodoc can be opened from [Civiltakeoff](https://civiltakeoff.ai) with URL parameters to view project PDFs (bid docs, soils reports). See [docs/CIVILTAKEOFF_INTEGRATION.md](docs/CIVILTAKEOFF_INTEGRATION.md) for the URL contract and behavior.
+
 ## Deployment
 
 ### Web App

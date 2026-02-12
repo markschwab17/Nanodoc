@@ -1,6 +1,7 @@
 import { createBrowserRouter } from "react-router-dom";
 import Home from "./pages/Home";
 import Editor from "./pages/Editor";
+import CiviltakeoffView from "./pages/CiviltakeoffView";
 import FAQ from "./pages/FAQ";
 import Compare from "./pages/Compare";
 import Privacy from "./pages/Privacy";
@@ -12,6 +13,10 @@ export const router = createBrowserRouter([
   {
     path: "/",
     element: <AppRouter />, // This component will handle the routing decision
+  },
+  {
+    path: "/view",
+    element: <CiviltakeoffView />,
   },
   {
     path: "/editor",
