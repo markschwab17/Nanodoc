@@ -8,18 +8,27 @@ import type { AIConfig, SpecExtractionResult, AIProvider } from './types';
 import { extractSpecsFromChunks as geminiExtractSpecs, callGeminiAPI, type GeminiConfig } from './GeminiService';
 import { extractSpecsFromChunks as openaiExtractSpecs, generateText as openaiGenerateText } from './OpenAIService';
 import { useAIProviderStore } from '@/shared/stores/aiProviderStore';
+import { useCiviltakeoffContextStore } from '@/shared/stores/civiltakeoffContextStore';
 
 /**
- * Get the active AI provider configuration
+ * Get the active AI provider configuration.
+ * When opened from CTO (Civiltakeoff), returns config with ctoProxy so Gemini uses CTO's proxy.
  */
 export function getAIConfig(): AIConfig | null {
+  const ctx = typeof window !== "undefined"
+    ? useCiviltakeoffContextStore.getState().getContext()
+    : null;
+  if (ctx) {
+    return {
+      apiKey: "",
+      provider: "gemini",
+      model: "gemini-2.0-flash",
+      ctoProxy: { token: ctx.token, apiOrigin: ctx.api_origin },
+    };
+  }
   const store = useAIProviderStore.getState();
   const apiKey = store.getApiKey(store.activeProvider);
-  
-  if (!apiKey) {
-    return null;
-  }
-  
+  if (!apiKey) return null;
   return {
     apiKey,
     provider: store.activeProvider,
@@ -44,6 +53,7 @@ export async function extractSpecsFromChunks(
       apiKey: config.apiKey,
       model: config.model as any,
       baseUrl: config.baseUrl,
+      ctoProxy: config.ctoProxy,
     };
     return geminiExtractSpecs(chunks, geminiConfig, extractionType, customPrompt);
   } else if (config.provider === 'chatgpt') {
@@ -67,6 +77,7 @@ export async function generateText(prompt: string): Promise<string> {
       apiKey: config.apiKey,
       model: config.model as any,
       baseUrl: config.baseUrl,
+      ctoProxy: config.ctoProxy,
     };
     return callGeminiAPI(prompt, geminiConfig);
   } else if (config.provider === 'chatgpt') {
@@ -77,11 +88,11 @@ export async function generateText(prompt: string): Promise<string> {
 }
 
 /**
- * Check if an API key is configured for the active provider
+ * Check if an API key is configured for the active provider, or we're in CTO context (proxy).
  */
 export function hasConfiguredAPIKey(): boolean {
   const config = getAIConfig();
-  return config !== null;
+  return config !== null && (Boolean(config.apiKey) || Boolean(config.ctoProxy));
 }
 
 /**

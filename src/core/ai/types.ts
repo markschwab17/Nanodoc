@@ -23,6 +23,8 @@ export interface AIConfig {
   provider: AIProvider;
   model?: string;
   baseUrl?: string;
+  /** When set, use CTO's Gemini proxy (token + apiOrigin) instead of direct API key. */
+  ctoProxy?: { token: string; apiOrigin: string };
 }
 
 /**

@@ -12,6 +12,10 @@ export interface CiviltakeoffViewParams {
   page: number | null;
   anchor: string | null;
   api_origin: string;
+  /** When set to "geotechnical", Nanodoc will auto-run geotechnical extraction after load (e.g. for soils report). */
+  auto_extract: string | null;
+  /** When "1", after extraction completes, auto-POST extraction to CTO (no Save dialog). Used for background extraction. */
+  background: string | null;
 }
 
 /**
@@ -26,6 +30,8 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const doc = params.get("doc") ?? null;
   const token = params.get("token") ?? null;
   const anchor = params.get("anchor") ?? null;
+  const auto_extract = params.get("auto_extract") ?? null;
+  const background = params.get("background") ?? null;
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -44,6 +50,8 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     page,
     anchor,
     api_origin,
+    auto_extract,
+    background,
   };
 }
 

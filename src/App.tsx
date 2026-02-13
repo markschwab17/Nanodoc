@@ -17,7 +17,7 @@ import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { SearchBar } from "@/features/search/SearchBar";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { Button } from "@/components/ui/button";
-import { FileText, Upload, File } from "lucide-react";
+import { FileText, Upload, File, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
@@ -32,6 +32,7 @@ function App() {
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
   
   // Enable keyboard shortcuts
   useKeyboard();
@@ -335,22 +336,55 @@ function App() {
 
       {/* Main Content - Sidebar + Viewer - extends to top */}
       <div className="h-screen flex overflow-hidden">
-        {/* Left Sidebar - Thumbnails and Bookmarks */}
-        <aside className="w-64 border-r bg-secondary/50 flex flex-col overflow-hidden">
-          {/* Thumbnails Section - takes available space from top */}
-          <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            <div className="border-b bg-background">
-              <SearchBar />
+        {/* Left Sidebar - Thumbnails and Bookmarks (collapsible) */}
+        <aside
+          className={cn(
+            "border-r bg-secondary/50 flex flex-col overflow-hidden flex-shrink-0 transition-[width] duration-200 ease-out",
+            leftSidebarCollapsed ? "w-8" : "w-64"
+          )}
+        >
+          {leftSidebarCollapsed ? (
+            <div className="flex flex-col items-center py-2 h-full">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md"
+                onClick={() => setLeftSidebarCollapsed(false)}
+                title="Expand page navigation"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <ThumbnailCarousel />
-            </div>
-          </div>
-          
-          {/* Bookmarks Section - positioned at bottom, expands upward */}
-          <div className="flex-shrink-0">
-            <BookmarksPanel />
-          </div>
+          ) : (
+            <>
+              <div className="flex-1 flex flex-col overflow-hidden min-h-0 relative">
+                <div className="border-b bg-background">
+                  <SearchBar />
+                </div>
+                <div className="flex-1 overflow-hidden min-h-0">
+                  <ThumbnailCarousel />
+                </div>
+                {/* Collapse button on right edge (overlay) */}
+                <div className="absolute right-0 top-2 bottom-0 w-8 flex items-start justify-center pt-2 bg-gradient-to-l from-secondary/80 to-transparent pointer-events-none">
+                  <div className="pointer-events-auto">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 rounded-md shadow-sm bg-background/90 hover:bg-background border border-border/50"
+                      onClick={() => setLeftSidebarCollapsed(true)}
+                      title="Collapse page navigation"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              {/* Bookmarks Section - positioned at bottom, expands upward */}
+              <div className="flex-shrink-0">
+                <BookmarksPanel />
+              </div>
+            </>
+          )}
         </aside>
 
         {/* Center - Large Viewer */}

@@ -10,8 +10,10 @@
 
 export interface GeminiConfig {
   apiKey: string;
-  model?: 'gemini-1.5-pro' | 'gemini-1.5-flash';
+  model?: 'gemini-1.5-pro' | 'gemini-1.5-flash' | string;
   baseUrl?: string;
+  /** When set, use CTO's Gemini proxy instead of direct API (token + apiOrigin). */
+  ctoProxy?: { token: string; apiOrigin: string };
 }
 
 import type { SpecExtractionResult } from './types';
@@ -368,7 +370,8 @@ export async function extractSpecsFromChunks(
   
   const allSpecs: SpecExtractionResult[] = [];
   
-  // Discover available models once before processing batches
+  // When using CTO proxy, skip model discovery and use a single model
+  const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   let modelVariants = [
     'gemini-2.5-flash',      // Current recommended model
     'gemini-2.5-pro',        // Current pro model
@@ -377,19 +380,20 @@ export async function extractSpecsFromChunks(
     'gemini-1.5-pro',        // Legacy (may not work)
     'gemini-pro',            // Legacy (may not work)
   ];
-  
-  // Try to get available models from API
-  try {
-    const availableModels = await listAvailableModels(config.apiKey, baseUrl);
-    if (availableModels.length > 0) {
-      // Prefer discovered models, but keep fallbacks
-      modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
-      console.log(`Using discovered models (${availableModels.length} total):`, availableModels.slice(0, 5), availableModels.length > 5 ? '...' : '');
-    } else {
-      console.log('No models discovered from API, using hardcoded list');
+  if (!useCtoProxy) {
+    try {
+      const availableModels = await listAvailableModels(config.apiKey, baseUrl);
+      if (availableModels.length > 0) {
+        modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
+        console.log(`Using discovered models (${availableModels.length} total):`, availableModels.slice(0, 5), availableModels.length > 5 ? '...' : '');
+      } else {
+        console.log('No models discovered from API, using hardcoded list');
+      }
+    } catch (e) {
+      console.warn('Could not discover models, using hardcoded list:', e);
     }
-  } catch (e) {
-    console.warn('Could not discover models, using hardcoded list:', e);
+  } else {
+    modelVariants = ['gemini-2.0-flash'];
   }
   
   // API versions to try
@@ -417,47 +421,59 @@ export async function extractSpecsFromChunks(
       };
     
     try {
-      let response: Response | null = null;
-      let lastError: string = '';
-      
-      // If we have a cached working model, try it first
-      const modelsToTry: Array<[string, string]> = cachedModel && cachedVersion
-        ? [[cachedModel, cachedVersion], ...modelVariants.flatMap((m: string) => apiVersions.map((v: string) => [m, v] as [string, string]))]
-        : modelVariants.flatMap((m: string) => apiVersions.map((v: string) => [m, v] as [string, string]));
-      
-      // Try each model/version combination
-      for (const [modelName, apiVersion] of modelsToTry) {
+      let data: any;
+      if (useCtoProxy && config.ctoProxy) {
+        const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, '');
+        const proxyUrl = `${apiOrigin}/api/nanodoc/gemini`;
+        const res = await fetch(proxyUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: config.ctoProxy.token,
+            model: config.model || 'gemini-2.0-flash',
+            contents: requestBody.contents,
+            generationConfig: requestBody.generationConfig,
+          }),
+        });
+        const result = await res.json();
+        if (!res.ok) {
+          throw new Error((result as { message?: string }).message ?? (result as { error?: string }).error ?? `Proxy error ${res.status}`);
+        }
+        data = (result as { response?: unknown }).response;
+        if (!data) {
+          throw new Error('CTO proxy returned no response');
+        }
+      } else {
+        let response: Response | null = null;
+        let lastError: string = '';
+        const modelsToTry: Array<[string, string]> = cachedModel && cachedVersion
+          ? [[cachedModel, cachedVersion], ...modelVariants.flatMap((m: string) => apiVersions.map((v: string) => [m, v] as [string, string]))]
+          : modelVariants.flatMap((m: string) => apiVersions.map((v: string) => [m, v] as [string, string]));
+        for (const [modelName, apiVersion] of modelsToTry) {
           try {
-            // Ensure model name doesn't have 'models/' prefix
             const cleanModelName: string = modelName.replace(/^models\//, '');
             const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
             response = await fetch(url, {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(requestBody),
             });
-            
             if (response.ok) {
-              // Cache the successful model for future batches
               cachedModel = cleanModelName;
               cachedVersion = apiVersion;
               console.log(`✓ Successfully using model: ${cleanModelName} with API ${apiVersion}`);
-              break; // Success, exit loop
+              break;
             } else {
               const errorText = await response.text();
               lastError = errorText;
               try {
                 const errorData = JSON.parse(errorText);
-                if (errorData.error?.code === 404) {
-                  // Silently skip 404s - model doesn't exist in this API version
-                } else if (errorData.error?.code === 429) {
-                  console.warn(`⚠ Rate limit/quota exceeded for ${cleanModelName} (${apiVersion}), trying next...`);
+                if (errorData.error?.code === 404) { /* skip */ } else if (errorData.error?.code === 429) {
+                  console.warn(`⚠ Rate limit for ${cleanModelName}, trying next...`);
                 } else {
                   console.warn(`⚠ Failed with ${cleanModelName} (${apiVersion}):`, errorText.substring(0, 200));
                 }
-              } catch (e) {
+              } catch {
                 console.warn(`⚠ Failed with ${cleanModelName} (${apiVersion}):`, errorText.substring(0, 200));
               }
               response = null;
@@ -467,14 +483,11 @@ export async function extractSpecsFromChunks(
             response = null;
           }
         }
-      
-      if (!response || !response.ok) {
-        const error = lastError || 'Unknown error';
-        console.error('Gemini API error after trying all model variants:', error);
-        throw new Error(`Gemini API error: ${response?.status || 'unknown'} ${error}`);
+        if (!response || !response.ok) {
+          throw new Error(`Gemini API error: ${response?.status ?? 'unknown'} ${lastError || 'Unknown error'}`);
+        }
+        data = await response.json();
       }
-      
-      const data = await response.json();
       
       // Parse JSON response
       if (data.candidates && data.candidates[0] && data.candidates[0].content) {

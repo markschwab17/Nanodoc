@@ -44,6 +44,7 @@ import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { SpecExtractionButton } from "@/features/specs/SpecExtractionButton";
 import { AISettings } from "@/features/settings/AISettings";
 import {
@@ -70,6 +71,7 @@ export function Toolbar() {
 
   // Get current tab for save state
   const activeTab = useTabStore.getState().getActiveTab();
+  const ctoContext = useCiviltakeoffContextStore((s) => s.context);
 
   // Cleanup shape menu hover timeout on unmount
   useEffect(() => {
@@ -221,7 +223,7 @@ export function Toolbar() {
     const result = await fileSystem.openFile();
     if (result) {
       try {
-        // Initialize mupdf
+        useCiviltakeoffContextStore.getState().setContext(null);
         const mupdfModule = await import("mupdf");
         await loadPDF(result.data, result.name, mupdfModule.default, result.path || null);
       } catch (error) {
@@ -383,23 +385,87 @@ export function Toolbar() {
     if (!currentDoc) return;
 
     const originalPath = usePDFStore.getState().getDocumentPath(currentDoc.getId());
-    
-    // If we have an original path, save directly to it (no dialog)
-    // Only available in Tauri (desktop) environment
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+
+    // Tauri with path: save to file
     if (originalPath && isTauri) {
       try {
         await syncAndSavePDF(async (data) => {
           await fileSystem.saveFileToPath(data, originalPath);
         }, originalPath);
       } catch (error) {
-        // If saveFileToPath fails (e.g., in browser), fall back to Save As
         console.error("Error saving to path, falling back to Save As:", error);
         await handleSaveAs();
       }
-    } else {
-      // No original path, show Save As dialog
-      await handleSaveAs();
+      return;
     }
+
+    // Opened from Civiltakeoff (browser, no path): save PDF and extraction back to CTO
+    if (ctx && !originalPath) {
+      try {
+        await syncAndSavePDF(async (pdfData) => {
+          const form = new FormData();
+          form.append("token", ctx.token);
+          form.append("file", new Blob([pdfData], { type: "application/pdf" }), currentDoc.getName());
+          const saveRes = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
+            method: "POST",
+            body: form,
+          });
+          if (!saveRes.ok) {
+            const err = await saveRes.json().catch(() => ({}));
+            throw new Error((err as { message?: string }).message ?? "Failed to save PDF to Civiltakeoff");
+          }
+          const documentId = currentDoc.getId();
+          const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(documentId);
+          const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(documentId);
+          const tables =
+            extractedSpecs.length > 0
+              ? [
+                  {
+                    headers: ["Category", "Parameter", "Value", "Unit", "Page", "Quote"],
+                    rows: extractedSpecs.map((s) => [
+                      s.category,
+                      s.parameter,
+                      s.value,
+                      s.unit ?? "",
+                      s.page,
+                      s.quote_text ?? "",
+                    ]),
+                  },
+                ]
+              : [];
+          const pageRefs = Array.from(
+            new Set(extractedSpecs.map((s) => s.page).filter((p) => p != null))
+          ).map((page) => ({ page: Number(page), label: `Page ${Number(page) + 1}` }));
+          const extractionJson: { tables?: unknown[]; specHighlights?: typeof specHighlights } = { tables };
+          if (specHighlights.length > 0) {
+            extractionJson.specHighlights = specHighlights;
+          }
+          const extractRes = await fetch(`${ctx.api_origin}/api/nanodoc/extraction`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              token: ctx.token,
+              extractionJson,
+              pageRefs,
+            }),
+          });
+          if (!extractRes.ok) {
+            console.warn("Failed to send extraction to Civiltakeoff:", await extractRes.text());
+          }
+        });
+        useNotificationStore.getState().showNotification("Saved to Civiltakeoff", "success");
+      } catch (error) {
+        console.error("Error saving to Civiltakeoff:", error);
+        useNotificationStore
+          .getState()
+          .showNotification(error instanceof Error ? error.message : "Failed to save to Civiltakeoff", "error");
+      }
+      return;
+    }
+
+    // No path and not CTO: Save As
+    await handleSaveAs();
   };
 
   const handleSaveAs = async () => {
@@ -558,7 +624,7 @@ export function Toolbar() {
               <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
                 Save as PDF
               </div>
-              {isTauri && (
+              {(isTauri || ctoContext) && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -566,7 +632,7 @@ export function Toolbar() {
                   className="justify-start"
                 >
                   <Save className="h-4 w-4 mr-2" />
-                  Save
+                  {ctoContext ? "Save to Civiltakeoff" : "Save"}
                 </Button>
               )}
               <Button

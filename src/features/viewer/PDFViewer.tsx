@@ -39,7 +39,7 @@ export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
-  const { setSelectedSpec } = useSpecExtractionStore();
+  const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();
   const { showNotification } = useNotificationStore();
   const currentDocument = getCurrentDocument();
   const [mupdf, setMupdf] = useState<any>(null);
@@ -391,10 +391,88 @@ export function PDFViewer() {
       
       const documentId = currentDocument.getId();
       
-      // Set selected spec for highlighting
+      // When we have a specific specId, set it now so bbox is emphasized during scroll
       if (specId) {
         setSelectedSpec(documentId, specId);
+      } else {
+        setSelectedSpec(documentId, null);
       }
+      
+      // For page-only (e.g. CTO table): we'll set selected spec + temporary text highlight after scroll
+      const allHighlights = getSpecHighlights(documentId);
+      const forPage = allHighlights.filter((h) => h.page === page);
+      const forAdjacent = allHighlights.filter((h) => h.page === page - 1 || h.page === page + 1);
+      const pageHighlights = !specId && (forPage.length > 0 ? forPage : forAdjacent);
+      const firstHighlight = pageHighlights.length > 0 ? pageHighlights[0] : null;
+      
+      const applyTemporaryHighlight = () => {
+        if (firstHighlight) {
+          setSelectedSpec(documentId, firstHighlight.specId);
+          const [x0, y0, x1, y1] = firstHighlight.bbox;
+          const color = firstHighlight.color || "#fbbf24";
+          let quadsToUse: number[][] | null = null;
+          try {
+            const mupdfDoc = currentDocument.getMupdfDocument();
+            const mupdfPage = mupdfDoc.loadPage(firstHighlight.page);
+            const pageMetadata = currentDocument.getPageMetadata(firstHighlight.page);
+            const pageHeight = pageMetadata?.height || 792;
+            const displayMinY = pageHeight - y1;
+            const displayMaxY = pageHeight - y0;
+            const p = [x0, displayMinY];
+            const q = [x1, displayMaxY];
+            const structuredText = mupdfPage.toStructuredText("preserve-whitespace");
+            let quads = structuredText.highlight(p, q);
+            if (!quads || quads.length === 0) {
+              const expandedP = [x0 - 2, displayMinY - 2];
+              const expandedQ = [x1 + 2, displayMaxY + 2];
+              quads = structuredText.highlight(expandedP, expandedQ);
+            }
+            if (quads && quads.length > 0) {
+              quadsToUse = quads.map((quad: any) => {
+                let rawQuad: number[];
+                if (Array.isArray(quad) && quad.length >= 8) {
+                  rawQuad = quad;
+                } else {
+                  rawQuad = [quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0, quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0];
+                }
+                return [
+                  rawQuad[0], pageHeight - rawQuad[1],
+                  rawQuad[2], pageHeight - rawQuad[3],
+                  rawQuad[4], pageHeight - rawQuad[5],
+                  rawQuad[6], pageHeight - rawQuad[7],
+                ];
+              });
+            }
+          } catch (e) {
+            console.warn("Scroll-to-spec: text quads from mupdf failed", e);
+          }
+          if (!quadsToUse || quadsToUse.length === 0) {
+            const bboxMinX = Math.min(x0, x1);
+            const bboxMaxX = Math.max(x0, x1);
+            const bboxMinY = Math.min(y0, y1);
+            const bboxMaxY = Math.max(y0, y1);
+            const bboxQuad = [bboxMinX, bboxMinY, bboxMaxX, bboxMinY, bboxMaxX, bboxMaxY, bboxMinX, bboxMaxY];
+            quadsToUse = [bboxQuad];
+          }
+          setTemporaryHighlight({ page: firstHighlight.page, quads: quadsToUse, color, specId: firstHighlight.specId });
+          setTimeout(() => setTemporaryHighlight(null), 3000);
+          return;
+        }
+        // Fallback only when there is no spec data for this page at all
+        try {
+          const pageMetadata = currentDocument.getPageMetadata(page);
+          if (pageMetadata) {
+            const w = pageMetadata.width || 612;
+            const h = pageMetadata.height || 792;
+            const topStrip = Math.min(120, h * 0.2);
+            const quad = [0, h - topStrip, w, h - topStrip, w, h, 0, h];
+            setTemporaryHighlight({ page, quads: [quad], color: "#fbbf24", specId: "_page" });
+            setTimeout(() => setTemporaryHighlight(null), 3000);
+          }
+        } catch (e) {
+          console.warn("Scroll-to-spec: could not set page fallback highlight", e);
+        }
+      };
       
       // Helper function to perform the scroll
       const performScroll = () => {
@@ -417,12 +495,15 @@ export function PDFViewer() {
                   // Wait one more frame for state to update
                   requestAnimationFrame(() => {
                     scrollToPage(page, true, bbox);
+                    if (!specId) setTimeout(applyTemporaryHighlight, 280);
                   });
                 } else {
                   scrollToPage(page, true, bbox);
+                  if (!specId) setTimeout(applyTemporaryHighlight, 280);
                 }
               } else {
                 scrollToPage(page, true, bbox);
+                if (!specId) setTimeout(applyTemporaryHighlight, 280);
               }
             }
           });
@@ -460,7 +541,7 @@ export function PDFViewer() {
     return () => {
       window.removeEventListener('scroll-to-spec', handleScrollToSpec);
     };
-  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, baseFitScale]);
+  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, getSpecHighlights, setTemporaryHighlight, baseFitScale]);
 
   // Handle page visibility changes from VirtualizedPageList
   // This updates the current page as the user scrolls

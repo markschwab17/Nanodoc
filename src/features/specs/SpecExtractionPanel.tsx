@@ -10,6 +10,9 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
 import { extractSpecsFromChunks, hasConfiguredAPIKey } from "@/core/ai/AIService";
 import { createChunks } from "@/core/ai/PDFContentChunker";
 import { getEmbeddingService, findTopKChunks } from "@/core/ai/EmbeddingService";
@@ -179,10 +182,74 @@ export function SpecExtractionPanel() {
       
       setExtractionProgress(100);
       finishExtraction();
+
+      // When opened from CTO with background=1, auto-POST extraction only if we have results (don't overwrite with empty)
+      const params = parseCiviltakeoffViewParams(window.location.search);
+      if (params.background === "1" && document.getId()) {
+        const ctx = useCiviltakeoffContextStore.getState().getContext();
+        if (ctx) {
+          const docId = document.getId();
+          const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(docId);
+          if (extractedSpecs.length === 0) {
+            useNotificationStore.getState().showNotification("No specs extracted (e.g. quota or API error). Try again or open in Nanodoc.", "error");
+            if (typeof window !== "undefined" && window.parent !== window) {
+              window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+            }
+          } else {
+            const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(docId);
+            const tables = [
+              {
+                headers: ["Category", "Parameter", "Value", "Unit", "Page", "Quote"],
+                rows: extractedSpecs.map((s) => [
+                  s.category,
+                  s.parameter,
+                  s.value,
+                  s.unit ?? "",
+                  s.page,
+                  s.quote_text ?? "",
+                ]),
+              },
+            ];
+            const pageRefs = Array.from(
+              new Set(extractedSpecs.map((s) => s.page).filter((p) => p != null))
+            ).map((page) => ({ page: Number(page), label: `Page ${Number(page) + 1}` }));
+            const extractionJson: { tables: unknown[]; specHighlights?: typeof specHighlights } = { tables };
+            if (specHighlights.length > 0) extractionJson.specHighlights = specHighlights;
+            try {
+              const res = await fetch(`${ctx.api_origin}/api/nanodoc/extraction`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token: ctx.token, extractionJson, pageRefs }),
+              });
+              if (res.ok) {
+                useNotificationStore.getState().showNotification("Extraction saved to Civiltakeoff", "success");
+                if (typeof window !== "undefined" && window.parent !== window) {
+                  window.parent.postMessage({ type: "nanodoc-extraction-complete", success: true }, "*");
+                }
+              } else {
+                const err = await res.text();
+                useNotificationStore.getState().showNotification(`Failed to save extraction: ${err}`, "error");
+                if (typeof window !== "undefined" && window.parent !== window) {
+                  window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+                }
+              }
+            } catch (e) {
+              useNotificationStore.getState().showNotification(e instanceof Error ? e.message : "Failed to save extraction", "error");
+              if (typeof window !== "undefined" && window.parent !== window) {
+                window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+              }
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error("Extraction error:", error);
       setExtractionError(error instanceof Error ? error.message : "Failed to extract specs");
       finishExtraction();
+      const params = parseCiviltakeoffViewParams(window.location.search);
+      if (params.background === "1" && typeof window !== "undefined" && window.parent !== window) {
+        window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+      }
     }
   };
   
