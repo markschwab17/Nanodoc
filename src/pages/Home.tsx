@@ -5,10 +5,13 @@ import { useEffect, useState } from "react";
 import {
   FileText,
   Combine,
+  LayoutGrid,
   Trash2,
   FileDown,
   Type,
   Highlighter,
+  Stamp,
+  FileInput,
   EyeOff,
   Download,
   ChevronDown,
@@ -77,6 +80,11 @@ function Home() {
       description: "Merge multiple PDF files into one document effortlessly",
     },
     {
+      icon: LayoutGrid,
+      title: "Stitch PDFs",
+      description: "Arrange multiple PDF pages on one canvas—remove white backgrounds or erase SVG elements, then resize, rotate, and export as a single PDF",
+    },
+    {
       icon: Trash2,
       title: "Delete Pages",
       description: "Remove unwanted pages from your PDF documents",
@@ -95,6 +103,16 @@ function Home() {
       icon: Highlighter,
       title: "Highlights",
       description: "Highlight important sections with customizable colors",
+    },
+    {
+      icon: Stamp,
+      title: "Stamps & Signatures",
+      description: "Add text stamps, image stamps, or draw your signature and place them anywhere on the PDF",
+    },
+    {
+      icon: FileInput,
+      title: "Fillable Fields",
+      description: "Create and edit fillable form fields—text boxes, checkboxes, dropdowns—so others can complete forms",
     },
     {
       icon: EyeOff,
@@ -120,7 +138,7 @@ function Home() {
           
           <p className="text-lg md:text-xl text-muted-foreground mb-12 max-w-2xl mx-auto">
             A lightweight, easy-to-use PDF editor that works right in your browser. 
-            Combine PDFs, delete pages, extract pages, add text, highlights, and redact information—all completely free.
+            Combine PDFs, stitch pages, delete or extract pages, add text, highlights, stamps and signatures, fillable fields, and redact information—all completely free.
           </p>
           
           <Link to="/editor">
