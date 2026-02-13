@@ -403,7 +403,7 @@ export function PDFViewer() {
       const forPage = allHighlights.filter((h) => h.page === page);
       const forAdjacent = allHighlights.filter((h) => h.page === page - 1 || h.page === page + 1);
       const pageHighlights = !specId && (forPage.length > 0 ? forPage : forAdjacent);
-      const firstHighlight = pageHighlights.length > 0 ? pageHighlights[0] : null;
+      const firstHighlight = Array.isArray(pageHighlights) && pageHighlights.length > 0 ? pageHighlights[0] : null;
       
       const applyTemporaryHighlight = () => {
         if (firstHighlight) {

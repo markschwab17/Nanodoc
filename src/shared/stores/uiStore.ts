@@ -43,6 +43,10 @@ export interface UIState {
   // Form tool settings
   currentFieldType: "text" | "checkbox" | "radio" | "dropdown" | "date";
   
+  // Request to open Document Settings (e.g. after creating a new project)
+  requestDocumentSettingsOpen: boolean;
+  setRequestDocumentSettingsOpen: (v: boolean) => void;
+  
   // Actions
   setZoomLevel: (level: number) => void;
   setFitMode: (mode: "width" | "page" | "custom") => void;
@@ -104,6 +108,8 @@ export const useUIStore = create<UIState>((set, get) => ({
   
   // Form tool settings
   currentFieldType: "text",
+  requestDocumentSettingsOpen: false,
+  setRequestDocumentSettingsOpen: (v) => set({ requestDocumentSettingsOpen: v }),
 
   setZoomLevel: (level) => {
     const state = get();

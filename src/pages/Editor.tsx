@@ -36,7 +36,7 @@ function Editor() {
   const { tabs } = useTabStore();
   const { setCurrentDocument } = usePDFStore();
   const { getRecentFiles } = useRecentFilesStore();
-  const { readMode, activeTool } = useUIStore();
+  const { readMode, activeTool, setRequestDocumentSettingsOpen } = useUIStore();
   const fileSystem = useFileSystem();
   const { loadPDF, loading } = usePDF();
   const { showNotification } = useNotificationStore();
@@ -453,6 +453,27 @@ function Editor() {
     }
   };
 
+  // Create a new blank PDF project (single page) and open Document Settings
+  const handleCreateProject = async () => {
+    const pdfStore = usePDFStore.getState();
+    try {
+      pdfStore.setLoading(true);
+      const { PDFDocument } = await import("pdf-lib");
+      const pdfDoc = await PDFDocument.create();
+      pdfDoc.addPage([612, 792]); // US Letter
+      const bytes = await pdfDoc.save();
+      const mupdfModule = await import("mupdf");
+      await loadPDF(bytes, "Untitled.pdf", mupdfModule.default, null);
+      setRequestDocumentSettingsOpen(true);
+      showNotification("New PDF project created.", "success");
+    } catch (error) {
+      console.error("Error creating PDF project:", error);
+      showNotification("Failed to create PDF project.", "error");
+    } finally {
+      pdfStore.setLoading(false);
+    }
+  };
+
   // Sync active tab with current document
   useEffect(() => {
     const activeTab = useTabStore.getState().getActiveTab();
@@ -627,6 +648,17 @@ function Editor() {
               <File className="h-5 w-5 mr-2" />
               Browse Files
             </Button>
+            <p className="text-muted-foreground mt-3 text-sm">
+              or{" "}
+              <button
+                type="button"
+                onClick={handleCreateProject}
+                disabled={loading}
+                className="underline underline-offset-2 hover:text-foreground focus:outline-none focus:ring-0 disabled:opacity-50"
+              >
+                create a PDF project
+              </button>
+            </p>
           </div>
         </div>
       )}

@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { PAGE_PRESETS, pointsToInches, inchesToPoints, type RenderQuality, useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
+import { PAGE_PRESETS, pointsToInches, inchesToPoints } from "@/shared/stores/documentSettingsStore";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 
 interface DocumentSettingsDialogProps {
@@ -50,8 +50,6 @@ export function DocumentSettingsDialog({
   const [orientation, setOrientation] = useState<"portrait" | "landscape">("portrait");
   const [applyToAll, setApplyToAll] = useState(true);
   const [isApplying, setIsApplying] = useState(false);
-  const { renderQuality: currentRenderQuality, setRenderQuality: setStoreRenderQuality } = useDocumentSettingsStore();
-  const [renderQuality, setRenderQuality] = useState<RenderQuality>("high");
 
   // Initialize with current page dimensions when dialog opens
   useEffect(() => {
@@ -88,10 +86,7 @@ export function DocumentSettingsDialog({
         setPreset(matchedPreset);
       }
     }
-
-    // Initialize render quality
-    setRenderQuality(currentRenderQuality);
-  }, [open, document, currentPage, currentRenderQuality]);
+  }, [open, document, currentPage]);
 
   const handlePresetChange = (value: string) => {
     const presetKey = value as PresetKey;
@@ -147,7 +142,6 @@ export function DocumentSettingsDialog({
     setIsApplying(true);
     try {
       await onApply(widthPoints, heightPoints, applyToAll);
-      setStoreRenderQuality(renderQuality); // Save render quality setting
       onOpenChange(false);
     } catch (error) {
       console.error("Error applying document settings:", error);
@@ -249,25 +243,6 @@ export function DocumentSettingsDialog({
                 </Label>
               </div>
             </RadioGroup>
-          </div>
-
-          {/* Render Quality */}
-          <div className="grid gap-1">
-            <Label htmlFor="render-quality">Render Quality</Label>
-            <Select value={renderQuality} onValueChange={(value) => setRenderQuality(value as RenderQuality)}>
-              <SelectTrigger id="render-quality">
-                <SelectValue placeholder="Select render quality" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="low">Low (1x) - Fast, lower quality</SelectItem>
-                <SelectItem value="medium">Medium (1.5x) - Balanced performance</SelectItem>
-                <SelectItem value="high">High (2x) - Crisp text, recommended</SelectItem>
-                <SelectItem value="ultra">Ultra (3x) - Maximum quality, slower</SelectItem>
-              </SelectContent>
-            </Select>
-            <div className="text-xs text-muted-foreground">
-              Higher quality improves text readability but may be slower.
-            </div>
           </div>
 
           {/* Preview */}

@@ -1,6 +1,7 @@
 import { createBrowserRouter } from "react-router-dom";
 import Home from "./pages/Home";
 import Editor from "./pages/Editor";
+import StitchView from "./pages/StitchView";
 import CiviltakeoffView from "./pages/CiviltakeoffView";
 import FAQ from "./pages/FAQ";
 import Compare from "./pages/Compare";
@@ -21,6 +22,10 @@ export const router = createBrowserRouter([
   {
     path: "/editor",
     element: <Editor />,
+  },
+  {
+    path: "/stitch",
+    element: <StitchView />,
   },
   {
     path: "/faq",

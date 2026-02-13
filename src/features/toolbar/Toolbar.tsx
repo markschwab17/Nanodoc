@@ -26,8 +26,10 @@ import {
   Circle,
   ArrowRight,
   FileText,
-  Stamp as StampIcon
+  Stamp as StampIcon,
+  Layers
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
@@ -54,7 +56,8 @@ import {
 } from "@/shared/browserPdfAiStorage";
 
 export function Toolbar() {
-  const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType } = useUIStore();
+  const navigate = useNavigate();
+  const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType, requestDocumentSettingsOpen, setRequestDocumentSettingsOpen } = useUIStore();
   const { currentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
@@ -90,6 +93,14 @@ export function Toolbar() {
       window.removeEventListener("openHelp", handleOpenHelp);
     };
   }, []);
+
+  // Open Document Settings when requested (e.g. after creating a new project)
+  useEffect(() => {
+    if (currentDocument && requestDocumentSettingsOpen) {
+      setShowDocumentSettings(true);
+      setRequestDocumentSettingsOpen(false);
+    }
+  }, [currentDocument, requestDocumentSettingsOpen, setRequestDocumentSettingsOpen]);
   
   // Viewport detection and auto-adjustment
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -406,7 +417,7 @@ export function Toolbar() {
         await syncAndSavePDF(async (pdfData) => {
           const form = new FormData();
           form.append("token", ctx.token);
-          form.append("file", new Blob([pdfData], { type: "application/pdf" }), currentDoc.getName());
+          form.append("file", new Blob([pdfData as BlobPart], { type: "application/pdf" }), currentDoc.getName());
           const saveRes = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
             method: "POST",
             body: form,
@@ -669,6 +680,15 @@ export function Toolbar() {
           className={sizeClasses.button}
         >
           <Printer className={sizeClasses.icon} />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => navigate("/stitch")}
+          title="Stitch PDFs together"
+          className={sizeClasses.button}
+        >
+          <Layers className={sizeClasses.icon} />
         </Button>
       </div>
 
