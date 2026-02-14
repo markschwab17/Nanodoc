@@ -94,20 +94,40 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
           dragStartRef.current = null;
         }
       } else {
-        setSelectedTileIds([tile.id]);
         const currentTiles = useStitchStore.getState().tiles;
         const currentTile = currentTiles.find((x) => x.id === tile.id);
         const isLocked = Boolean(currentTile?.locked);
-        if (!isLocked && currentTile) {
-          dragStartRef.current = {
-            type: "single",
-            x: e.clientX,
-            y: e.clientY,
-            tileX: currentTile.x,
-            tileY: currentTile.y,
-          };
+        // If 2+ tiles are selected and we're clicking on one of them, keep selection and start group drag
+        if (currentIds.length >= 2 && currentIds.includes(tile.id) && !isLocked) {
+          const unlockedIds = currentIds.filter(
+            (id) => !currentTiles.find((x) => x.id === id)?.locked
+          );
+          const positions = unlockedIds.map((id) => {
+            const t = currentTiles.find((x) => x.id === id)!;
+            return { id, x: t.x, y: t.y };
+          });
+          dragStartRef.current =
+            positions.length > 0
+              ? {
+                  type: "group",
+                  x: e.clientX,
+                  y: e.clientY,
+                  positions,
+                }
+              : null;
         } else {
-          dragStartRef.current = null;
+          setSelectedTileIds([tile.id]);
+          if (!isLocked && currentTile) {
+            dragStartRef.current = {
+              type: "single",
+              x: e.clientX,
+              y: e.clientY,
+              tileX: currentTile.x,
+              tileY: currentTile.y,
+            };
+          } else {
+            dragStartRef.current = null;
+          }
         }
       }
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);

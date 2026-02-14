@@ -16,6 +16,7 @@ import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowUpToLine,
+  CheckSquare,
   Crosshair,
   Crop,
   Download,
@@ -154,6 +155,7 @@ export function StitchToolbar({
     redoStack,
     zoomLevel,
     selectedTileIds,
+    setSelectedTileIds,
     tiles,
   } = useStitchStore();
 
@@ -348,6 +350,11 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         )}
         <div className="h-5 w-px bg-border" aria-hidden />
+        <div className="flex items-center gap-0.5" role="group" aria-label="Selection">
+          <IconButtonWithTooltip variant="outline" disabled={tiles.length === 0} title={tiles.length === 0 ? "No pages on canvas" : "Select all pages (Ctrl+A)"} label="Select all" onClick={() => tiles.length > 0 && setSelectedTileIds(tiles.map((t) => t.id))}>
+            <CheckSquare className="h-3.5 w-3.5 shrink-0" />
+          </IconButtonWithTooltip>
+        </div>
         <div className="flex items-center gap-0.5" role="group" aria-label="Arrange selection">
           <IconButtonWithTooltip variant="outline" disabled={!hasSelection} title={hasSelection ? "Send selected to back" : "Select a page first"} label="Back" onClick={() => hasSelection && sendTilesToBack(selectedTileIds)}>
             <ArrowDownToLine className="h-3.5 w-3.5 shrink-0" />

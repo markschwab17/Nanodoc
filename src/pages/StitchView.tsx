@@ -17,6 +17,15 @@ import { exportStitchToPdf } from "@/features/stitch/stitchExport";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export default function StitchView() {
   const { tiles, setCropRect, setCropToContent, setSelectedTileIds } = useStitchStore();
@@ -32,6 +41,26 @@ export default function StitchView() {
       y: (rect.height - canvasHeight * zoomLevel) / 2,
     });
   }, []);
+
+  // Center the canvas in the viewport when first opening stitch mode
+  useEffect(() => {
+    let cancelled = false;
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!cancelled) handleRecenter();
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(id);
+    };
+  }, [handleRecenter]);
+
+  // Auto-open Add PDF modal on first load so user can add pages immediately
+  useEffect(() => {
+    setShowAddPdf(true);
+  }, []);
+
   const navigate = useNavigate();
   const { loadPDF } = usePDF();
   const { showNotification } = useNotificationStore();
@@ -39,6 +68,9 @@ export default function StitchView() {
   useStitchKeyboard();
 
   const [showAddPdf, setShowAddPdf] = useState(false);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [saveDialogIntent, setSaveDialogIntent] = useState<"download" | "open">("download");
+  const [saveDialogFilename, setSaveDialogFilename] = useState("Stitched.pdf");
   const [isSaving, setIsSaving] = useState(false);
   const [isExportingTraining, setIsExportingTraining] = useState(false);
   const [contentDeleteMode, setContentDeleteMode] = useState(false);
@@ -134,42 +166,56 @@ export default function StitchView() {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [handleSelectToolActivate]);
 
-  const handleSaveAndFlatten = async (openInEditor: boolean) => {
+  const handleSaveAndFlatten = (openInEditor: boolean) => {
     if (tiles.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
     }
-    setIsSaving(true);
-    try {
-      const buffer = await exportStitchToPdf();
-      if (!buffer) {
-        showNotification("Export failed.", "error");
-        return;
-      }
-      if (openInEditor) {
-        const mupdf = await import("mupdf").then((m) => m.default);
-        await loadPDF(buffer, "Stitched.pdf", mupdf, null);
-        showNotification("Stitched PDF opened in editor.", "success");
-        navigate("/editor");
-      } else {
-        const blob = new Blob([buffer as BlobPart], {
-          type: "application/pdf",
-        });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "Stitched.pdf";
-        a.click();
-        URL.revokeObjectURL(url);
-        showNotification("Stitched PDF downloaded.", "success");
-      }
-    } catch (e) {
-      console.error(e);
-      showNotification("Failed to export PDF.", "error");
-    } finally {
-      setIsSaving(false);
-    }
+    setSaveDialogIntent(openInEditor ? "open" : "download");
+    setSaveDialogFilename("Stitched.pdf");
+    setSaveDialogOpen(true);
   };
+
+  const ensurePdfExtension = (name: string) =>
+    name.trim().toLowerCase().endsWith(".pdf") ? name.trim() : `${name.trim()}.pdf`;
+
+  const doSaveAndFlatten = useCallback(
+    async (openInEditor: boolean, filename: string) => {
+      const name = ensurePdfExtension(filename) || "Stitched.pdf";
+      setSaveDialogOpen(false);
+      setIsSaving(true);
+      try {
+        const buffer = await exportStitchToPdf();
+        if (!buffer) {
+          showNotification("Export failed.", "error");
+          return;
+        }
+        if (openInEditor) {
+          const mupdf = await import("mupdf").then((m) => m.default);
+          await loadPDF(buffer, name, mupdf, null);
+          showNotification("Stitched PDF opened in editor.", "success");
+          navigate("/editor");
+        } else {
+          const blob = new Blob([buffer as BlobPart], {
+            type: "application/pdf",
+          });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = name;
+          a.click();
+          URL.revokeObjectURL(url);
+          showNotification("Stitched PDF downloaded.", "success");
+        }
+      } catch (e) {
+        console.error(e);
+        showNotification("Failed to export PDF.", "error");
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [loadPDF, navigate, showNotification]
+  );
 
   const handleDownloadForTraining = async () => {
     if (tiles.length === 0) {
@@ -254,6 +300,38 @@ export default function StitchView() {
         />
       </main>
       <AddPdfModal open={showAddPdf} onClose={() => setShowAddPdf(false)} />
+      <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
+        <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>
+              {saveDialogIntent === "download" ? "Download PDF" : "Save & open in editor"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-2 py-2">
+            <label htmlFor="save-pdf-filename" className="text-sm font-medium">
+              File name
+            </label>
+            <Input
+              id="save-pdf-filename"
+              value={saveDialogFilename}
+              onChange={(e) => setSaveDialogFilename(e.target.value)}
+              placeholder="Stitched.pdf"
+              className="font-mono"
+            />
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setSaveDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!saveDialogFilename.trim()}
+              onClick={() => doSaveAndFlatten(saveDialogIntent === "open", saveDialogFilename)}
+            >
+              {saveDialogIntent === "download" ? "Download" : "Save & open"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

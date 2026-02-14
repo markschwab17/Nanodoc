@@ -20,6 +20,7 @@ const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
 const MARGIN = 20;
 const GAP = 10;
+const TILES_PER_ROW = 3;
 
 /** Scale page dimensions so the tile fits within the canvas (with margin). Never scale up. */
 function scaleToFitCanvas(
@@ -138,17 +139,30 @@ export function AddPdfModal({
       const mupdf = await import("mupdf").then((m) => m.default);
       const renderer = new PDFRenderer(mupdf);
       const selected = Array.from(selectedPages).sort((a, b) => a - b);
-      let y = MARGIN;
-      const newTiles: Array<{
+      type TileData = {
         sourcePdfBytes: Uint8Array;
         sourcePageIndex: number;
         sourceFileName?: string;
-        x: number;
-        y: number;
         width: number;
         height: number;
         imageDataUrl?: string;
-      }> = [];
+      };
+      const newTiles: Array<TileData & { x: number; y: number }> = [];
+      let rowY = MARGIN;
+      const rowBuffer: Array<{ tile: TileData; w: number; h: number }> = [];
+
+      const flushRow = () => {
+        if (rowBuffer.length === 0) return;
+        let x = MARGIN;
+        const maxH = Math.max(...rowBuffer.map((b) => b.h));
+        for (const { tile, w } of rowBuffer) {
+          newTiles.push({ ...tile, x, y: rowY });
+          x += w + GAP;
+        }
+        rowY += maxH + GAP;
+        rowBuffer.length = 0;
+      };
+
       for (const pageIndex of selected) {
         const page = mupdfDoc.loadPage(pageIndex);
         const bounds = page.getBounds();
@@ -167,21 +181,18 @@ export function AddPdfModal({
         if (imageData && imageData.data && removeWhiteBackground)
           imageData = makeWhiteTransparent(imageData);
         const dataUrl = imageData && imageData.data ? imageDataToDataUrl(imageData) : undefined;
-        let x = MARGIN;
-        if (x + tileW > canvasWidth) x = Math.max(0, canvasWidth - tileW);
-        if (y + tileH > canvasHeight) y = Math.max(0, canvasHeight - tileH);
-        newTiles.push({
+        const tileData: TileData = {
           sourcePdfBytes: pdfBytes,
           sourcePageIndex: pageIndex,
           sourceFileName: pdfFileName || undefined,
-          x,
-          y,
           width: tileW,
           height: tileH,
           imageDataUrl: dataUrl,
-        });
-        y += tileH + GAP;
+        };
+        rowBuffer.push({ tile: tileData, w: tileW, h: tileH });
+        if (rowBuffer.length === TILES_PER_ROW) flushRow();
       }
+      flushRow();
       addTiles(newTiles);
       onClose();
     } catch (e) {

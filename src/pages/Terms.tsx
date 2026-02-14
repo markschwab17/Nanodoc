@@ -161,7 +161,7 @@ function Terms() {
               If you have any questions about these Terms and Conditions, please contact us at:
             </p>
             <p className="font-semibold">
-              Email: <a href="mailto:support@nanodoc.app" className="text-primary hover:underline">support@nanodoc.app</a>
+              Email: <a href="mailto:Markschwab@civiltakeoff.ai" className="text-primary hover:underline">Markschwab@civiltakeoff.ai</a>
             </p>
           </section>
         </div>

@@ -55,6 +55,9 @@ export function StitchCanvas({
   erasedRegionFeedback = [],
   isDeletingAlongPath = false,
   pointAlignMode = false,
+  pointAlignReferenceId,
+  pointAlignTargetId,
+  pointAlignStep = 0,
   pointAlignPoints = [null, null, null, null],
   onPointAlignClick,
   scaleAlignMode = false,
@@ -97,6 +100,13 @@ export function StitchCanvas({
   const [deleteStrokePath, setDeleteStrokePath] = useState<Array<{ x: number; y: number }>>([]);
   const [deleteStrokeCurrent, setDeleteStrokeCurrent] = useState<{ x: number; y: number } | null>(null);
   const deleteStrokePathRef = useRef<Array<{ x: number; y: number }>>([]);
+
+  /** In point-align mode, canvas coords of mouse for live preview line (step 1: A1→mouse, step 3: A2→mouse). */
+  const [pointAlignMouse, setPointAlignMouse] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!pointAlignMode) setPointAlignMouse(null);
+  }, [pointAlignMode]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -232,6 +242,12 @@ export function StitchCanvas({
           <div
             className="absolute inset-0 z-10 cursor-crosshair pointer-events-auto"
             style={{ width: canvasWidth, height: canvasHeight }}
+            onPointerMove={(e) => {
+              if (!pointAlignMode || (pointAlignStep !== 1 && pointAlignStep !== 3)) return;
+              const coords = clientToCanvas(e.clientX, e.clientY);
+              setPointAlignMouse(coords ?? null);
+            }}
+            onPointerLeave={() => setPointAlignMouse(null)}
             onPointerDown={(e) => {
               if (e.button !== 0) return;
               e.preventDefault();
@@ -286,6 +302,42 @@ export function StitchCanvas({
                       </text>
                     </g>
                   )
+              )}
+              {pointAlignMode && pointAlignStep >= 2 && pointAlignPoints[0] && pointAlignPoints[1] && (
+                <line
+                  x1={pointAlignPoints[0].x}
+                  y1={pointAlignPoints[0].y}
+                  x2={pointAlignPoints[1].x}
+                  y2={pointAlignPoints[1].y}
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={markerStroke}
+                  strokeDasharray={`${dashLen} ${dashLen}`}
+                  opacity={0.8}
+                />
+              )}
+              {pointAlignMode && pointAlignStep === 1 && pointAlignPoints[0] && pointAlignMouse && (
+                <line
+                  x1={pointAlignPoints[0].x}
+                  y1={pointAlignPoints[0].y}
+                  x2={pointAlignMouse.x}
+                  y2={pointAlignMouse.y}
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={markerStroke}
+                  strokeDasharray={`${dashLen} ${dashLen}`}
+                  opacity={0.7}
+                />
+              )}
+              {pointAlignMode && pointAlignStep === 3 && pointAlignPoints[2] && pointAlignMouse && (
+                <line
+                  x1={pointAlignPoints[2].x}
+                  y1={pointAlignPoints[2].y}
+                  x2={pointAlignMouse.x}
+                  y2={pointAlignMouse.y}
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={markerStroke}
+                  strokeDasharray={`${dashLen} ${dashLen}`}
+                  opacity={0.7}
+                />
               )}
               {scaleAlignMode && scaleAlignPoints[0] && scaleAlignPoints[1] && (
                 <line

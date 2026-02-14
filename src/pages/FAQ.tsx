@@ -96,7 +96,7 @@ function FAQ() {
               Still have questions?
             </p>
             <a
-              href="mailto:support@nanodoc.app"
+              href="mailto:Markschwab@civiltakeoff.ai"
               className="text-primary hover:underline"
             >
               Contact us

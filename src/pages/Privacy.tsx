@@ -59,7 +59,7 @@ function Privacy() {
           <section>
             <h2 className="text-2xl font-semibold mb-4">5. Contact Information</h2>
             <p>
-              If you contact us at <a href="mailto:support@nanodoc.app" className="text-primary hover:underline">support@nanodoc.app</a>, we will only use your email address to respond to your inquiry. We do not store or use this information for any other purpose.
+              If you contact us at <a href="mailto:Markschwab@civiltakeoff.ai" className="text-primary hover:underline">Markschwab@civiltakeoff.ai</a>, we will only use your email address to respond to your inquiry. We do not store or use this information for any other purpose.
             </p>
           </section>
 
@@ -97,7 +97,7 @@ function Privacy() {
               If you have any questions about this Privacy Statement, please contact us at:
             </p>
             <p className="font-semibold">
-              Email: <a href="mailto:support@nanodoc.app" className="text-primary hover:underline">support@nanodoc.app</a>
+              Email: <a href="mailto:Markschwab@civiltakeoff.ai" className="text-primary hover:underline">Markschwab@civiltakeoff.ai</a>
             </p>
           </section>
         </div>

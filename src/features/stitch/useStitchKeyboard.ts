@@ -6,7 +6,7 @@ import { useEffect } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 
 export function useStitchKeyboard() {
-  const { selectedTileIds, removeTile, undo, redo } = useStitchStore();
+  const { selectedTileIds, removeTile, undo, redo, tiles, setSelectedTileIds } = useStitchStore();
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -16,6 +16,14 @@ export function useStitchKeyboard() {
         target?.tagName === "TEXTAREA" ||
         target?.isContentEditable === true;
 
+      if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!inInput && tiles.length > 0) {
+          setSelectedTileIds(tiles.map((t) => t.id));
+        }
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
         e.stopPropagation();
@@ -39,5 +47,5 @@ export function useStitchKeyboard() {
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [selectedTileIds, removeTile, undo, redo]);
+  }, [selectedTileIds, removeTile, undo, redo, tiles, setSelectedTileIds]);
 }
