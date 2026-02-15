@@ -23,6 +23,11 @@ const MARGIN = 20;
 const GAP = 10;
 const TILES_PER_ROW = 3;
 
+/** Yield to the event loop so the tab stays responsive during long PDF work. */
+function yieldToMain(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function imageDataToDataUrl(imageData: ImageData): string {
   const canvas = document.createElement("canvas");
   canvas.width = imageData.width;
@@ -99,6 +104,8 @@ export function AddPdfModal({
         const renderer = new PDFRenderer(mupdf);
         const thumbs: Record<number, string> = {};
         for (let i = 0; i < count && !cancelled; i++) {
+          await yieldToMain();
+          if (cancelled) return;
           const rendered = await renderer.renderPage(doc, i, {
             scale: THUMB_SCALE,
           });
@@ -150,6 +157,7 @@ export function AddPdfModal({
       };
 
       for (const pageIndex of selected) {
+        await yieldToMain();
         const page = mupdfDoc.loadPage(pageIndex);
         const bounds = page.getBounds();
         const widthPt = bounds[2] - bounds[0];
