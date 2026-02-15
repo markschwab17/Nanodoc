@@ -8,6 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
+import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
@@ -26,6 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { FilePlus } from "lucide-react";
 
 export default function StitchView() {
   const { tiles, setCropRect, setCropToContent, setSelectedTileIds } = useStitchStore();
@@ -76,6 +78,7 @@ export default function StitchView() {
   const [contentDeleteMode, setContentDeleteMode] = useState(false);
   const [deleteElementMode, setDeleteElementMode] = useState(false);
   const [panMode, setPanMode] = useState(false);
+  const [canvasVisible, setCanvasVisible] = useState(true);
 
   const pointAlign = usePointAlignMode();
   const scaleAlign = useScaleAlignMode();
@@ -248,6 +251,7 @@ export default function StitchView() {
     <div className="flex flex-col h-screen bg-background">
       <StitchToolbar
         onAddPdf={() => setShowAddPdf(true)}
+        hasTiles={tiles.length > 0}
         contentDeleteMode={contentDeleteMode}
         setContentDeleteMode={setContentDeleteMode}
         deleteElementMode={deleteElementMode}
@@ -269,13 +273,24 @@ export default function StitchView() {
         onScaleAlignModeChange={handleScaleAlignModeChange}
         onScaleAlignCancel={scaleAlign.cancelScaleAlign}
         scaleAlignStep={scaleAlign.step}
-        onRecenter={handleRecenter}
         panMode={panMode}
         onPanModeChange={handlePanModeChange}
         onSelectToolActivate={handleSelectToolActivate}
         onClearSession={handleClearSession}
       />
-      <main className="flex-1 min-h-0 overflow-hidden outline-none" tabIndex={0}>
+      <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
+        {tiles.length === 0 && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-muted/50">
+            <Button
+              size="lg"
+              className="h-14 px-8 text-lg gap-3 shadow-lg"
+              onClick={() => setShowAddPdf(true)}
+            >
+              <FilePlus className="h-7 w-7" />
+              Add PDF
+            </Button>
+          </div>
+        )}
         <StitchCanvas
           contentDeleteMode={contentDeleteMode}
           onContentDeleteRect={handleContentDeleteRect}
@@ -296,9 +311,15 @@ export default function StitchView() {
           scaleAlignPoints={scaleAlign.points}
           onScaleAlignClick={scaleAlign.recordPoint}
           panMode={panMode}
+          canvasVisible={canvasVisible}
           forwardedContainerRef={canvasContainerRef}
         />
       </main>
+      <StitchBottomToolbar
+        onRecenter={handleRecenter}
+        canvasVisible={canvasVisible}
+        onCanvasVisibleChange={setCanvasVisible}
+      />
       <AddPdfModal open={showAddPdf} onClose={() => setShowAddPdf(false)} />
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>

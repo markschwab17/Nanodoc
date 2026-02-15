@@ -32,7 +32,7 @@ function interpolatePath(
 }
 
 export function useStitchContentDelete(showNotification: (msg: string, type: "success" | "error" | "info") => void) {
-  const { tiles, updateTile } = useStitchStore();
+  const { tiles, updateTiles } = useStitchStore();
   const [erasedRegionFeedback, setErasedRegionFeedback] = useState<
     Array<{ x: number; y: number; w: number; h: number }>
   >([]);
@@ -40,25 +40,26 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
 
   const handleContentDeleteRect = useCallback(
     async (rect: { x: number; y: number; w: number; h: number }) => {
-      let updated = 0;
+      const updates: Array<{ id: string; patch: { imageDataUrl: string } }> = [];
       for (const tile of tiles) {
         const newDataUrl = await eraseRectFromTile(tile, rect);
         if (newDataUrl) {
-          updateTile(tile.id, { imageDataUrl: newDataUrl });
-          updated++;
+          updates.push({ id: tile.id, patch: { imageDataUrl: newDataUrl } });
         }
       }
-      if (updated > 0) {
-        showNotification(`Content removed from ${updated} tile(s).`, "success");
+      if (updates.length > 0) {
+        updateTiles(updates);
+        showNotification(`Content removed from ${updates.length} tile(s).`, "success");
       }
     },
-    [tiles, updateTile, showNotification]
+    [tiles, updateTiles, showNotification]
   );
 
   const handleDeleteElementAlongPath = useCallback(
     async (path: Array<{ x: number; y: number }>) => {
       if (path.length === 0) return;
       const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
+      const updates: Array<{ id: string; patch: { imageDataUrl: string } }> = [];
       setIsDeletingAlongPath(true);
       try {
         if (path.length === 1) {
@@ -69,7 +70,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
               skipBackground: true,
             });
             if (result) {
-              updateTile(tile.id, { imageDataUrl: result.dataUrl });
+              updates.push({ id: tile.id, patch: { imageDataUrl: result.dataUrl } });
               rects.push(result.canvasRect);
             }
           }
@@ -112,10 +113,13 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
                 }
               }
             }
-            if (currentImageDataUrl !== tile.imageDataUrl) {
-              updateTile(tile.id, { imageDataUrl: currentImageDataUrl });
+            if (currentImageDataUrl !== tile.imageDataUrl && currentImageDataUrl != null) {
+              updates.push({ id: tile.id, patch: { imageDataUrl: currentImageDataUrl } });
             }
           }
+        }
+        if (updates.length > 0) {
+          updateTiles(updates);
         }
         if (rects.length > 0) {
           setErasedRegionFeedback(rects);
@@ -139,7 +143,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
         setIsDeletingAlongPath(false);
       }
     },
-    [tiles, updateTile, showNotification]
+    [tiles, updateTiles, showNotification]
   );
 
   return {

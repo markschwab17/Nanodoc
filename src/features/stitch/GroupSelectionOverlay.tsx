@@ -16,7 +16,7 @@ function angleDeg(clientX: number, clientY: number, centerX: number, centerY: nu
 }
 
 export function GroupSelectionOverlay() {
-  const { tiles, selectedTileIds, updateTiles, zoomLevel } = useStitchStore();
+  const { tiles, selectedTileIds, updateTiles, zoomLevel, resizeLocked } = useStitchStore();
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [rotationDragStart, setRotationDragStart] = useState<{
     startAngleDeg: number;
@@ -59,7 +59,7 @@ export function GroupSelectionOverlay() {
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
       e.stopPropagation();
-      if (unlockedTiles.length === 0) return;
+      if (resizeLocked || unlockedTiles.length === 0) return;
       const centerX = bounds.x + bounds.width / 2;
       const centerY = bounds.y + bounds.height / 2;
       resizeStartRef.current = {
@@ -76,7 +76,7 @@ export function GroupSelectionOverlay() {
       };
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [bounds, unlockedTiles]
+    [bounds, unlockedTiles, resizeLocked]
   );
 
   const handlePointerMove = useCallback(
@@ -133,7 +133,7 @@ export function GroupSelectionOverlay() {
     (e: React.PointerEvent) => {
       e.stopPropagation();
       e.preventDefault();
-      if (unlockedTiles.length === 0) return;
+      if (resizeLocked || unlockedTiles.length === 0) return;
       const el = overlayRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
@@ -157,7 +157,7 @@ export function GroupSelectionOverlay() {
       });
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [groupCenter, unlockedTiles]
+    [groupCenter, unlockedTiles, resizeLocked]
   );
 
   const handleRotatePointerMove = useCallback(
@@ -232,7 +232,7 @@ export function GroupSelectionOverlay() {
         boxShadow: "0 0 0 1px hsl(var(--primary) / 0.3)",
       }}
     >
-      {(["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
+      {!resizeLocked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
         <div
           key={dir}
           className="absolute bg-primary rounded-md border-2 border-white shadow-md pointer-events-auto"
@@ -251,19 +251,21 @@ export function GroupSelectionOverlay() {
           onPointerLeave={handlePointerUp}
         />
       ))}
-      <Button
-        type="button"
-        variant="secondary"
-        size="icon"
-        className="absolute -top-12 left-1/2 -translate-x-1/2 h-10 w-10 z-10 border-2 border-border shadow-md pointer-events-auto cursor-grab active:cursor-grabbing"
-        title="Drag to rotate group"
-        onPointerDown={handleRotatePointerDown}
-        onPointerMove={handleRotatePointerMove}
-        onPointerUp={handleRotatePointerUp}
-        onPointerLeave={handleRotatePointerUp}
-      >
-        <RotateCw className="h-5 w-5" />
-      </Button>
+      {!resizeLocked && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          className="absolute -top-12 left-1/2 -translate-x-1/2 h-10 w-10 z-10 border-2 border-border shadow-md pointer-events-auto cursor-grab active:cursor-grabbing"
+          title="Drag to rotate group"
+          onPointerDown={handleRotatePointerDown}
+          onPointerMove={handleRotatePointerMove}
+          onPointerUp={handleRotatePointerUp}
+          onPointerLeave={handleRotatePointerUp}
+        >
+          <RotateCw className="h-5 w-5" />
+        </Button>
+      )}
     </div>
   );
 }

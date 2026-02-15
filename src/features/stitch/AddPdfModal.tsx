@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Loader2 } from "lucide-react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
@@ -21,23 +22,6 @@ const TILE_RENDER_SCALE = 1.5;
 const MARGIN = 20;
 const GAP = 10;
 const TILES_PER_ROW = 3;
-
-/** Scale page dimensions so the tile fits within the canvas (with margin). Never scale up. */
-function scaleToFitCanvas(
-  widthPt: number,
-  heightPt: number,
-  canvasWidth: number,
-  canvasHeight: number
-): { width: number; height: number } {
-  const maxW = canvasWidth - 2 * MARGIN;
-  const maxH = canvasHeight - 2 * MARGIN;
-  if (widthPt <= 0 || heightPt <= 0) return { width: widthPt, height: heightPt };
-  const scale = Math.min(1, maxW / widthPt, maxH / heightPt);
-  return {
-    width: widthPt * scale,
-    height: heightPt * scale,
-  };
-}
 
 function imageDataToDataUrl(imageData: ImageData): string {
   const canvas = document.createElement("canvas");
@@ -57,7 +41,7 @@ export function AddPdfModal({
   onClose: () => void;
 }) {
   const fileSystem = useFileSystem();
-  const { addTiles, canvasWidth, canvasHeight } = useStitchStore();
+  const { addTiles, canvasWidth, canvasHeight, setReferenceScaleFeetPerInch } = useStitchStore();
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfFileName, setPdfFileName] = useState<string>("");
   const [mupdfDoc, setMupdfDoc] = useState<any>(null);
@@ -66,7 +50,9 @@ export function AddPdfModal({
   const [thumbnails, setThumbnails] = useState<Record<number, string>>({});
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [removeWhiteBackground, setRemoveWhiteBackground] = useState(false);
+  const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
+  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
+  const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -168,12 +154,9 @@ export function AddPdfModal({
         const bounds = page.getBounds();
         const widthPt = bounds[2] - bounds[0];
         const heightPt = bounds[3] - bounds[1];
-        const { width: tileW, height: tileH } = scaleToFitCanvas(
-          widthPt,
-          heightPt,
-          canvasWidth,
-          canvasHeight
-        );
+        // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt) so scale is correct.
+        const tileW = widthPt;
+        const tileH = heightPt;
         const rendered = await renderer.renderPage(mupdfDoc, pageIndex, {
           scale: TILE_RENDER_SCALE,
         });
@@ -193,6 +176,10 @@ export function AddPdfModal({
         if (rowBuffer.length === TILES_PER_ROW) flushRow();
       }
       flushRow();
+      const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
+      if (Number.isFinite(scaleNum) && scaleNum > 0) {
+        setReferenceScaleFeetPerInch(scaleNum);
+      }
       addTiles(newTiles);
       onClose();
     } catch (e) {
@@ -200,7 +187,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, canvasWidth, canvasHeight, onClose, removeWhiteBackground]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, canvasWidth, canvasHeight, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch]);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -208,7 +195,12 @@ export function AddPdfModal({
         <DialogHeader>
           <DialogTitle>Add PDF pages to canvas</DialogTitle>
         </DialogHeader>
-        {loading ? (
+        {adding ? (
+          <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+            <Loader2 className="h-10 w-10 animate-spin" />
+            <p>Adding pages to canvas…</p>
+          </div>
+        ) : loading ? (
           <div className="py-12 text-center text-muted-foreground">
             Loading PDF…
           </div>
@@ -231,6 +223,18 @@ export function AddPdfModal({
                   className="rounded border-input"
                 />
                 Remove white background (import content only)
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground whitespace-nowrap">Scale (e.g. 1"=20'):</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="20"
+                  value={scaleFeetPerInch}
+                  onChange={(e) => setScaleFeetPerInch(e.target.value)}
+                  className="w-20 rounded border border-input bg-background px-2 py-1 text-sm"
+                />
+                <span className="text-muted-foreground text-xs">feet per inch</span>
               </label>
             </div>
             <div className="flex-1 overflow-auto grid grid-cols-4 gap-2 py-2 min-h-[200px]">
@@ -263,7 +267,7 @@ export function AddPdfModal({
               ))}
             </div>
           </>
-        ) : !loading && !pdfBytes ? (
+        ) : !loading && !pdfBytes && !adding ? (
           <p className="text-muted-foreground py-4">Open a PDF to select pages.</p>
         ) : null}
         <DialogFooter>

@@ -8,6 +8,7 @@ import type { CSSProperties } from "react";
 import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
+import { getScaleStampDimensions } from "@/features/stitch/scaleStamp";
 import { HANDLE_SIZE, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
 import { Lock, RotateCw, Unlock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -32,6 +33,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
     setSelectedTileIds,
     selectedTileIds,
     snapToEdges,
+    resizeLocked,
     tiles,
     canvasWidth,
     canvasHeight,
@@ -266,7 +268,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
       e.stopPropagation();
-      if (tile.locked) return;
+      if (resizeLocked || tile.locked) return;
       const { width, height, x: tileX, y: tileY } = tile;
       resizeStartRef.current = {
         dir,
@@ -280,7 +282,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       };
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [tile.width, tile.height, tile.x, tile.y, tile.locked]
+    [tile.width, tile.height, tile.x, tile.y, tile.locked, resizeLocked]
   );
 
   const baseRotation = (tile.rotation ?? 0) % 360;
@@ -290,7 +292,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
     (e: React.PointerEvent) => {
       e.stopPropagation();
       e.preventDefault();
-      if (tile.locked) return;
+      if (resizeLocked || tile.locked) return;
       const el = tileContainerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
@@ -306,7 +308,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       setRotationWhileDragging(baseRotation);
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [tile.locked, baseRotation]
+    [tile.locked, resizeLocked, baseRotation]
   );
 
   const handleRotatePointerMove = useCallback(
@@ -345,6 +347,15 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
 
   if (!tile.imageDataUrl) return null;
 
+  // Scale stamps: always render at canonical size so far-left and far-right scale lines are exactly 1"
+  const isScaleStampWithScale = Boolean(tile.isScaleStamp && tile.scaleStampFeetPerInch != null);
+  const displayWidth = isScaleStampWithScale
+    ? getScaleStampDimensions(tile.scaleStampFeetPerInch!).widthPt
+    : tile.width;
+  const displayHeight = isScaleStampWithScale
+    ? getScaleStampDimensions(tile.scaleStampFeetPerInch!).heightPt
+    : tile.height;
+
   return (
     <div
       ref={tileContainerRef}
@@ -353,8 +364,8 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       style={{
         left: tile.x,
         top: tile.y,
-        width: tile.width,
-        height: tile.height,
+        width: displayWidth,
+        height: displayHeight,
         borderColor: isSelected ? "hsl(var(--primary))" : undefined,
         boxShadow: isSelected && selectedTileIds.length > 1 ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
         transform: displayRotation ? `rotate(${displayRotation}deg)` : undefined,
@@ -368,12 +379,12 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       <img
         src={tile.imageDataUrl}
         alt=""
-        className="w-full h-full object-fill pointer-events-none select-none"
+        className="w-full h-full pointer-events-none select-none object-fill"
         draggable={false}
       />
       {isSingleSelected && (
         <>
-          {!isLocked &&
+          {!resizeLocked && !isLocked &&
             (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
               const pos: Record<string, CSSProperties> = {
                 nw: { left: -HANDLE_SIZE / 2, top: -HANDLE_SIZE / 2 },
@@ -399,7 +410,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
                 />
               );
             })}
-          {!isLocked && (
+          {!resizeLocked && !isLocked && (
             <Button
               type="button"
               variant="secondary"

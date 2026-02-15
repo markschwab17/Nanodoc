@@ -17,6 +17,10 @@ export interface StitchTile {
   imageDataUrl?: string;
   /** When true, tile cannot be moved, resized, or rotated until unlocked. */
   locked?: boolean;
+  /** True for generated scale bar stamps (no PDF source). */
+  isScaleStamp?: boolean;
+  /** Scale bar only: 1" = this many feet (e.g. 20). Used to render stamp at canonical size so bar is exactly 1". */
+  scaleStampFeetPerInch?: number;
 }
 
 export interface CropRect {

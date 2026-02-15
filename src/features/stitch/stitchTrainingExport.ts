@@ -15,6 +15,21 @@ export interface TrainingControlsJson {
   createdAt: string;
   canvas: { widthPt: number; heightPt: number };
   crop: { x: number; y: number; w: number; h: number } | null;
+  /** User-set scale and effective scale after composition. All in feet per inch (1"=X'). */
+  scale: {
+    /** Original scale user entered (reference): 1" = this many feet. null if not set. */
+    originalScaleFeetPerInch: number | null;
+    /** Composition scale factor (1 = no shrink; less than 1 = shrunk). Effective = original / compositionScaleFactor. */
+    compositionScaleFactor: number;
+    /** Adjusted scale after shrinking: 1" = this many feet. null if original not set. */
+    adjustedScaleFeetPerInch: number | null;
+  };
+  /** View and behavior toggles at export time. */
+  controls: {
+    zoomLevel: number;
+    snapToEdges: boolean;
+    resizeLocked: boolean;
+  };
   tiles: Array<{
     index: number;
     id: string;
@@ -49,13 +64,34 @@ function getTilesInCrop(
   });
 }
 
+/** Exclude scale stamp tiles (no PDF source) from training tile list. */
+function onlyPdfTiles(tiles: StitchTile[]): StitchTile[] {
+  return tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+}
+
 export function buildControlsJson(): TrainingControlsJson {
-  const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
+  const {
+    canvasWidth,
+    canvasHeight,
+    tiles,
+    cropRect,
+    referenceScaleFeetPerInch,
+    compositionScaleFactor,
+    zoomLevel,
+    snapToEdges,
+    resizeLocked,
+  } = useStitchStore.getState();
+
+  const adjustedScaleFeetPerInch =
+    referenceScaleFeetPerInch != null && Number.isFinite(referenceScaleFeetPerInch)
+      ? referenceScaleFeetPerInch / compositionScaleFactor
+      : null;
+
   const cropX = cropRect?.x ?? 0;
   const cropY = cropRect?.y ?? 0;
   const cropW = cropRect?.w ?? canvasWidth;
   const cropH = cropRect?.h ?? canvasHeight;
-  const tilesInCrop = getTilesInCrop(tiles, cropX, cropY, cropW, cropH);
+  const tilesInCrop = onlyPdfTiles(getTilesInCrop(tiles, cropX, cropY, cropW, cropH));
 
   const tileEntries = tilesInCrop.map((t, index) => {
     const nx = cropW > 0 ? (t.x - cropX) / cropW : 0;
@@ -82,9 +118,19 @@ export function buildControlsJson(): TrainingControlsJson {
     createdAt: new Date().toISOString(),
     canvas: { widthPt: canvasWidth, heightPt: canvasHeight },
     crop: cropRect ? { x: cropRect.x, y: cropRect.y, w: cropRect.w, h: cropRect.h } : null,
+    scale: {
+      originalScaleFeetPerInch: referenceScaleFeetPerInch ?? null,
+      compositionScaleFactor,
+      adjustedScaleFeetPerInch,
+    },
+    controls: {
+      zoomLevel,
+      snapToEdges,
+      resizeLocked,
+    },
     tiles: tileEntries,
     notes:
-      "Coordinates in canvas pt. normalized is 0-1 relative to crop. Y axis: down. Layer order = array order (index 0 = back).",
+      "Coordinates in canvas pt. normalized is 0-1 relative to crop. Y axis: down. Layer order = array order (index 0 = back). scale.original = user 1\"=X'; scale.adjusted = effective after shrink.",
     stitchedPngScale: TRAINING_STITCHED_SCALE,
   };
 }
@@ -124,7 +170,7 @@ export async function getTilePngBlobs(): Promise<Blob[]> {
   const cropY = cropRect?.y ?? 0;
   const cropW = cropRect?.w ?? canvasWidth;
   const cropH = cropRect?.h ?? canvasHeight;
-  const tilesInCrop = getTilesInCrop(tiles, cropX, cropY, cropW, cropH);
+  const tilesInCrop = onlyPdfTiles(getTilesInCrop(tiles, cropX, cropY, cropW, cropH));
   const blobs: Blob[] = [];
   for (const t of tilesInCrop) {
     if (!t.imageDataUrl) continue;

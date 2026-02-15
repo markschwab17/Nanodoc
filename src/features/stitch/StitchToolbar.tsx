@@ -3,15 +3,9 @@
  */
 
 import type { ComponentProps } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -22,29 +16,30 @@ import {
   Download,
   Eraser,
   FilePlus,
-  Focus,
   GraduationCap,
   Hand,
-  Lock,
-  Magnet,
+  Maximize2,
   MousePointer2,
   MousePointerClick,
   Redo2,
   RotateCcw,
   Ruler,
+  Expand,
   Save,
+  Shrink,
+  Stamp,
   Trash2,
   Undo2,
-  Unlock,
   X,
-  ZoomIn,
-  ZoomOut,
 } from "lucide-react";
-import { useStitchStore, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
-import { MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "./stitchConstants";
+import { useStitchStore } from "@/shared/stores/stitchStore";
+import { MIN_SCALE, MAX_SCALE, SCALE_STEP } from "./stitchConstants";
+import { generateScaleStampDataUrl, getScaleStampDimensions } from "./scaleStamp";
 
 export interface StitchToolbarProps {
   onAddPdf: () => void;
+  /** When false, Add PDF is shown large in main area; when true, show small icon here. */
+  hasTiles: boolean;
   contentDeleteMode: boolean;
   setContentDeleteMode: (v: boolean | ((prev: boolean) => boolean)) => void;
   deleteElementMode: boolean;
@@ -66,7 +61,6 @@ export interface StitchToolbarProps {
   onScaleAlignModeChange: (active: boolean) => void;
   onScaleAlignCancel: () => void;
   scaleAlignStep: 0 | 1 | 2 | 3;
-  onRecenter?: () => void;
   panMode: boolean;
   onPanModeChange: (active: boolean) => void;
   onSelectToolActivate: () => void;
@@ -86,6 +80,10 @@ const SCALE_ALIGN_STEP_LABELS = [
   "Click first point on target (PDF B) to start the line",
   "Click second point on target (PDF B) — PDF B will resize to match scale",
 ];
+
+function roundToStep(value: number, step: number): number {
+  return Math.round(value / step) * step;
+}
 
 /** Wraps an icon button and shows a label below on hover. */
 function IconButtonWithTooltip({
@@ -111,6 +109,7 @@ function IconButtonWithTooltip({
 
 export function StitchToolbar({
   onAddPdf,
+  hasTiles,
   contentDeleteMode,
   setContentDeleteMode,
   deleteElementMode,
@@ -132,7 +131,6 @@ export function StitchToolbar({
   onScaleAlignModeChange,
   onScaleAlignCancel,
   scaleAlignStep,
-  onRecenter,
   panMode,
   onPanModeChange,
   onSelectToolActivate,
@@ -141,69 +139,149 @@ export function StitchToolbar({
   const {
     canvasWidth,
     canvasHeight,
-    setCanvasSize,
-    setZoomLevel,
-    setSnapToEdges,
-    snapToEdges,
+    setResizeLocked,
+    resizeLocked,
+    referenceScaleFeetPerInch,
+    setReferenceScaleFeetPerInch,
+    compositionScaleFactor,
+    scaleComposition,
+    addTiles,
     sendTilesToBack,
     bringTilesToFront,
     removeTile,
-    updateTiles,
     undo,
     redo,
     undoStack,
     redoStack,
-    zoomLevel,
     selectedTileIds,
     setSelectedTileIds,
     tiles,
   } = useStitchStore();
 
-  const hasSelection = selectedTileIds.length > 0;
-  const allSelectedLocked =
-    hasSelection &&
-    selectedTileIds.every((id) => tiles.find((t) => t.id === id)?.locked);
-  const canUndo = undoStack.length > 0;
-  const canRedo = redoStack.length > 0;
+  const effectiveScaleFeetPerInch =
+    referenceScaleFeetPerInch != null ? referenceScaleFeetPerInch / compositionScaleFactor : null;
 
-  const currentPresetIndex = CANVAS_PRESETS.findIndex(
-    (p) =>
-      (p.width === canvasWidth && p.height === canvasHeight) ||
-      (p.width === canvasHeight && p.height === canvasWidth)
+  const [scaleInputValue, setScaleInputValue] = useState(
+    referenceScaleFeetPerInch != null ? String(referenceScaleFeetPerInch) : ""
   );
-  const currentOrientation =
-    canvasWidth <= canvasHeight ? "portrait" : "landscape";
-  const currentSizeKey =
-    currentPresetIndex >= 0
-      ? `${CANVAS_PRESETS[currentPresetIndex].width}x${CANVAS_PRESETS[currentPresetIndex].height}-${currentOrientation}`
-      : undefined;
+  const [scaleInputFocused, setScaleInputFocused] = useState(false);
+  const [effectiveScaleInputValue, setEffectiveScaleInputValue] = useState("");
+  const [effectiveScaleInputFocused, setEffectiveScaleInputFocused] = useState(false);
+  useEffect(() => {
+    if (!scaleInputFocused && referenceScaleFeetPerInch != null) {
+      setScaleInputValue(String(referenceScaleFeetPerInch));
+    } else if (!scaleInputFocused && referenceScaleFeetPerInch == null) {
+      setScaleInputValue("");
+    }
+  }, [referenceScaleFeetPerInch, scaleInputFocused]);
+  useEffect(() => {
+    if (!effectiveScaleInputFocused && effectiveScaleFeetPerInch != null) {
+      setEffectiveScaleInputValue(String(Math.round(effectiveScaleFeetPerInch)));
+    } else if (!effectiveScaleInputFocused && effectiveScaleFeetPerInch == null) {
+      setEffectiveScaleInputValue("");
+    }
+  }, [effectiveScaleFeetPerInch, effectiveScaleInputFocused]);
 
-  const handleCanvasSizeChange = (value: string) => {
-    const [presetKey, orient] = value.split("-");
-    const preset = CANVAS_PRESETS.find(
-      (p) => `${p.width}x${p.height}` === presetKey
-    );
-    if (preset) {
-      const [w, h] =
-        orient === "landscape"
-          ? [preset.height, preset.width]
-          : [preset.width, preset.height];
-      setCanvasSize(w, h);
+  const commitScaleInput = () => {
+    const trimmed = scaleInputValue.trim();
+    if (trimmed === "") {
+      setReferenceScaleFeetPerInch(null);
+      setScaleInputValue("");
+      return;
+    }
+    const num = parseFloat(trimmed);
+    if (Number.isFinite(num) && num > 0) {
+      setReferenceScaleFeetPerInch(num);
+      setScaleInputValue(String(num));
+    } else {
+      setScaleInputValue(referenceScaleFeetPerInch != null ? String(referenceScaleFeetPerInch) : "");
     }
   };
 
-  const handleDeleteSelected = () => {
-    selectedTileIds.forEach((id) => removeTile(id));
+  const commitEffectiveScaleInput = () => {
+    const trimmed = effectiveScaleInputValue.trim();
+    if (trimmed === "" || referenceScaleFeetPerInch == null) return;
+    const num = parseFloat(trimmed);
+    if (Number.isFinite(num) && num >= 1) {
+      setEffectiveScaleTo(Math.round(num));
+      setEffectiveScaleInputValue(String(Math.round(num)));
+    } else {
+      setEffectiveScaleInputValue(effectiveScaleFeetPerInch != null ? String(Math.round(effectiveScaleFeetPerInch)) : "");
+    }
   };
 
-  const handleToggleLockSelected = () => {
-    if (!hasSelection) return;
-    updateTiles(
-      selectedTileIds.map((id) => ({
-        id,
-        patch: { locked: !allSelectedLocked },
-      }))
-    );
+  const handleScaleComposition = (factor: number) => {
+    const ox = cropRect ? cropRect.x + cropRect.w / 2 : canvasWidth / 2;
+    const oy = cropRect ? cropRect.y + cropRect.h / 2 : canvasHeight / 2;
+    scaleComposition(factor, ox, oy);
+  };
+
+  /** When reference scale is set, step to next whole-number effective scale (1"=k'). Otherwise step composition by SCALE_STEP. */
+  const handleScaleStep = (delta: number) => {
+    if (referenceScaleFeetPerInch != null && referenceScaleFeetPerInch > 0) {
+      const currentEffective = referenceScaleFeetPerInch / compositionScaleFactor;
+      const k = Math.floor(currentEffective);
+      if (delta < 0) {
+        const newEffective = k + 1;
+        const newComp = referenceScaleFeetPerInch / newEffective;
+        const target = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newComp));
+        if (Math.abs(target - compositionScaleFactor) < 1e-6) return;
+        handleScaleComposition(target / compositionScaleFactor);
+      } else {
+        const newEffective = Math.max(1, k - (Number.isInteger(currentEffective) ? 1 : 0));
+        const newComp = referenceScaleFeetPerInch / newEffective;
+        const target = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newComp));
+        if (Math.abs(target - compositionScaleFactor) < 1e-6) return;
+        handleScaleComposition(target / compositionScaleFactor);
+      }
+    } else {
+      const target = Math.max(MIN_SCALE, Math.min(MAX_SCALE, roundToStep(compositionScaleFactor + delta, SCALE_STEP)));
+      if (Math.abs(target - compositionScaleFactor) < 1e-6) return;
+      handleScaleComposition(target / compositionScaleFactor);
+    }
+  };
+
+  /** Set composition so effective scale is exactly targetEffective (e.g. 80 for 1"=80'). Requires reference scale. */
+  const setEffectiveScaleTo = (targetEffective: number) => {
+    if (referenceScaleFeetPerInch == null || !Number.isFinite(targetEffective) || targetEffective < 1) return;
+    const newComp = referenceScaleFeetPerInch / targetEffective;
+    const target = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newComp));
+    if (Math.abs(target - compositionScaleFactor) < 1e-6) return;
+    handleScaleComposition(target / compositionScaleFactor);
+  };
+
+  const handleAddScaleStamp = () => {
+    if (effectiveScaleFeetPerInch == null) return;
+    const effectiveWhole = Math.round(effectiveScaleFeetPerInch);
+    const imageDataUrl = generateScaleStampDataUrl(effectiveWhole);
+    if (!imageDataUrl) return;
+    const { widthPt, heightPt } = getScaleStampDimensions(effectiveWhole);
+    const margin = 12;
+    const cx = cropRect ? cropRect.x + cropRect.w : canvasWidth;
+    const cy = cropRect ? cropRect.y + cropRect.h : canvasHeight;
+    const x = cx - widthPt - margin;
+    const y = cy - heightPt - margin;
+    addTiles([
+      {
+        sourcePdfBytes: new Uint8Array(0),
+        sourcePageIndex: -1,
+        isScaleStamp: true,
+        scaleStampFeetPerInch: effectiveWhole,
+        x,
+        y,
+        width: widthPt,
+        height: heightPt,
+        imageDataUrl,
+      },
+    ]);
+  };
+
+  const hasSelection = selectedTileIds.length > 0;
+  const canUndo = undoStack.length > 0;
+  const canRedo = redoStack.length > 0;
+
+  const handleDeleteSelected = () => {
+    selectedTileIds.forEach((id) => removeTile(id));
   };
 
   const deleteContentTip =
@@ -232,34 +310,7 @@ export function StitchToolbar({
           </Button>
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />
-        <div className="flex items-center gap-1.5" role="group" aria-label="Canvas">
-          <Select value={currentSizeKey} onValueChange={handleCanvasSizeChange}>
-            <SelectTrigger className="w-[100px] h-7 text-xs" title="Canvas size (e.g. 11×17, 17×22)">
-              <SelectValue placeholder="Size" />
-            </SelectTrigger>
-            <SelectContent>
-              {CANVAS_PRESETS.flatMap((p) => [
-                <SelectItem key={`${p.width}x${p.height}-portrait`} value={`${p.width}x${p.height}-portrait`}>
-                  {p.label} Portrait
-                </SelectItem>,
-                <SelectItem key={`${p.width}x${p.height}-landscape`} value={`${p.width}x${p.height}-landscape`}>
-                  {p.label} Landscape
-                </SelectItem>,
-              ])}
-            </SelectContent>
-          </Select>
-          <div className="flex items-center gap-0.5 border rounded-md h-7 bg-background">
-            <Button variant="ghost" size="icon" className="h-6 w-6" title="Zoom out" onClick={() => setZoomLevel(Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP))}>
-              <ZoomOut className="h-3 w-3" />
-            </Button>
-            <span className="text-xs tabular-nums w-8 text-center" title="Zoom level">{Math.round(zoomLevel * 100)}%</span>
-            <Button variant="ghost" size="icon" className="h-6 w-6" title="Zoom in" onClick={() => setZoomLevel(Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP))}>
-              <ZoomIn className="h-3 w-3" />
-            </Button>
-          </div>
-          <IconButtonWithTooltip variant="outline" title="Center the canvas in the viewport" label="Center" onClick={onRecenter}>
-            <Focus className="h-3.5 w-3.5 shrink-0" />
-          </IconButtonWithTooltip>
+        <div className="flex items-center gap-1.5" role="group" aria-label="Tools">
           <IconButtonWithTooltip
             variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode ? "secondary" : "outline"}
             title="Select and move tiles (Ctrl+A: select all)"
@@ -271,14 +322,32 @@ export function StitchToolbar({
           <IconButtonWithTooltip variant={panMode ? "secondary" : "outline"} title="Pan canvas (Space: hold to pan)" label="Pan" onClick={() => onPanModeChange(!panMode)}>
             <Hand className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
-          <IconButtonWithTooltip variant={snapToEdges ? "secondary" : "outline"} title="Snap tiles to edges when moving or resizing" label="Snap" onClick={() => setSnapToEdges(!snapToEdges)}>
-            <Magnet className="h-3.5 w-3.5 shrink-0" />
+          <IconButtonWithTooltip
+            variant={resizeLocked ? "secondary" : "outline"}
+            title={resizeLocked
+              ? "Resize locked — move only. If you resize tiles, the scale stamp cannot be used correctly."
+              : "Resize unlocked — you can resize and rotate tiles. Resizing may make the scale stamp incorrect."}
+            label={resizeLocked ? "Resize locked" : "Resize unlocked"}
+            onClick={() => setResizeLocked(!resizeLocked)}
+          >
+            {resizeLocked ? (
+              <span className="relative inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+                <Maximize2 className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="absolute inset-0 flex items-center justify-center">
+                  <X className="h-2.5 w-2.5 stroke-[2.5] text-destructive" strokeWidth={2.5} />
+                </span>
+              </span>
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5 shrink-0" />
+            )}
           </IconButtonWithTooltip>
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />
-        <IconButtonWithTooltip variant="outline" title="Add PDF pages to the canvas" label="Add PDF" onClick={onAddPdf}>
-          <FilePlus className="h-3.5 w-3.5 shrink-0" />
-        </IconButtonWithTooltip>
+        {hasTiles && (
+          <IconButtonWithTooltip variant="outline" title="Add PDF pages to the canvas" label="Add PDF" onClick={onAddPdf}>
+            <FilePlus className="h-3.5 w-3.5 shrink-0" />
+          </IconButtonWithTooltip>
+        )}
         {onClearSession && (
           <IconButtonWithTooltip variant="outline" title="Clear session and start fresh (removes all tiles, resets canvas)" label="Clear session" onClick={onClearSession}>
             <RotateCcw className="h-3.5 w-3.5 shrink-0" />
@@ -350,6 +419,91 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         )}
         <div className="h-5 w-px bg-border" aria-hidden />
+        <div className="flex items-center gap-1" role="group" aria-label="Scale">
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            title="Decrease scale (smaller)"
+            aria-label="Decrease scale"
+            onClick={() => handleScaleStep(-SCALE_STEP)}
+          >
+            <Shrink className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            title="Increase scale (bigger)"
+            aria-label="Increase scale"
+            onClick={() => handleScaleStep(SCALE_STEP)}
+          >
+            <Expand className="h-3.5 w-3.5" />
+          </Button>
+          <span className="text-xs tabular-nums w-10 text-center shrink-0" title="Current scale factor">
+            {parseFloat(compositionScaleFactor.toFixed(2))}×
+          </span>
+          <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0" title="Reference scale: 1 inch = X feet">
+            1&quot;=
+          </span>
+          <input
+            type="text"
+            inputMode="decimal"
+            placeholder="20"
+            value={scaleInputValue}
+            onChange={(e) => setScaleInputValue(e.target.value)}
+            onFocus={() => setScaleInputFocused(true)}
+            onBlur={() => {
+              setScaleInputFocused(false);
+              commitScaleInput();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.currentTarget.blur();
+              }
+            }}
+            className="h-7 w-10 rounded border border-input bg-background px-1.5 text-xs tabular-nums focus:outline-none focus:ring-2 focus:ring-ring"
+            aria-label="Reference scale feet per inch (e.g. 20 for 1 inch = 20 feet)"
+          />
+          <span className="text-xs text-muted-foreground shrink-0">&#39;</span>
+          {referenceScaleFeetPerInch != null && (
+            <>
+              <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0" title="Adjust composition so effective scale is 1 inch = X feet">
+                Adjusted 1&quot;=
+              </span>
+              <input
+                type="text"
+                inputMode="numeric"
+                placeholder={effectiveScaleFeetPerInch != null ? String(Math.round(effectiveScaleFeetPerInch)) : "20"}
+                value={effectiveScaleInputValue}
+                onChange={(e) => setEffectiveScaleInputValue(e.target.value)}
+                onFocus={() => setEffectiveScaleInputFocused(true)}
+                onBlur={() => {
+                  setEffectiveScaleInputFocused(false);
+                  commitEffectiveScaleInput();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.currentTarget.blur();
+                  }
+                }}
+                className="h-7 w-10 rounded border border-input bg-background px-1.5 text-xs tabular-nums focus:outline-none focus:ring-2 focus:ring-ring"
+                aria-label="Adjusted effective scale (e.g. 80 for 1 inch = 80 feet); scales the composition to match"
+              />
+              <span className="text-xs text-muted-foreground shrink-0">&#39;</span>
+            </>
+          )}
+          <IconButtonWithTooltip
+            variant="outline"
+            disabled={referenceScaleFeetPerInch == null}
+            title={referenceScaleFeetPerInch != null ? "Add scale bar stamp (current effective scale)" : "Set reference scale above first"}
+            label="Scale stamp"
+            onClick={handleAddScaleStamp}
+          >
+            <Stamp className="h-3.5 w-3.5 shrink-0" />
+          </IconButtonWithTooltip>
+        </div>
+        <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-0.5" role="group" aria-label="Selection">
           <IconButtonWithTooltip variant="outline" disabled={tiles.length === 0} title={tiles.length === 0 ? "No pages on canvas" : "Select all pages (Ctrl+A)"} label="Select all" onClick={() => tiles.length > 0 && setSelectedTileIds(tiles.map((t) => t.id))}>
             <CheckSquare className="h-3.5 w-3.5 shrink-0" />
@@ -364,9 +518,6 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
           <IconButtonWithTooltip variant="outline" disabled={!hasSelection} title={hasSelection ? "Remove selected pages (Delete key)" : "Select a page first"} label="Delete" onClick={handleDeleteSelected}>
             <Trash2 className="h-3.5 w-3.5 shrink-0" />
-          </IconButtonWithTooltip>
-          <IconButtonWithTooltip variant="outline" disabled={!hasSelection} title={allSelectedLocked ? "Unlock so tiles can be moved again" : "Lock position so tiles cannot be moved"} label={allSelectedLocked ? "Unlock" : "Lock"} onClick={handleToggleLockSelected}>
-            {allSelectedLocked ? <Lock className="h-3.5 w-3.5 shrink-0" /> : <Unlock className="h-3.5 w-3.5 shrink-0" />}
           </IconButtonWithTooltip>
         </div>
         <div className="flex-1 min-w-2" />

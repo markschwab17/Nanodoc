@@ -10,7 +10,14 @@ import { StitchTile } from "./StitchTile";
 import { GroupSelectionOverlay } from "./GroupSelectionOverlay";
 import type { CanvasRect } from "./imageUtils";
 import { useStitchPanZoom } from "./useStitchPanZoom";
-import { MIN_ERASE_SIZE, STROKE_POINT_MIN_DIST } from "./stitchConstants";
+import { MIN_ERASE_SIZE, PT_PER_INCH, STROKE_POINT_MIN_DIST } from "./stitchConstants";
+
+const RULER_SIZE = 24;
+const PT_PER_HALF_INCH = PT_PER_INCH / 2;
+
+function rulerLabel(inches: number): string {
+  return inches % 1 === 0 ? String(inches) : inches.toFixed(1);
+}
 import { hitTestTileAtPoint, type CanvasPoint } from "./stitchGeometry";
 
 export interface StitchCanvasProps {
@@ -43,6 +50,8 @@ export interface StitchCanvasProps {
   onScaleAlignClick?: (tileId: string, point: CanvasPoint) => void;
   /** When true, drag pans the canvas (same as holding Space). */
   panMode?: boolean;
+  /** When false, the canvas background (paper/grid) is hidden; PDFs remain visible. */
+  canvasVisible?: boolean;
   /** Optional ref to receive the viewport container element (e.g. for recenter). */
   forwardedContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
@@ -64,6 +73,7 @@ export function StitchCanvas({
   scaleAlignPoints = [null, null, null, null],
   onScaleAlignClick,
   panMode = false,
+  canvasVisible = true,
   forwardedContainerRef,
 }: StitchCanvasProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -138,9 +148,10 @@ export function StitchCanvas({
     if (!inner) return null;
     const rect = inner.getBoundingClientRect();
     const zoom = zoomLevelRef.current;
+    // Canvas content is inset by RULER_SIZE; (0,0) is at (RULER_SIZE, RULER_SIZE) in inner div
     return {
-      x: (clientX - rect.left) / zoom,
-      y: (clientY - rect.top) / zoom,
+      x: (clientX - rect.left) / zoom - RULER_SIZE,
+      y: (clientY - rect.top) / zoom - RULER_SIZE,
     };
   }, []);
 
@@ -205,24 +216,129 @@ export function StitchCanvas({
         style={{
           left: panOffset.x,
           top: panOffset.y,
-          width: canvasWidth,
-          height: canvasHeight,
+          width: RULER_SIZE + canvasWidth,
+          height: RULER_SIZE + canvasHeight,
           transform: `scale(${zoomLevel})`,
           transformOrigin: "0 0",
         }}
       >
-        <div
-          className="absolute inset-0 border border-border bg-background"
-          style={{
-            width: canvasWidth,
-            height: canvasHeight,
-            backgroundImage: `
-              linear-gradient(to right, rgba(0,0,0,0.03) 1px, transparent 1px),
-              linear-gradient(to bottom, rgba(0,0,0,0.03) 1px, transparent 1px)
-            `,
-            backgroundSize: "24px 24px",
-          }}
-        />
+        {canvasVisible && (
+          <>
+            {/* Left ruler: 0.5" increments; numbers sit above tick lines */}
+            <svg
+              className="absolute pointer-events-none z-[2]"
+              style={{ left: 0, top: RULER_SIZE, width: RULER_SIZE, height: canvasHeight }}
+              viewBox={`0 0 ${RULER_SIZE} ${canvasHeight}`}
+              preserveAspectRatio="none"
+              aria-label="Vertical ruler"
+            >
+              <rect width={RULER_SIZE} height={canvasHeight} fill="hsl(var(--muted))" fillOpacity={0.5} stroke="hsl(var(--border))" strokeWidth={1} />
+              {Array.from({ length: Math.floor(canvasHeight / PT_PER_HALF_INCH) + 1 }, (_, i) => {
+                const y = i * PT_PER_HALF_INCH;
+                if (y > canvasHeight) return null;
+                const inches = y / PT_PER_INCH;
+                const textY = y === 0 ? 6 : y - 6;
+                return (
+                  <g key={y}>
+                    <line x1={18} y1={y} x2={24} y2={y} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+                    <text x={10} y={textY} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+                      {rulerLabel(inches)}
+                    </text>
+                  </g>
+                );
+              })}
+              {canvasHeight % PT_PER_HALF_INCH !== 0 && (
+                <g key={`v-end-${canvasHeight}`}>
+                  <line x1={18} y1={canvasHeight} x2={24} y2={canvasHeight} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+                  <text x={10} y={canvasHeight - 6} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+                    {(canvasHeight / PT_PER_INCH).toFixed(1)}
+                  </text>
+                </g>
+              )}
+            </svg>
+            {/* Top ruler: 0.5" increments; numbers sit above tick lines */}
+            <svg
+              className="absolute pointer-events-none z-[2]"
+              style={{ left: RULER_SIZE, top: 0, width: canvasWidth, height: RULER_SIZE }}
+              viewBox={`0 0 ${canvasWidth} ${RULER_SIZE}`}
+              preserveAspectRatio="none"
+              aria-label="Horizontal ruler"
+            >
+              <rect width={canvasWidth} height={RULER_SIZE} fill="hsl(var(--muted))" fillOpacity={0.5} stroke="hsl(var(--border))" strokeWidth={1} />
+              {Array.from({ length: Math.floor(canvasWidth / PT_PER_HALF_INCH) + 1 }, (_, i) => {
+                const x = i * PT_PER_HALF_INCH;
+                if (x > canvasWidth) return null;
+                const inches = x / PT_PER_INCH;
+                return (
+                  <g key={x}>
+                    <line x1={x} y1={10} x2={x} y2={24} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+                    <text x={i === 0 ? Math.max(6, x) : x} y={5} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+                      {rulerLabel(inches)}
+                    </text>
+                  </g>
+                );
+              })}
+              {canvasWidth % PT_PER_HALF_INCH !== 0 && (
+                <g key={`h-end-${canvasWidth}`}>
+                  <line x1={canvasWidth} y1={10} x2={canvasWidth} y2={24} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+                  <text x={canvasWidth} y={5} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+                    {(canvasWidth / PT_PER_INCH).toFixed(1)}
+                  </text>
+                </g>
+              )}
+            </svg>
+          </>
+        )}
+            {/* Canvas area: background, guidelines, tiles (inset by RULER_SIZE so rulers sit outside) — always rendered */}
+            <div
+              className="absolute"
+              style={{ left: RULER_SIZE, top: RULER_SIZE, width: canvasWidth, height: canvasHeight }}
+            >
+        {canvasVisible && (
+          <>
+              <div className="absolute inset-0 border border-border bg-background" />
+              {/* Inch guidelines (1" = 72 pt) — true 1" boundaries; scale stamp and rulers align to these */}
+              <svg
+              className="absolute left-0 top-0 pointer-events-none z-[1]"
+              width={canvasWidth}
+              height={canvasHeight}
+              viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
+              preserveAspectRatio="none"
+              aria-hidden
+            >
+              {Array.from({ length: Math.floor(canvasWidth / PT_PER_INCH) + 1 }, (_, i) => {
+                const x = i * PT_PER_INCH;
+                return (
+                  <line
+                    key={`v-${x}`}
+                    x1={x}
+                    y1={0}
+                    x2={x}
+                    y2={canvasHeight}
+                    stroke="hsl(var(--muted-foreground))"
+                    strokeOpacity={0.22}
+                    strokeWidth={1}
+                  />
+                );
+              })}
+              {Array.from({ length: Math.floor(canvasHeight / PT_PER_INCH) + 1 }, (_, i) => {
+                const y = i * PT_PER_INCH;
+                return (
+                  <line
+                    key={`h-${y}`}
+                    x1={0}
+                    y1={y}
+                    x2={canvasWidth}
+                    y2={y}
+                    stroke="hsl(var(--muted-foreground))"
+                    strokeOpacity={0.22}
+                    strokeWidth={1}
+                  />
+                );
+              })}
+            </svg>
+          </>
+        )}
         {cropRect && (
           <div
             className="absolute border-2 border-dashed border-primary pointer-events-none"
@@ -537,6 +653,7 @@ export function StitchCanvas({
               }}
             />
           ))}
+            </div>
       </div>
       {isDeletingAlongPath && (
         <div

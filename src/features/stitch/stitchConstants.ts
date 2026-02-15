@@ -2,7 +2,7 @@
  * Shared constants for the stitch PDF feature.
  */
 
-const PT_PER_INCH = 72;
+export const PT_PER_INCH = 72;
 
 export const CANVAS_PRESETS = [
   { label: "8.5 × 11\"", width: 8.5 * PT_PER_INCH, height: 11 * PT_PER_INCH },
@@ -12,8 +12,13 @@ export const CANVAS_PRESETS = [
 ] as const;
 
 export const MIN_ZOOM = 0.25;
-export const MAX_ZOOM = 10;
+export const MAX_ZOOM = 50;
 export const ZOOM_STEP = 0.25;
+
+/** Scale composition: min/max factor and step for slider and +/- buttons. */
+export const MIN_SCALE = 0.05;
+export const MAX_SCALE = 4;
+export const SCALE_STEP = 0.05;
 export const ZOOM_DELTA = 1.05;
 export const SCROLL_SENSITIVITY = 1.0;
 

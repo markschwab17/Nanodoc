@@ -37,13 +37,19 @@ interface StitchState {
   cropRect: CropRect | null;
   /** When true, tiles snap to other tiles' edges and canvas edges when dragging/resizing. */
   snapToEdges: boolean;
+  /** When true, tiles cannot be resized or rotated (move only). Toggle to allow resize/rotate. */
+  resizeLocked: boolean;
+  /** Drawing scale: 1 inch = this many feet (e.g. 20 for 1"=20'). null = not set. */
+  referenceScaleFeetPerInch: number | null;
+  /** Composition scale factor (1 = no shrink; 0.25 = shrunk 4x). Effective scale = referenceScaleFeetPerInch / compositionScaleFactor. */
+  compositionScaleFactor: number;
   undoStack: StitchUndoSnapshot[];
   redoStack: StitchUndoSnapshot[];
   setCanvasSize: (width: number, height: number) => void;
   addTiles: (tiles: Omit<StitchTile, "id">[]) => void;
-  updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName">>) => void;
-  /** Apply patches to multiple tiles in one update. */
-  updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked">> }>) => void;
+  updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch">>) => void;
+  /** Apply patches to multiple tiles in one update (one undo step). */
+  updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl">> }>) => void;
   removeTile: (id: string) => void;
   /** Move tile(s) to the back (lowest layer). Pass one id or multiple. */
   sendTileToBack: (id: string) => void;
@@ -60,6 +66,11 @@ interface StitchState {
   setCropRect: (rect: CropRect | null) => void;
   setCropToContent: (margin?: number) => void;
   setSnapToEdges: (enabled: boolean) => void;
+  setResizeLocked: (locked: boolean) => void;
+  setReferenceScaleFeetPerInch: (value: number | null) => void;
+  setCompositionScaleFactor: (factor: number) => void;
+  /** Scale all tiles uniformly around origin (undoable). */
+  scaleComposition: (factor: number, originX: number, originY: number) => void;
   reset: () => void;
   undo: () => void;
   redo: () => void;
@@ -94,6 +105,9 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   selectedTileIds: [],
   cropRect: null,
   snapToEdges: true,
+  resizeLocked: true,
+  referenceScaleFeetPerInch: null,
+  compositionScaleFactor: 1,
   undoStack: [],
   redoStack: [],
 
@@ -240,6 +254,35 @@ export const useStitchStore = create<StitchState>((set, get) => ({
 
   setSnapToEdges: (snapToEdges) => set({ snapToEdges }),
 
+  setResizeLocked: (resizeLocked) => set({ resizeLocked }),
+
+  setReferenceScaleFeetPerInch: (referenceScaleFeetPerInch) => set({ referenceScaleFeetPerInch }),
+
+  setCompositionScaleFactor: (compositionScaleFactor) => set({ compositionScaleFactor }),
+
+  scaleComposition: (factor, originX, originY) =>
+    set((state) => {
+      const snap = snapshotState(state);
+      const updates = state.tiles.map((t) => {
+        const newX = originX + (t.x - originX) * factor;
+        const newY = originY + (t.y - originY) * factor;
+        const newWidth = t.width * factor;
+        const newHeight = t.height * factor;
+        return { id: t.id, patch: { x: newX, y: newY, width: newWidth, height: newHeight } };
+      });
+      const byId = new Map(updates.map((u) => [u.id, u.patch]));
+      const tiles = state.tiles.map((t) => {
+        const patch = byId.get(t.id);
+        return patch ? { ...t, ...patch } : t;
+      });
+      return {
+        tiles,
+        compositionScaleFactor: state.compositionScaleFactor * factor,
+        undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
+        redoStack: [],
+      };
+    }),
+
   setCropToContent: (margin = 0) =>
     set((state) => {
       if (state.tiles.length === 0) return { cropRect: null };
@@ -302,6 +345,9 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       selectedTileIds: [],
       cropRect: null,
       snapToEdges: true,
+      resizeLocked: true,
+      referenceScaleFeetPerInch: null,
+      compositionScaleFactor: 1,
       undoStack: [],
       redoStack: [],
     }),
