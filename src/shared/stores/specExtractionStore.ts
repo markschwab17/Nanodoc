@@ -5,7 +5,7 @@
  */
 
 import { create } from "zustand";
-import type { SpecExtractionResult } from "@/core/ai/types";
+import type { SpecExtractionResult, GeotechnicalScope, GeotechnicalSummary } from "@/core/ai/types";
 
 export interface SpecHighlight {
   page: number;
@@ -33,6 +33,8 @@ export interface SpecExtractionState {
   // Results
   extractedSpecs: Map<string, SpecExtractionResult[]>; // documentId -> specs
   specHighlights: Map<string, SpecHighlight[]>; // documentId -> highlights
+  geotechnicalSummary: Map<string, GeotechnicalSummary>; // documentId -> fixed 5-row summary
+  geotechnicalScope: Map<string, GeotechnicalScope>; // documentId -> scope used for extraction/insights
   
   // Current extraction
   currentDocumentId: string | null;
@@ -51,6 +53,8 @@ export interface SpecExtractionState {
   setExtractionError: (error: string | null) => void;
   setExtractedSpecs: (documentId: string, specs: SpecExtractionResult[]) => void;
   setSpecHighlights: (documentId: string, highlights: SpecHighlight[]) => void;
+  setGeotechnicalSummary: (documentId: string, summary: GeotechnicalSummary) => void;
+  setGeotechnicalScope: (documentId: string, scope: GeotechnicalScope) => void;
   setSelectedSpec: (documentId: string, specId: string | null) => void;
   setTemporaryHighlight: (highlight: TemporaryTextHighlight | null) => void;
   finishExtraction: () => void;
@@ -59,6 +63,8 @@ export interface SpecExtractionState {
   remapSpecsAfterPageDeletion: (documentId: string, deletedPageIndices: number[]) => void;
   getExtractedSpecs: (documentId: string) => SpecExtractionResult[];
   getSpecHighlights: (documentId: string) => SpecHighlight[];
+  getGeotechnicalSummary: (documentId: string) => GeotechnicalSummary | undefined;
+  getGeotechnicalScope: (documentId: string) => GeotechnicalScope | undefined;
 }
 
 export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => ({
@@ -68,6 +74,8 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
   extractionError: null,
   extractedSpecs: new Map(),
   specHighlights: new Map(),
+  geotechnicalSummary: new Map(),
+  geotechnicalScope: new Map(),
   currentDocumentId: null,
   selectedSpecId: null,
   selectedSpecDocumentId: null,
@@ -110,6 +118,20 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
       newHighlights.set(documentId, highlights);
       return { specHighlights: newHighlights };
     }),
+
+  setGeotechnicalSummary: (documentId: string, summary: GeotechnicalSummary) =>
+    set((state) => {
+      const next = new Map(state.geotechnicalSummary);
+      next.set(documentId, summary);
+      return { geotechnicalSummary: next };
+    }),
+
+  setGeotechnicalScope: (documentId: string, scope: GeotechnicalScope) =>
+    set((state) => {
+      const next = new Map(state.geotechnicalScope);
+      next.set(documentId, scope);
+      return { geotechnicalScope: next };
+    }),
   
   finishExtraction: () =>
     set({
@@ -122,11 +144,17 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
     set((state) => {
       const newSpecs = new Map(state.extractedSpecs);
       const newHighlights = new Map(state.specHighlights);
+      const newGeotechnicalSummary = new Map(state.geotechnicalSummary);
+      const newGeotechnicalScope = new Map(state.geotechnicalScope);
       newSpecs.delete(documentId);
       newHighlights.delete(documentId);
+      newGeotechnicalSummary.delete(documentId);
+      newGeotechnicalScope.delete(documentId);
       return {
         extractedSpecs: newSpecs,
         specHighlights: newHighlights,
+        geotechnicalSummary: newGeotechnicalSummary,
+        geotechnicalScope: newGeotechnicalScope,
         currentDocumentId: state.currentDocumentId === documentId ? null : state.currentDocumentId,
       };
     }),
@@ -134,12 +162,12 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
   remapSpecsAfterPageDeletion: (documentId: string, deletedPageIndices: number[]) =>
     set((state) => {
       const deletedSet = new Set(deletedPageIndices);
-      const specs = state.extractedSpecs.get(documentId);
-      const highlights = state.specHighlights.get(documentId);
-      if (!specs?.length && !highlights?.length) return state;
-
       const countDeletedBefore = (page: number) =>
         deletedPageIndices.filter((p) => p < page).length;
+
+      const specs = state.extractedSpecs.get(documentId);
+      const highlights = state.specHighlights.get(documentId);
+      const geoSummary = state.geotechnicalSummary.get(documentId);
 
       const newSpecs = specs
         ? specs
@@ -151,12 +179,26 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
             .filter((h) => !deletedSet.has(h.page))
             .map((h) => ({ ...h, page: h.page - countDeletedBefore(h.page) }))
         : [];
+      const newGeoSummary: GeotechnicalSummary | undefined = geoSummary
+        ? geoSummary.map((row) => ({
+            ...row,
+            page: deletedSet.has(row.page) ? 0 : row.page - countDeletedBefore(row.page),
+            ...(deletedSet.has(row.page) ? { value: "N/A", quote: "Not found in document." } : {}),
+          }))
+        : undefined;
 
       const nextSpecs = new Map(state.extractedSpecs);
       const nextHighlights = new Map(state.specHighlights);
+      const nextGeoSummary = new Map(state.geotechnicalSummary);
       nextSpecs.set(documentId, newSpecs);
       nextHighlights.set(documentId, newHighlights);
-      return { extractedSpecs: nextSpecs, specHighlights: nextHighlights };
+      if (newGeoSummary) nextGeoSummary.set(documentId, newGeoSummary);
+
+      return {
+        extractedSpecs: nextSpecs,
+        specHighlights: nextHighlights,
+        geotechnicalSummary: nextGeoSummary,
+      };
     }),
 
   getExtractedSpecs: (documentId: string) => {
@@ -168,4 +210,7 @@ export const useSpecExtractionStore = create<SpecExtractionState>((set, get) => 
     const state = get();
     return state.specHighlights.get(documentId) || [];
   },
+
+  getGeotechnicalSummary: (documentId: string) => get().geotechnicalSummary.get(documentId),
+  getGeotechnicalScope: (documentId: string) => get().geotechnicalScope.get(documentId),
 }));

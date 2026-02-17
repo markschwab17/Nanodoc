@@ -17,7 +17,9 @@ import { extractSpecsFromChunks, hasConfiguredAPIKey } from "@/core/ai/AIService
 import { createChunks } from "@/core/ai/PDFContentChunker";
 import { getEmbeddingService, findTopKChunks } from "@/core/ai/EmbeddingService";
 import { filterChunksBySpecProbability } from "@/core/ai/SpecCandidateDetector";
-import type { SpecExtractionResult } from "@/core/ai/types";
+import type { SpecExtractionResult, GeotechnicalScope, GeotechnicalSummary } from "@/core/ai/types";
+import { getInsights, CHARACTERISTIC_LABELS } from "@/features/specs/geotechnicalInsights";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 
 export function SpecExtractionPanel() {
   const {
@@ -31,8 +33,12 @@ export function SpecExtractionPanel() {
     setExtractionError,
     setExtractedSpecs,
     setSpecHighlights,
+    setGeotechnicalSummary,
+    setGeotechnicalScope,
     finishExtraction,
     getExtractedSpecs,
+    getGeotechnicalSummary,
+    getGeotechnicalScope,
     setSelectedSpec,
     setTemporaryHighlight,
   } = useSpecExtractionStore();
@@ -49,45 +55,47 @@ export function SpecExtractionPanel() {
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() || null;
   const specs = documentId ? getExtractedSpecs(documentId) : [];
+  const geotechnicalSummary = documentId ? getGeotechnicalSummary(documentId) : undefined;
+  const geotechnicalScope = documentId ? getGeotechnicalScope(documentId) : undefined;
   const pageCount = currentDocument?.getPageCount() ?? 0;
   // Only show specs that reference existing pages (dynamic tie to current document state)
   const visibleSpecs = specs.filter((s) => (s.page ?? 0) < pageCount);
+  const hasGeotechnicalResults = Boolean(geotechnicalSummary && geotechnicalSummary.length > 0);
+  const hasAnyGeotechnicalValues = Boolean(
+    geotechnicalSummary?.some((row) => row.value !== "N/A" && String(row.value).trim() !== "")
+  );
 
   const { selectedSpecId, selectedSpecDocumentId } = useSpecExtractionStore();
   
   useEffect(() => {
     const handleExtractionRequest = (event: CustomEvent) => {
-      const { documentId: requestedDocId, extractionType: type, customPrompt } = event.detail;
+      const { documentId: requestedDocId, extractionType: type, customPrompt, scope } = event.detail;
       if (requestedDocId === documentId && currentDocument) {
         const selectedType = type || "specs";
         setExtractionType(selectedType);
         setIsOpen(true);
         setExtractionInProgress(true);
-        performExtraction(currentDocument, selectedType, customPrompt).finally(() => {
+        performExtraction(currentDocument, selectedType, customPrompt, scope).finally(() => {
           setExtractionInProgress(false);
         });
       }
     };
-    
+
     const handleShowResults = (event: CustomEvent) => {
       const { documentId: requestedDocId } = event.detail;
       if (requestedDocId === documentId) {
         setIsOpen(true);
-        // Determine extraction type from existing specs if available
-        if (specs.length > 0) {
-          // Try to infer type from the first spec's category or use stored type
-          // For now, just use the current extractionType state
-        }
+        if (geotechnicalSummary?.length) setExtractionType("geotechnical");
       }
     };
-    
+
     window.addEventListener('spec-extraction-request', handleExtractionRequest as EventListener);
     window.addEventListener('show-spec-results', handleShowResults as EventListener);
     return () => {
       window.removeEventListener('spec-extraction-request', handleExtractionRequest as EventListener);
       window.removeEventListener('show-spec-results', handleShowResults as EventListener);
     };
-  }, [documentId, currentDocument, specs.length]);
+  }, [documentId, currentDocument, specs.length, geotechnicalSummary?.length]);
   
   // Auto-open panel when extraction starts
   useEffect(() => {
@@ -96,7 +104,12 @@ export function SpecExtractionPanel() {
     }
   }, [isExtracting, isOpen]);
   
-  const performExtraction = async (document: any, extractionType: "specs" | "geotechnical" = "specs", customPrompt?: string) => {
+  const performExtraction = async (
+    document: any,
+    extractionType: "specs" | "geotechnical" = "specs",
+    customPrompt?: string,
+    scope?: GeotechnicalScope
+  ) => {
     if (!hasConfiguredAPIKey()) {
       setExtractionError("Please configure your AI API key in settings.");
       return;
@@ -162,59 +175,105 @@ export function SpecExtractionPanel() {
         }
       }, 2000);
 
-      const specs = await extractSpecsFromChunks(chunksForAI, extractionType, customPrompt);
+      const result = await extractSpecsFromChunks(chunksForAI, extractionType, customPrompt, scope);
       clearInterval(progressInterval);
 
       setExtractionProgress(90);
-      
-      // Step 5: Create highlights from specs
-      const specHighlights = specs
-        .filter(s => s.bbox && s.bbox.length >= 4)
-        .map((spec, idx) => ({
-          page: spec.page,
-          bbox: [spec.bbox![0], spec.bbox![1], spec.bbox![2], spec.bbox![3]] as [number, number, number, number],
-          specId: spec.spec_id || `spec_${idx}`,
-          color: getColorForCategory(spec.category),
-        }));
-      
-      setExtractedSpecs(document.getId(), specs);
-      setSpecHighlights(document.getId(), specHighlights);
+
+      const docId = document.getId();
+      const isGeotechnicalResult =
+        extractionType === "geotechnical" &&
+        Array.isArray(result) &&
+        result.length > 0 &&
+        "characteristicKey" in result[0];
+      if (isGeotechnicalResult) {
+        setGeotechnicalSummary(docId, result as GeotechnicalSummary);
+        if (scope) setGeotechnicalScope(docId, scope);
+        setExtractedSpecs(docId, []);
+        setSpecHighlights(docId, []);
+      } else {
+        const specsArr = result as SpecExtractionResult[];
+        const specHighlights = specsArr
+          .filter((s) => s.bbox && s.bbox.length >= 4)
+          .map((spec, idx) => ({
+            page: spec.page,
+            bbox: [spec.bbox![0], spec.bbox![1], spec.bbox![2], spec.bbox![3]] as [number, number, number, number],
+            specId: spec.spec_id || `spec_${idx}`,
+            color: getColorForCategory(spec.category),
+          }));
+        setExtractedSpecs(docId, specsArr);
+        setSpecHighlights(docId, specHighlights);
+      }
       
       setExtractionProgress(100);
       finishExtraction();
 
-      // When opened from CTO with background=1, auto-POST extraction only if we have results (don't overwrite with empty)
+      // CTO integration: when opened with background=1, auto-POST extraction to CTO after success.
+      // extractionJson.tables: for specs, 6 columns (Category, Parameter, Value, Unit, Page, Quote); for geotechnical, 4 columns (Characteristic, Value, Page #, Quote). Quote may include relevant excerpt + inference when value is N/A (e.g. "(Note: Not provided in this document)."). extractionJson.extractionType and extractionJson.scope tell CTO which format to use.
       const params = parseCiviltakeoffViewParams(window.location.search);
       if (params.background === "1" && document.getId()) {
         const ctx = useCiviltakeoffContextStore.getState().getContext();
         if (ctx) {
           const docId = document.getId();
           const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(docId);
-          if (extractedSpecs.length === 0) {
+          const geoSummary = useSpecExtractionStore.getState().getGeotechnicalSummary(docId);
+          const hasResults = extractedSpecs.length > 0 || (geoSummary?.length ?? 0) > 0;
+          if (!hasResults) {
             useNotificationStore.getState().showNotification("No specs extracted (e.g. quota or API error). Try again or open in Nanodoc.", "error");
             if (typeof window !== "undefined" && window.parent !== window) {
               window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
             }
           } else {
             const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(docId);
-            const tables = [
-              {
-                headers: ["Category", "Parameter", "Value", "Unit", "Page", "Quote"],
-                rows: extractedSpecs.map((s) => [
-                  s.category,
-                  s.parameter,
-                  s.value,
-                  s.unit ?? "",
-                  s.page,
-                  s.quote_text ?? "",
-                ]),
-              },
-            ];
-            const pageRefs = Array.from(
-              new Set(extractedSpecs.map((s) => s.page).filter((p) => p != null))
-            ).map((page) => ({ page: Number(page), label: `Page ${Number(page) + 1}` }));
-            const extractionJson: { tables: unknown[]; specHighlights?: typeof specHighlights } = { tables };
+            const tables = geoSummary?.length
+              ? [
+                  {
+                    headers: ["Characteristic", "Value", "Page #", "Quote"],
+                    rows: geoSummary.map((row) => [
+                      CHARACTERISTIC_LABELS[row.characteristicKey],
+                      row.value,
+                      (row.page ?? 0) + 1,
+                      row.quote ?? "",
+                    ]),
+                  },
+                ]
+              : [
+                  {
+                    headers: ["Category", "Parameter", "Value", "Unit", "Page", "Quote"],
+                    rows: extractedSpecs.map((s) => [
+                      s.category,
+                      s.parameter,
+                      s.value,
+                      s.unit ?? "",
+                      s.page,
+                      s.quote_text ?? "",
+                    ]),
+                  },
+                ];
+            const pageRefs = geoSummary?.length
+              ? Array.from(new Set(geoSummary.map((r) => r.page).filter((p) => p != null))).map((page) => ({
+                  page: Number(page),
+                  label: `Page ${Number(page) + 1}`,
+                }))
+              : Array.from(
+                  new Set(extractedSpecs.map((s) => s.page).filter((p) => p != null))
+                ).map((page) => ({ page: Number(page), label: `Page ${Number(page) + 1}` }));
+            const extractionJson: {
+              tables: unknown[];
+              specHighlights?: typeof specHighlights;
+              extractionType?: "specs" | "geotechnical";
+              scope?: string;
+            } = { tables };
             if (specHighlights.length > 0) extractionJson.specHighlights = specHighlights;
+            const geotechnicalScopeUsed = geoSummary?.length
+              ? (useSpecExtractionStore.getState().getGeotechnicalScope(docId) ?? undefined)
+              : undefined;
+            if (geoSummary?.length) {
+              extractionJson.extractionType = "geotechnical";
+              if (geotechnicalScopeUsed) extractionJson.scope = geotechnicalScopeUsed;
+            } else {
+              extractionJson.extractionType = "specs";
+            }
             try {
               const res = await fetch(`${ctx.api_origin}/api/nanodoc/extraction`, {
                 method: "POST",
@@ -224,7 +283,15 @@ export function SpecExtractionPanel() {
               if (res.ok) {
                 useNotificationStore.getState().showNotification("Extraction saved to Civiltakeoff", "success");
                 if (typeof window !== "undefined" && window.parent !== window) {
-                  window.parent.postMessage({ type: "nanodoc-extraction-complete", success: true }, "*");
+                  window.parent.postMessage(
+                    {
+                      type: "nanodoc-extraction-complete",
+                      success: true,
+                      extractionType: geoSummary?.length ? "geotechnical" : "specs",
+                      scope: geotechnicalScopeUsed,
+                    },
+                    "*"
+                  );
                 }
               } else {
                 const err = await res.text();
@@ -436,21 +503,38 @@ export function SpecExtractionPanel() {
   }, []);
   
   const handleExport = () => {
-    if (specs.length === 0) return;
-    
-    // Create CSV with proper escaping for spreadsheet compatibility
     const escapeCSV = (value: string | number | null | undefined): string => {
       if (value === null || value === undefined) return "";
       const str = String(value);
-      // If contains comma, quote, or newline, wrap in quotes and escape quotes
       if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
         return `"${str.replace(/"/g, '""')}"`;
       }
       return str;
     };
-    
+
+    if (extractionType === "geotechnical" && geotechnicalSummary?.length) {
+      const headers = ["Characteristic", "Value", "Page #", "Quote"];
+      const rows = geotechnicalSummary.map((row) => [
+        escapeCSV(CHARACTERISTIC_LABELS[row.characteristicKey]),
+        escapeCSV(row.value),
+        escapeCSV((row.page ?? 0) + 1),
+        escapeCSV(row.quote),
+      ]);
+      const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+      const BOM = "\uFEFF";
+      const blob = new Blob([BOM + csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `geotechnical_${documentId || "export"}_${new Date().toISOString().split("T")[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    if (specs.length === 0) return;
     const headers = ["Category", "Parameter", "Value", "Unit", "Page", "Section Heading", "Spec ID", "Quote Text"];
-    const rows = visibleSpecs.map(s => [
+    const rows = visibleSpecs.map((s) => [
       escapeCSV(s.category),
       escapeCSV(s.parameter),
       escapeCSV(s.value),
@@ -460,28 +544,19 @@ export function SpecExtractionPanel() {
       escapeCSV(s.spec_id),
       escapeCSV(s.quote_text),
     ]);
-    
-    const csv = [
-      headers.join(","),
-      ...rows.map(row => row.join(",")),
-    ].join("\n");
-    
-    // Add BOM for Excel UTF-8 compatibility
+    const csv = [headers.join(","), ...rows.map((row) => row.join(","))].join("\n");
     const BOM = "\uFEFF";
     const blob = new Blob([BOM + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    const timestamp = new Date().toISOString().split('T')[0];
-    const typeLabel = extractionType === "geotechnical" ? "geotechnical" : "specs";
-    a.download = `${typeLabel}_${documentId || "export"}_${timestamp}.csv`;
+    a.download = `specs_${documentId || "export"}_${new Date().toISOString().split("T")[0]}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
-  
-  // Only hide panel if it's closed AND there are no specs
-  // Allow closing even when specs exist
-  if (!isOpen && specs.length === 0) return null;
+
+  // Only hide panel if it's closed AND there are no specs and no geotechnical summary
+  if (!isOpen && specs.length === 0 && !hasGeotechnicalResults) return null;
 
   const hasStaleSpecs = specs.length > 0 && visibleSpecs.length < specs.length;
   
@@ -495,7 +570,7 @@ export function SpecExtractionPanel() {
           {extractionType === "geotechnical" ? "Extracted Geotechnical Data" : "Extracted Specifications"}
         </h2>
         <div className="flex gap-2">
-          {visibleSpecs.length > 0 && (
+          {(visibleSpecs.length > 0 || hasGeotechnicalResults) && (
             <Button variant="outline" size="sm" onClick={handleExport}>
               <Download className="h-4 w-4 mr-2" />
               Export
@@ -546,7 +621,7 @@ export function SpecExtractionPanel() {
             </div>
           )}
           
-          {!isExtracting && !extractionInProgress && specs.length === 0 && (
+          {!isExtracting && !extractionInProgress && specs.length === 0 && !hasGeotechnicalResults && (
             <div className="text-center py-8 text-muted-foreground">
               <p>No data extracted yet.</p>
               <p className="text-sm mt-2">Select extraction type and click the button to begin.</p>
@@ -558,12 +633,81 @@ export function SpecExtractionPanel() {
               Some results referred to pages that were removed. Showing {visibleSpecs.length} of {specs.length} that still match the current document.
             </div>
           )}
-          
-          {!isExtracting && !extractionInProgress && visibleSpecs.length > 0 && (
+
+          {!isExtracting && !extractionInProgress && extractionType === "geotechnical" && hasGeotechnicalResults && geotechnicalSummary && (
+            <div className="space-y-3">
+              <p className="text-sm font-medium">Key Soil Characteristic Summary</p>
+              {geotechnicalScope && (
+                <p className="text-xs text-muted-foreground">Scope: {geotechnicalScope}</p>
+              )}
+              <div className="border rounded-md overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/50 border-b">
+                    <tr>
+                      <th className="text-left p-2 font-medium">Characteristic</th>
+                      <th className="text-left p-2 font-medium">Value</th>
+                      <th className="text-left p-2 font-medium">Page #</th>
+                      <th className="text-left p-2 font-medium">Quote</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {geotechnicalSummary.map((row) => (
+                      <tr key={row.characteristicKey} className="border-b">
+                        <td className="p-2 align-top">
+                          {hasAnyGeotechnicalValues ? (
+                            <Accordion type="single" collapsible className="w-full">
+                              <AccordionItem value={row.characteristicKey} className="border-none">
+                                <AccordionTrigger className="py-1 px-0 hover:no-underline [&[data-state=open]>svg]:rotate-180">
+                                  <span className="font-medium">{CHARACTERISTIC_LABELS[row.characteristicKey]}</span>
+                                </AccordionTrigger>
+                                <AccordionContent className="pb-2 pt-0">
+                                  {geotechnicalScope ? (
+                                    <div className="text-xs space-y-2 mt-1 pl-0">
+                                      <div>
+                                        <span className="font-medium text-muted-foreground">High impact:</span>
+                                        <ul className="list-disc pl-4 mt-0.5">
+                                          {getInsights(row.characteristicKey, geotechnicalScope).highImpact.map((item, i) => (
+                                            <li key={i}>{item}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                      <div>
+                                        <span className="font-medium text-muted-foreground">Insights:</span>
+                                        <ul className="list-disc pl-4 mt-0.5">
+                                          {getInsights(row.characteristicKey, geotechnicalScope).insights.map((item, i) => (
+                                            <li key={i}>{item}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <p className="text-xs text-muted-foreground">Select a scope when extracting to see insights.</p>
+                                  )}
+                                </AccordionContent>
+                              </AccordionItem>
+                            </Accordion>
+                          ) : (
+                            <span className="font-medium">{CHARACTERISTIC_LABELS[row.characteristicKey]}</span>
+                          )}
+                        </td>
+                        <td className="p-2 align-top">{row.value}</td>
+                        <td className="p-2 align-top">{(row.page ?? 0) + 1}</td>
+                        <td className="p-2 align-top text-muted-foreground italic text-xs max-w-[200px] truncate" title={row.quote}>
+                          {row.quote}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {!isExtracting && !extractionInProgress && visibleSpecs.length > 0 && extractionType !== "geotechnical" && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-medium">
-                  Found {visibleSpecs.length} {extractionType === "geotechnical" ? "data point" : "specification"}{visibleSpecs.length !== 1 ? "s" : ""}
+                  Found {visibleSpecs.length} specification{visibleSpecs.length !== 1 ? "s" : ""}
                 </p>
                 <div className="flex gap-1 border rounded-md p-0.5">
                   <Button
@@ -584,7 +728,7 @@ export function SpecExtractionPanel() {
                   </Button>
                 </div>
               </div>
-              
+
               {viewMode === "cards" ? (
               <div className="space-y-1">
                 {visibleSpecs.map((spec) => {

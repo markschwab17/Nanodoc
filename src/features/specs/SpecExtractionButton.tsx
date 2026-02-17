@@ -14,8 +14,21 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
+import type { GeotechnicalScope } from "@/core/ai/types";
 
 export type ExtractionType = "specs" | "geotechnical";
+
+export const GEOTECHNICAL_SCOPES: GeotechnicalScope[] = [
+  "Earthwork Grading Contractor",
+  "Site Development",
+  "Underground Utilities",
+  "Paving & Concrete",
+  "Demolition",
+  "Land Development",
+  "Highway Construction",
+  "Commercial Site work",
+  "Residential Development",
+];
 
 interface SpecExtractionButtonProps {
   buttonClassName?: string;
@@ -23,18 +36,20 @@ interface SpecExtractionButtonProps {
 }
 
 export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExtractionButtonProps = {}) {
-  const { isExtracting, getExtractedSpecs } = useSpecExtractionStore();
+  const { isExtracting, getExtractedSpecs, getGeotechnicalSummary } = useSpecExtractionStore();
   const { getCurrentDocument } = usePDFStore();
   const [mode, setMode] = useState<"extract" | "ask">("extract");
   const [extractionType, setExtractionType] = useState<ExtractionType>("specs");
+  const [geotechnicalScope, setGeotechnicalScope] = useState<GeotechnicalScope | "">("");
   const [customPrompt, setCustomPrompt] = useState("");
   const [question, setQuestion] = useState("");
   const [isOpen, setIsOpen] = useState(false);
-  
+
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() || null;
   const existingSpecs = documentId ? getExtractedSpecs(documentId) : [];
-  const hasResults = existingSpecs.length > 0;
+  const geoSummary = documentId ? getGeotechnicalSummary(documentId) : undefined;
+  const hasResults = existingSpecs.length > 0 || (geoSummary?.length ?? 0) > 0;
   
   // Calculate API credit estimation
   const apiCreditEstimate = useMemo(() => {
@@ -91,12 +106,13 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
     // Close popover
     setIsOpen(false);
     
-    // Trigger extraction with type and custom prompt
+    // Trigger extraction with type and custom prompt; scope required for geotechnical
     const event = new CustomEvent('spec-extraction-request', {
-      detail: { 
+      detail: {
         documentId: currentDocument.getId(),
         extractionType: extractionType,
         customPrompt: customPrompt.trim() || undefined,
+        scope: extractionType === "geotechnical" ? (geotechnicalScope as GeotechnicalScope) : undefined,
       },
     });
     window.dispatchEvent(event);
@@ -206,12 +222,38 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  {extractionType === "specs" 
+                  {extractionType === "specs"
                     ? "Extracts material specs, dimensions, performance requirements, and product codes."
-                    : "Extracts soil classifications, bearing capacity, foundation recommendations, and groundwater data."}
+                    : "Extracts key soil characteristics: existing/optimal moisture, expansion index, shrinkage, subsidence."}
                 </p>
               </div>
-              
+
+              {extractionType === "geotechnical" && (
+                <div className="space-y-2">
+                  <Label htmlFor="geotechnical-scope" className="text-xs">
+                    Project scope <span className="text-destructive">*</span>
+                  </Label>
+                  <Select
+                    value={geotechnicalScope}
+                    onValueChange={(value) => setGeotechnicalScope(value as GeotechnicalScope | "")}
+                  >
+                    <SelectTrigger id="geotechnical-scope" className="w-full h-9">
+                      <SelectValue placeholder="Select scope..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {GEOTECHNICAL_SCOPES.map((scope) => (
+                        <SelectItem key={scope} value={scope}>
+                          {scope}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Required. Insights will be tailored to this scope.
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label htmlFor="custom-prompt" className="text-xs">
                   Custom Prompt (Optional)
@@ -243,7 +285,10 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
               
               <Button
                 onClick={handleExtract}
-                disabled={isExtracting}
+                disabled={
+                  isExtracting ||
+                  (extractionType === "geotechnical" ? !geotechnicalScope : false)
+                }
                 className="w-full"
                 size="sm"
               >
@@ -252,8 +297,8 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
                 ) : (
                   <Sparkles className="h-4 w-4 mr-2" />
                 )}
-                {isExtracting 
-                  ? "Extracting..." 
+                {isExtracting
+                  ? "Extracting..."
                   : `Extract ${extractionType === "specs" ? "Specs" : "Geotechnical Data"}`}
               </Button>
             </>

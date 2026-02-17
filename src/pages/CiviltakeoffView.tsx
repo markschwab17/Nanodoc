@@ -169,7 +169,11 @@ export default function CiviltakeoffView() {
             setTimeout(() => {
               window.dispatchEvent(
                 new CustomEvent("spec-extraction-request", {
-                  detail: { documentId, extractionType: "geotechnical" },
+                  detail: {
+                    documentId,
+                    extractionType: "geotechnical",
+                    scope: "Earthwork Grading Contractor",
+                  },
                 })
               );
             }, 300);

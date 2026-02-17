@@ -4,7 +4,7 @@
  * Provides a unified interface for different AI providers (Gemini, ChatGPT, etc.)
  */
 
-import type { AIConfig, SpecExtractionResult, AIProvider } from './types';
+import type { AIConfig, SpecExtractionResult, GeotechnicalSummary, AIProvider } from './types';
 import { extractSpecsFromChunks as geminiExtractSpecs, callGeminiAPI, type GeminiConfig } from './GeminiService';
 import { extractSpecsFromChunks as openaiExtractSpecs, generateText as openaiGenerateText } from './OpenAIService';
 import { useAIProviderStore } from '@/shared/stores/aiProviderStore';
@@ -36,30 +36,32 @@ export function getAIConfig(): AIConfig | null {
 }
 
 /**
- * Extract specs from chunks using the active AI provider
+ * Extract specs from chunks using the active AI provider.
+ * For geotechnical, returns GeotechnicalSummary (fixed 5 rows); otherwise returns SpecExtractionResult[].
  */
 export async function extractSpecsFromChunks(
   chunks: Array<{ text: string; page: number; sectionPath: string[] }>,
   extractionType: "specs" | "geotechnical" = "specs",
-  customPrompt?: string
-): Promise<SpecExtractionResult[]> {
+  customPrompt?: string,
+  scope?: string
+): Promise<SpecExtractionResult[] | GeotechnicalSummary> {
   const config = getAIConfig();
   if (!config) {
     throw new Error("Please configure your AI API key in settings.");
   }
-  
+
   if (config.provider === 'gemini') {
     const geminiConfig: GeminiConfig = {
       apiKey: config.apiKey,
-      model: config.model as any,
+      model: extractionType === 'geotechnical' ? 'gemini-3-pro-preview' : (config.model as any),
       baseUrl: config.baseUrl,
       ctoProxy: config.ctoProxy,
     };
-    return geminiExtractSpecs(chunks, geminiConfig, extractionType, customPrompt);
+    return geminiExtractSpecs(chunks, geminiConfig, extractionType, customPrompt, scope);
   } else if (config.provider === 'chatgpt') {
-    return openaiExtractSpecs(chunks, config, extractionType, customPrompt);
+    return openaiExtractSpecs(chunks, config, extractionType, customPrompt, scope);
   }
-  
+
   throw new Error(`Unsupported AI provider: ${config.provider}`);
 }
 
