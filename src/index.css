@@ -53,6 +53,16 @@
   * {
     @apply border-border;
   }
+  html, body {
+    @apply m-0 p-0;
+    height: 100%;
+    overflow: hidden;
+  }
+  #root {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
   body {
     @apply bg-background text-foreground;
   }

@@ -20,6 +20,7 @@ import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContext
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useUIStore } from "@/shared/stores/uiStore";
 
 export default function CiviltakeoffView() {
   const location = useLocation();
@@ -48,9 +49,10 @@ export default function CiviltakeoffView() {
       if (data?.type === "nanodoc-goto-page" && typeof data.page === "number") {
         const raw = Math.floor(data.page);
         const page = raw >= 1 ? raw - 1 : Math.max(0, raw);
+        const specId = typeof data.specId === "string" && data.specId.trim() ? data.specId.trim() : undefined;
         window.dispatchEvent(
           new CustomEvent("scroll-to-spec", {
-            detail: { page },
+            detail: specId ? { page, specId } : { page },
           })
         );
         return;
@@ -180,6 +182,20 @@ export default function CiviltakeoffView() {
 
         const mupdfModule = await import("mupdf");
         await loadPDFRef.current(data, name, mupdfModule.default, null);
+
+        // Apply CTO project-details defaults: read mode (fit width for split-screen), thumbnail sidebar open
+        const ui = useUIStore.getState();
+        if (params.read_mode === "1") {
+          ui.setReadMode(true);
+        }
+        if (params.sidebar === "1") {
+          ui.setInitialSidebarOpen(true);
+        } else if (params.sidebar === "0") {
+          ui.setInitialSidebarOpen(false);
+        }
+        if (params.split_screen === "1") {
+          ui.setSplitScreenMode(true);
+        }
 
         const raw = extraction?.specHighlights ?? extraction?.spec_highlights;
         if (Array.isArray(raw) && raw.length > 0) {

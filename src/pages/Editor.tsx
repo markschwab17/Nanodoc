@@ -12,6 +12,7 @@ import { TabBar } from "@/features/tabs/TabBar";
 import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
+import { CTOSplitScreenToolbar } from "@/features/toolbar/CTOSplitScreenToolbar";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
 import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
@@ -36,7 +37,7 @@ function Editor() {
   const { tabs } = useTabStore();
   const { setCurrentDocument } = usePDFStore();
   const { getRecentFiles } = useRecentFilesStore();
-  const { readMode, activeTool, setRequestDocumentSettingsOpen } = useUIStore();
+  const { readMode, activeTool, setRequestDocumentSettingsOpen, initialSidebarOpen, splitScreenMode } = useUIStore();
   const fileSystem = useFileSystem();
   const { loadPDF, loading } = usePDF();
   const { showNotification } = useNotificationStore();
@@ -44,8 +45,19 @@ function Editor() {
   const [showStampCreator, setShowStampCreator] = useState(false);
   const [stampGalleryWidth, setStampGalleryWidth] = useState(320); // Default width in pixels
   const [isResizingStampGallery, setIsResizingStampGallery] = useState(false);
-  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
-  
+  // Start collapsed when URL has sidebar=0 (split-screen) so first paint is correct
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(
+    () => useUIStore.getState().initialSidebarOpen === false
+  );
+
+  // Apply CTO URL initial sidebar state when set from CiviltakeoffView after load (clears initialSidebarOpen)
+  useEffect(() => {
+    if (initialSidebarOpen !== null) {
+      setLeftSidebarCollapsed(!initialSidebarOpen);
+      useUIStore.getState().setInitialSidebarOpen(null);
+    }
+  }, [initialSidebarOpen]);
+
   // Handle stamp gallery resize
   useEffect(() => {
     if (!isResizingStampGallery) return;
@@ -591,7 +603,8 @@ function Editor() {
     <div
       {...restRootProps}
       className={cn(
-        "h-screen w-screen flex flex-col bg-background",
+        "w-screen flex flex-col bg-background overflow-hidden",
+        splitScreenMode ? "h-full min-h-0" : "h-screen",
         isDragActive && "ring-2 ring-primary ring-offset-2"
       )}
       title=""
@@ -673,37 +686,28 @@ function Editor() {
         </div>
       )}
 
-      {/* Main Content - Sidebar + Viewer - extends to top */}
-      <div className="h-screen flex overflow-hidden relative">
-        {/* Left Sidebar - Thumbnails and Bookmarks (collapsible) */}
+      {/* Main Content - Sidebar + Viewer; use h-full in split-screen to fill iframe and remove bottom gap */}
+      <div className={cn("flex overflow-hidden relative min-h-0", splitScreenMode ? "flex-1 h-full" : "h-screen")}>
+        {/* Left Sidebar - Thumbnails and Bookmarks (collapsible). Content kept mounted when collapsed so thumbnails stay cached. */}
         <aside
           className={cn(
-            "border-r bg-secondary/50 flex flex-col overflow-hidden flex-shrink-0 transition-[width] duration-200 ease-out",
+            "border-r bg-secondary/50 flex flex-col overflow-hidden flex-shrink-0 transition-[width] duration-200 ease-out relative",
             leftSidebarCollapsed ? "w-8" : "w-64"
           )}
         >
-          {leftSidebarCollapsed ? (
-            <div className="flex flex-col items-center py-2 h-full">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 rounded-md"
-                onClick={() => setLeftSidebarCollapsed(false)}
-                title="Expand page navigation"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-          ) : (
-            <>
-              <div className="flex-1 flex flex-col overflow-hidden min-h-0 relative">
+          {/* Sidebar content: always mounted so ThumbnailCarousel cache is preserved when expanding */}
+          <div className={cn("flex h-full w-64 shrink-0 flex-col min-h-0", leftSidebarCollapsed && "absolute left-0 top-0 bottom-0 pointer-events-none opacity-0")}>
+            <div className="flex-1 flex flex-col overflow-hidden min-h-0 relative">
+              {!splitScreenMode && (
                 <div className="border-b bg-background">
                   <SearchBar />
                 </div>
-                <div className="flex-1 overflow-hidden min-h-0">
-                  <ThumbnailCarousel />
-                </div>
-                {/* Collapse button on right edge (overlay) */}
+              )}
+              <div className="flex-1 overflow-hidden min-h-0">
+                <ThumbnailCarousel />
+              </div>
+              {/* Collapse button on right edge (overlay) - pointer-events restored when expanded */}
+              {!leftSidebarCollapsed && (
                 <div className="absolute right-0 top-2 bottom-0 w-8 flex items-start justify-center pt-2 bg-gradient-to-l from-secondary/80 to-transparent pointer-events-none">
                   <div className="pointer-events-auto">
                     <Button
@@ -717,17 +721,30 @@ function Editor() {
                     </Button>
                   </div>
                 </div>
-              </div>
-              {/* Bookmarks Section - positioned at bottom, expands upward */}
-              <div className="flex-shrink-0">
-                <BookmarksPanel />
-              </div>
-            </>
+              )}
+            </div>
+            <div className="flex-shrink-0">
+              <BookmarksPanel />
+            </div>
+          </div>
+          {/* Expand button: visible when collapsed, on top so it receives clicks */}
+          {leftSidebarCollapsed && (
+            <div className="flex flex-col items-center py-2 h-full pointer-events-auto">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md"
+                onClick={() => setLeftSidebarCollapsed(false)}
+                title="Expand page navigation"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
           )}
         </aside>
 
-        {/* Stamp Gallery Panel - appears when stamp tool is active, overlays on top */}
-        {activeTool === "stamp" && (
+        {/* Stamp Gallery Panel - appears when stamp tool is active (hidden in split-screen) */}
+        {activeTool === "stamp" && !splitScreenMode && (
           <aside 
             className={cn(
               "absolute top-0 bottom-0 border-r bg-background flex flex-col overflow-hidden z-50 shadow-lg",
@@ -775,18 +792,23 @@ function Editor() {
         )}
 
         {/* Center - Large Viewer */}
-        <main className="flex-1 flex overflow-hidden bg-muted">
-          <PDFViewer />
+        <main className="flex-1 flex flex-col overflow-hidden min-h-0 bg-muted">
+          {splitScreenMode && <CTOSplitScreenToolbar />}
+          <div className="flex-1 min-h-0 overflow-hidden flex">
+            <PDFViewer />
+          </div>
         </main>
         
-        {/* Right Sidebar - Tools */}
-        <aside className="w-16 border-l bg-secondary/50 flex flex-col overflow-hidden">
-          <Toolbar />
-        </aside>
+        {/* Right Sidebar - Tools (hidden in split-screen mode) */}
+        {!splitScreenMode && (
+          <aside className="w-16 border-l bg-secondary/50 flex flex-col overflow-hidden">
+            <Toolbar />
+          </aside>
+        )}
       </div>
 
-      {/* Floating Context Toolbar - changes based on active tool */}
-      {currentDocument && !readMode && (
+      {/* Floating Context Toolbar - changes based on active tool (hidden in split-screen) */}
+      {currentDocument && !readMode && !splitScreenMode && (
         <div
           className={cn(
             "absolute top-4 right-16 z-40 flex justify-center",

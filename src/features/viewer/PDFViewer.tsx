@@ -37,7 +37,7 @@ import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
-  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
+  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, splitScreenMode } = useUIStore();
   const { showRulers, toggleRulers, renderQuality } = useDocumentSettingsStore();
   const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();
   const { showNotification } = useNotificationStore();
@@ -1170,10 +1170,10 @@ export function PDFViewer() {
   const canGoNext = currentPage < pageCount - 1;
 
   return (
-    <div className="flex flex-col h-full w-full">
+    <div className="flex flex-col h-full w-full min-h-0">
       {/* Page Canvas - Full Height */}
       {/* Cache both views for fast switching - both stay mounted but only one is visible */}
-      <div className="flex-1 relative">
+      <div className="flex-1 min-h-0 relative">
         {/* Read mode: Virtualized page list with native scrolling */}
         <div
           ref={scrollContainerRef}
@@ -1217,11 +1217,11 @@ export function PDFViewer() {
         </div>
       </div>
       
-      {/* Bottom Navigation Bar with Read Mode Toggle */}
-      <div className="flex items-center justify-between px-2 py-1.5 border-t bg-background">
+      {/* Bottom toolbar: always show; z-10 so it stays above PDF content and is clickable */}
+      <div className="relative z-10 flex flex-shrink-0 items-center justify-between border-t bg-background px-2 py-1.5">
         <div className="flex items-center gap-1">
-          {!readMode && <PageTools />}
-          {!readMode && <div className="h-4 w-px bg-border mx-0.5" />}
+          {!readMode && !splitScreenMode && <PageTools />}
+          {!readMode && !splitScreenMode && <div className="h-4 w-px bg-border mx-0.5" />}
           <Button
             variant="outline"
             size="icon"
@@ -1268,7 +1268,7 @@ export function PDFViewer() {
         </div>
         
         <div className="flex items-center gap-1">
-          {!readMode && (
+          {!readMode && !splitScreenMode && (
             <>
               <Button
                 variant="outline"
@@ -1327,28 +1327,31 @@ export function PDFViewer() {
             </Button>
           </div>
           
-          <div className="h-5 w-px bg-border mx-0.5" />
-          
-          <Button
-            variant={showRulers ? "default" : "outline"}
-            size="icon"
-            className="h-7 w-7"
-            onClick={toggleRulers}
-            title="Toggle Rulers"
-            disabled={!currentDocument || readMode}
-          >
-            <Ruler className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setShowDocumentSettings(true)}
-            title="Document Settings"
-            disabled={!currentDocument}
-          >
-            <Settings className="h-3.5 w-3.5" />
-          </Button>
+          {!splitScreenMode && (
+            <>
+              <div className="h-5 w-px bg-border mx-0.5" />
+              <Button
+                variant={showRulers ? "default" : "outline"}
+                size="icon"
+                className="h-7 w-7"
+                onClick={toggleRulers}
+                title="Toggle Rulers"
+                disabled={!currentDocument || readMode}
+              >
+                <Ruler className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => setShowDocumentSettings(true)}
+                title="Document Settings"
+                disabled={!currentDocument}
+              >
+                <Settings className="h-3.5 w-3.5" />
+              </Button>
+            </>
+          )}
           <Button
             variant={readMode ? "default" : "outline"}
             size="icon"

@@ -37,6 +37,8 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useCtoTextSelectionStore } from "@/shared/stores/ctoTextSelectionStore";
+import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
 
 interface PageCanvasProps {
   document: PDFDocument;
@@ -2697,6 +2699,7 @@ export function PageCanvas({
           // Clear any previous selection and reset state
           setSelectedTextSpans([]);
           selectedTextRef.current = "";
+          useCtoTextSelectionStore.getState().clearSelection();
           setIsSelecting(false);
           setSelectionStart(null);
           setSelectionEnd(null);
@@ -2715,6 +2718,14 @@ export function PageCanvas({
         setSelectedTextSpans(result.spans);
         selectedTextRef.current = result.text;
         
+        // When embedded in CTO split screen, store selection for "Add to table" (0-based page per CTO contract)
+        if (result.text?.trim()) {
+          const params = parseCiviltakeoffViewParams(typeof window !== "undefined" ? window.location.search : "");
+          if (params.token && params.split_screen === "1") {
+            useCtoTextSelectionStore.getState().setSelection(pageNumber, result.text.trim());
+          }
+        }
+        
         // Stop the selection process (set isSelecting=false) but keep the spans visible
         // The selectedTextSpans will remain visible until user clicks and drags again
         setIsSelecting(false);
@@ -2731,6 +2742,7 @@ export function PageCanvas({
         console.error("Error extracting text selection:", error);
         setSelectedTextSpans([]);
         selectedTextRef.current = "";
+        useCtoTextSelectionStore.getState().clearSelection();
         setIsSelecting(false);
         setSelectionStart(null);
         setSelectionEnd(null);
@@ -2836,9 +2848,7 @@ export function PageCanvas({
     : activeTool === "text"
     ? "text"
     : activeTool === "selectText"
-    ? isHoveringOverText
-      ? "text"
-      : "default"
+    ? "text" // Always show text cursor so user sees the tool is active (e.g. in CTO split screen)
     : activeTool === "highlight"
     ? isSelecting 
       ? "text" // Show text cursor while selecting/dragging

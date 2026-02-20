@@ -248,7 +248,7 @@ REQUIRED OUTPUT — exactly 5 items.
 - If you do NOT find the value: set "value" to "N/A" and "page" to 0. For "quote" give a brief, relevant excerpt plus a short inference in parentheses, e.g. "(Note: Specific percentage not provided in this report)." Do NOT use a generic "Not found in document."
 Do NOT invent values. Prefer the exact location (value + where it appears) over long narrative.
 
-1. existing_moisture — Existing moisture (value, with unit if present)
+1. existing_moisture — Existing/natural/in-place/current moisture content (value with unit, e.g. %). Look for "existing moisture", "natural moisture", "in-place moisture", "as-received moisture", or similar; extract the value and page.
 2. optimal_moisture — Optimal moisture (percentage range, e.g. "10–14%")
 3. expansion_index — Expansion index (percentage)
 4. shrinkage — Shrinkage (percentage range)
@@ -385,7 +385,7 @@ REQUIRED OUTPUT — exactly 5 items.
 - If you do NOT find the value: set "value" to "N/A" and "page" to 0. For "quote" give a brief, relevant excerpt plus a short inference in parentheses, e.g. "(Note: Specific percentage not provided in this report)." Do NOT use a generic "Not found in document."
 Do NOT invent values. Prefer the exact location (value + where it appears) over long narrative.
 
-1. existing_moisture — Existing moisture (value, with unit if present)
+1. existing_moisture — Existing/natural/in-place/current moisture content (value with unit, e.g. %). Look for "existing moisture", "natural moisture", "in-place moisture", "as-received moisture", or similar; extract the value and page.
 2. optimal_moisture — Optimal moisture (percentage range, e.g. "10–14%")
 3. expansion_index — Expansion index (percentage)
 4. shrinkage — Shrinkage (percentage range)

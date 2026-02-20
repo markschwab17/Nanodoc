@@ -114,7 +114,7 @@ REQUIRED OUTPUT — exactly 5 items.
   - Any similar relevant quote from the text followed by "(Note: [reason not provided])."
 Do NOT use a generic "Not found in document." — always supply either a relevant excerpt and/or an inference. Do NOT invent actual values.
 
-1. existing_moisture — Existing moisture (value, with unit if present)
+1. existing_moisture — Existing/natural/in-place/current moisture content (value with unit, e.g. %). Look for "existing moisture", "natural moisture", "in-place moisture", "as-received moisture", or similar; extract the value and page.
 2. optimal_moisture — Optimal moisture (percentage range, e.g. "10–14%")
 3. expansion_index — Expansion index (percentage)
 4. shrinkage — Shrinkage (percentage range)

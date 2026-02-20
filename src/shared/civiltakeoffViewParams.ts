@@ -22,6 +22,12 @@ export interface CiviltakeoffViewParams {
   stitch: string | null;
   /** Optional project scope string from CTO (used for geotechnical extraction). */
   scope: string | null;
+  /** "0" = thumbnail sidebar collapsed, "1" = open. When opened from CTO project details we use 1. */
+  sidebar: string | null;
+  /** "1" = enter read mode on load and fit width for split-screen. */
+  read_mode: string | null;
+  /** "1" = embedded in CTO project details split view; hide most tools/toolbars. */
+  split_screen: string | null;
 }
 
 /**
@@ -41,6 +47,9 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const background = params.get("background") ?? null;
   const stitch = params.get("stitch") ?? null;
   const scope = params.get("scope") ?? null;
+  const sidebar = params.get("sidebar") ?? null;
+  const read_mode = params.get("read_mode") ?? null;
+  const split_screen = params.get("split_screen") ?? null;
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -64,6 +73,9 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     background,
     stitch,
     scope,
+    sidebar,
+    read_mode,
+    split_screen,
   };
 }
 

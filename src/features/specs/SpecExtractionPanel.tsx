@@ -374,10 +374,16 @@ export function SpecExtractionPanel() {
               if (params.background === "1" && typeof window !== "undefined") {
                 console.log("[SpecExtraction] POSTing extraction to", extractionUrl);
               }
+              // Send geotechnicalSummary + scope in body so CTO can rebuild table if extractionJson.tables rows are empty (e.g. iframe/store timing)
+              const postBody: Record<string, unknown> = { token: ctx.token, extractionJson, pageRefs };
+              if (geoSummary?.length && geotechnicalScopeUsed != null) {
+                postBody.geotechnicalSummary = geoSummary;
+                postBody.scope = geotechnicalScopeUsed;
+              }
               const res = await fetch(extractionUrl, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ token: ctx.token, extractionJson, pageRefs }),
+                body: JSON.stringify(postBody),
               });
               if (res.ok) {
                 if (params.background === "1" && typeof window !== "undefined") {

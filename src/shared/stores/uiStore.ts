@@ -46,6 +46,14 @@ export interface UIState {
   // Request to open Document Settings (e.g. after creating a new project)
   requestDocumentSettingsOpen: boolean;
   setRequestDocumentSettingsOpen: (v: boolean) => void;
+
+  /** When set from CiviltakeoffView URL (sidebar=0 or 1), Editor applies on mount then clears. */
+  initialSidebarOpen: boolean | null;
+  setInitialSidebarOpen: (v: boolean | null) => void;
+
+  /** True when opened in CTO split-screen (split_screen=1); hide most tools/toolbars. */
+  splitScreenMode: boolean;
+  setSplitScreenMode: (v: boolean) => void;
   
   // Actions
   setZoomLevel: (level: number) => void;
@@ -75,17 +83,36 @@ export interface UIState {
   setCurrentFieldType: (type: "text" | "checkbox" | "radio" | "dropdown" | "date") => void;
 }
 
+/** Read CTO view params from URL so first paint is correct when opened in split-screen. */
+function getInitialStateFromUrl(): { readMode: boolean; initialSidebarOpen: boolean | null; splitScreenMode: boolean } {
+  if (typeof window === "undefined")
+    return { readMode: false, initialSidebarOpen: null, splitScreenMode: false };
+  const p = new URLSearchParams(window.location.search);
+  const splitScreen = p.get("split_screen") === "1";
+  const readMode = p.get("read_mode") === "1";
+  const sidebar = p.get("sidebar");
+  const initialSidebarOpen =
+    sidebar === "0" ? false : sidebar === "1" ? true : null;
+  return {
+    readMode: splitScreen ? true : readMode, // split_screen implies read mode
+    initialSidebarOpen,
+    splitScreenMode: splitScreen,
+  };
+}
+
+const urlState = getInitialStateFromUrl();
+
 export const useUIStore = create<UIState>((set, get) => ({
   zoomLevel: 1.0,
   readModeZoomLevel: 1.0, // Separate zoom level for read mode, starts at base fit scale
   normalModeZoomLevel: 1.0, // Separate zoom level for normal mode
-  fitMode: "page", // Default to fit page
-  activeTool: "select",
+  fitMode: urlState.splitScreenMode ? "width" : "page", // split-screen opens fit width
+  activeTool: urlState.splitScreenMode ? "selectText" : "select", // CTO split screen: select-text tool active by default
   viewMode: "single",
   showThumbnails: true,
   showToolbar: true,
   zoomToCenterCallback: null,
-  readMode: false,
+  readMode: urlState.readMode,
   
   // Highlight tool settings
   highlightColor: "#FFFF00",
@@ -110,6 +137,10 @@ export const useUIStore = create<UIState>((set, get) => ({
   currentFieldType: "text",
   requestDocumentSettingsOpen: false,
   setRequestDocumentSettingsOpen: (v) => set({ requestDocumentSettingsOpen: v }),
+  initialSidebarOpen: urlState.initialSidebarOpen,
+  setInitialSidebarOpen: (v) => set({ initialSidebarOpen: v }),
+  splitScreenMode: urlState.splitScreenMode,
+  setSplitScreenMode: (v) => set({ splitScreenMode: v }),
 
   setZoomLevel: (level) => {
     const state = get();

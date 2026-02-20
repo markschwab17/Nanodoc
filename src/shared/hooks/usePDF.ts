@@ -252,8 +252,10 @@ export function usePDF() {
           tabStore.updateTab(tabId, { ctoContext });
         }
 
-        // Set select tool as default when PDF is loaded
-        setActiveTool("select");
+        // Set select tool as default when PDF is loaded (in CTO split screen keep current tool so "Select text" stays active)
+        if (!useUIStore.getState().splitScreenMode) {
+          setActiveTool("select");
+        }
         
         // Blur any focused elements to prevent Enter/Space from triggering buttons
         if (typeof window !== 'undefined' && window.document.activeElement instanceof HTMLElement) {
