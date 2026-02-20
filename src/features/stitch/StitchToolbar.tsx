@@ -89,23 +89,25 @@ function roundToStep(value: number, step: number): number {
   return Math.round(value / step) * step;
 }
 
-/** Wraps an icon button and shows a label below on hover. */
+/** Wraps an icon button and shows a label (or description) below on hover. */
 function IconButtonWithTooltip({
   title,
   label,
+  tooltipDescription,
   children,
   ...buttonProps
-}: ComponentProps<typeof Button> & { title: string; label: string }) {
+}: ComponentProps<typeof Button> & { title: string; label: string; tooltipDescription?: string }) {
+  const tooltipText = tooltipDescription ?? label;
   return (
     <div className="relative group inline-flex">
       <Button size="icon" className="h-7 w-7 shrink-0" title={title} {...buttonProps}>
         {children}
       </Button>
       <span
-        className="absolute left-1/2 top-full -translate-x-1/2 mt-1 px-2 py-0.5 rounded bg-popover border border-border text-popover-foreground text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 shadow"
+        className={`absolute left-1/2 top-full -translate-x-1/2 mt-1 px-2 py-1 rounded bg-popover border border-border text-popover-foreground text-xs opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 shadow ${tooltipDescription ? "whitespace-pre-line min-w-[280px] max-w-[320px] text-left" : "whitespace-nowrap"}`}
         role="tooltip"
       >
-        {label}
+        {tooltipText}
       </span>
     </div>
   );
@@ -318,7 +320,7 @@ export function StitchToolbar({
         <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-1.5" role="group" aria-label="Tools">
           <IconButtonWithTooltip
-            variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode ? "secondary" : "outline"}
+            variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode ? "default" : "outline"}
             title="Select and move tiles (Ctrl+A: select all)"
             label="Select"
             onClick={onSelectToolActivate}
@@ -386,8 +388,13 @@ export function StitchToolbar({
         </IconButtonWithTooltip>
         <IconButtonWithTooltip
           variant={pointAlignMode ? "secondary" : "outline"}
-          title={canEnterPointAlign ? "Align a PDF to the locked reference by selecting two point pairs" : "Lock exactly one tile as reference (PDF A) first"}
+          title={canEnterPointAlign
+            ? "One PDF is locked as reference. Align another PDF to it by selecting two point pairs (ref point 1 → target point 1, then ref point 2 → target point 2)."
+            : "Point align is only available once you have locked a PDF in place. To lock a PDF: select the PDF — there is a LOCK icon in the top right of the PDF."}
           label="Point align"
+          tooltipDescription={canEnterPointAlign
+            ? "One PDF is locked. Align another by picking two point pairs (ref 1→target 1, ref 2→target 2)."
+            : "Point align is only available once you have \"locked\" a PDF in place.\nTo lock a PDF: select the PDF — there is a LOCK icon in the top right of the PDF."}
           disabled={!canEnterPointAlign && !pointAlignMode}
           onClick={() => {
             if (pointAlignMode) onPointAlignModeChange(false);
@@ -402,8 +409,13 @@ export function StitchToolbar({
         </IconButtonWithTooltip>
         <IconButtonWithTooltip
           variant={scaleAlignMode ? "secondary" : "outline"}
-          title={canEnterScaleAlign ? "Resize a PDF to match the locked reference scale by drawing the same distance on both" : "Lock exactly one tile as reference (PDF A) first"}
+          title={canEnterScaleAlign
+            ? "One PDF is locked as reference. Resize another PDF to match its scale by drawing the same distance on both."
+            : "Scale align is only available once you have locked a PDF in place. To lock a PDF: select the PDF — there is a LOCK icon in the top right of the PDF."}
           label="Scale align"
+          tooltipDescription={canEnterScaleAlign
+            ? "One PDF is locked. Resize another to match scale by drawing the same distance on both."
+            : "Scale align is only available once you have \"locked\" a PDF in place.\nTo lock a PDF: select the PDF — there is a LOCK icon in the top right of the PDF."}
           disabled={!canEnterScaleAlign && !scaleAlignMode}
           onClick={() => {
             if (scaleAlignMode) onScaleAlignModeChange(false);
