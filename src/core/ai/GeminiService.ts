@@ -244,13 +244,9 @@ Output: {
 Your task: Extract ONLY the following 5 characteristics. For each, search the entire provided document chunks. Use the PDF Page Index from the chunk metadata (e.g. "PDF Page Index: 4") for the "page" field — 0-based: first page = 0, second page = 1. Do NOT use footer/header page numbers.
 ${scopeLine}
 REQUIRED OUTPUT — exactly 5 items.
-- If you FIND the value: use the exact quote from the document and the correct 0-based page index.
-- If you do NOT find the value: set "value" to "N/A" and "page" to 0. For "quote" you MUST still provide useful context: (1) search the document for any relevant passage that relates to this characteristic (e.g. general discussion of moisture, compaction, or soils), and (2) add a brief inference in parentheses explaining why the specific value is not present. Examples for the quote when not found:
-  - A relevant excerpt plus "(Note: Specific percentage not provided in this supplemental report)."
-  - "(Note: Not provided in this document)."
-  - "This is not a soils report and therefore does not have this information."
-  - Any similar relevant quote from the text followed by "(Note: [reason not provided])."
-Do NOT use a generic "Not found in document." — always supply either a relevant excerpt and/or an inference. Do NOT invent actual values.
+- If you FIND the value: (1) Put in "value" the exact number/range/unit as stated (e.g. "12–14%", "8.2%"). (2) Put in "quote" the SHORT phrase or sentence that CONTAINS that value (the exact location in the document—e.g. a table cell, a line in a section). If the value was derived by combining information from multiple places, add a brief note in the quote: e.g. "(From Table 3 OMC and Section 4.2 lab data.)" or "(Combined from p. 8 and p. 12.)." (3) Use the PDF Page Index from the chunk header (0-based) for "page".
+- If you do NOT find the value: set "value" to "N/A" and "page" to 0. For "quote" give a brief, relevant excerpt plus a short inference in parentheses, e.g. "(Note: Specific percentage not provided in this report)." Do NOT use a generic "Not found in document."
+Do NOT invent values. Prefer the exact location (value + where it appears) over long narrative.
 
 1. existing_moisture — Existing moisture (value, with unit if present)
 2. optimal_moisture — Optimal moisture (percentage range, e.g. "10–14%")
@@ -339,15 +335,22 @@ export async function listAvailableModels(
 
 /**
  * Parse geotechnical JSON response into fixed 5-row summary.
+ * When batchChunks is empty (e.g. PDF-based extraction), page numbers are taken from the model and only clamped to >= 0.
  */
 function parseGeotechnicalResponse(parsed: Record<string, unknown>, batchChunks: Array<{ text: string; page: number }>): GeotechnicalSummary {
-  const validPages = batchChunks.length ? batchChunks.map((c) => c.page) : [0];
-  const minPage = Math.min(...validPages);
-  const maxPage = Math.max(...validPages);
+  const hasChunkRange = batchChunks.length > 0;
+  const validPages = hasChunkRange ? batchChunks.map((c) => c.page) : [];
+  const minPage = validPages.length ? Math.min(...validPages) : 0;
+  const maxPage = validPages.length ? Math.max(...validPages) : 0;
 
-  const clampPage = (p: number): number => {
+  // Models often return 1-based page numbers (as in document footers). Normalize to 0-based for storage.
+  const normalizePage = (p: number): number => {
     if (typeof p !== 'number' || Number.isNaN(p)) return 0;
-    return Math.max(minPage, Math.min(maxPage, p));
+    const raw = Math.floor(p);
+    const asZeroBased = raw >= 1 ? raw - 1 : raw; // 1-based 15 → 0-based 14; 0 stays 0
+    const normalized = Math.max(0, asZeroBased);
+    if (hasChunkRange) return Math.max(minPage, Math.min(maxPage, normalized));
+    return normalized;
   };
 
   return GEOTECHNICAL_CHARACTERISTIC_ORDER.map((key) => {
@@ -357,7 +360,7 @@ function parseGeotechnicalResponse(parsed: Record<string, unknown>, batchChunks:
       return {
         characteristicKey: key,
         value: typeof obj.value === 'string' ? obj.value : 'N/A',
-        page: clampPage(Number(obj.page)),
+        page: normalizePage(Number(obj.page)),
         quote: typeof obj.quote === 'string' && obj.quote.trim() ? obj.quote : '(Note: Not provided in this document).',
       } as GeotechnicalSoilRow;
     }
@@ -368,6 +371,162 @@ function parseGeotechnicalResponse(parsed: Record<string, unknown>, batchChunks:
       quote: '(Note: Not provided in this document).',
     } as GeotechnicalSoilRow;
   });
+}
+
+/** Build geotechnical extraction prompt for an attached PDF (no chunk text). */
+function createGeotechnicalPromptForPDF(scope?: string): string {
+  const scopeLine = scope ? `\nProject scope context: ${scope}. Use this to focus extraction if relevant.\n` : '';
+  return `You are an AI assistant extracting key soil characteristics from a soils report PDF. Your output will be used for a "Key Soil Characteristic Summary" table.
+
+Your task: Extract ONLY the following 5 characteristics. Search the ENTIRE attached PDF. For the "page" field use the PAGE NUMBER as it appears in the document (first page = 1, second = 2, etc.). Use the number from headers/footers or the actual page order—this is 1-based.
+${scopeLine}
+REQUIRED OUTPUT — exactly 5 items.
+- If you FIND the value: (1) Put in "value" the exact number/range/unit as stated (e.g. "12–14%", "8.2%"). (2) Put in "quote" the SHORT phrase or sentence that CONTAINS that value (the exact location in the document—e.g. a table cell, a line in a section). If the value was derived by combining information from multiple places, add a brief note in the quote: e.g. "(From Table 3 OMC and Section 4.2 lab data.)" or "(Combined from p. 8 and p. 12.)." (3) Use the page number (1-based) where the value or primary source appears.
+- If you do NOT find the value: set "value" to "N/A" and "page" to 0. For "quote" give a brief, relevant excerpt plus a short inference in parentheses, e.g. "(Note: Specific percentage not provided in this report)." Do NOT use a generic "Not found in document."
+Do NOT invent values. Prefer the exact location (value + where it appears) over long narrative.
+
+1. existing_moisture — Existing moisture (value, with unit if present)
+2. optimal_moisture — Optimal moisture (percentage range, e.g. "10–14%")
+3. expansion_index — Expansion index (percentage)
+4. shrinkage — Shrinkage (percentage range)
+5. subsidence — Subsidence (value range)
+
+Return ONLY valid JSON in this exact shape (no other keys):
+{
+  "existing_moisture": { "value": "...", "page": 0, "quote": "..." },
+  "optimal_moisture": { "value": "...", "page": 0, "quote": "..." },
+  "expansion_index": { "value": "...", "page": 0, "quote": "..." },
+  "shrinkage": { "value": "...", "page": 0, "quote": "..." },
+  "subsidence": { "value": "...", "page": 0, "quote": "..." }
+}
+
+CRITICAL: Use 1-based page numbers as in the document (first page = 1). Return only the JSON object.`;
+}
+
+/**
+ * Extract geotechnical summary by sending the full PDF to Gemini (same as uploading in the UI).
+ * Prefer this over chunk-based extraction when provider is Gemini so the model sees the real document.
+ */
+export async function extractGeotechnicalFromPDF(
+  pdfData: Uint8Array,
+  fileName: string,
+  config: GeminiConfig,
+  scope?: string
+): Promise<GeotechnicalSummary> {
+  const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
+  const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
+
+  // Base64 for inline PDF (Gemini supports inline PDF up to ~20–100MB depending on model)
+  let base64Pdf: string;
+  try {
+    base64Pdf = btoa(String.fromCharCode(...pdfData));
+  } catch {
+    const chunkSize = 8192;
+    const chunks: string[] = [];
+    for (let i = 0; i < pdfData.length; i += chunkSize) {
+      chunks.push(String.fromCharCode(...pdfData.subarray(i, i + chunkSize)));
+    }
+    base64Pdf = btoa(chunks.join(''));
+  }
+
+  const prompt = createGeotechnicalPromptForPDF(scope);
+  const contents = [
+    {
+      parts: [
+        { inlineData: { mimeType: 'application/pdf' as const, data: base64Pdf } },
+        { text: prompt },
+      ],
+    },
+  ];
+  const generationConfig = { temperature: 0.1, topP: 0.8, topK: 40 };
+
+  const modelOrder = ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'];
+  let modelVariants = config.model ? [config.model, ...modelOrder.filter((m) => m !== config.model)] : modelOrder;
+  if (useCtoProxy) {
+    modelVariants = config.model ? [config.model, 'gemini-2.0-flash'] : ['gemini-2.0-flash'];
+  } else {
+    try {
+      const available = await listAvailableModels(config.apiKey, baseUrl);
+      if (available.length > 0) modelVariants = [...available, ...modelVariants.filter((m) => !available.includes(m))];
+    } catch {
+      // keep modelVariants
+    }
+  }
+
+  const apiVersions = ['v1beta', 'v1'];
+  let lastError = '';
+
+  for (const modelName of modelVariants) {
+    const cleanModel = modelName.replace(/^models\//, '');
+    for (const apiVersion of apiVersions) {
+      try {
+        if (useCtoProxy && config.ctoProxy) {
+          const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, '');
+          const res = await fetch(`${apiOrigin}/api/nanodoc/gemini`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              token: config.ctoProxy.token,
+              model: cleanModel,
+              contents,
+              generationConfig,
+            }),
+          });
+          const result = await res.json();
+          if (!res.ok) throw new Error((result as { message?: string }).message ?? (result as { error?: string }).error ?? `Proxy ${res.status}`);
+          const data = (result as { response?: unknown }).response;
+          if (!data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+            lastError = 'Proxy returned no text';
+            continue;
+          }
+          const content = (data.candidates[0].content.parts[0] as { text: string }).text;
+          const parsed = parseJsonFromGeminiResponse(content);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parseGeotechnicalResponse(parsed as Record<string, unknown>, []);
+          }
+          lastError = 'Invalid geotechnical JSON';
+          continue;
+        }
+        const url = `${baseUrl}/${apiVersion}/models/${cleanModel}:generateContent?key=${config.apiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents, generationConfig }),
+        });
+        if (!response.ok) {
+          lastError = await response.text();
+          continue;
+        }
+        const data = await response.json();
+        if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+          lastError = 'No text in response';
+          continue;
+        }
+        const content = data.candidates[0].content.parts[0].text;
+        const parsed = parseJsonFromGeminiResponse(content);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parseGeotechnicalResponse(parsed as Record<string, unknown>, []);
+        }
+        lastError = 'Invalid geotechnical JSON';
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+  throw new Error(`Geotechnical extraction from PDF failed: ${lastError || 'No valid response'}`);
+}
+
+/** Extract JSON from Gemini text (direct parse, code block, or object match). */
+function parseJsonFromGeminiResponse(content: string): unknown {
+  try {
+    return JSON.parse(content);
+  } catch {
+    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) return JSON.parse(jsonMatch[1]);
+    const objMatch = content.match(/\{[\s\S]*\}/);
+    if (objMatch) return JSON.parse(objMatch[0]);
+  }
+  return undefined;
 }
 
 /**
@@ -455,6 +614,8 @@ export async function extractSpecsFromChunks(
       if (useCtoProxy && config.ctoProxy) {
         const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, '');
         const proxyUrl = `${apiOrigin}/api/nanodoc/gemini`;
+        const contentsCount = requestBody.contents?.length ?? 0;
+        // CTO proxy: do not log URL or token so the API key cannot be discovered
         const res = await fetch(proxyUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -520,6 +681,10 @@ export async function extractSpecsFromChunks(
       }
       
       // Parse JSON response
+      if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+        const reason = !data.candidates?.length ? 'no candidates' : !data.candidates[0].content ? 'empty content (e.g. safety block)' : 'missing parts';
+        console.warn('[GeminiService] Gemini response missing text:', reason, data.candidates?.[0]?.finishReason ?? '');
+      }
       if (data.candidates && data.candidates[0] && data.candidates[0].content) {
         const content = data.candidates[0].content.parts[0].text;
         
@@ -547,6 +712,9 @@ export async function extractSpecsFromChunks(
           if (extractionType === 'geotechnical' && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             const summary = parseGeotechnicalResponse(parsed as Record<string, unknown>, batch);
             return summary;
+          }
+          if (extractionType === 'geotechnical' && parsed !== undefined) {
+            console.warn('[GeminiService] Geotechnical extraction expected an object with keys (existing_moisture, optimal_moisture, etc.). Got:', Array.isArray(parsed) ? 'array' : typeof parsed, Array.isArray(parsed) ? `length ${parsed.length}` : '');
           }
 
           if (parsed && parsed.specs && Array.isArray(parsed.specs)) {

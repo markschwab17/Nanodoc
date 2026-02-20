@@ -1,10 +1,12 @@
 /**
  * Tab Store
- * 
+ *
  * Manages multiple PDF tabs: open, close, switch, reorder.
+ * Optional ctoContext is stored per-tab so Save uses the correct CTO document when switching tabs.
  */
 
 import { create } from "zustand";
+import type { CiviltakeoffContext } from "./civiltakeoffContextStore";
 
 export interface Tab {
   id: string;
@@ -13,6 +15,8 @@ export interface Tab {
   isModified: boolean;
   lastSaved: number | null; // timestamp in milliseconds, null if never saved
   order: number;
+  /** When opened from CTO, context for saving back to the correct project/file */
+  ctoContext?: CiviltakeoffContext | null;
 }
 
 export interface TabStoreState {

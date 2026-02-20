@@ -134,6 +134,7 @@ export function PageCanvas({
   const { showRulers } = useDocumentSettingsStore();
   const { showNotification } = useNotificationStore();
   const { copyTextAnnotation, pasteTextAnnotation, hasTextAnnotation, clear: clearTextAnnotationClipboard } = useTextAnnotationClipboardStore();
+  const temporaryHighlight = useSpecExtractionStore((s) => s.temporaryHighlight);
   const currentDocument = getCurrentDocument();
   
   // Get search data reactively from the store
@@ -3526,7 +3527,7 @@ export function PageCanvas({
 
         {/* Render spec extraction highlights */}
         {(() => {
-          const { getSpecHighlights, selectedSpecId, selectedSpecDocumentId, temporaryHighlight } = useSpecExtractionStore.getState();
+          const { getSpecHighlights, selectedSpecId, selectedSpecDocumentId } = useSpecExtractionStore.getState();
           if (!currentDocument) return null;
           const documentId = currentDocument.getId();
           const specHighlights = getSpecHighlights(documentId);
@@ -3626,8 +3627,13 @@ export function PageCanvas({
                       .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x - quadX} ${p.y - quadY}`)
                       .join(" ") + " Z";
                     
-                    // Natural highlighter style: yellow/amber semi-transparent fill, no stroke
-                    const fillColor = 'rgba(253, 224, 71, 0.4)'; // highlighter yellow
+                    // Use highlight color from store (e.g. geotechnical amber); default highlighter yellow. Make location obvious with fill + stroke.
+                    const hex = (temporaryHighlight.color || "#fbbf24").replace(/^#/, "");
+                    const r = parseInt(hex.slice(0, 2), 16);
+                    const g = parseInt(hex.slice(2, 4), 16);
+                    const b = parseInt(hex.slice(4, 6), 16);
+                    const fillColor = `rgba(${r}, ${g}, ${b}, 0.5)`;
+                    const strokeColor = `rgba(${r}, ${g}, ${b}, 0.9)`;
                     
                     return (
                       <div
@@ -3644,12 +3650,13 @@ export function PageCanvas({
                           width={quadWidth}
                           height={quadHeight}
                           className="absolute inset-0"
-                          style={{ overflow: 'visible' }}
+                          style={{ overflow: "visible" }}
                         >
                           <path
                             d={pathData}
                             fill={fillColor}
-                            stroke="none"
+                            stroke={strokeColor}
+                            strokeWidth={1.5}
                           />
                         </svg>
                       </div>

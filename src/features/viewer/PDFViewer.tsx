@@ -8,7 +8,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useUIStore } from "@/shared/stores/uiStore";
-import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
+import { useDocumentSettingsStore, getRenderQualityScale } from "@/shared/stores/documentSettingsStore";
 import { PageCanvas } from "./PageCanvas";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { VirtualizedPageList } from "./VirtualizedPageList";
@@ -38,7 +38,7 @@ import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 export function PDFViewer() {
   const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter } = useUIStore();
-  const { showRulers, toggleRulers } = useDocumentSettingsStore();
+  const { showRulers, toggleRulers, renderQuality } = useDocumentSettingsStore();
   const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();
   const { showNotification } = useNotificationStore();
   const currentDocument = getCurrentDocument();
@@ -390,6 +390,29 @@ export function PDFViewer() {
       if (!currentDocument) return;
       
       const documentId = currentDocument.getId();
+
+      // Pre-warm render cache for target page and neighbors so they appear instantly when we scroll
+      if (renderer && currentDocument.isDocumentLoaded()) {
+        const firstMeta = currentDocument.getPageMetadata(0);
+        if (firstMeta && baseFitScale > 0 && zoomLevel > 0) {
+          const zoomFactor = zoomLevel / baseFitScale;
+          const viewportWidth = firstMeta.width * baseFitScale * zoomFactor;
+          const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+          const qualityScale = getRenderQualityScale(renderQuality);
+          const mupdfDoc = currentDocument.getMupdfDocument();
+          const pageCount = currentDocument.getPageCount();
+          for (const p of [page, page - 1, page + 1, page - 2, page + 2]) {
+            if (p >= 0 && p < pageCount) {
+              const pageMeta = currentDocument.getPageMetadata(p);
+              if (pageMeta) {
+                const displayScale = viewportWidth / pageMeta.width;
+                const renderScale = displayScale * qualityScale * dpr;
+                renderer.renderPage(mupdfDoc, p, { scale: renderScale, rotation: 0 });
+              }
+            }
+          }
+        }
+      }
       
       // When we have a specific specId, set it now so bbox is emphasized during scroll
       if (specId) {
@@ -541,7 +564,7 @@ export function PDFViewer() {
     return () => {
       window.removeEventListener('scroll-to-spec', handleScrollToSpec);
     };
-  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, getSpecHighlights, setTemporaryHighlight, baseFitScale]);
+  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, getSpecHighlights, setTemporaryHighlight, baseFitScale, renderer, renderQuality, zoomLevel]);
 
   // Handle page visibility changes from VirtualizedPageList
   // This updates the current page as the user scrolls
@@ -1174,7 +1197,7 @@ export function PDFViewer() {
                 zoomLevel={zoomLevel}
                 baseFitScale={baseFitScale}
                 pageGap={8}
-                bufferPages={2}
+                bufferPages={6}
                 onPageVisible={handlePageVisible}
                 scrollContainerRef={scrollContainerRef}
               />

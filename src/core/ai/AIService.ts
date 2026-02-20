@@ -4,8 +4,8 @@
  * Provides a unified interface for different AI providers (Gemini, ChatGPT, etc.)
  */
 
-import type { AIConfig, SpecExtractionResult, GeotechnicalSummary, AIProvider } from './types';
-import { extractSpecsFromChunks as geminiExtractSpecs, callGeminiAPI, type GeminiConfig } from './GeminiService';
+import type { AIConfig, SpecExtractionResult, GeotechnicalSummary, AIProvider, GeotechnicalScope } from './types';
+import { extractSpecsFromChunks as geminiExtractSpecs, extractGeotechnicalFromPDF, callGeminiAPI, type GeminiConfig } from './GeminiService';
 import { extractSpecsFromChunks as openaiExtractSpecs, generateText as openaiGenerateText } from './OpenAIService';
 import { useAIProviderStore } from '@/shared/stores/aiProviderStore';
 import { useCiviltakeoffContextStore } from '@/shared/stores/civiltakeoffContextStore';
@@ -63,6 +63,29 @@ export async function extractSpecsFromChunks(
   }
 
   throw new Error(`Unsupported AI provider: ${config.provider}`);
+}
+
+/**
+ * Extract geotechnical summary by sending the full PDF to Gemini (same as uploading in Gemini UI).
+ * Only supported when provider is Gemini. Returns the fixed 5-row GeotechnicalSummary.
+ */
+export async function extractGeotechnicalFromPDFBytes(
+  pdfData: Uint8Array,
+  fileName: string,
+  scope?: GeotechnicalScope
+): Promise<GeotechnicalSummary> {
+  const config = getAIConfig();
+  if (!config) throw new Error("Please configure your AI API key in settings.");
+  if (config.provider !== 'gemini') {
+    throw new Error("Geotechnical extraction from PDF is only supported with Gemini. Use chunk-based extraction for other providers.");
+  }
+  const geminiConfig: GeminiConfig = {
+    apiKey: config.apiKey,
+    model: config.model ?? 'gemini-2.0-flash',
+    baseUrl: config.baseUrl,
+    ctoProxy: config.ctoProxy,
+  };
+  return extractGeotechnicalFromPDF(pdfData, fileName, geminiConfig, scope);
 }
 
 /**

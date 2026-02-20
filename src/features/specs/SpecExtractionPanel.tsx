@@ -13,11 +13,12 @@ import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
-import { extractSpecsFromChunks, hasConfiguredAPIKey } from "@/core/ai/AIService";
+import { extractSpecsFromChunks, extractGeotechnicalFromPDFBytes, hasConfiguredAPIKey, getAIConfig } from "@/core/ai/AIService";
 import { createChunks } from "@/core/ai/PDFContentChunker";
 import { getEmbeddingService, findTopKChunks } from "@/core/ai/EmbeddingService";
 import { filterChunksBySpecProbability } from "@/core/ai/SpecCandidateDetector";
-import type { SpecExtractionResult, GeotechnicalScope, GeotechnicalSummary } from "@/core/ai/types";
+import type { SpecExtractionResult, GeotechnicalScope, GeotechnicalSummary, GeotechnicalSoilRow } from "@/core/ai/types";
+import type { Annotation } from "@/core/pdf";
 import { getInsights, CHARACTERISTIC_LABELS } from "@/features/specs/geotechnicalInsights";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 
@@ -43,7 +44,7 @@ export function SpecExtractionPanel() {
     setTemporaryHighlight,
   } = useSpecExtractionStore();
   
-  const { getCurrentDocument } = usePDFStore();
+  const { getCurrentDocument, getAnnotations, addAnnotation, removeAnnotation } = usePDFStore();
   const [isOpen, setIsOpen] = useState(false);
   const [extractionType, setExtractionType] = useState<"specs" | "geotechnical">("specs");
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
@@ -51,6 +52,7 @@ export function SpecExtractionPanel() {
   const [isResizing, setIsResizing] = useState(false);
   const [extractionInProgress, setExtractionInProgress] = useState(false);
   const highlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hoverHighlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() || null;
@@ -69,16 +71,26 @@ export function SpecExtractionPanel() {
   
   useEffect(() => {
     const handleExtractionRequest = (event: CustomEvent) => {
-      const { documentId: requestedDocId, extractionType: type, customPrompt, scope } = event.detail;
-      if (requestedDocId === documentId && currentDocument) {
-        const selectedType = type || "specs";
-        setExtractionType(selectedType);
-        setIsOpen(true);
-        setExtractionInProgress(true);
-        performExtraction(currentDocument, selectedType, customPrompt, scope).finally(() => {
-          setExtractionInProgress(false);
-        });
+      const { documentId: requestedDocId, extractionType: type, customPrompt, scope } = event.detail || {};
+      const store = usePDFStore.getState();
+      const doc =
+        store.documents.get(requestedDocId) ||
+        store.getCurrentDocument() ||
+        currentDocument;
+      if (!doc) {
+        if (typeof window !== "undefined" && window.location.search.includes("background=1")) {
+          console.warn("[SpecExtraction] No document for extraction request, id:", requestedDocId);
+          window.parent?.postMessage?.({ type: "nanodoc-extraction-complete", success: false }, "*");
+        }
+        return;
       }
+      const selectedType = type || "specs";
+      setExtractionType(selectedType);
+      setIsOpen(true);
+      setExtractionInProgress(true);
+      performExtraction(doc, selectedType, customPrompt, scope).finally(() => {
+        setExtractionInProgress(false);
+      });
     };
 
     const handleShowResults = (event: CustomEvent) => {
@@ -110,86 +122,157 @@ export function SpecExtractionPanel() {
     customPrompt?: string,
     scope?: GeotechnicalScope
   ) => {
+    const params = parseCiviltakeoffViewParams(window.location.search);
+    const isBackground = params.background === "1";
+    if (isBackground && typeof window !== "undefined") {
+      console.log("[SpecExtraction] Background extraction started", { extractionType, scope });
+    }
     if (!hasConfiguredAPIKey()) {
       setExtractionError("Please configure your AI API key in settings.");
+      finishExtraction();
+      if (isBackground && typeof window !== "undefined" && window.parent !== window) {
+        console.warn("[SpecExtraction] No API key or CTO context — cannot extract");
+        window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+      }
       return;
     }
     
-    if (!document) return;
+    if (!document) {
+      finishExtraction();
+      if (isBackground && typeof window !== "undefined" && window.parent !== window) {
+        window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+      }
+      return;
+    }
     
     startExtraction(document.getId());
     setExtractionError(null);
-    
-    try {
-      // Step 1: Create chunks (10% progress)
-      setExtractionPhase("preparing");
-      setExtractionProgress(10);
-      const chunks = await createChunks(document, {
-        maxChunkTokens: 1200,
-        minChunkTokens: 300,
-        overlapPercent: 15,
-      });
-      
-      // Step 2: Filter chunks by spec probability (20% progress)
-      setExtractionProgress(20);
-      const chunkTexts = chunks.map(c => ({ text: c.text, chunkId: c.chunkId }));
-      const filteredChunks = filterChunksBySpecProbability(chunkTexts, 20); // threshold
-      
-      // Step 3: Generate embeddings and retrieve top-K (40% progress)
-      setExtractionPhase("finding");
-      setExtractionProgress(40);
-      const embeddingService = getEmbeddingService();
-      const queryText = extractionType === "geotechnical"
-        ? "extract geotechnical soils data bearing capacity foundation recommendations groundwater permeability soil classification"
-        : "extract construction specifications materials dimensions performance requirements product codes";
-      const queryEmbedding = await embeddingService.embed(queryText);
-      
-      const filteredChunkTexts = filteredChunks.map(c => c.text);
-      const chunkEmbeddings = await embeddingService.embedBatch(filteredChunkTexts);
-      const embeddingMap = new Map(
-        filteredChunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]])
-      );
-      
-      const topChunks = findTopKChunks(queryEmbedding, embeddingMap, 10);
-      const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
-      const selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
-      
-      // Step 4: Extract specs using AI provider — show "AI is thinking" and nudge progress
-      setExtractionPhase("thinking");
-      setExtractionProgress(60);
-      const chunksForAI = selectedChunks.map(c => ({
-        text: c.text,
-        page: c.pageRange[0],
-        sectionPath: c.sectionPath,
-      }));
 
-      // Nudge progress every 2s during AI call so the bar doesn't look stuck (cap at 88)
-      const progressInterval = setInterval(() => {
-        const state = useSpecExtractionStore.getState();
-        if (!state.isExtracting || state.extractionPhase !== "thinking") {
+    const docId = document.getId();
+    let result: SpecExtractionResult[] | GeotechnicalSummary;
+
+    try {
+      // Geotechnical + Gemini: send the full PDF to Gemini (same as uploading in the UI) so the model sees the real document
+      if (extractionType === "geotechnical" && getAIConfig()?.provider === "gemini") {
+        setExtractionPhase("preparing");
+        setExtractionProgress(10);
+        let pdfData: Uint8Array;
+        try {
+          const mupdfModule = await import("mupdf");
+          const { PDFEditor } = await import("@/core/pdf/PDFEditor");
+          const editor = new PDFEditor(mupdfModule.default);
+          const annotations = usePDFStore.getState().getAnnotations(docId);
+          pdfData = await editor.saveDocument(document, annotations, undefined);
+        } catch (e) {
+          setExtractionError("Could not serialize PDF for upload.");
+          setExtractionPhase("finished");
+          setExtractionProgress(100);
+          finishExtraction();
           return;
         }
-        const current = state.extractionProgress;
-        if (current < 88) {
-          useSpecExtractionStore.getState().setExtractionProgress(Math.min(88, current + 6));
+        setExtractionPhase("thinking");
+        setExtractionProgress(60);
+        const progressInterval = setInterval(() => {
+          const state = useSpecExtractionStore.getState();
+          if (!state.isExtracting || state.extractionPhase !== "thinking") return;
+          const current = state.extractionProgress;
+          if (current < 88) useSpecExtractionStore.getState().setExtractionProgress(Math.min(88, current + 6));
+        }, 2000);
+        try {
+          result = await extractGeotechnicalFromPDFBytes(pdfData, document.getName(), scope);
+        } finally {
+          clearInterval(progressInterval);
         }
-      }, 2000);
+      } else {
+        // Chunk-based path (specs, or geotechnical with non-Gemini provider)
+        setExtractionPhase("preparing");
+        setExtractionProgress(10);
+        const chunks = await createChunks(document, {
+          maxChunkTokens: 1200,
+          minChunkTokens: 300,
+          overlapPercent: 15,
+        });
 
-      const result = await extractSpecsFromChunks(chunksForAI, extractionType, customPrompt, scope);
-      clearInterval(progressInterval);
+        setExtractionProgress(20);
+        let selectedChunks: typeof chunks;
+        if (extractionType === "geotechnical") {
+          selectedChunks = chunks;
+          setExtractionPhase("finding");
+          setExtractionProgress(40);
+          if (isBackground && typeof window !== "undefined") {
+            console.log("[SpecExtraction] Geotechnical: using all", chunks.length, "chunks for full-document extraction.");
+          }
+        } else {
+          const chunkTexts = chunks.map(c => ({ text: c.text, chunkId: c.chunkId }));
+          const filteredChunks = filterChunksBySpecProbability(chunkTexts, 20);
+          setExtractionPhase("finding");
+          setExtractionProgress(40);
+          const embeddingService = getEmbeddingService();
+          const queryText = "extract construction specifications materials dimensions performance requirements product codes";
+          const queryEmbedding = await embeddingService.embed(queryText);
+          const filteredChunkTexts = filteredChunks.map(c => c.text);
+          const chunkEmbeddings = await embeddingService.embedBatch(filteredChunkTexts);
+          const embeddingMap = new Map(
+            filteredChunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]])
+          );
+          const topChunks = findTopKChunks(queryEmbedding, embeddingMap, 10);
+          let selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
+          selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
+          if (selectedChunks.length === 0 && chunks.length > 0) {
+            const k = Math.min(10, chunks.length);
+            selectedChunks = chunks.slice(0, k);
+            console.log("[SpecExtraction] No chunks selected by similarity — using first", k, "chunks as fallback.");
+          }
+        }
+
+        setExtractionPhase("thinking");
+        setExtractionProgress(60);
+        const chunksForAI = selectedChunks.map(c => ({
+          text: c.text,
+          page: c.pageRange[0],
+          sectionPath: c.sectionPath,
+        }));
+
+        if (chunksForAI.length === 0) {
+          const isLikelyRaster = chunks.length === 0;
+          const msg = isLikelyRaster
+            ? "No text could be extracted from this PDF. It may be a scanned/raster PDF with no text layer. Try an OCR'd or text-based PDF."
+            : "No chunks selected for extraction. Check chunking or try a different document.";
+          console.warn("[SpecExtraction] No chunks for AI — skipping.", { totalChunks: chunks.length, selectedChunks: selectedChunks.length });
+          setExtractionError(msg);
+          setExtractionPhase("finished");
+          setExtractionProgress(100);
+          finishExtraction();
+          return;
+        }
+
+        const progressInterval = setInterval(() => {
+          const state = useSpecExtractionStore.getState();
+          if (!state.isExtracting || state.extractionPhase !== "thinking") return;
+          const current = state.extractionProgress;
+          if (current < 88) useSpecExtractionStore.getState().setExtractionProgress(Math.min(88, current + 6));
+        }, 2000);
+        try {
+          result = await extractSpecsFromChunks(chunksForAI, extractionType, customPrompt, scope);
+        } finally {
+          clearInterval(progressInterval);
+        }
+      }
 
       setExtractionProgress(90);
 
-      const docId = document.getId();
       const isGeotechnicalResult =
         extractionType === "geotechnical" &&
         Array.isArray(result) &&
         result.length > 0 &&
         "characteristicKey" in result[0];
       if (isGeotechnicalResult) {
-        setGeotechnicalSummary(docId, result as GeotechnicalSummary);
+        const geoSummary = result as GeotechnicalSummary;
+        setGeotechnicalSummary(docId, geoSummary);
         if (scope) setGeotechnicalScope(docId, scope);
         setExtractedSpecs(docId, []);
+        // Real highlight annotations so the user can remove them; no spec overlay for geo
+        syncGeotechnicalHighlightAnnotations(geoSummary);
         setSpecHighlights(docId, []);
       } else {
         const specsArr = result as SpecExtractionResult[];
@@ -213,17 +296,29 @@ export function SpecExtractionPanel() {
       const params = parseCiviltakeoffViewParams(window.location.search);
       if (params.background === "1" && document.getId()) {
         const ctx = useCiviltakeoffContextStore.getState().getContext();
-        if (ctx) {
-          const docId = document.getId();
-          const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(docId);
-          const geoSummary = useSpecExtractionStore.getState().getGeotechnicalSummary(docId);
-          const hasResults = extractedSpecs.length > 0 || (geoSummary?.length ?? 0) > 0;
-          if (!hasResults) {
-            useNotificationStore.getState().showNotification("No specs extracted (e.g. quota or API error). Try again or open in Nanodoc.", "error");
-            if (typeof window !== "undefined" && window.parent !== window) {
-              window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
-            }
-          } else {
+        const docId = document.getId();
+        const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(docId);
+        const geoSummary = useSpecExtractionStore.getState().getGeotechnicalSummary(docId);
+        const hasResults = extractedSpecs.length > 0 || (geoSummary?.length ?? 0) > 0;
+        if (params.background === "1" && typeof window !== "undefined") {
+          console.log("[SpecExtraction] CTO background: hasResults=", hasResults, "ctx=", !!ctx, "geoSummary.length=", geoSummary?.length ?? 0, "extractedSpecs.length=", extractedSpecs.length);
+        }
+        if (!ctx) {
+          if (params.background === "1" && typeof window !== "undefined") {
+            console.warn("[SpecExtraction] No CTO context — cannot POST extraction to Civiltakeoff");
+          }
+          if (typeof window !== "undefined" && window.parent !== window) {
+            window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+          }
+        } else if (!hasResults) {
+          useNotificationStore.getState().showNotification("No specs extracted (e.g. quota or API error). Try again or open in Nanodoc.", "error");
+          if (params.background === "1" && typeof window !== "undefined") {
+            console.warn("[SpecExtraction] Extraction finished with no results — not POSTing to CTO. Check Gemini API key in Nanodoc settings or CTO proxy.");
+          }
+          if (typeof window !== "undefined" && window.parent !== window) {
+            window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+          }
+        } else {
             const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(docId);
             const tables = geoSummary?.length
               ? [
@@ -275,12 +370,19 @@ export function SpecExtractionPanel() {
               extractionJson.extractionType = "specs";
             }
             try {
-              const res = await fetch(`${ctx.api_origin}/api/nanodoc/extraction`, {
+              const extractionUrl = `${ctx.api_origin}/api/nanodoc/extraction`;
+              if (params.background === "1" && typeof window !== "undefined") {
+                console.log("[SpecExtraction] POSTing extraction to", extractionUrl);
+              }
+              const res = await fetch(extractionUrl, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ token: ctx.token, extractionJson, pageRefs }),
               });
               if (res.ok) {
+                if (params.background === "1" && typeof window !== "undefined") {
+                  console.log("[SpecExtraction] POST extraction OK (200), notifying parent");
+                }
                 useNotificationStore.getState().showNotification("Extraction saved to Civiltakeoff", "success");
                 if (typeof window !== "undefined" && window.parent !== window) {
                   window.parent.postMessage(
@@ -293,9 +395,66 @@ export function SpecExtractionPanel() {
                     "*"
                   );
                 }
+                // Save PDF with baked-in extraction metadata back to CTO so the stored file has it
+                try {
+                  const currentDoc = document;
+                  const annotations = usePDFStore.getState().getAnnotations(docId);
+                  const extractedSpecsForPdf = useSpecExtractionStore.getState().getExtractedSpecs(docId);
+                  const geoSummaryForPdf = useSpecExtractionStore.getState().getGeotechnicalSummary(docId);
+                  const geoScopeForPdf = useSpecExtractionStore.getState().getGeotechnicalScope(docId);
+                  const hasGeo = Boolean(geoSummaryForPdf?.length && geoScopeForPdf);
+                  const aiMetadata =
+                    extractedSpecsForPdf.length > 0 || hasGeo
+                      ? {
+                          version: 1,
+                          ...(extractedSpecsForPdf.length > 0 && { extractedSpecs: extractedSpecsForPdf }),
+                          ...(hasGeo &&
+                            geoSummaryForPdf &&
+                            geoScopeForPdf && {
+                              geotechnicalSummary: geoSummaryForPdf,
+                              geotechnicalScope: geoScopeForPdf,
+                            }),
+                        }
+                      : undefined;
+                  const mupdfModule = await import("mupdf");
+                  const { PDFEditor } = await import("@/core/pdf/PDFEditor");
+                  const editor = new PDFEditor(mupdfModule.default);
+                  const pdfData = await editor.saveDocument(currentDoc, annotations, aiMetadata);
+                  const form = new FormData();
+                  form.append("token", ctx.token);
+                  form.append(
+                    "file",
+                    new Blob([pdfData as BlobPart], { type: "application/pdf" }),
+                    currentDoc.getName()
+                  );
+                  const saveRes = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
+                    method: "POST",
+                    body: form,
+                  });
+                  if (!saveRes.ok) {
+                    const err = await saveRes.json().catch(() => ({}));
+                    useNotificationStore
+                      .getState()
+                      .showNotification(
+                        (err as { message?: string }).message ?? "PDF saved to CTO but file update failed",
+                        "error"
+                      );
+                  }
+                } catch (saveErr) {
+                  console.warn("Background save-pdf after extraction:", saveErr);
+                  useNotificationStore
+                    .getState()
+                    .showNotification(
+                      saveErr instanceof Error ? saveErr.message : "Could not save PDF back to Civiltakeoff",
+                      "error"
+                    );
+                }
               } else {
-                const err = await res.text();
-                useNotificationStore.getState().showNotification(`Failed to save extraction: ${err}`, "error");
+                const errText = await res.text();
+                if (params.background === "1" && typeof window !== "undefined") {
+                  console.warn("[SpecExtraction] POST extraction failed", res.status, errText.slice(0, 200));
+                }
+                useNotificationStore.getState().showNotification(`Failed to save extraction: ${errText.slice(0, 100)}`, "error");
                 if (typeof window !== "undefined" && window.parent !== window) {
                   window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
                 }
@@ -308,13 +467,13 @@ export function SpecExtractionPanel() {
             }
           }
         }
-      }
     } catch (error) {
-      console.error("Extraction error:", error);
+      console.error("[SpecExtraction] Extraction error:", error);
       setExtractionError(error instanceof Error ? error.message : "Failed to extract specs");
       finishExtraction();
       const params = parseCiviltakeoffViewParams(window.location.search);
       if (params.background === "1" && typeof window !== "undefined" && window.parent !== window) {
+        console.warn("[SpecExtraction] Notifying parent of extraction failure");
         window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
       }
     }
@@ -331,6 +490,127 @@ export function SpecExtractionPanel() {
     return colors[category] || "#94a3b8"; // gray default
   };
   
+  const GEO_HIGHLIGHT_COLOR = "#f59e0b"; // amber-500 for permanent geo highlights
+
+  /** Get quads for a geotechnical row: prefer the value (exact location), then quote. PDF coords. */
+  const getGeotechnicalQuads = (row: GeotechnicalSoilRow): { page: number; quads: number[][] } | null => {
+    if (!currentDocument) return null;
+    const page = row.page ?? 0;
+    if (pageCount > 0 && page >= pageCount) return null;
+    const valueText = (row.value || "").trim();
+    const quoteText = (row.quote || "").replace(/\s*\(Note:.*\)\s*$/i, "").replace(/\s*\(From.*?\)\.?\s*$/i, "").replace(/\s*\(Combined from.*?\)\.?\s*$/i, "").trim();
+    try {
+      const mupdfDoc = currentDocument.getMupdfDocument();
+      const mupdfPage = mupdfDoc.loadPage(page);
+      const pageMetadata = currentDocument.getPageMetadata(page);
+      const pageHeight = pageMetadata?.height || 792;
+      const runSearch = (searchCandidates: string[]) => {
+        for (const searchText of searchCandidates) {
+          if (searchText.length < 2) continue;
+          const matches = mupdfPage.search(searchText, 20);
+          if (matches && matches.length > 0) {
+            const first = matches[0];
+            const quadsRaw = Array.isArray(first) && typeof first[0] === "number"
+              ? [first as number[]]
+              : (Array.isArray(first) ? (first as number[][]) : []);
+            const quadArray = quadsRaw
+              .filter((q) => Array.isArray(q) && q.length >= 8)
+              .map((rawQuad: number[]) => [
+                rawQuad[0], pageHeight - rawQuad[1],
+                rawQuad[2], pageHeight - rawQuad[3],
+                rawQuad[4], pageHeight - rawQuad[5],
+                rawQuad[6], pageHeight - rawQuad[7],
+              ]);
+            if (quadArray.length > 0) return quadArray;
+          }
+        }
+        return null;
+      };
+      // Prefer value (e.g. "12–14%", "8.2%") so highlight lands on the actual value
+      if (valueText.length >= 2 && valueText !== "N/A") {
+        const valueQuads = runSearch([valueText, valueText.replace(/\s*–\s*/g, "-"), valueText.replace(/\s+/g, " ")]);
+        if (valueQuads) return { page, quads: valueQuads };
+      }
+      // Fall back to quote (short location phrase)
+      if (quoteText.length >= 2) {
+        const quoteQuads = runSearch([
+          quoteText.slice(0, 150),
+          quoteText.slice(0, 80),
+          quoteText.split(/\s+/).slice(0, 12).join(" "),
+        ]);
+        if (quoteQuads) return { page, quads: quoteQuads };
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  };
+
+  /** Sync geotechnical rows as real highlight annotations so the user can remove them. Removes existing geo_* annotations then adds one per row. */
+  const syncGeotechnicalHighlightAnnotations = (summary: GeotechnicalSummary) => {
+    if (!documentId || !currentDocument) return;
+    const existing = getAnnotations(documentId);
+    for (const a of existing) {
+      if (a.id.startsWith("geo_")) removeAnnotation(documentId, a.id);
+    }
+    for (const row of summary) {
+      const result = getGeotechnicalQuads(row);
+      if (!result || result.quads.length === 0) continue;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const q of result.quads) {
+        if (q.length < 8) continue;
+        for (let i = 0; i < 8; i += 2) {
+          minX = Math.min(minX, q[i]);
+          maxX = Math.max(maxX, q[i]);
+          minY = Math.min(minY, q[i + 1]);
+          maxY = Math.max(maxY, q[i + 1]);
+        }
+      }
+      if (minX === Infinity) continue;
+      const annotation: Annotation = {
+        id: `geo_${row.characteristicKey}`,
+        type: "highlight",
+        pageNumber: result.page,
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+        quads: result.quads,
+        color: GEO_HIGHLIGHT_COLOR,
+        highlightMode: "text",
+      };
+      addAnnotation(documentId, annotation);
+    }
+  };
+
+  /** Hover: emphasize the permanent highlight for this row (selected state) and scroll to page. */
+  const handleGeotechnicalRowHover = (row: GeotechnicalSoilRow, isEnter: boolean) => {
+    if (hoverHighlightTimeoutRef.current) {
+      clearTimeout(hoverHighlightTimeoutRef.current);
+      hoverHighlightTimeoutRef.current = null;
+    }
+    if (!isEnter) {
+      setSelectedSpec(documentId ?? "", null);
+      return;
+    }
+    const page = row.page ?? 0;
+    if (pageCount > 0 && page >= pageCount) return;
+    setSelectedSpec(documentId ?? "", `geo_${row.characteristicKey}`);
+    window.dispatchEvent(
+      new CustomEvent("scroll-to-spec", { detail: { page, specId: `geo_${row.characteristicKey}` } })
+    );
+  };
+
+  /** Click: go to page; permanent highlight is already shown, hover state emphasizes it. */
+  const handleGeotechnicalRowClick = (row: GeotechnicalSoilRow) => {
+    if (!documentId) return;
+    const page = row.page ?? 0;
+    if (pageCount > 0 && page >= pageCount) return;
+    const specId = `geo_${row.characteristicKey}`;
+    setSelectedSpec(documentId, specId);
+    window.dispatchEvent(new CustomEvent("scroll-to-spec", { detail: { page, specId } }));
+  };
+
   const handleSpecClick = async (spec: SpecExtractionResult) => {
     if (!documentId || !currentDocument) return;
     // Don't try to show a spec that references a deleted or out-of-range page
@@ -468,7 +748,30 @@ export function SpecExtractionPanel() {
     });
     window.dispatchEvent(event);
   };
-  
+
+  // Keep geotechnical highlight annotations in sync when this document has a geotechnical summary (e.g. after load from saved PDF).
+  // Use a ref to avoid re-running when only array identity changed (e.g. visibleSpecs/specs new ref each render) to prevent infinite loop.
+  const geoSpecSyncSignatureRef = useRef<string>("");
+  useEffect(() => {
+    if (!documentId || !currentDocument) return;
+    const visibleSpecsNow = specs.filter((s) => (s.page ?? 0) < pageCount);
+    const sig = `${documentId}-${pageCount}-${geotechnicalSummary?.length ?? 0}-${(geotechnicalSummary?.map((r) => r.characteristicKey).join(",")) ?? ""}-${specs.length}-${visibleSpecsNow.map((s) => (s.spec_id ?? "") + (s.page ?? 0)).join(",")}`;
+    if (geoSpecSyncSignatureRef.current === sig) return;
+    geoSpecSyncSignatureRef.current = sig;
+    if (geotechnicalSummary?.length) {
+      syncGeotechnicalHighlightAnnotations(geotechnicalSummary);
+    }
+    const specOnlyHighlights = visibleSpecsNow
+      .filter((s) => s.bbox && s.bbox.length >= 4)
+      .map((spec, idx) => ({
+        page: spec.page,
+        bbox: [spec.bbox![0], spec.bbox![1], spec.bbox![2], spec.bbox![3]] as [number, number, number, number],
+        specId: spec.spec_id || `spec_${idx}`,
+        color: getColorForCategory(spec.category),
+      }));
+    setSpecHighlights(documentId, specOnlyHighlights);
+  }, [documentId, geotechnicalSummary, currentDocument, pageCount, specs]);
+
   // Handle panel resize
   useEffect(() => {
     if (!isResizing) return;
@@ -493,12 +796,11 @@ export function SpecExtractionPanel() {
     };
   }, [isResizing]);
   
-  // Cleanup timeout on unmount
+  // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
-      if (highlightTimeoutRef.current) {
-        clearTimeout(highlightTimeoutRef.current);
-      }
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+      if (hoverHighlightTimeoutRef.current) clearTimeout(hoverHighlightTimeoutRef.current);
     };
   }, []);
   
@@ -652,15 +954,22 @@ export function SpecExtractionPanel() {
                   </thead>
                   <tbody>
                     {geotechnicalSummary.map((row) => (
-                      <tr key={row.characteristicKey} className="border-b">
+                      <tr
+                        key={row.characteristicKey}
+                        className="border-b cursor-pointer transition-colors hover:bg-amber-500/10"
+                        onMouseEnter={() => handleGeotechnicalRowHover(row, true)}
+                        onMouseLeave={() => handleGeotechnicalRowHover(row, false)}
+                        onClick={() => handleGeotechnicalRowClick(row)}
+                        title="Hover to emphasize highlight on page · Click to go to page"
+                      >
                         <td className="p-2 align-top">
                           {hasAnyGeotechnicalValues ? (
                             <Accordion type="single" collapsible className="w-full">
                               <AccordionItem value={row.characteristicKey} className="border-none">
-                                <AccordionTrigger className="py-1 px-0 hover:no-underline [&[data-state=open]>svg]:rotate-180">
+                                <AccordionTrigger className="py-1 px-0 hover:no-underline [&[data-state=open]>svg]:rotate-180" onClick={(e) => e.stopPropagation()}>
                                   <span className="font-medium">{CHARACTERISTIC_LABELS[row.characteristicKey]}</span>
                                 </AccordionTrigger>
-                                <AccordionContent className="pb-2 pt-0">
+                                <AccordionContent className="pb-2 pt-0" onClick={(e) => e.stopPropagation()}>
                                   {geotechnicalScope ? (
                                     <div className="text-xs space-y-2 mt-1 pl-0">
                                       <div>
@@ -691,7 +1000,9 @@ export function SpecExtractionPanel() {
                           )}
                         </td>
                         <td className="p-2 align-top">{row.value}</td>
-                        <td className="p-2 align-top">{(row.page ?? 0) + 1}</td>
+                        <td className="p-2 align-top font-medium text-primary/90">
+                          {(row.page ?? 0) + 1}
+                        </td>
                         <td className="p-2 align-top text-muted-foreground italic text-xs max-w-[200px] truncate" title={row.quote}>
                           {row.quote}
                         </td>

@@ -46,11 +46,11 @@ export class PDFAnnotationLoader {
   const type = pdfAnnot.getType();
 
 
-  // Line annotations don't have a Rect property - skip it
+  // Line and Ink annotations don't have a Rect property - skip getRect for those
 
   let rect: number[] | null = null;
 
-  if (type !== "Line") {
+  if (type !== "Line" && type !== "Ink") {
 
   try {
 
@@ -66,6 +66,8 @@ export class PDFAnnotationLoader {
 
   }
 
+  // Ink annotations use ink list, not rect; we don't load them into the editor yet
+  if (type === "Ink") continue;
 
   const contents = pdfAnnot.getContents() || "";
 

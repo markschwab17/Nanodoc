@@ -6,10 +6,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
+import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
+import { addPdfBytesToStitchCanvas } from "@/features/stitch/addPdfToStitchCanvas";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
@@ -58,9 +61,16 @@ export default function StitchView() {
     };
   }, [handleRecenter]);
 
-  // Auto-open Add PDF modal on first load so user can add pages immediately
+  // CTO stitch preload: when opened from CTO with stitch=1, add the initial PDF to canvas once
   useEffect(() => {
-    setShowAddPdf(true);
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    const initial = useCtoStitchInitialStore.getState().takeInitial();
+    if (ctx && initial) {
+      addPdfBytesToStitchCanvas(initial.pdfBytes, initial.fileName).catch((e) => {
+        console.error("CTO stitch preload failed", e);
+        useNotificationStore.getState().showNotification("Failed to add initial PDF to canvas.", "error");
+      });
+    }
   }, []);
 
   const navigate = useNavigate();
@@ -79,6 +89,12 @@ export default function StitchView() {
   const [deleteElementMode, setDeleteElementMode] = useState(false);
   const [panMode, setPanMode] = useState(false);
   const [canvasVisible, setCanvasVisible] = useState(true);
+
+  const ctoContext = useCiviltakeoffContextStore((s) => s.context);
+  // Auto-open Add PDF modal on first load only when not from CTO (CTO lands with preloaded PDF)
+  useEffect(() => {
+    if (!ctoContext) setShowAddPdf(true);
+  }, [ctoContext]);
 
   const pointAlign = usePointAlignMode();
   const scaleAlign = useScaleAlignMode();
@@ -220,6 +236,48 @@ export default function StitchView() {
     [loadPDF, navigate, showNotification]
   );
 
+  const handleSaveToCto = useCallback(async () => {
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    if (!ctx) return;
+    if (tiles.length === 0) {
+      showNotification("Add at least one page to the canvas first.", "info");
+      return;
+    }
+    try {
+      const buffer = await exportStitchToPdf();
+      if (!buffer) {
+        showNotification("Export failed.", "error");
+        return;
+      }
+      // Copy to ArrayBuffer-backed Uint8Array so Blob accepts it (TS BlobPart expects ArrayBuffer, not SharedArrayBuffer)
+      const copy = new Uint8Array(buffer.length);
+      copy.set(buffer);
+      const blob = new Blob([copy], { type: "application/pdf" });
+      const formData = new FormData();
+      formData.append("token", ctx.token);
+      formData.append("file", blob, "stitched.pdf");
+      const res = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `Save failed (${res.status})`);
+      }
+      showNotification("Saved to Civiltakeoff.", "success");
+      if (typeof window !== "undefined" && window.opener) {
+        try {
+          window.opener.postMessage({ type: "nanodoc-stitch-saved", success: true }, ctx.api_origin);
+        } catch {
+          // ignore
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      showNotification(e instanceof Error ? e.message : "Failed to save to Civiltakeoff.", "error");
+    }
+  }, [tiles.length, showNotification]);
+
   const handleDownloadForTraining = async () => {
     if (tiles.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
@@ -262,6 +320,8 @@ export default function StitchView() {
         isSaving={isSaving}
         onDownloadForTraining={handleDownloadForTraining}
         isExportingTraining={isExportingTraining}
+        showSaveToCto={!!ctoContext}
+        onSaveToCto={handleSaveToCto}
         cropRect={cropRect}
         pointAlignMode={pointAlign.pointAlignMode}
         canEnterPointAlign={pointAlign.canEnterPointAlign}

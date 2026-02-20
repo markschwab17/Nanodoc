@@ -14,6 +14,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Settings, Key, CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
 import { useAIProviderStore } from "@/shared/stores/aiProviderStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { validateGeminiApiKey } from "@/core/ai/GeminiService";
 import { validateApiKey as validateOpenAIApiKey } from "@/core/ai/OpenAIService";
 import type { AIProvider } from "@/core/ai/types";
@@ -26,12 +27,18 @@ interface AISettingsProps {
 
 export function AISettings({ buttonClassName, iconClassName, showLabel = false }: AISettingsProps = {}) {
   const { activeProvider, setActiveProvider, getApiKey, setApiKey } = useAIProviderStore();
+  const ctoContext = useCiviltakeoffContextStore((s) => s.getContext());
+  const isCtoSession = Boolean(ctoContext);
   const [apiKey, setApiKeyLocal] = useState("");
   const [isOpen, setIsOpen] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [validationStatus, setValidationStatus] = useState<"idle" | "valid" | "invalid">("idle");
 
   useEffect(() => {
+    if (isCtoSession) {
+      setApiKeyLocal("");
+      return;
+    }
     const savedKey = getApiKey(activeProvider);
     if (savedKey) {
       setApiKeyLocal(savedKey);
@@ -39,7 +46,7 @@ export function AISettings({ buttonClassName, iconClassName, showLabel = false }
       setApiKeyLocal("");
     }
     setValidationStatus("idle");
-  }, [activeProvider, getApiKey]);
+  }, [activeProvider, getApiKey, isCtoSession]);
 
   const handleProviderChange = (provider: AIProvider) => {
     setActiveProvider(provider);
@@ -107,69 +114,77 @@ export function AISettings({ buttonClassName, iconClassName, showLabel = false }
             AI Provider Configuration
           </DialogTitle>
           <DialogDescription>
-            Choose your AI provider and configure your API key to enable AI-powered features.
+            {isCtoSession
+              ? "AI is provided by Civiltakeoff. The API key is managed securely and is not visible or editable here."
+              : "Choose your AI provider and configure your API key to enable AI-powered features."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-6 py-4">
-          {/* Provider Selection */}
-          <div className="space-y-3">
-            <Label>AI Provider</Label>
-            <RadioGroup value={activeProvider} onValueChange={handleProviderChange}>
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="gemini" id="gemini" />
-                <Label htmlFor="gemini" className="font-normal cursor-pointer">
-                  Google Gemini
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="chatgpt" id="chatgpt" />
-                <Label htmlFor="chatgpt" className="font-normal cursor-pointer">
-                  ChatGPT (OpenAI)
-                </Label>
-              </div>
-            </RadioGroup>
-          </div>
-
-          {/* API Key Input */}
-          <div className="space-y-2">
-            <Label htmlFor="api-key">
-              {activeProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API Key
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                id="api-key"
-                type="password"
-                placeholder={`Enter your ${activeProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API key`}
-                value={apiKey}
-                onChange={(e) => {
-                  setApiKeyLocal(e.target.value);
-                  setValidationStatus("idle");
-                }}
-                className="flex-1"
-              />
-              <Button
-                onClick={handleValidate}
-                disabled={isValidating || !apiKey.trim()}
-                variant="outline"
-              >
-                {isValidating ? "Validating..." : "Validate"}
-              </Button>
+          {isCtoSession ? (
+            <div className="rounded-md border border-muted bg-muted/40 p-4 text-sm text-muted-foreground">
+              When opened from Civiltakeoff, AI requests use Civiltakeoff’s secure proxy. The API key is never sent to or stored in this app and cannot be viewed or changed here.
             </div>
-            {validationStatus === "valid" && (
-              <div className="flex items-center gap-2 text-sm text-green-600">
-                <CheckCircle2 className="h-4 w-4" />
-                API key is valid
+          ) : (
+            <>
+              {/* Provider Selection */}
+              <div className="space-y-3">
+                <Label>AI Provider</Label>
+                <RadioGroup value={activeProvider} onValueChange={handleProviderChange}>
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem value="gemini" id="gemini" />
+                    <Label htmlFor="gemini" className="font-normal cursor-pointer">
+                      Google Gemini
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <RadioGroupItem value="chatgpt" id="chatgpt" />
+                    <Label htmlFor="chatgpt" className="font-normal cursor-pointer">
+                      ChatGPT (OpenAI)
+                    </Label>
+                  </div>
+                </RadioGroup>
               </div>
-            )}
-            {validationStatus === "invalid" && (
-              <div className="flex items-center gap-2 text-sm text-red-600">
-                <AlertCircle className="h-4 w-4" />
-                Invalid API key. Please check and try again.
-              </div>
-            )}
-          </div>
 
-          {/* Step-by-Step Guide */}
+              {/* API Key Input - never shown when CTO provides AI */}
+              <div className="space-y-2">
+                <Label htmlFor="api-key">
+                  {activeProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API Key
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="api-key"
+                    type="password"
+                    placeholder={`Enter your ${activeProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API key`}
+                    value={apiKey}
+                    onChange={(e) => {
+                      setApiKeyLocal(e.target.value);
+                      setValidationStatus("idle");
+                    }}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={handleValidate}
+                    disabled={isValidating || !apiKey.trim()}
+                    variant="outline"
+                  >
+                    {isValidating ? "Validating..." : "Validate"}
+                  </Button>
+                </div>
+                {validationStatus === "valid" && (
+                  <div className="flex items-center gap-2 text-sm text-green-600">
+                    <CheckCircle2 className="h-4 w-4" />
+                    API key is valid
+                  </div>
+                )}
+                {validationStatus === "invalid" && (
+                  <div className="flex items-center gap-2 text-sm text-red-600">
+                    <AlertCircle className="h-4 w-4" />
+                    Invalid API key. Please check and try again.
+                  </div>
+                )}
+              </div>
+
+              {/* Step-by-Step Guide */}
           <div className="space-y-2">
             <Label>How to Get Your API Key</Label>
             <Accordion type="single" collapsible className="w-full">
@@ -325,15 +340,23 @@ export function AISettings({ buttonClassName, iconClassName, showLabel = false }
             </Accordion>
           </div>
 
-          {/* Action Buttons */}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setIsOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleSave} disabled={!apiKey.trim()}>
-              Save
-            </Button>
-          </div>
+              {/* Action Buttons */}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={() => setIsOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={!apiKey.trim()}>
+                  Save
+                </Button>
+              </div>
+            </>
+          )}
+
+          {isCtoSession && (
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => setIsOpen(false)}>Close</Button>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

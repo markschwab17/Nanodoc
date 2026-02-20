@@ -6,7 +6,7 @@
  * re-opened, extracted information and conversation can be restored.
  */
 
-import type { SpecExtractionResult } from "@/core/ai/types";
+import type { SpecExtractionResult, GeotechnicalSummary, GeotechnicalScope } from "@/core/ai/types";
 
 /** Key used in the PDF Info dictionary for NanoDoc AI data */
 export const PDF_AI_METADATA_KEY = "info:NanoDocAI";
@@ -45,6 +45,9 @@ export interface ConversationMessage {
 export interface PDFAIMetadataPayload {
   version: number;
   extractedSpecs?: SpecExtractionResult[];
+  /** Geotechnical (soils) extraction: fixed 5-row summary and scope used for insights */
+  geotechnicalSummary?: GeotechnicalSummary;
+  geotechnicalScope?: GeotechnicalScope;
   /** Conversation history for Q&A; can be extended later for "continue conversation" */
   conversationHistory?: {
     messages: ConversationMessage[];

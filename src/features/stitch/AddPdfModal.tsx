@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { makeWhiteTransparent } from "@/features/stitch/imageUtils";
 
@@ -38,6 +39,8 @@ function imageDataToDataUrl(imageData: ImageData): string {
   return canvas.toDataURL("image/png");
 }
 
+type SourceTab = "device" | "cto";
+
 export function AddPdfModal({
   open,
   onClose,
@@ -47,6 +50,8 @@ export function AddPdfModal({
 }) {
   const fileSystem = useFileSystem();
   const { addTiles, canvasWidth, canvasHeight, setReferenceScaleFeetPerInch } = useStitchStore();
+  const ctoContext = useCiviltakeoffContextStore((s) => s.context);
+  const [sourceTab, setSourceTab] = useState<SourceTab>("device");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [pdfFileName, setPdfFileName] = useState<string>("");
   const [mupdfDoc, setMupdfDoc] = useState<any>(null);
@@ -58,6 +63,7 @@ export function AddPdfModal({
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
   /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
+  const [ctoListening, setCtoListening] = useState(false);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -76,6 +82,42 @@ export function AddPdfModal({
     setSelectedPages(new Set());
   }, []);
 
+  /** Load PDF from bytes + name into modal state (thumbnails, page count, etc.). */
+  const loadPdfFromResult = useCallback(
+    async (data: Uint8Array, name: string) => {
+      setLoading(true);
+      try {
+        const mupdf = await import("mupdf").then((m) => m.default);
+        const doc = mupdf.Document.openDocument(data, "application/pdf");
+        const count = doc.countPages();
+        setPdfBytes(data);
+        setPdfFileName(name);
+        setMupdfDoc(doc);
+        setPageCount(count);
+        setSelectedPages(new Set(Array.from({ length: count }, (_, i) => i)));
+        const renderer = new PDFRenderer(mupdf);
+        const thumbs: Record<number, string> = {};
+        for (let i = 0; i < count; i++) {
+          await yieldToMain();
+          const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE });
+          const id = rendered.imageData as ImageData;
+          if (id?.data) thumbs[i] = imageDataToDataUrl(id);
+        }
+        setThumbnails(thumbs);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
+  const handleChooseFile = useCallback(async () => {
+    const result = await fileSystem.openFile();
+    if (result) await loadPdfFromResult(result.data, result.name ?? "");
+  }, [fileSystem, loadPdfFromResult]);
+
   useEffect(() => {
     if (!open) {
       setPdfBytes(null);
@@ -84,6 +126,11 @@ export function AddPdfModal({
       setPageCount(0);
       setSelectedPages(new Set());
       setThumbnails({});
+      setCtoListening(false);
+      return;
+    }
+    if (ctoContext) {
+      setSourceTab("device");
       return;
     }
     let cancelled = false;
@@ -92,38 +139,59 @@ export function AddPdfModal({
       try {
         const result = await fileSystem.openFile();
         if (!result || cancelled) return;
-        const mupdf = await import("mupdf").then((m) => m.default);
-        const doc = mupdf.Document.openDocument(result.data, "application/pdf");
-        const count = doc.countPages();
-        if (cancelled) return;
-        setPdfBytes(result.data);
-        setPdfFileName(result.name ?? "");
-        setMupdfDoc(doc);
-        setPageCount(count);
-        setSelectedPages(new Set());
-        const renderer = new PDFRenderer(mupdf);
-        const thumbs: Record<number, string> = {};
-        for (let i = 0; i < count && !cancelled; i++) {
-          await yieldToMain();
-          if (cancelled) return;
-          const rendered = await renderer.renderPage(doc, i, {
-            scale: THUMB_SCALE,
-          });
-          const id = (rendered.imageData as ImageData);
-          if (id && id.data) thumbs[i] = imageDataToDataUrl(id);
-        }
-        if (!cancelled) setThumbnails(thumbs);
-      } catch (e) {
-        console.error(e);
+        await loadPdfFromResult(result.data, result.name ?? "");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     run();
     return () => {
       cancelled = true;
     };
-  }, [open, fileSystem]);
+  }, [open, ctoContext, fileSystem, loadPdfFromResult]);
+
+  // From Civiltakeoff: postMessage listener for nanodoc-add-cto-doc
+  useEffect(() => {
+    if (!open || !ctoContext || sourceTab !== "cto") return;
+    setCtoListening(true);
+    const ctx = ctoContext;
+    const allowedOrigin = ctx.api_origin?.replace(/\/+$/, "") ?? "";
+
+    const handleMessage = async (event: MessageEvent) => {
+      if (allowedOrigin && event.origin !== allowedOrigin) return;
+      const data = event.data;
+      if (data?.type !== "nanodoc-add-cto-doc") return;
+      const name = typeof data.name === "string" ? data.name : "document.pdf";
+      try {
+        if (typeof data.pdfUrl === "string" && data.pdfUrl) {
+          const res = await fetch(data.pdfUrl);
+          if (!res.ok) throw new Error(`Failed to fetch PDF (${res.status})`);
+          const ab = await res.arrayBuffer();
+          await loadPdfFromResult(new Uint8Array(ab), name);
+          return;
+        }
+        if (typeof data.token === "string" && data.token) {
+          const url = `${ctx.api_origin}/api/nanodoc/pdf?token=${encodeURIComponent(data.token)}`;
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`Failed to load document (${res.status})`);
+          const json = await res.json();
+          const pdfUrl = json?.pdfUrl;
+          if (!pdfUrl || typeof pdfUrl !== "string") throw new Error("Invalid response");
+          const pdfRes = await fetch(pdfUrl);
+          if (!pdfRes.ok) throw new Error("Failed to fetch PDF");
+          const ab = await pdfRes.arrayBuffer();
+          await loadPdfFromResult(new Uint8Array(ab), name);
+        }
+      } catch (e) {
+        console.error("CTO add doc failed", e);
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      setCtoListening(false);
+    };
+  }, [open, ctoContext, sourceTab, loadPdfFromResult]);
 
   const handleAddToCanvas = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
@@ -203,6 +271,40 @@ export function AddPdfModal({
         <DialogHeader>
           <DialogTitle>Add PDF pages to canvas</DialogTitle>
         </DialogHeader>
+        {ctoContext && (
+          <div className="flex gap-2 border-b pb-2">
+            <Button
+              variant={sourceTab === "device" ? "secondary" : "outline"}
+              size="sm"
+              onClick={() => {
+                setSourceTab("device");
+                setPdfBytes(null);
+                setPdfFileName("");
+                setMupdfDoc(null);
+                setPageCount(0);
+                setSelectedPages(new Set());
+                setThumbnails({});
+              }}
+            >
+              From device
+            </Button>
+            <Button
+              variant={sourceTab === "cto" ? "secondary" : "outline"}
+              size="sm"
+              onClick={() => {
+                setSourceTab("cto");
+                setPdfBytes(null);
+                setPdfFileName("");
+                setMupdfDoc(null);
+                setPageCount(0);
+                setSelectedPages(new Set());
+                setThumbnails({});
+              }}
+            >
+              From Civiltakeoff
+            </Button>
+          </div>
+        )}
         {adding ? (
           <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
             <Loader2 className="h-10 w-10 animate-spin" />
@@ -211,6 +313,17 @@ export function AddPdfModal({
         ) : loading ? (
           <div className="py-12 text-center text-muted-foreground">
             Loading PDF…
+          </div>
+        ) : ctoContext && sourceTab === "device" && !pdfBytes && !loading ? (
+          <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground">
+            <p>Choose a PDF file from your device.</p>
+            <Button onClick={handleChooseFile}>Choose file</Button>
+          </div>
+        ) : ctoContext && sourceTab === "cto" && !pdfBytes ? (
+          <div className="py-12 text-center text-muted-foreground">
+            {ctoListening
+              ? "Waiting for document from Civiltakeoff… (Use “Add to stitch” in Civiltakeoff to send a document.)"
+              : "Select “From Civiltakeoff” and wait for a document to be sent from the Civiltakeoff app."}
           </div>
         ) : pdfBytes && pageCount > 0 ? (
           <>
@@ -275,7 +388,7 @@ export function AddPdfModal({
               ))}
             </div>
           </>
-        ) : !loading && !pdfBytes && !adding ? (
+        ) : !loading && !pdfBytes && !adding && !ctoContext ? (
           <p className="text-muted-foreground py-4">Open a PDF to select pages.</p>
         ) : null}
         <DialogFooter>

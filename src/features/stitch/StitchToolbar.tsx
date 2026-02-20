@@ -30,6 +30,7 @@ import {
   Stamp,
   Trash2,
   Undo2,
+  Upload,
   X,
 } from "lucide-react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
@@ -48,6 +49,9 @@ export interface StitchToolbarProps {
   onClearCrop: () => void;
   onSaveAndFlatten: (openInEditor: boolean) => void;
   isSaving: boolean;
+  /** When true, show "Save to Civiltakeoff" button (CTO session). */
+  showSaveToCto?: boolean;
+  onSaveToCto?: () => void;
   onDownloadForTraining?: () => void;
   isExportingTraining?: boolean;
   cropRect: { x: number; y: number; w: number; h: number } | null;
@@ -118,6 +122,8 @@ export function StitchToolbar({
   onClearCrop,
   onSaveAndFlatten,
   isSaving,
+  showSaveToCto,
+  onSaveToCto,
   onDownloadForTraining,
   isExportingTraining,
   cropRect,
@@ -528,6 +534,11 @@ export function StitchToolbar({
           <IconButtonWithTooltip disabled={isSaving || tiles.length === 0} title="Save PDF and open in editor" label={isSaving ? "Saving…" : "Save & open"} onClick={() => onSaveAndFlatten(true)}>
             <Save className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
+          {showSaveToCto && onSaveToCto && (
+            <IconButtonWithTooltip variant="outline" disabled={isSaving || tiles.length === 0} title="Save stitched PDF to Civiltakeoff" label="Save to Civiltakeoff" onClick={onSaveToCto}>
+              <Upload className="h-3.5 w-3.5 shrink-0" />
+            </IconButtonWithTooltip>
+          )}
           {onDownloadForTraining && (
             <IconButtonWithTooltip
               variant="outline"

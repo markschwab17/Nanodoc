@@ -111,14 +111,8 @@ export const usePrintStore = create<PrintStore>()(
 
       getSettings: (documentId) => {
         const state = get();
-        if (!state.settings.has(documentId)) {
-          // Initialize with defaults if not exists
-          const newSettings = { ...DEFAULT_SETTINGS };
-          state.settings.set(documentId, newSettings);
-          set({ settings: new Map(state.settings) });
-          return newSettings;
-        }
-        return state.settings.get(documentId)!;
+        // Return stored or defaults without mutating (avoids setState during render)
+        return state.settings.get(documentId) ?? { ...DEFAULT_SETTINGS };
       },
 
       setOrientation: (documentId, orientation) =>

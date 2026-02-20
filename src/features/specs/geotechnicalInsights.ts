@@ -35,8 +35,8 @@ const CHARACTERISTICS: GeotechnicalSoilCharacteristicKey[] = [
 
 /** Default insights when no scope-specific content is defined (fallback). */
 const DEFAULT_INSIGHTS: CharacteristicInsights = {
-  highImpact: ["Affects compaction effort and schedule.", "Drives water/additive and equipment choice."],
-  insights: ["Compare to optimal moisture to plan conditioning.", "Document in proposal to justify means and methods."],
+  highImpact: ["Drives your moisture conditioning cost and equipment (water trucks, tillers, lime)."],
+  insights: ["Bid conditioning to bring soil into spec range; document in means & methods.", "Compare to optimal moisture—outside range risks failed density and rework."],
 };
 
 /**
@@ -79,40 +79,40 @@ function getInsightsForPair(char: GeotechnicalSoilCharacteristicKey, scope: Scop
 function scopeInsightsExistingMoisture(scope: ScopeKey): CharacteristicInsights {
   const byScope: Record<ScopeKey, CharacteristicInsights> = {
     "Earthwork Grading Contractor": {
-      highImpact: ["Directly drives whether you need to add water or dry soils; affects production and cost."],
-      insights: ["Wet of optimum: consider aeration or lime; dry of optimum: water trucks and timing.", "Include moisture conditioning in your means and methods."],
+      highImpact: ["Bid driver: wet soils need drying (lime/aeration); dry soils need water—directly affects your cost and production."],
+      insights: ["Include moisture conditioning in your unit price and means & methods.", "Wet of optimum: price tillage, lime, or aeration; dry: price water trucks and application."],
     },
     "Site Development": {
-      highImpact: ["Determines site prep and compaction strategy across the project."],
-      insights: ["Plan for dewatering or moisture conditioning by phase.", "Affects duration and equipment (tillers, water trucks)."],
+      highImpact: ["Drives site prep cost and schedule: conditioning by phase affects equipment and duration."],
+      insights: ["Bid dewatering or moisture conditioning per phase; plan tillers/water trucks.", "Document in schedule—wet soils can push compaction and delay downstream work."],
     },
     "Underground Utilities": {
-      highImpact: ["Backfill compaction and pipe bedding depend on moisture content."],
-      insights: ["Specify moisture at placement for trench backfill and bedding.", "Avoid swell/shrink under pavements and structures."],
+      highImpact: ["Backfill and bedding must be at acceptable moisture for density—affects placement and acceptance."],
+      insights: ["Specify moisture at placement in backfill procedures; bid conditioning in trench if needed.", "Avoid placing wet backfill under pavement or structures (swell/settlement risk)."],
     },
     "Paving & Concrete": {
-      highImpact: ["Subgrade moisture affects subbase stability and pavement performance."],
-      insights: ["Control moisture before subbase and paving to avoid pumping or settlement.", "Document for warranty and claims."],
+      highImpact: ["Subgrade moisture drives pumping and settlement risk—directly tied to warranty and callbacks."],
+      insights: ["Bid subgrade prep and moisture control before subbase; document for QA.", "Wet subgrade = pumping and loss of support; control before proof-roll and paving."],
     },
     "Demolition": {
-      highImpact: ["Influences handling and disposal of excavated material."],
-      insights: ["Wet soils increase haul weight and may require drying or special disposal.", "Plan for dewatering if reusing on-site."],
+      highImpact: ["Wet soils = heavier haul, possible special disposal or drying—affects haul and disposal cost."],
+      insights: ["Price haul and disposal based on moisture; wet loads weigh more and may need different handling.", "If reusing on-site, plan dewatering or drying and include in scope."],
     },
     "Land Development": {
-      highImpact: ["Drives grading and compaction strategy for lots and infrastructure."],
-      insights: ["Balance cut/fill moisture to minimize import/export and conditioning.", "Phase work around seasonal moisture."],
+      highImpact: ["Cut/fill moisture drives import/export and conditioning cost across lots and infrastructure."],
+      insights: ["Balance moisture in cut/fill to minimize import and conditioning; phase work when soils are workable.", "Include conditioning in grading bid; document by phase for schedule."],
     },
     "Highway Construction": {
-      highImpact: ["Critical for subgrade and embankment compaction to meet density specs."],
-      insights: ["Often strict OMC tolerance; plan moisture conditioning in the bid.", "Affects roller type and pass count."],
+      highImpact: ["Density acceptance is strict; wrong moisture = failed test and rework—must be in bid."],
+      insights: ["Bid moisture conditioning (water trucks, tillage) to stay within OMC tolerance.", "Affects roller selection and pass count; document in QC and quantity letter."],
     },
     "Commercial Site work": {
-      highImpact: ["Impacts building pad and pavement subgrade quality."],
-      insights: ["Coordinate with structural and paving; document for QA and warranty.", "Schedule conditioning to avoid delays."],
+      highImpact: ["Pad and pavement subgrade acceptance depend on moisture—delays and rework if not controlled."],
+      insights: ["Coordinate with structural and paving; bid conditioning and document in QA plan.", "Schedule subgrade prep so moisture is right before foundations and pavement."],
     },
     "Residential Development": {
-      highImpact: ["Affects lot grading, compaction, and foundation support."],
-      insights: ["Vary by lot; include moisture conditioning in unit pricing.", "Wet soils can delay lot release."],
+      highImpact: ["Lot-by-lot moisture drives conditioning cost and can delay lot release and foundations."],
+      insights: ["Include moisture conditioning in lot unit price; wet soils often delay compaction release.", "Communicate to foundation and paving subs—moisture affects their schedule."],
     },
   };
   return byScope[scope] ?? DEFAULT_INSIGHTS;
@@ -121,40 +121,40 @@ function scopeInsightsExistingMoisture(scope: ScopeKey): CharacteristicInsights 
 function scopeInsightsOptimalMoisture(scope: ScopeKey): CharacteristicInsights {
   const byScope: Record<ScopeKey, CharacteristicInsights> = {
     "Earthwork Grading Contractor": {
-      highImpact: ["Target range for compaction; outside range increases cost and risk of rejection."],
-      insights: ["Bid water trucks or drying (lime/aeration) to bring soils into range.", "Include OMC in field QC narrative."],
+      highImpact: ["Your compaction target—outside this range = failed density, rework, and cost you eat."],
+      insights: ["Bid water trucks or drying (lime/aeration) to get into range; put in means & methods.", "Include OMC in QC narrative and submittals so you can prove compliance."],
     },
     "Site Development": {
-      highImpact: ["Defines acceptable moisture window for each lift and area."],
-      insights: ["Plan sequencing so work happens when soils are near OMC.", "Document OMC in submittals."],
+      highImpact: ["Acceptable moisture window for each lift—drives when you can compact and what you bid."],
+      insights: ["Sequence work so compaction happens when soils are near OMC; bid conditioning where they won’t be.", "Document OMC in submittals and tie to density logs."],
     },
     "Underground Utilities": {
-      highImpact: ["Backfill and bedding must be placed at or near OMC for density."],
-      insights: ["Specify OMC in backfill procedures; plan for conditioning in trenches.", "Avoid future settlement under pavement."],
+      highImpact: ["Backfill and bedding must be at or near OMC for density—otherwise settlement and callbacks."],
+      insights: ["Write OMC into backfill procedures; bid conditioning in trench if soils are wet/dry.", "Avoid placing out-of-range backfill under pavement—future settlement is your problem."],
     },
     "Paving & Concrete": {
-      highImpact: ["Subgrade should be near OMC before subbase and paving."],
-      insights: ["Prevent pumping and loss of support; include in subgrade prep spec.", "Tie to density and proof-roll."],
+      highImpact: ["Subgrade must be near OMC before subbase and paving or you get pumping and failure."],
+      insights: ["Include moisture control in subgrade prep bid; tie to proof-roll and density.", "Document that subgrade was at OMC—protects you on warranty and claims."],
     },
     "Demolition": {
-      highImpact: ["Less direct; relevant if reusing or selling excavated material."],
-      insights: ["If reusing, OMC helps plan placement and compaction.", "Otherwise note for disposal handling."],
+      highImpact: ["Matters if you’re reusing or selling material—placement and compaction need to hit OMC."],
+      insights: ["If reusing, plan placement and compaction at OMC; include in scope and price.", "If exporting only, note OMC for disposal handling and weight."],
     },
     "Land Development": {
-      highImpact: ["Target for all compacted fill and subgrade."],
-      insights: ["Use OMC range in cut/fill balance and conditioning estimates.", "Phase work to hit OMC where possible."],
+      highImpact: ["Target for all compacted fill and subgrade—drives conditioning cost and phasing."],
+      insights: ["Use OMC range in cut/fill and conditioning takeoffs; phase work to hit OMC where you can.", "Document in grading narrative; out of range = rework and delay."],
     },
     "Highway Construction": {
-      highImpact: ["Typically strict; outside range can mean failed density and rework."],
-      insights: ["Include conditioning in unit price; plan for weather and moisture management.", "Document OMC in QC reports."],
+      highImpact: ["Agency specs are strict; outside OMC = failed density, rework, no pay until fixed."],
+      insights: ["Bid conditioning in unit price; plan for weather and moisture management in schedule.", "Document OMC in every QC report—required for acceptance."],
     },
     "Commercial Site work": {
-      highImpact: ["Required for pads and pavement subgrade acceptance."],
-      insights: ["Align with spec section on compaction and moisture; include in QA plan.", "Track versus existing moisture."],
+      highImpact: ["Pad and pavement subgrade acceptance require moisture at OMC—schedule and QA depend on it."],
+      insights: ["Align bid and QA plan with spec compaction/moisture section; track existing vs OMC.", "Schedule subgrade prep so moisture is right before structural and paving."],
     },
     "Residential Development": {
-      highImpact: ["Target for lot fill and subgrade under slabs and pavement."],
-      insights: ["Vary by soil type and lot; include in lot grading and compaction scope.", "Communicate OMC to subs."],
+      highImpact: ["Target for lot fill and subgrade under slabs and pavement—varies by soil and lot."],
+      insights: ["Include OMC in lot grading and compaction scope and unit price.", "Communicate OMC to foundation and paving subs so they can plan."],
     },
   };
   return byScope[scope] ?? DEFAULT_INSIGHTS;
@@ -163,40 +163,40 @@ function scopeInsightsOptimalMoisture(scope: ScopeKey): CharacteristicInsights {
 function scopeInsightsExpansionIndex(scope: ScopeKey): CharacteristicInsights {
   const byScope: Record<ScopeKey, CharacteristicInsights> = {
     "Earthwork Grading Contractor": {
-      highImpact: ["High EI soils can swell and damage overlying work; may require removal or treatment."],
-      insights: ["Price removal or lime stabilization if EI exceeds spec.", "Avoid using high-EI material under pavements or structures."],
+      highImpact: ["High EI = swell under pavement/structure—you’ll remove or stabilize; must be in the bid."],
+      insights: ["Price removal or lime stabilization where EI exceeds spec; don’t bury high-EI under pavements.", "Call out EI in means & methods and tie to spec limits."],
     },
     "Site Development": {
-      highImpact: ["Drives where expansive soils can remain and where they must be removed or treated."],
-      insights: ["Map EI to phases; include removal/stabilization in earthwork bid.", "Protect utilities and pavements from swell."],
+      highImpact: ["Drives where you remove or treat vs leave in place—directly affects earthwork cost and phasing."],
+      insights: ["Map EI by phase; bid removal/stabilization and protect utilities and pavement from swell.", "Include in earthwork narrative; high-EI in wrong place = callbacks."],
     },
     "Underground Utilities": {
-      highImpact: ["Swell can load pipes and structures; backfill choice is critical."],
-      insights: ["Use low-EI backfill where required; avoid expansive native in critical zones.", "Document EI in trench sections."],
+      highImpact: ["Swell loads pipes and structures—backfill type and placement drive your cost and risk."],
+      insights: ["Use specified low-EI backfill in critical zones; avoid expansive native next to pipe.", "Document EI in trench sections and backfill submittals."],
     },
     "Paving & Concrete": {
-      highImpact: ["Expansion under pavement causes heave and failure; often strict EI limits."],
-      insights: ["Remove or treat high-EI subgrade per spec; include in subgrade prep.", "Tie to warranty and long-term performance."],
+      highImpact: ["EI limits under pavement are strict—heave = failure and warranty; subgrade prep must address it."],
+      insights: ["Bid removal or treatment of high-EI subgrade per spec; include in subgrade prep line.", "Document for warranty; uncontrolled EI = callbacks."],
     },
     "Demolition": {
-      highImpact: ["Identifies material that may be unsuitable for reuse or require special handling."],
-      insights: ["High-EI export may have different disposal or reuse constraints.", "Note for site restoration."],
+      highImpact: ["High-EI export may have different disposal or reuse rules—affects haul and disposal cost."],
+      insights: ["Check disposal/reuse requirements for high-EI material; price accordingly.", "Note for site restoration if placing fill."],
     },
     "Land Development": {
-      highImpact: ["Determines fill and subgrade design (removal, treatment, or acceptance)."],
-      insights: ["Balance cut/fill with EI; avoid placing high-EI under structures or pavement.", "Include in grading and compaction narrative."],
+      highImpact: ["Decides removal vs treatment vs leave in place—drives grading and balance cost."],
+      insights: ["Don’t place high-EI under structures or pavement; include removal/stabilization in bid.", "Document EI in grading narrative and compaction submittals."],
     },
     "Highway Construction": {
-      highImpact: ["Subgrade and embankment often have EI limits; excess triggers removal or stabilization."],
-      insights: ["Bid removal or lime/fly ash stabilization; document EI in QC.", "Affects subgrade acceptance."],
+      highImpact: ["EI over limit = no acceptance until removed or stabilized—must be in unit price."],
+      insights: ["Bid removal or lime/fly ash stabilization where EI exceeds spec; document in QC.", "Tie to subgrade acceptance and pay."],
     },
     "Commercial Site work": {
-      highImpact: ["Building pads and pavement subgrade typically have EI caps."],
-      insights: ["Include removal or stabilization in earthwork; tie to structural and paving specs.", "Track EI by area for QA."],
+      highImpact: ["Pad and pavement subgrade have EI caps—over = rework and warranty exposure."],
+      insights: ["Include removal or stabilization in earthwork bid; align with structural and paving specs.", "Track EI by area in QA; document for acceptance."],
     },
     "Residential Development": {
-      highImpact: ["High EI under slabs and pavement causes callbacks and warranty issues."],
-      insights: ["Remove or treat under foundations and pavement; include in lot scope.", "Communicate EI to foundation and paving subs."],
+      highImpact: ["High EI under slabs and pavement = callbacks and warranty—fix before foundations and paving."],
+      insights: ["Remove or treat under foundations and pavement; include in lot scope and price.", "Communicate EI to foundation and paving subs so they can plan."],
     },
   };
   return byScope[scope] ?? DEFAULT_INSIGHTS;
@@ -205,40 +205,40 @@ function scopeInsightsExpansionIndex(scope: ScopeKey): CharacteristicInsights {
 function scopeInsightsShrinkage(scope: ScopeKey): CharacteristicInsights {
   const byScope: Record<ScopeKey, CharacteristicInsights> = {
     "Earthwork Grading Contractor": {
-      highImpact: ["Shrinkage reduces volume; affects quantity takeoffs and haul/import."],
-      insights: ["Apply shrinkage factor to cut/fill and import; document in quantity letter.", "Affects balance and cost."],
+      highImpact: ["Shrinkage reduces placed volume—your takeoffs and import need the right factor or you’re short."],
+      insights: ["Apply spec or typical shrinkage factor to cut/fill and import; put in quantity letter.", "Wrong factor = not enough fill, extra import, or disputed quantities."],
     },
     "Site Development": {
-      highImpact: ["Impacts earthwork quantities and balance across the site."],
-      insights: ["Include shrinkage in mass diagram and quantity estimates.", "Varies by soil type and moisture."],
+      highImpact: ["Drives earthwork quantities and balance—wrong shrinkage = wrong import/export and cost."],
+      insights: ["Include shrinkage in mass diagram and quantity estimates; document factor used.", "Varies by soil and moisture; tie to spec or geotech recommendation."],
     },
     "Underground Utilities": {
-      highImpact: ["Trench backfill may shrink and cause settlement if not compacted properly."],
-      insights: ["Account for shrinkage in backfill quantities; compact at OMC to minimize.", "Avoid settlement over pipes."],
+      highImpact: ["Backfill shrinks after placement—under-order and you’re short; poor compaction = more settlement."],
+      insights: ["Order backfill with shrinkage in mind; compact at OMC to minimize settlement.", "Settlement over pipe = callbacks; document placement and compaction."],
     },
     "Paving & Concrete": {
-      highImpact: ["Subgrade shrinkage can cause settlement and pavement failure."],
-      insights: ["Control moisture and compaction to limit shrinkage; note in subgrade prep.", "Relevant for long-term performance."],
+      highImpact: ["Subgrade shrinkage = settlement and pavement failure—control moisture and compaction."],
+      insights: ["Address in subgrade prep (moisture, compaction); note in submittals.", "Document for long-term performance and warranty."],
     },
     "Demolition": {
-      highImpact: ["Volume change affects disposal and reuse quantities."],
-      insights: ["Apply shrinkage when estimating export or reuse volumes.", "Document for billing and disposal."],
+      highImpact: ["Volume change affects export and reuse quantities—billing and disposal."],
+      insights: ["Apply shrinkage when estimating export or reuse volumes; document for billing.", "Wet vs dry weight and volume affect haul and disposal cost."],
     },
     "Land Development": {
-      highImpact: ["Drives cut/fill and import/export quantities."],
-      insights: ["Use shrinkage factor in takeoffs and balance; include in earthwork narrative.", "Varies by soil and moisture."],
+      highImpact: ["Cut/fill and import/export quantities depend on shrinkage—directly affects bid and balance."],
+      insights: ["Use shrinkage factor in takeoffs and balance; state in earthwork narrative.", "Wrong factor = balance and cost issues; document source of factor."],
     },
     "Highway Construction": {
-      highImpact: ["Embankment and subgrade quantities depend on shrinkage factor."],
-      insights: ["Apply agency shrinkage factor to quantities; document in quantity report.", "Affects pay quantities."],
+      highImpact: ["Pay quantities and balance use agency shrinkage factor—wrong factor = quantity disputes."],
+      insights: ["Apply agency shrinkage factor to all quantity takeoffs; document in quantity report.", "Affects pay quantities and balance; keep consistent with spec."],
     },
     "Commercial Site work": {
-      highImpact: ["Affects fill and balance quantities for pads and site work."],
-      insights: ["Include shrinkage in earthwork takeoffs and submittals.", "Tie to spec and QA."],
+      highImpact: ["Fill and balance for pads and site work depend on shrinkage—affects quantities and cost."],
+      insights: ["Include shrinkage in earthwork takeoffs and submittals; tie to spec.", "Document factor for QA and quantity reconciliation."],
     },
     "Residential Development": {
-      highImpact: ["Lot grading and fill quantities depend on shrinkage."],
-      insights: ["Apply shrinkage in lot balance and import; communicate to grading sub.", "Affects unit cost."],
+      highImpact: ["Lot balance and import depend on shrinkage—wrong factor = short fill or extra cost."],
+      insights: ["Apply shrinkage in lot balance and import; include in grading sub scope.", "Communicate factor to grading sub; affects unit cost and quantities."],
     },
   };
   return byScope[scope] ?? DEFAULT_INSIGHTS;
@@ -247,40 +247,40 @@ function scopeInsightsShrinkage(scope: ScopeKey): CharacteristicInsights {
 function scopeInsightsSubsidence(scope: ScopeKey): CharacteristicInsights {
   const byScope: Record<ScopeKey, CharacteristicInsights> = {
     "Earthwork Grading Contractor": {
-      highImpact: ["Settlement after placement affects finish grade and overlying work."],
-      insights: ["Include overbuild or preload where subsidence is expected.", "Document for schedule and QC."],
+      highImpact: ["Settlement after placement eats your finish grade—overbuild or preload must be in the bid."],
+      insights: ["Bid overbuild or preload where subsidence is expected; document in means & methods.", "Schedule and QC: allow time or lift thickness so finish grade is met after settlement."],
     },
     "Site Development": {
-      highImpact: ["Settlement can damage utilities, pavement, and structures if not accounted for."],
-      insights: ["Plan for preload, overbuild, or staged construction where subsidence is high.", "Include in phasing and schedule."],
+      highImpact: ["Unplanned settlement damages utilities, pavement, and structures—you own the fix if you didn’t plan for it."],
+      insights: ["Bid preload, overbuild, or staged construction where subsidence is high; put in phasing.", "Include in schedule—settlement time can drive critical path."],
     },
     "Underground Utilities": {
-      highImpact: ["Differential settlement can damage pipes and structures."],
-      insights: ["Design backfill and bedding to limit settlement; consider overexcavation and select fill.", "Document for warranty."],
+      highImpact: ["Differential settlement breaks pipes and structures—backfill and bedding must limit it."],
+      insights: ["Use specified backfill and bedding to limit settlement; consider overexcavation and select fill.", "Document placement and compaction for warranty; settlement = callbacks."],
     },
     "Paving & Concrete": {
-      highImpact: ["Subgrade settlement causes pavement failure and warranty claims."],
-      insights: ["Address in subgrade prep (overexcavation, stabilization, preload).", "Tie to spec and long-term performance."],
+      highImpact: ["Subgrade settlement = pavement failure and warranty—address in subgrade prep or eat the callback."],
+      insights: ["Bid overexcavation, stabilization, or preload per spec in subgrade prep.", "Document for long-term performance and warranty; tie to spec."],
     },
     "Demolition": {
-      highImpact: ["Less direct; relevant if fill is placed for restoration."],
-      insights: ["If placing fill, account for subsidence in thickness and finish grade.", "Note for post-demolition grading."],
+      highImpact: ["Matters when you place fill for restoration—thickness and finish grade must allow for settlement."],
+      insights: ["If placing fill, add subsidence to thickness and finish grade; include in scope.", "Document for post-demolition grading and acceptance."],
     },
     "Land Development": {
-      highImpact: ["Settlement affects finish grades and building pads."],
-      insights: ["Include overbuild or preload in earthwork; phase to allow settlement where possible.", "Document in grading plan."],
+      highImpact: ["Settlement drives finish grades and pad elevations—overbuild or preload must be in earthwork bid."],
+      insights: ["Include overbuild or preload in earthwork; phase to allow settlement where possible.", "Document in grading plan and submittals; wrong grade = rework."],
     },
     "Highway Construction": {
-      highImpact: ["Embankment and subgrade settlement affect profile and rideability."],
-      insights: ["Apply settlement factor in design and construction; preload or stage if needed.", "Document for acceptance."],
+      highImpact: ["Settlement affects profile and rideability—agency will reject if not addressed."],
+      insights: ["Apply settlement factor per spec; bid preload or staging if required.", "Document in construction and QC for acceptance and pay."],
     },
     "Commercial Site work": {
-      highImpact: ["Building and pavement performance depend on limiting settlement."],
-      insights: ["Include in subgrade and fill design; preload or overbuild per spec.", "Track for QA and warranty."],
+      highImpact: ["Pad and pavement performance depend on limiting settlement—spec usually requires preload or overbuild."],
+      insights: ["Bid subgrade and fill per spec (preload, overbuild); track in QA.", "Document for warranty; settlement = structural and pavement callbacks."],
     },
     "Residential Development": {
-      highImpact: ["Settlement under slabs and pavement causes callbacks."],
-      insights: ["Address in pad and lot grading; overbuild or allow time for settlement.", "Communicate to foundation and paving subs."],
+      highImpact: ["Settlement under slabs and pavement = callbacks—fix in pad and lot grading scope."],
+      insights: ["Bid overbuild or allow time for settlement in pad and lot grading.", "Communicate to foundation and paving subs so they don’t build on fresh fill."],
     },
   };
   return byScope[scope] ?? DEFAULT_INSIGHTS;

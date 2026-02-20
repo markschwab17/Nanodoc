@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import Editor from "./Editor";
 import {
   parseCiviltakeoffViewParams,
@@ -17,11 +17,13 @@ import {
 import { usePDF } from "@/shared/hooks/usePDF";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
+import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export default function CiviltakeoffView() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { loadPDF } = usePDF();
   const { showNotification } = useNotificationStore();
 
@@ -34,23 +36,73 @@ export default function CiviltakeoffView() {
   // Guard: only one fetch per distinct URL (no setState, so no extra renders/effect re-runs)
   const lastFetchedSearchRef = useRef<string | null>(null);
 
-  // Listen for CTO postMessage: go to page without reload (scroll + highlight)
+  // Listen for CTO postMessage: go to page without reload (scroll + highlight), or open another PDF as new tab
   useEffect(() => {
     const params = parseCiviltakeoffViewParams(window.location.search);
     const allowedOrigin = params.api_origin?.replace(/\/+$/, "") ?? null;
 
-    const handleMessage = (event: MessageEvent) => {
+    const handleMessage = async (event: MessageEvent) => {
       if (allowedOrigin && event.origin !== allowedOrigin) return;
       const data = event.data;
-      if (data?.type !== "nanodoc-goto-page" || typeof data.page !== "number") return;
-      // CTO may send 1-based page (e.g. table "Page 1"); viewer uses 0-based
-      const raw = Math.floor(data.page);
-      const page = raw >= 1 ? raw - 1 : Math.max(0, raw);
-      window.dispatchEvent(
-        new CustomEvent("scroll-to-spec", {
-          detail: { page },
-        })
-      );
+
+      if (data?.type === "nanodoc-goto-page" && typeof data.page === "number") {
+        const raw = Math.floor(data.page);
+        const page = raw >= 1 ? raw - 1 : Math.max(0, raw);
+        window.dispatchEvent(
+          new CustomEvent("scroll-to-spec", {
+            detail: { page },
+          })
+        );
+        return;
+      }
+
+      if (data?.type === "nanodoc-open-document" && data?.token && data?.api_origin) {
+        const apiOrigin = String(data.api_origin).replace(/\/+$/, "");
+        const token = String(data.token);
+        const projectId = data?.project_id != null ? String(data.project_id) : null;
+        const displayName = typeof data.displayName === "string" && data.displayName.trim()
+          ? data.displayName.trim()
+          : "document.pdf";
+        try {
+          // Set CTO context before load so the new tab gets it when addTab runs; Save will use this file
+          if (projectId) {
+            useCiviltakeoffContextStore.getState().setContext({
+              project: projectId,
+              doc: "document_file",
+              token,
+              api_origin: apiOrigin,
+            });
+          }
+          const url = `${apiOrigin}/api/nanodoc/pdf?token=${encodeURIComponent(token)}`;
+          const res = await fetch(url);
+          if (!res.ok) {
+            if (res.status === 401) {
+              throw new Error("Invalid or expired link. Please open the document again from Civiltakeoff.");
+            }
+            if (res.status === 404) {
+              throw new Error("Document not found.");
+            }
+            throw new Error(`Failed to load document (${res.status}).`);
+          }
+          const json = await res.json();
+          const pdfUrl = json?.pdfUrl;
+          if (!pdfUrl || typeof pdfUrl !== "string") {
+            throw new Error("Invalid response from server.");
+          }
+          const pdfRes = await fetch(pdfUrl);
+          if (!pdfRes.ok) {
+            throw new Error("Failed to fetch PDF file.");
+          }
+          const arrayBuffer = await pdfRes.arrayBuffer();
+          const pdfData = new Uint8Array(arrayBuffer);
+          const mupdfModule = await import("mupdf");
+          await loadPDFRef.current(pdfData, displayName, mupdfModule.default, null);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Failed to open document.";
+          usePDFStore.getState().setError(msg);
+          showNotificationRef.current(msg, "error");
+        }
+      }
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
@@ -105,7 +157,26 @@ export default function CiviltakeoffView() {
             ? "soils_report.pdf"
             : params.doc === "bid_docs"
               ? "bid_docs.pdf"
-              : "document.pdf";
+              : params.doc === "document_file" && params.file_name?.trim()
+                ? (params.file_name.trim().toLowerCase().endsWith(".pdf") ? params.file_name.trim() : params.file_name.trim() + ".pdf")
+                : "document.pdf";
+
+        // Persist CTO context so Save / stitch can use it
+        if (params.project && params.doc && params.token) {
+          useCiviltakeoffContextStore.getState().setContext({
+            project: params.project,
+            doc: params.doc,
+            token: params.token,
+            api_origin: params.api_origin,
+          });
+        }
+
+        // Stitch mode: do not load into editor; pass PDF to stitch view and navigate
+        if (params.stitch === "1") {
+          useCtoStitchInitialStore.getState().setInitial({ pdfBytes: data, fileName: name });
+          navigate("/stitch");
+          return;
+        }
 
         const mupdfModule = await import("mupdf");
         await loadPDFRef.current(data, name, mupdfModule.default, null);
@@ -135,16 +206,6 @@ export default function CiviltakeoffView() {
           }
         }
 
-        // Persist CTO context so Save can write PDF and extraction back to CTO
-        if (params.project && params.doc && params.token) {
-          useCiviltakeoffContextStore.getState().setContext({
-            project: params.project,
-            doc: params.doc,
-            token: params.token,
-            api_origin: params.api_origin,
-          });
-        }
-
         // Deep link: navigate to page (0-based)
         if (params.page != null) {
           usePDFStore.getState().setCurrentPage(params.page);
@@ -163,21 +224,52 @@ export default function CiviltakeoffView() {
 
         // Auto-run geotechnical extraction when opened from CTO soils report
         if (params.auto_extract === "geotechnical") {
-          const doc = usePDFStore.getState().getCurrentDocument();
-          if (doc) {
-            const documentId = doc.getId();
-            setTimeout(() => {
+          const defaultScope = "Earthwork Grading Contractor";
+          const allScopes = [
+            "Earthwork Grading Contractor",
+            "Site Development",
+            "Underground Utilities",
+            "Paving & Concrete",
+            "Demolition",
+            "Land Development",
+            "Highway Construction",
+            "Commercial Site work",
+            "Residential Development",
+          ] as const;
+          const incomingScope = params.scope;
+          const scopeForExtraction =
+            incomingScope && allScopes.includes(incomingScope as (typeof allScopes)[number])
+              ? incomingScope
+              : defaultScope;
+          
+          // Retry logic: try multiple times with increasing delays to ensure SpecExtractionPanel is ready
+          let attempt = 0;
+          const maxAttempts = 5;
+          const tryExtraction = () => {
+            const doc = usePDFStore.getState().getCurrentDocument();
+            if (doc) {
+              const documentId = doc.getId();
+              console.log("[CiviltakeoffView] Dispatching spec-extraction-request", { documentId, scope: scopeForExtraction });
               window.dispatchEvent(
                 new CustomEvent("spec-extraction-request", {
                   detail: {
                     documentId,
                     extractionType: "geotechnical",
-                    scope: "Earthwork Grading Contractor",
+                    scope: scopeForExtraction,
                   },
                 })
               );
-            }, 300);
-          }
+            } else if (attempt < maxAttempts) {
+              attempt++;
+              setTimeout(tryExtraction, 500 * attempt); // 500ms, 1000ms, 1500ms, 2000ms, 2500ms
+            } else {
+              console.warn("[CiviltakeoffView] No document after retries, posting extraction-complete false");
+              if (typeof window !== "undefined" && window.parent !== window) {
+                window.parent.postMessage({ type: "nanodoc-extraction-complete", success: false }, "*");
+              }
+            }
+          };
+          setTimeout(tryExtraction, 1000); // Initial delay: 1 second
         }
       } catch (e) {
         const msg =

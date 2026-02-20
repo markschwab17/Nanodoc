@@ -7,6 +7,7 @@
 import { useCallback } from "react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
@@ -100,6 +101,12 @@ export function usePDF() {
         }
         if (aiPayload?.extractedSpecs?.length) {
           useSpecExtractionStore.getState().setExtractedSpecs(documentId, aiPayload.extractedSpecs);
+        }
+        if (aiPayload?.geotechnicalSummary?.length) {
+          useSpecExtractionStore.getState().setGeotechnicalSummary(documentId, aiPayload.geotechnicalSummary);
+          if (aiPayload.geotechnicalScope) {
+            useSpecExtractionStore.getState().setGeotechnicalScope(documentId, aiPayload.geotechnicalScope);
+          }
         }
 
         // Add to recent files if we have a file path (use normalized path for consistency with sidecar)
@@ -238,6 +245,12 @@ export function usePDF() {
           lastSaved: filePath ? Date.now() : null, // If loaded from file, consider it "saved"
           order: tabStore.tabs.length,
         });
+
+        // If we have CTO context (e.g. opened from CTO or postMessage), attach it to this tab so Save uses the correct file
+        const ctoContext = useCiviltakeoffContextStore.getState().getContext();
+        if (ctoContext) {
+          tabStore.updateTab(tabId, { ctoContext });
+        }
 
         // Set select tool as default when PDF is loaded
         setActiveTool("select");

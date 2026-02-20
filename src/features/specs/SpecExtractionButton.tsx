@@ -50,8 +50,9 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
   const existingSpecs = documentId ? getExtractedSpecs(documentId) : [];
   const geoSummary = documentId ? getGeotechnicalSummary(documentId) : undefined;
   const hasResults = existingSpecs.length > 0 || (geoSummary?.length ?? 0) > 0;
+  const resultCount = existingSpecs.length + (geoSummary?.length ?? 0);
   
-  // Calculate API credit estimation
+  // Calculate API credit estimation (specs = chunk-based; geotechnical = full PDF sent)
   const apiCreditEstimate = useMemo(() => {
     if (!currentDocument) return null;
     
@@ -60,31 +61,29 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
       const pageCount = metadata.pageCount || 0;
       const fileSize = metadata.fileSize || 0;
       
-      // If document isn't loaded yet or has no pages, return null
       if (pageCount === 0 || fileSize === 0) return null;
       
       const fileSizeMB = fileSize / (1024 * 1024);
+      // Gemini 1.5 Flash: ~$0.075 per 1M input tokens, ~$0.30 per 1M output tokens
+      let totalTokens: number;
+      let apiCalls: number;
+      if (mode === "ask") {
+        totalTokens = pageCount * 1000;
+        apiCalls = 1.5;
+      } else if (extractionType === "geotechnical") {
+        // Full PDF sent as inline base64: token count scales with file size (~256 tokens per KB)
+        totalTokens = Math.ceil((fileSize / 1024) * 256);
+        apiCalls = 1; // single generateContent with inline PDF
+      } else {
+        // Specs: chunk-based extraction, ~1000 tokens per page, 2–3 API calls
+        totalTokens = pageCount * 1000;
+        apiCalls = 2.5;
+      }
       
-      // Rough estimation:
-      // - Gemini 1.5 Flash: ~$0.075 per 1M input tokens, ~$0.30 per 1M output tokens
-      // - Average PDF: ~1000 tokens per page (text extraction)
-      // - For extraction: typically 2-3 API calls (chunking + extraction)
-      // - For question: typically 1-2 API calls
-      
-      const estimatedTokensPerPage = 1000;
-      const totalTokens = pageCount * estimatedTokensPerPage;
-      
-      // Input cost: tokens * price per 1M tokens
       const inputCost = (totalTokens / 1_000_000) * 0.075;
-      
-      // Output cost (estimated 10% of input for extraction, 5% for questions)
       const outputRatio = mode === "extract" ? 0.1 : 0.05;
       const outputTokens = totalTokens * outputRatio;
       const outputCost = (outputTokens / 1_000_000) * 0.30;
-      
-      // Number of API calls (extraction uses more calls)
-      const apiCalls = mode === "extract" ? 2.5 : 1.5;
-      
       const totalCost = (inputCost + outputCost) * apiCalls;
       
       return {
@@ -98,7 +97,7 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
       console.warn("Error calculating API credit estimate:", error);
       return null;
     }
-  }, [currentDocument, mode]);
+  }, [currentDocument, mode, extractionType]);
   
   const handleExtract = () => {
     if (!currentDocument) return;
@@ -279,7 +278,7 @@ export function SpecExtractionButton({ buttonClassName, iconClassName }: SpecExt
                   size="sm"
                 >
                   <FileText className="h-4 w-4 mr-2" />
-                  View Results ({existingSpecs.length})
+                  View Results ({resultCount})
                 </Button>
               )}
               

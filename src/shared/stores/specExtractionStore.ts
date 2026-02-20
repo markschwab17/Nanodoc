@@ -21,7 +21,7 @@ export interface TemporaryTextHighlight {
   specId: string;
 }
 
-export type ExtractionPhase = "preparing" | "finding" | "thinking" | null;
+export type ExtractionPhase = "preparing" | "finding" | "thinking" | "finished" | null;
 
 export interface SpecExtractionState {
   // Extraction state

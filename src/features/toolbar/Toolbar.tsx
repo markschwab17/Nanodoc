@@ -15,6 +15,7 @@ import {
   Undo2,
   Redo2,
   Save,
+  Loader2,
   Printer,
   Clock,
   TextSelect,
@@ -69,12 +70,21 @@ export function Toolbar() {
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showShapeMenu, setShowShapeMenu] = useState(false);
+  const [savingToCto, setSavingToCto] = useState(false);
   const recentFilesButtonRef = useRef<HTMLButtonElement>(null);
   const shapeMenuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Get current tab for save state
-  const activeTab = useTabStore.getState().getActiveTab();
+  // Subscribe to active tab so Save uses the correct CTO context when user switches tabs
+  const activeTabId = useTabStore((s) => s.activeTabId);
+  const activeTab = useTabStore((s) =>
+    s.activeTabId ? s.tabs.find((t) => t.id === s.activeTabId) ?? null : null
+  );
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
+
+  useEffect(() => {
+    const tab = useTabStore.getState().getActiveTab();
+    useCiviltakeoffContextStore.getState().setContext(tab?.ctoContext ?? null);
+  }, [activeTabId]);
 
   // Cleanup shape menu hover timeout on unmount
   useEffect(() => {
@@ -253,15 +263,26 @@ export function Toolbar() {
       // Get all annotations for this document
       const annotations = usePDFStore.getState().getAnnotations(currentDoc.getId());
 
-      // Build AI metadata (extracted specs, conversation) so it persists when PDF is re-opened
+      // Build AI metadata (extracted specs, geotechnical, conversation) so it persists when PDF is re-opened and is stored inside the PDF file
       const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(currentDoc.getId());
+      const geotechnicalSummary = useSpecExtractionStore.getState().getGeotechnicalSummary(currentDoc.getId());
+      const geotechnicalScope = useSpecExtractionStore.getState().getGeotechnicalScope(currentDoc.getId());
       // TODO: when we have a per-document conversation store, pass it here and include in aiMetadata
       const conversationHistory: { messages: { role: "user" | "assistant"; content: string }[] } | undefined =
         undefined as { messages: { role: "user" | "assistant"; content: string }[] } | undefined;
       const hasConversation = conversationHistory != null && conversationHistory.messages.length > 0;
+      const hasGeotechnical = Boolean(geotechnicalSummary?.length && geotechnicalScope);
       const aiMetadata =
-        extractedSpecs.length > 0 || hasConversation
-          ? { version: 1, extractedSpecs, ...(hasConversation && conversationHistory ? { conversationHistory } : {}) }
+        extractedSpecs.length > 0 || hasConversation || hasGeotechnical
+          ? {
+              version: 1,
+              ...(extractedSpecs.length > 0 && { extractedSpecs }),
+              ...(hasGeotechnical && geotechnicalSummary && geotechnicalScope && {
+                geotechnicalSummary,
+                geotechnicalScope,
+              }),
+              ...(hasConversation && conversationHistory ? { conversationHistory } : {}),
+            }
           : undefined;
 
       // Initialize mupdf and PDFEditor
@@ -413,6 +434,7 @@ export function Toolbar() {
 
     // Opened from Civiltakeoff (browser, no path): save PDF and extraction back to CTO
     if (ctx && !originalPath) {
+      setSavingToCto(true);
       try {
         await syncAndSavePDF(async (pdfData) => {
           const form = new FormData();
@@ -471,12 +493,84 @@ export function Toolbar() {
         useNotificationStore
           .getState()
           .showNotification(error instanceof Error ? error.message : "Failed to save to Civiltakeoff", "error");
+      } finally {
+        setSavingToCto(false);
       }
       return;
     }
 
     // No path and not CTO: Save As
     await handleSaveAs();
+  };
+
+  /** Save current PDF and extraction to Civiltakeoff only. Shown only when ctoContext is set. */
+  const handleSaveToCto = async () => {
+    const currentDoc = getCurrentDocument();
+    if (!currentDoc) return;
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    if (!ctx) return;
+    setSavingToCto(true);
+    try {
+      await syncAndSavePDF(async (pdfData) => {
+        const form = new FormData();
+        form.append("token", ctx.token);
+        form.append("file", new Blob([pdfData as BlobPart], { type: "application/pdf" }), currentDoc.getName());
+        const saveRes = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
+          method: "POST",
+          body: form,
+        });
+        if (!saveRes.ok) {
+          const err = await saveRes.json().catch(() => ({}));
+          throw new Error((err as { message?: string }).message ?? "Failed to save PDF to Civiltakeoff");
+        }
+        const documentId = currentDoc.getId();
+        const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(documentId);
+        const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(documentId);
+        const tables =
+          extractedSpecs.length > 0
+            ? [
+                {
+                  headers: ["Category", "Parameter", "Value", "Unit", "Page", "Quote"],
+                  rows: extractedSpecs.map((s) => [
+                    s.category,
+                    s.parameter,
+                    s.value,
+                    s.unit ?? "",
+                    s.page,
+                    s.quote_text ?? "",
+                  ]),
+                },
+              ]
+            : [];
+        const pageRefs = Array.from(
+          new Set(extractedSpecs.map((s) => s.page).filter((p) => p != null))
+        ).map((page) => ({ page: Number(page), label: `Page ${Number(page) + 1}` }));
+        const extractionJson: { tables?: unknown[]; specHighlights?: typeof specHighlights } = { tables };
+        if (specHighlights.length > 0) {
+          extractionJson.specHighlights = specHighlights;
+        }
+        const extractRes = await fetch(`${ctx.api_origin}/api/nanodoc/extraction`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: ctx.token,
+            extractionJson,
+            pageRefs,
+          }),
+        });
+        if (!extractRes.ok) {
+          console.warn("Failed to send extraction to Civiltakeoff:", await extractRes.text());
+        }
+      });
+      useNotificationStore.getState().showNotification("Saved to Civiltakeoff", "success");
+    } catch (error) {
+      console.error("Error saving to Civiltakeoff:", error);
+      useNotificationStore
+        .getState()
+        .showNotification(error instanceof Error ? error.message : "Failed to save to Civiltakeoff", "error");
+    } finally {
+      setSavingToCto(false);
+    }
   };
 
   const handleSaveAs = async () => {
@@ -622,12 +716,16 @@ export function Toolbar() {
             <Button
               variant="outline"
               size="icon"
-              disabled={!currentDocument}
-              title="Save & Export"
+              disabled={!currentDocument || savingToCto}
+              title={savingToCto ? "Saving…" : "Save & Export"}
               className={sizeClasses.button}
               data-action="save"
             >
-              <Save className={sizeClasses.icon} />
+              {savingToCto ? (
+                <Loader2 className={`${sizeClasses.icon} animate-spin`} />
+              ) : (
+                <Save className={sizeClasses.icon} />
+              )}
             </Button>
           </PopoverTrigger>
           <PopoverContent className="w-56 p-1" side="left" align="start">
@@ -635,7 +733,7 @@ export function Toolbar() {
               <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
                 Save as PDF
               </div>
-              {(isTauri || ctoContext) && (
+              {isTauri && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -643,7 +741,23 @@ export function Toolbar() {
                   className="justify-start"
                 >
                   <Save className="h-4 w-4 mr-2" />
-                  {ctoContext ? "Save to Civiltakeoff" : "Save"}
+                  Save
+                </Button>
+              )}
+              {ctoContext && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleSaveToCto}
+                  disabled={savingToCto}
+                  className="justify-start"
+                >
+                  {savingToCto ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4 mr-2" />
+                  )}
+                  {savingToCto ? "Saving…" : "Save to Civiltakeoff"}
                 </Button>
               )}
               <Button

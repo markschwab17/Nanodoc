@@ -165,10 +165,18 @@ ${customPrompt ? `\nADDITIONAL CUSTOM INSTRUCTIONS:\n${customPrompt}\n` : ''}
 }
 
 function parseGeotechnicalResponse(parsed: Record<string, unknown>, batchChunks: Array<{ page: number }>): GeotechnicalSummary {
-  const validPages = batchChunks.length ? batchChunks.map((c) => c.page) : [0];
-  const minPage = Math.min(...validPages);
-  const maxPage = Math.max(...validPages);
-  const clampPage = (p: number): number => (typeof p !== 'number' || Number.isNaN(p) ? 0 : Math.max(minPage, Math.min(maxPage, p)));
+  const hasChunkRange = batchChunks.length > 0;
+  const validPages = hasChunkRange ? batchChunks.map((c) => c.page) : [];
+  const minPage = validPages.length ? Math.min(...validPages) : 0;
+  const maxPage = validPages.length ? Math.max(...validPages) : 0;
+  const normalizePage = (p: number): number => {
+    if (typeof p !== 'number' || Number.isNaN(p)) return 0;
+    const raw = Math.floor(p);
+    const asZeroBased = raw >= 1 ? raw - 1 : raw;
+    const normalized = Math.max(0, asZeroBased);
+    if (hasChunkRange) return Math.max(minPage, Math.min(maxPage, normalized));
+    return normalized;
+  };
 
   return GEOTECHNICAL_CHARACTERISTIC_ORDER.map((key) => {
     const raw = parsed[key];
@@ -177,7 +185,7 @@ function parseGeotechnicalResponse(parsed: Record<string, unknown>, batchChunks:
       return {
         characteristicKey: key,
         value: typeof obj.value === 'string' ? obj.value : 'N/A',
-        page: clampPage(Number(obj.page)),
+        page: normalizePage(Number(obj.page)),
         quote: typeof obj.quote === 'string' && obj.quote.trim() ? obj.quote : '(Note: Not provided in this document).',
       } as GeotechnicalSoilRow;
     }
