@@ -137,7 +137,7 @@ export function StitchCanvas({
       ro.disconnect();
       win?.removeEventListener("scroll", update, true);
     };
-  }, [pointAlignMode, scaleAlignMode]);
+  }, [pointAlignMode, scaleAlignMode, contentDeleteMode]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -398,51 +398,6 @@ export function StitchCanvas({
           <StitchTile key={tile.id} tile={tile} zoomLevel={zoomLevel} />
         ))}
         <GroupSelectionOverlay />
-        {contentDeleteMode && (
-          <div
-            className="absolute inset-0 z-10 pointer-events-auto"
-            style={{ width: canvasWidth, height: canvasHeight }}
-            onPointerDown={(e) => {
-              if (e.button === 0 && onContentDeleteRect) {
-                const coords = clientToCanvas(e.clientX, e.clientY);
-                if (coords) {
-                  isDeleteSelectingRef.current = true;
-                  setDeleteSelection({ start: coords, current: coords });
-                }
-              }
-            }}
-            onPointerMove={(e) => {
-              if (isDeleteSelectingRef.current && deleteSelection) {
-                const coords = clientToCanvas(e.clientX, e.clientY);
-                if (coords) setDeleteSelection((prev) => (prev ? { ...prev, current: coords } : null));
-              }
-            }}
-            onPointerUp={(e) => {
-              if (e.button === 0 && isDeleteSelectingRef.current && deleteSelection && onContentDeleteRect) {
-                isDeleteSelectingRef.current = false;
-                const { start, current } = deleteSelection;
-                const x = Math.min(start.x, current.x);
-                const y = Math.min(start.y, current.y);
-                const w = Math.abs(current.x - start.x);
-                const h = Math.abs(current.y - start.y);
-                if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onContentDeleteRect({ x, y, w, h });
-                setDeleteSelection(null);
-              }
-            }}
-            onPointerLeave={() => {
-              if (isDeleteSelectingRef.current && deleteSelection && onContentDeleteRect) {
-                const { start, current } = deleteSelection;
-                const x = Math.min(start.x, current.x);
-                const y = Math.min(start.y, current.y);
-                const w = Math.abs(current.x - start.x);
-                const h = Math.abs(current.y - start.y);
-                if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onContentDeleteRect({ x, y, w, h });
-                isDeleteSelectingRef.current = false;
-                setDeleteSelection(null);
-              }
-            }}
-          />
-        )}
         {deleteElementMode && (
           <div
             className="absolute left-0 top-0 z-10 cursor-crosshair"
@@ -571,6 +526,65 @@ export function StitchCanvas({
           ))}
             </div>
       </div>
+      {/* Content-delete overlay: portal so erase works outside canvas (e.g. rulers, viewport margin) */}
+      {contentDeleteMode &&
+        containerRect &&
+        createPortal(
+          <div
+            className="fixed z-[100] cursor-crosshair"
+            style={{
+              left: containerRect.left,
+              top: containerRect.top,
+              width: containerRect.width,
+              height: containerRect.height,
+              pointerEvents: "auto",
+            }}
+            onPointerDown={(e) => {
+              if (e.button === 0 && onContentDeleteRect) {
+                const coords = clientToCanvas(e.clientX, e.clientY);
+                if (coords) {
+                  isDeleteSelectingRef.current = true;
+                  setDeleteSelection({ start: coords, current: coords });
+                  (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+                }
+              }
+            }}
+            onPointerMove={(e) => {
+              if (isDeleteSelectingRef.current && deleteSelection) {
+                const coords = clientToCanvas(e.clientX, e.clientY);
+                if (coords) setDeleteSelection((prev) => (prev ? { ...prev, current: coords } : null));
+              }
+            }}
+            onPointerUp={(e) => {
+              if (e.button === 0 && isDeleteSelectingRef.current && deleteSelection && onContentDeleteRect) {
+                try {
+                  (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+                } catch (_) {}
+                isDeleteSelectingRef.current = false;
+                const { start, current } = deleteSelection;
+                const x = Math.min(start.x, current.x);
+                const y = Math.min(start.y, current.y);
+                const w = Math.abs(current.x - start.x);
+                const h = Math.abs(current.y - start.y);
+                if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onContentDeleteRect({ x, y, w, h });
+                setDeleteSelection(null);
+              }
+            }}
+            onPointerLeave={() => {
+              if (isDeleteSelectingRef.current && deleteSelection && onContentDeleteRect) {
+                const { start, current } = deleteSelection;
+                const x = Math.min(start.x, current.x);
+                const y = Math.min(start.y, current.y);
+                const w = Math.abs(current.x - start.x);
+                const h = Math.abs(current.y - start.y);
+                if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onContentDeleteRect({ x, y, w, h });
+                isDeleteSelectingRef.current = false;
+                setDeleteSelection(null);
+              }
+            }}
+          />,
+          document.body
+        )}
       {/* Point/scale align overlay: portal with fixed position so preview is never clipped by canvas/container */}
       {(pointAlignMode || scaleAlignMode) &&
         (onPointAlignClick || onScaleAlignClick) &&

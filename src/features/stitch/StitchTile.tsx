@@ -431,8 +431,9 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
             size="icon"
             className={`absolute -top-12 z-10 border-2 border-border shadow-md ${isLocked ? "left-1/2 -translate-x-1/2" : "right-0 translate-x-1/2"}`}
             style={{
-              width: `${Math.max(40, Math.round(28 * zoomLevel))}px`,
-              height: `${Math.max(40, Math.round(28 * zoomLevel))}px`,
+              // Size in canvas space so that on-screen size stays ~29px (canvas is scaled by zoomLevel)
+              width: `${(32 * 0.9) / zoomLevel}px`,
+              height: `${(32 * 0.9) / zoomLevel}px`,
             }}
             title={isLocked ? "Unlock position" : "Lock position"}
             onClick={handleToggleLock}
