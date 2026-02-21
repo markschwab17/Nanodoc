@@ -19,7 +19,6 @@ import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
 import { ShapeToolbar } from "@/features/viewer/ShapeToolbar";
 import { FormToolbar } from "@/features/viewer/FormToolbar";
-import { SearchBar } from "@/features/search/SearchBar";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { StampGallery } from "@/features/stamps/StampGallery";
 import { StampCreator } from "@/features/stamps/StampCreator";
@@ -699,11 +698,6 @@ function Editor() {
           {/* Sidebar content: always mounted so ThumbnailCarousel cache is preserved when expanding */}
           <div className={cn("flex h-full w-64 shrink-0 flex-col min-h-0", leftSidebarCollapsed && "absolute left-0 top-0 bottom-0 pointer-events-none opacity-0")}>
             <div className="flex-1 flex flex-col overflow-hidden min-h-0 relative">
-              {!splitScreenMode && (
-                <div className="border-b bg-background">
-                  <SearchBar />
-                </div>
-              )}
               <div className="flex-1 overflow-hidden min-h-0">
                 <ThumbnailCarousel />
               </div>

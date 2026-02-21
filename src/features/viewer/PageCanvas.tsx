@@ -3470,51 +3470,36 @@ export function PageCanvas({
 
         {/* No selection rectangle for selectText - only show text highlights */}
 
-        {/* Render search result highlights */}
-        {pageSearchMatches.length > 0 && (
-          <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 50 }}>
-            {pageSearchMatches.map((match) => {
-                // match.quad is an array of quads (for multi-line matches)
-                // Each quad is [x0, y0, x1, y1, x2, y2, x3, y3] in PDF coordinates
-                // Get the first quad for this match
-                const quads = match.quad;
+        {/* Render search result highlights - use same point/scale system as other markups (pdfToCanvas) */}
+        {pageSearchMatches.length > 0 && (() => {
+          const pageMetadata = document.getPageMetadata(pageNumber);
+          const pageHeight = pageMetadata?.height ?? 0;
+          return (
+            <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 50 }}>
+              {pageSearchMatches.flatMap((match) => {
+                // match.quad can be a single quad (number[]) or array of quads (number[][]); mupdf search returns display coords (Y=0 at top)
+                const quadsRaw = match.quad;
+                const quads: number[][] = Array.isArray(quadsRaw) && quadsRaw.length > 0
+                  ? (Array.isArray(quadsRaw[0]) ? (quadsRaw as number[][]) : [quadsRaw as unknown as number[]])
+                  : [];
                 const isCurrentMatch = currentSearchMatch?.matchIndex === match.matchIndex;
-                
-                // Render each quad in this match (usually just one, but can be multiple for multi-line text)
+
                 return quads.map((singleQuad: number[], quadIdx: number) => {
-                  const minX = Math.min(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
-                  const minY = Math.min(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
-                  const maxX = Math.max(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
-                  const maxY = Math.max(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
-                  
-                  // mupdf search quads use Y=0 at top (screen-like), so no Y flip; just scale in read mode
-                  let canvasX = minX;
-                  let canvasY = minY;
-                  let width = maxX - minX;
-                  let height = maxY - minY;
-                  
-                  // In read mode, use same scale as pdfToCanvas (display props or zoom fallback) for alignment
-                  const pageMetadata = document.getPageMetadata(pageNumber);
-                  if (readMode && pageMetadata && pageMetadata.width > 0 && pageMetadata.height > 0) {
-                    let scaleX = 1;
-                    let scaleY = 1;
-                    if (displayWidthProp != null && displayHeightProp != null && displayWidthProp > 0 && displayHeightProp > 0) {
-                      scaleX = displayWidthProp / pageMetadata.width;
-                      scaleY = displayHeightProp / pageMetadata.height;
-                    } else {
-                      const firstPageMetadata = document.getPageMetadata(0);
-                      if (firstPageMetadata) {
-                        const viewportWidth = firstPageMetadata.width * zoomLevel;
-                        scaleX = viewportWidth / pageMetadata.width;
-                        scaleY = scaleX;
-                      }
-                    }
-                    canvasX = minX * scaleX;
-                    canvasY = minY * scaleY;
-                    width = (maxX - minX) * scaleX;
-                    height = (maxY - minY) * scaleY;
-                  }
-                  
+                  if (!Array.isArray(singleQuad) || singleQuad.length < 8) return null;
+                  // mupdf search quads are in display coordinates (Y=0 at top); convert to PDF (Y=0 at bottom) then use pdfToCanvas like other overlays
+                  const displayMinX = Math.min(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
+                  const displayMinY = Math.min(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
+                  const displayMaxX = Math.max(singleQuad[0], singleQuad[2], singleQuad[4], singleQuad[6]);
+                  const displayMaxY = Math.max(singleQuad[1], singleQuad[3], singleQuad[5], singleQuad[7]);
+                  const pdfMinY = pageHeight - displayMaxY;
+                  const pdfMaxY = pageHeight - displayMinY;
+                  const topLeft = pdfToCanvas(displayMinX, pdfMaxY);
+                  const bottomRight = pdfToCanvas(displayMaxX, pdfMinY);
+                  const canvasX = Math.min(topLeft.x, bottomRight.x);
+                  const canvasY = Math.min(topLeft.y, bottomRight.y);
+                  const width = Math.abs(bottomRight.x - topLeft.x);
+                  const height = Math.abs(bottomRight.y - topLeft.y);
+
                   return (
                     <div
                       key={`search_${match.matchIndex}_${quadIdx}`}
@@ -3533,7 +3518,8 @@ export function PageCanvas({
                 });
               })}
             </div>
-        )}
+          );
+        })()}
 
         {/* Render spec extraction highlights */}
         {(() => {
