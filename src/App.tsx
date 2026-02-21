@@ -12,6 +12,7 @@ import { TabBar } from "@/features/tabs/TabBar";
 import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
+import { AISidePanel } from "@/features/specs/AISidePanel";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
 import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { SearchBar } from "@/features/search/SearchBar";
@@ -256,9 +257,9 @@ function App() {
   }, [currentDocument, getRecentFiles]);
 
 
-  // Get root props but override title to prevent tooltip
+  // Get root props but override title to prevent tooltip (spread all dropzone props so drag-and-drop works)
   const rootProps = getRootProps();
-  const { title, ...restRootProps } = (rootProps && typeof rootProps === 'object' && 'title' in rootProps) ? rootProps : {};
+  const { title, ...restRootProps } = ((rootProps && typeof rootProps === 'object') ? rootProps : {}) as { title?: string; [key: string]: unknown };
   
   return (
     <div
@@ -392,9 +393,12 @@ function App() {
           <PDFViewer />
         </main>
         
-        {/* Right Sidebar - Tools */}
-        <aside className="w-16 border-l bg-secondary/50 flex flex-col overflow-hidden">
-          <Toolbar />
+        {/* Right Sidebar - AI panel (collapsible) + Tools */}
+        <aside className="flex border-l bg-secondary/50 overflow-hidden h-full">
+          <AISidePanel />
+          <div className="w-16 flex flex-col overflow-hidden shrink-0">
+            <Toolbar />
+          </div>
         </aside>
       </div>
 

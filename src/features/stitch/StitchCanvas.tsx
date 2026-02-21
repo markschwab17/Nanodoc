@@ -4,6 +4,7 @@
  */
 
 import { useRef, useEffect, useCallback, useState } from "react";
+import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { StitchTile } from "./StitchTile";
@@ -99,6 +100,7 @@ export function StitchCanvas({
   const { panOffsetRef, zoomLevelRef } = useStitchPanZoom(containerRef);
 
   const [isSpacePan, setIsSpacePan] = useState(false);
+  const isSpacePanRef = useRef(false);
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
 
   const [deleteSelection, setDeleteSelection] = useState<{
@@ -114,15 +116,35 @@ export function StitchCanvas({
   /** In point-align mode, canvas coords of mouse for live preview line (step 1: A1→mouse, step 3: A2→mouse). */
   const [pointAlignMouse, setPointAlignMouse] = useState<{ x: number; y: number } | null>(null);
 
+  /** Container rect for portal overlay (point/scale align) so overlay covers viewport and receives clicks outside canvas. */
+  const [containerRect, setContainerRect] = useState<DOMRect | null>(null);
+
   useEffect(() => {
     if (!pointAlignMode) setPointAlignMouse(null);
   }, [pointAlignMode]);
+
+  // Keep container rect in sync so portal overlay can match viewport area with position:fixed
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setContainerRect(el.getBoundingClientRect());
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    const win = el.ownerDocument?.defaultView;
+    win?.addEventListener("scroll", update, true);
+    return () => {
+      ro.disconnect();
+      win?.removeEventListener("scroll", update, true);
+    };
+  }, [pointAlignMode, scaleAlignMode]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === "Space") {
         e.preventDefault();
         e.stopPropagation();
+        isSpacePanRef.current = true;
         setIsSpacePan(true);
       }
     };
@@ -130,6 +152,7 @@ export function StitchCanvas({
       if (e.code === "Space") {
         e.preventDefault();
         e.stopPropagation();
+        isSpacePanRef.current = false;
         setIsSpacePan(false);
         panStartRef.current = null;
       }
@@ -155,11 +178,31 @@ export function StitchCanvas({
     };
   }, []);
 
+  const handlePointerDownCapture = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode) return;
+      const panActive = panMode || isSpacePanRef.current;
+      if (panActive && containerRef.current) {
+        panStartRef.current = {
+          x: e.clientX,
+          y: e.clientY,
+          panX: panOffsetRef.current.x,
+          panY: panOffsetRef.current.y,
+        };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode]
+  );
+
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
       if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode) return;
-      const panActive = panMode || isSpacePan;
+      const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
           x: e.clientX,
@@ -199,10 +242,11 @@ export function StitchCanvas({
   return (
     <div
       ref={setContainerRef}
-      className="w-full h-full overflow-hidden bg-muted relative cursor-grab active:cursor-grabbing"
+      className="w-full h-full overflow-hidden bg-muted relative"
       style={{
-        cursor: contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode ? "crosshair" : panMode || isSpacePan ? "grab" : undefined,
+        cursor: contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode ? "crosshair" : panMode || isSpacePan ? "grab" : "default",
       }}
+      onPointerDownCapture={handlePointerDownCapture}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -354,134 +398,6 @@ export function StitchCanvas({
           <StitchTile key={tile.id} tile={tile} zoomLevel={zoomLevel} />
         ))}
         <GroupSelectionOverlay />
-        {(pointAlignMode || scaleAlignMode) && (onPointAlignClick || onScaleAlignClick) && (
-          <div
-            className="absolute inset-0 z-10 cursor-crosshair pointer-events-auto"
-            style={{ width: canvasWidth, height: canvasHeight }}
-            onPointerMove={(e) => {
-              if (!pointAlignMode || (pointAlignStep !== 1 && pointAlignStep !== 3)) return;
-              const coords = clientToCanvas(e.clientX, e.clientY);
-              setPointAlignMouse(coords ?? null);
-            }}
-            onPointerLeave={() => setPointAlignMouse(null)}
-            onPointerDown={(e) => {
-              if (e.button !== 0) return;
-              e.preventDefault();
-              e.stopPropagation();
-              const coords = clientToCanvas(e.clientX, e.clientY);
-              if (!coords) return;
-              const hit = hitTestTileAtPoint(coords, tiles, true);
-              if (hit) {
-                if (pointAlignMode && onPointAlignClick) onPointAlignClick(hit.tile.id, hit.point);
-                if (scaleAlignMode && onScaleAlignClick) onScaleAlignClick(hit.tile.id, hit.point);
-              }
-            }}
-          />
-        )}
-        {(pointAlignPoints.some((p) => p != null) || scaleAlignPoints.some((p) => p != null)) && (() => {
-          const zoom = Math.max(0.25, zoomLevel);
-          const markerR = Math.max(1, 6 / zoom);
-          const markerStroke = Math.max(0.5, 2 / zoom);
-          const markerFontSize = Math.max(6, 10 / zoom);
-          const dashLen = Math.max(1, 4 / zoom);
-          return (
-            <svg
-              className="absolute left-0 top-0 pointer-events-none z-[11]"
-              width={canvasWidth}
-              height={canvasHeight}
-              viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
-              preserveAspectRatio="none"
-            >
-              {(pointAlignMode ? pointAlignPoints : scaleAlignPoints).map(
-                (p, i) =>
-                  p && (
-                    <g key={i}>
-                      <circle
-                        cx={p.x}
-                        cy={p.y}
-                        r={markerR}
-                        fill="hsl(var(--primary))"
-                        stroke="hsl(var(--background))"
-                        strokeWidth={markerStroke}
-                        opacity={0.9}
-                      />
-                      <text
-                        x={p.x}
-                        y={p.y}
-                        textAnchor="middle"
-                        dominantBaseline="central"
-                        fill="hsl(var(--primary-foreground))"
-                        fontSize={markerFontSize}
-                        fontWeight="bold"
-                      >
-                        {i + 1}
-                      </text>
-                    </g>
-                  )
-              )}
-              {pointAlignMode && pointAlignStep >= 2 && pointAlignPoints[0] && pointAlignPoints[1] && (
-                <line
-                  x1={pointAlignPoints[0].x}
-                  y1={pointAlignPoints[0].y}
-                  x2={pointAlignPoints[1].x}
-                  y2={pointAlignPoints[1].y}
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={markerStroke}
-                  strokeDasharray={`${dashLen} ${dashLen}`}
-                  opacity={0.8}
-                />
-              )}
-              {pointAlignMode && pointAlignStep === 1 && pointAlignPoints[0] && pointAlignMouse && (
-                <line
-                  x1={pointAlignPoints[0].x}
-                  y1={pointAlignPoints[0].y}
-                  x2={pointAlignMouse.x}
-                  y2={pointAlignMouse.y}
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={markerStroke}
-                  strokeDasharray={`${dashLen} ${dashLen}`}
-                  opacity={0.7}
-                />
-              )}
-              {pointAlignMode && pointAlignStep === 3 && pointAlignPoints[2] && pointAlignMouse && (
-                <line
-                  x1={pointAlignPoints[2].x}
-                  y1={pointAlignPoints[2].y}
-                  x2={pointAlignMouse.x}
-                  y2={pointAlignMouse.y}
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={markerStroke}
-                  strokeDasharray={`${dashLen} ${dashLen}`}
-                  opacity={0.7}
-                />
-              )}
-              {scaleAlignMode && scaleAlignPoints[0] && scaleAlignPoints[1] && (
-                <line
-                  x1={scaleAlignPoints[0].x}
-                  y1={scaleAlignPoints[0].y}
-                  x2={scaleAlignPoints[1].x}
-                  y2={scaleAlignPoints[1].y}
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={markerStroke}
-                  strokeDasharray={`${dashLen} ${dashLen}`}
-                  opacity={0.8}
-                />
-              )}
-              {scaleAlignMode && scaleAlignPoints[2] && scaleAlignPoints[3] && (
-                <line
-                  x1={scaleAlignPoints[2].x}
-                  y1={scaleAlignPoints[2].y}
-                  x2={scaleAlignPoints[3].x}
-                  y2={scaleAlignPoints[3].y}
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={markerStroke}
-                  strokeDasharray={`${dashLen} ${dashLen}`}
-                  opacity={0.8}
-                />
-              )}
-            </svg>
-          );
-        })()}
         {contentDeleteMode && (
           <div
             className="absolute inset-0 z-10 pointer-events-auto"
@@ -655,6 +571,130 @@ export function StitchCanvas({
           ))}
             </div>
       </div>
+      {/* Point/scale align overlay: portal with fixed position so preview is never clipped by canvas/container */}
+      {(pointAlignMode || scaleAlignMode) &&
+        (onPointAlignClick || onScaleAlignClick) &&
+        containerRect &&
+        createPortal(
+          <div
+            className="fixed z-[100] cursor-crosshair"
+            style={{
+              left: containerRect.left,
+              top: containerRect.top,
+              width: containerRect.width,
+              height: containerRect.height,
+              pointerEvents: "auto",
+            }}
+            onPointerMove={(e) => {
+              if (!pointAlignMode || (pointAlignStep !== 1 && pointAlignStep !== 3)) return;
+              const coords = clientToCanvas(e.clientX, e.clientY);
+              setPointAlignMouse(coords ?? null);
+            }}
+            onPointerLeave={() => setPointAlignMouse(null)}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              e.stopPropagation();
+              const coords = clientToCanvas(e.clientX, e.clientY);
+              if (!coords) return;
+              const hit = hitTestTileAtPoint(coords, tiles, true);
+              if (hit) {
+                if (pointAlignMode && onPointAlignClick) onPointAlignClick(hit.tile.id, hit.point);
+                if (scaleAlignMode && onScaleAlignClick) onScaleAlignClick(hit.tile.id, hit.point);
+              }
+            }}
+          >
+            {/* Markers and lines in overlay (screen) space so they stay visible outside the canvas clip */}
+            {(pointAlignPoints.some((p) => p != null) || scaleAlignPoints.some((p) => p != null)) && (() => {
+              const zoom = Math.max(0.25, zoomLevel);
+              const toOverlay = (p: { x: number; y: number }) => ({
+                x: panOffset.x + (p.x + RULER_SIZE) * zoom,
+                y: panOffset.y + (p.y + RULER_SIZE) * zoom,
+              });
+              const pts = pointAlignMode ? pointAlignPoints : scaleAlignPoints;
+              // Scale with zoom; use larger minimums so markers stay visible when zoomed out
+              const markerR = Math.max(10, 8 * zoom);
+              const markerStroke = Math.max(2, 2.5 * zoom);
+              const dashLen = Math.max(4, 5 * zoom);
+              return (
+                <svg
+                  className="absolute left-0 top-0 w-full h-full pointer-events-none"
+                  width={containerRect.width}
+                  height={containerRect.height}
+                  viewBox={`0 0 ${containerRect.width} ${containerRect.height}`}
+                  preserveAspectRatio="none"
+                >
+                  {pts.map(
+                    (p, i) =>
+                      p && (() => {
+                        const o = toOverlay(p);
+                        return (
+                          <g key={i}>
+                            <circle
+                              cx={o.x}
+                              cy={o.y}
+                              r={markerR}
+                              fill="hsl(var(--primary))"
+                              stroke="hsl(var(--background))"
+                              strokeWidth={markerStroke}
+                              opacity={0.9}
+                            />
+                            <text
+                              x={o.x}
+                              y={o.y}
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fill="hsl(var(--primary-foreground))"
+                              fontSize={Math.max(14, 12 * zoom)}
+                              fontWeight="bold"
+                            >
+                              {i + 1}
+                            </text>
+                          </g>
+                        );
+                      })()
+                  )}
+                  {pointAlignMode && pointAlignStep >= 2 && pointAlignPoints[0] && pointAlignPoints[1] && (() => {
+                    const a = toOverlay(pointAlignPoints[0]);
+                    const b = toOverlay(pointAlignPoints[1]);
+                    return (
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                    );
+                  })()}
+                  {pointAlignMode && pointAlignStep === 1 && pointAlignPoints[0] && pointAlignMouse && (() => {
+                    const a = toOverlay(pointAlignPoints[0]);
+                    const b = toOverlay(pointAlignMouse);
+                    return (
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
+                    );
+                  })()}
+                  {pointAlignMode && pointAlignStep === 3 && pointAlignPoints[2] && pointAlignMouse && (() => {
+                    const a = toOverlay(pointAlignPoints[2]);
+                    const b = toOverlay(pointAlignMouse);
+                    return (
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
+                    );
+                  })()}
+                  {scaleAlignMode && scaleAlignPoints[0] && scaleAlignPoints[1] && (() => {
+                    const a = toOverlay(scaleAlignPoints[0]);
+                    const b = toOverlay(scaleAlignPoints[1]);
+                    return (
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                    );
+                  })()}
+                  {scaleAlignMode && scaleAlignPoints[2] && scaleAlignPoints[3] && (() => {
+                    const a = toOverlay(scaleAlignPoints[2]);
+                    const b = toOverlay(scaleAlignPoints[3]);
+                    return (
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                    );
+                  })()}
+                </svg>
+              );
+            })()}
+          </div>,
+          document.body
+        )}
       {isDeletingAlongPath && (
         <div
           className="absolute inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-[2px]"

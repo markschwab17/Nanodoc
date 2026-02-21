@@ -54,6 +54,11 @@ export interface UIState {
   /** True when opened in CTO split-screen (split_screen=1); hide most tools/toolbars. */
   splitScreenMode: boolean;
   setSplitScreenMode: (v: boolean) => void;
+
+  /** AI Extraction & Questions side panel (collapsible, next to toolbar). */
+  aiPanelOpen: boolean;
+  setAiPanelOpen: (v: boolean) => void;
+  toggleAIPanel: () => void;
   
   // Actions
   setZoomLevel: (level: number) => void;
@@ -141,6 +146,9 @@ export const useUIStore = create<UIState>((set, get) => ({
   setInitialSidebarOpen: (v) => set({ initialSidebarOpen: v }),
   splitScreenMode: urlState.splitScreenMode,
   setSplitScreenMode: (v) => set({ splitScreenMode: v }),
+  aiPanelOpen: false,
+  setAiPanelOpen: (v) => set({ aiPanelOpen: v }),
+  toggleAIPanel: () => set((s) => ({ aiPanelOpen: !s.aiPanelOpen })),
 
   setZoomLevel: (level) => {
     const state = get();

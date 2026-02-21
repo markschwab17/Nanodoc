@@ -5,8 +5,8 @@
  */
 
 import type { AIConfig, SpecExtractionResult, GeotechnicalSummary, AIProvider, GeotechnicalScope } from './types';
-import { extractSpecsFromChunks as geminiExtractSpecs, extractGeotechnicalFromPDF, callGeminiAPI, type GeminiConfig } from './GeminiService';
-import { extractSpecsFromChunks as openaiExtractSpecs, generateText as openaiGenerateText } from './OpenAIService';
+import { extractSpecsFromChunks as geminiExtractSpecs, extractGeotechnicalFromPDF, callGeminiAPI, callGeminiAPIWithHistory, type GeminiConfig } from './GeminiService';
+import { extractSpecsFromChunks as openaiExtractSpecs, generateText as openaiGenerateText, generateTextWithHistory as openaiGenerateTextWithHistory } from './OpenAIService';
 import { useAIProviderStore } from '@/shared/stores/aiProviderStore';
 import { useCiviltakeoffContextStore } from '@/shared/stores/civiltakeoffContextStore';
 
@@ -109,6 +109,35 @@ export async function generateText(prompt: string): Promise<string> {
     return openaiGenerateText(prompt, config);
   }
   
+  throw new Error(`Unsupported AI provider: ${config.provider}`);
+}
+
+/** Message for multi-turn chat (user or assistant). */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Generate text with conversation history (for follow-up questions).
+ */
+export async function generateTextWithHistory(messages: ChatMessage[]): Promise<string> {
+  const config = getAIConfig();
+  if (!config) {
+    throw new Error("Please configure your AI API key in settings.");
+  }
+  if (config.provider === 'gemini') {
+    const geminiConfig: GeminiConfig = {
+      apiKey: config.apiKey,
+      model: config.model as any,
+      baseUrl: config.baseUrl,
+      ctoProxy: config.ctoProxy,
+    };
+    return callGeminiAPIWithHistory(messages, geminiConfig);
+  }
+  if (config.provider === 'chatgpt') {
+    return openaiGenerateTextWithHistory(messages, config);
+  }
   throw new Error(`Unsupported AI provider: ${config.provider}`);
 }
 

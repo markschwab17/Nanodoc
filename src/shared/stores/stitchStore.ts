@@ -123,6 +123,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       ];
       return {
         tiles,
+        selectedTileIds: [],
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
       };

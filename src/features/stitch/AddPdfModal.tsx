@@ -94,7 +94,7 @@ export function AddPdfModal({
         setPdfFileName(name);
         setMupdfDoc(doc);
         setPageCount(count);
-        setSelectedPages(new Set(Array.from({ length: count }, (_, i) => i)));
+        setSelectedPages(new Set());
         const renderer = new PDFRenderer(mupdf);
         const thumbs: Record<number, string> = {};
         for (let i = 0; i < count; i++) {

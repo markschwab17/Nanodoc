@@ -430,13 +430,17 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
             variant="secondary"
             size="icon"
             className={`absolute -top-12 z-10 border-2 border-border shadow-md ${isLocked ? "left-1/2 -translate-x-1/2" : "right-0 translate-x-1/2"}`}
+            style={{
+              width: `${Math.max(40, Math.round(28 * zoomLevel))}px`,
+              height: `${Math.max(40, Math.round(28 * zoomLevel))}px`,
+            }}
             title={isLocked ? "Unlock position" : "Lock position"}
             onClick={handleToggleLock}
           >
             {isLocked ? (
-              <Lock className="h-5 w-5" />
+              <Lock className="h-full w-full shrink-0" />
             ) : (
-              <Unlock className="h-5 w-5" />
+              <Unlock className="h-full w-full shrink-0" />
             )}
           </Button>
         </>

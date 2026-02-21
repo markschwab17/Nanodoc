@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface LoadingIndicatorProps {
@@ -35,12 +34,14 @@ export function LoadingIndicator({
       )}
     >
       <div className="flex flex-col items-center gap-4">
-        <Loader2 className="h-12 w-12 animate-spin text-primary" />
-        <div className="flex flex-col items-center gap-2">
-          <p className="text-lg font-medium text-foreground">{message}</p>
-          <div className="w-64 h-1.5 bg-secondary rounded-full overflow-hidden">
-            <div className="h-full bg-primary rounded-full animate-pulse" style={{ width: "100%" }} />
-          </div>
+        <p className="text-lg font-medium text-foreground">{message}</p>
+        {/* Bar with moving shimmer – animation in global CSS so it always runs */}
+        <div className="w-64 h-1.5 bg-secondary rounded-full overflow-hidden">
+          <div
+            className="loading-bar-shimmer h-full w-1/2 rounded-full bg-primary"
+            style={{ willChange: "transform" }}
+            aria-hidden
+          />
         </div>
       </div>
     </div>

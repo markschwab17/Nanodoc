@@ -7,7 +7,7 @@
 import type { PDFDocument } from "../pdf/PDFDocument";
 import { createChunks } from "./PDFContentChunker";
 import { getEmbeddingService, findTopKChunks } from "./EmbeddingService";
-import { generateText, hasConfiguredAPIKey } from "./AIService";
+import { generateText, generateTextWithHistory, hasConfiguredAPIKey, type ChatMessage } from "./AIService";
 
 export interface QuestionAnswer {
   answer: string;
@@ -19,52 +19,7 @@ export interface QuestionAnswer {
   }>;
 }
 
-/**
- * Answer a question about a PDF document with citations
- */
-export async function answerQuestion(
-  document: PDFDocument,
-  question: string,
-  customPrompt?: string
-): Promise<QuestionAnswer> {
-  if (!hasConfiguredAPIKey()) {
-    throw new Error("Please configure your AI API key in settings.");
-  }
-  
-  // Step 1: Create chunks from the document
-  const chunks = await createChunks(document, {
-    maxChunkTokens: 1200,
-    minChunkTokens: 300,
-    overlapPercent: 15,
-  });
-  
-  // Check if PDF has a cover page (detected during document loading)
-  const hasCoverPage = document.hasCoverPage();
-  
-  // Step 2: Generate embeddings and find relevant chunks
-  const embeddingService = getEmbeddingService();
-  const questionEmbedding = await embeddingService.embed(question);
-  
-  const chunkTexts = chunks.map(c => c.text);
-  const chunkEmbeddings = await embeddingService.embedBatch(chunkTexts);
-  const embeddingMap = new Map(
-    chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]])
-  );
-  
-  // Get top-K most relevant chunks (increase for questions to get more context)
-  const topChunks = findTopKChunks(questionEmbedding, embeddingMap, 15);
-  const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
-  const selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
-  
-  // Step 3: Build prompt with citations requirement
-  const chunksText = selectedChunks.map((chunk, idx) => {
-    const sectionPath = chunk.sectionPath.length > 0 
-      ? `Section: ${chunk.sectionPath.join(' > ')}\n`
-      : '';
-    return `[Chunk ${idx + 1}, PDF Page Index: ${chunk.pageRange[0]} (0-based)]\n${sectionPath}${chunk.text}`;
-  }).join('\n\n---\n\n');
-  
-  const basePrompt = `You are an AI assistant answering questions about a PDF document.
+const CITATION_INSTRUCTIONS = `You are an AI assistant answering questions about a PDF document.
 
 CRITICAL REQUIREMENTS:
 1. ONLY use information found in the provided document chunks - do not use any external knowledge
@@ -73,40 +28,80 @@ CRITICAL REQUIREMENTS:
    - [Page X: "exact quote from document"] for simple citations
    - [Page X, Section Y: "exact quote from document"] if a section heading is available
    - CRITICAL PAGE NUMBERING RULE: The page number X in [Page X: ...] MUST be 1-based (human-readable page numbers)
-     * First page of document = Page 1
-     * Second page of document = Page 2
-     * Third page of document = Page 3
-     * And so on...
-   - To convert from chunk metadata to citation: If chunk shows "PDF Page Index: N (0-based)", then use "Page (N+1)" in your citation
-     * Example 1: Chunk shows "PDF Page Index: 0 (0-based)" → Use "Page 1" in citation
-     * Example 2: Chunk shows "PDF Page Index: 4 (0-based)" → Use "Page 5" in citation
-     * Example 3: Chunk shows "PDF Page Index: 9 (0-based)" → Use "Page 10" in citation
-   - DO NOT use the 0-based index directly - always add 1 to convert to 1-based page number
-   - DO NOT use labeled page numbers from footers/headers
+     * First page of document = Page 1, second = Page 2, etc.
+   - If chunk shows "PDF Page Index: N (0-based)", use "Page (N+1)" in your citation
+   - DO NOT use the 0-based index directly - always add 1 for 1-based page numbers
 4. Include multiple citations if information appears in multiple places
 5. Be precise and accurate - only state what is explicitly in the document
 6. When citing, use the exact quote from the document, not a paraphrase
-7. Format your answer naturally, but ensure every factual claim has a citation
+7. Format your answer naturally, but ensure every factual claim has a citation.`;
 
-Question: ${question}
+/**
+ * Answer a question about a PDF document with citations.
+ * Pass previousMessages for follow-up questions so the model keeps conversation context.
+ */
+export async function answerQuestion(
+  document: PDFDocument,
+  question: string,
+  customPrompt?: string,
+  previousMessages?: ChatMessage[]
+): Promise<QuestionAnswer> {
+  if (!hasConfiguredAPIKey()) {
+    throw new Error("Please configure your AI API key in settings.");
+  }
 
-${customPrompt ? `\nAdditional Instructions: ${customPrompt}\n` : ''}
+  const chunks = await createChunks(document, {
+    maxChunkTokens: 1200,
+    minChunkTokens: 300,
+    overlapPercent: 15,
+  });
+
+  const hasCoverPage = document.hasCoverPage();
+  const embeddingService = getEmbeddingService();
+  const questionEmbedding = await embeddingService.embed(question);
+  const chunkTexts = chunks.map(c => c.text);
+  const chunkEmbeddings = await embeddingService.embedBatch(chunkTexts);
+  const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
+  // Use more chunks so the AI sees more of the document (info can be missed with too few)
+  const topChunks = findTopKChunks(questionEmbedding, embeddingMap, 35);
+  const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
+  const selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
+
+  const chunksText = selectedChunks.map((chunk, idx) => {
+    const sectionPath = chunk.sectionPath.length > 0 ? `Section: ${chunk.sectionPath.join(' > ')}\n` : '';
+    return `[Chunk ${idx + 1}, PDF Page Index: ${chunk.pageRange[0]} (0-based)]\n${sectionPath}${chunk.text}`;
+  }).join('\n\n---\n\n');
+
+  const docContext = `${CITATION_INSTRUCTIONS}
+
+${customPrompt ? `Additional Instructions: ${customPrompt}\n\n` : ''}
 
 Document Content:
 ${chunksText}
 
-Now answer the question with proper citations. Remember: every fact must be cited with [Page X: "quote"] format, where X is ALWAYS 1-based (first page = 1, second page = 2, etc.). Always add 1 to the chunk's "PDF Page Index" to get the correct page number for citations.`;
+Answer questions based on the document above. Use citation format [Page X: "quote"] with 1-based page numbers (add 1 to chunk's PDF Page Index).`;
 
-  // Step 4: Call AI API (Gemini or ChatGPT)
-  const response = await generateText(basePrompt);
-  
-  // Step 5: Parse response and extract citations
+  let response: string;
+  const hasHistory = Array.isArray(previousMessages) && previousMessages.length > 0;
+
+  if (hasHistory) {
+    const messages: ChatMessage[] = [
+      { role: "user", content: docContext },
+      ...previousMessages,
+      { role: "user", content: question },
+    ];
+    response = await generateTextWithHistory(messages);
+  } else {
+    const basePrompt = `${docContext}
+
+Question: ${question}
+
+Now answer the question with proper citations.`;
+    response = await generateText(basePrompt);
+  }
+
   const { answer, citations } = parseAnswerWithCitations(response, selectedChunks, hasCoverPage);
-  
-  return {
-    answer,
-    citations,
-  };
+  return { answer, citations };
 }
 
 /**

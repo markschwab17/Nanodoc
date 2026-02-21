@@ -13,6 +13,7 @@ import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { CTOSplitScreenToolbar } from "@/features/toolbar/CTOSplitScreenToolbar";
+import { AISidePanel } from "@/features/specs/AISidePanel";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
 import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
@@ -595,9 +596,9 @@ function Editor() {
     }
   }, [fileSystem, loadPDF]);
 
-  // Get root props but override title to prevent tooltip
+  // Get root props but override title to prevent tooltip (spread all dropzone props so drag-and-drop works)
   const rootProps = getRootProps();
-  const { title, ...restRootProps } = (rootProps && typeof rootProps === 'object' && 'title' in rootProps) ? rootProps : {};
+  const { title, ...restRootProps } = ((rootProps && typeof rootProps === 'object') ? rootProps : {}) as { title?: string; [key: string]: unknown };
   
   return (
     <div
@@ -799,10 +800,13 @@ function Editor() {
           </div>
         </main>
         
-        {/* Right Sidebar - Tools (hidden in split-screen mode) */}
+        {/* Right Sidebar - AI panel (collapsible) + Tools (hidden in split-screen mode) */}
         {!splitScreenMode && (
-          <aside className="w-16 border-l bg-secondary/50 flex flex-col overflow-hidden">
-            <Toolbar />
+          <aside className="flex border-l bg-secondary/50 overflow-hidden h-full">
+            <AISidePanel />
+            <div className="w-16 flex flex-col overflow-hidden shrink-0">
+              <Toolbar />
+            </div>
           </aside>
         )}
       </div>

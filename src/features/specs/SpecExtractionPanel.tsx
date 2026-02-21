@@ -9,6 +9,7 @@ import { X, Download, ExternalLink, Loader2, Table, List } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useConversationStore } from "@/shared/stores/conversationStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
@@ -408,9 +409,11 @@ export function SpecExtractionPanel() {
                   const extractedSpecsForPdf = useSpecExtractionStore.getState().getExtractedSpecs(docId);
                   const geoSummaryForPdf = useSpecExtractionStore.getState().getGeotechnicalSummary(docId);
                   const geoScopeForPdf = useSpecExtractionStore.getState().getGeotechnicalScope(docId);
+                  const conversationMessages = useConversationStore.getState().getMessages(docId);
                   const hasGeo = Boolean(geoSummaryForPdf?.length && geoScopeForPdf);
+                  const hasConversation = conversationMessages.length > 0;
                   const aiMetadata =
-                    extractedSpecsForPdf.length > 0 || hasGeo
+                    extractedSpecsForPdf.length > 0 || hasGeo || hasConversation
                       ? {
                           version: 1,
                           ...(extractedSpecsForPdf.length > 0 && { extractedSpecs: extractedSpecsForPdf }),
@@ -420,6 +423,7 @@ export function SpecExtractionPanel() {
                               geotechnicalSummary: geoSummaryForPdf,
                               geotechnicalScope: geoScopeForPdf,
                             }),
+                          ...(hasConversation && { conversationHistory: { messages: conversationMessages } }),
                         }
                       : undefined;
                   const mupdfModule = await import("mupdf");

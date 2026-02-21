@@ -11,6 +11,7 @@ import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContext
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useConversationStore } from "@/shared/stores/conversationStore";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { PDFDocument } from "@/core/pdf/PDFDocument";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
@@ -65,7 +66,10 @@ export function usePDF() {
           try {
             const sidecarData = await fileSystem.readFile(normalizedFilePath + SIDECAR_SUFFIX);
             const parsed = JSON.parse(new TextDecoder().decode(sidecarData)) as PDFAIMetadataPayload;
-            if (parsed?.version != null && Array.isArray(parsed.extractedSpecs) && parsed.extractedSpecs.length > 0) {
+            const hasSpecs = Array.isArray(parsed?.extractedSpecs) && parsed.extractedSpecs.length > 0;
+            const hasGeo = Array.isArray(parsed?.geotechnicalSummary) && parsed.geotechnicalSummary.length > 0 && parsed.geotechnicalScope;
+            const hasConv = Array.isArray(parsed?.conversationHistory?.messages) && parsed.conversationHistory.messages.length > 0;
+            if (parsed?.version != null && (hasSpecs || hasGeo || hasConv)) {
               aiPayload = parsed;
             }
           } catch {
@@ -77,7 +81,10 @@ export function usePDF() {
             const hash = await hashPdfBytes(data);
             if (hash) {
               const stored = await getPdfAiMetadata(hash);
-              if (stored?.version != null && Array.isArray(stored.extractedSpecs) && stored.extractedSpecs.length > 0) {
+              const hasSpecs = Array.isArray(stored?.extractedSpecs) && stored.extractedSpecs.length > 0;
+              const hasGeo = Array.isArray(stored?.geotechnicalSummary) && stored.geotechnicalSummary.length > 0 && stored.geotechnicalScope;
+              const hasConv = Array.isArray(stored?.conversationHistory?.messages) && stored.conversationHistory.messages.length > 0;
+              if (stored?.version != null && (hasSpecs || hasGeo || hasConv)) {
                 aiPayload = stored;
               }
             }
@@ -107,6 +114,9 @@ export function usePDF() {
           if (aiPayload.geotechnicalScope) {
             useSpecExtractionStore.getState().setGeotechnicalScope(documentId, aiPayload.geotechnicalScope);
           }
+        }
+        if (aiPayload?.conversationHistory?.messages?.length) {
+          useConversationStore.getState().setMessages(documentId, aiPayload.conversationHistory.messages);
         }
 
         // Add to recent files if we have a file path (use normalized path for consistency with sidecar)

@@ -409,7 +409,7 @@ CRITICAL: Use 1-based page numbers as in the document (first page = 1). Return o
  */
 export async function extractGeotechnicalFromPDF(
   pdfData: Uint8Array,
-  fileName: string,
+  _fileName: string,
   config: GeminiConfig,
   scope?: string
 ): Promise<GeotechnicalSummary> {
@@ -474,12 +474,13 @@ export async function extractGeotechnicalFromPDF(
           });
           const result = await res.json();
           if (!res.ok) throw new Error((result as { message?: string }).message ?? (result as { error?: string }).error ?? `Proxy ${res.status}`);
-          const data = (result as { response?: unknown }).response;
+          type GeminiResponse = { response?: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } };
+          const data = (result as GeminiResponse).response;
           if (!data?.candidates?.[0]?.content?.parts?.[0]?.text) {
             lastError = 'Proxy returned no text';
             continue;
           }
-          const content = (data.candidates[0].content.parts[0] as { text: string }).text;
+          const content = data.candidates[0].content.parts[0].text;
           const parsed = parseJsonFromGeminiResponse(content);
           if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             return parseGeotechnicalResponse(parsed as Record<string, unknown>, []);
@@ -614,7 +615,6 @@ export async function extractSpecsFromChunks(
       if (useCtoProxy && config.ctoProxy) {
         const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, '');
         const proxyUrl = `${apiOrigin}/api/nanodoc/gemini`;
-        const contentsCount = requestBody.contents?.length ?? 0;
         // CTO proxy: do not log URL or token so the API key cannot be discovered
         const res = await fetch(proxyUrl, {
           method: 'POST',
@@ -945,6 +945,72 @@ export async function callGeminiAPI(
   }
   
   throw new Error(`Failed to call Gemini API with any model variant. Last error: ${lastError || 'Unknown error'}`);
+}
+
+/** Message for multi-turn chat (user or assistant). */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Call Gemini API with conversation history for follow-up questions.
+ */
+export async function callGeminiAPIWithHistory(
+  messages: ChatMessage[],
+  config: GeminiConfig
+): Promise<string> {
+  const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
+  let modelVariants = [
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-2.0-flash-exp',
+    'gemini-2.0-flash',
+    'gemini-1.5-pro',
+    'gemini-pro',
+  ];
+  try {
+    const availableModels = await listAvailableModels(config.apiKey, baseUrl);
+    if (availableModels.length > 0) {
+      modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
+    }
+  } catch {
+    // use defaults
+  }
+  const apiVersions = ['v1beta', 'v1'];
+  let lastError: string | null = null;
+  const model = (config.model && config.model.replace(/^models\//, '')) || modelVariants[0];
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+  for (const m of modelVariants) {
+    for (const apiVersion of apiVersions) {
+      try {
+        const cleanModelName = m.replace(/^models\//, '');
+        const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents,
+            generationConfig: { temperature: 0.1, topP: 0.8, topK: 40 },
+          }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+            return data.candidates[0].content.parts[0].text;
+          }
+        } else {
+          lastError = await response.text();
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  throw new Error(`Failed to call Gemini API with history. Last error: ${lastError || 'Unknown error'}`);
 }
 
 /**

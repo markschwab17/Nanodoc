@@ -47,6 +47,7 @@ import { ExportDialog } from "@/features/export/ExportDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
+import { useConversationStore } from "@/shared/stores/conversationStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { SpecExtractionButton } from "@/features/specs/SpecExtractionButton";
 import { AISettings } from "@/features/settings/AISettings";
@@ -267,9 +268,9 @@ export function Toolbar() {
       const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(currentDoc.getId());
       const geotechnicalSummary = useSpecExtractionStore.getState().getGeotechnicalSummary(currentDoc.getId());
       const geotechnicalScope = useSpecExtractionStore.getState().getGeotechnicalScope(currentDoc.getId());
-      // TODO: when we have a per-document conversation store, pass it here and include in aiMetadata
+      const conversationMessages = useConversationStore.getState().getMessages(currentDoc.getId());
       const conversationHistory: { messages: { role: "user" | "assistant"; content: string }[] } | undefined =
-        undefined as { messages: { role: "user" | "assistant"; content: string }[] } | undefined;
+        conversationMessages.length > 0 ? { messages: conversationMessages } : undefined;
       const hasConversation = conversationHistory != null && conversationHistory.messages.length > 0;
       const hasGeotechnical = Boolean(geotechnicalSummary?.length && geotechnicalScope);
       const aiMetadata =

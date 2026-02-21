@@ -62,8 +62,8 @@ export function useStitchPanZoom(containerRef: React.RefObject<HTMLDivElement | 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    container.addEventListener("wheel", handleWheel, { passive: false });
-    return () => container.removeEventListener("wheel", handleWheel);
+    container.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => container.removeEventListener("wheel", handleWheel, true);
   }, [containerRef, handleWheel]);
 
   return { panOffsetRef, zoomLevelRef };

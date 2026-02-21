@@ -93,6 +93,19 @@
     }
   }
 
+  /* Loading indicator: bar with moving shimmer so it’s clearly not frozen */
+  @keyframes loading-shimmer {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
+  }
+  .loading-bar-shimmer {
+    animation: loading-shimmer 1.6s ease-in-out infinite;
+  }
+
   .mockup-container {
     width: 90%;
     max-width: 1200px;

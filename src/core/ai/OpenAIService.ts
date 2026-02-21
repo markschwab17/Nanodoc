@@ -448,6 +448,52 @@ export async function generateText(
   throw new Error(`Failed to call OpenAI API with any model variant. Last error: ${lastError || 'Unknown error'}`);
 }
 
+/** Message for multi-turn chat. */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Generate text with conversation history (for follow-up questions).
+ */
+export async function generateTextWithHistory(
+  messages: ChatMessage[],
+  config: AIConfig
+): Promise<string> {
+  const baseUrl = config.baseUrl || 'https://api.openai.com/v1';
+  const modelVariants = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'];
+  let lastError: string | null = null;
+  for (const modelName of modelVariants) {
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages: messages.map((m) => ({ role: m.role, content: m.content })),
+          temperature: 0.1,
+          top_p: 0.8,
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.choices?.[0]?.message?.content) {
+          return data.choices[0].message.content;
+        }
+      } else {
+        lastError = await response.text();
+      }
+    } catch {
+      continue;
+    }
+  }
+  throw new Error(`Failed to call OpenAI API with history. Last error: ${lastError || 'Unknown error'}`);
+}
+
 /**
  * Validate OpenAI API key
  */
