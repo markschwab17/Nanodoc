@@ -979,7 +979,6 @@ export async function callGeminiAPIWithHistory(
   }
   const apiVersions = ['v1beta', 'v1'];
   let lastError: string | null = null;
-  const model = (config.model && config.model.replace(/^models\//, '')) || modelVariants[0];
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
