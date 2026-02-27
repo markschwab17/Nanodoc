@@ -10,6 +10,8 @@ export interface CiviltakeoffContext {
   doc: string;
   token: string;
   api_origin: string;
+  /** Optional project display name (for stitch save default filename). */
+  project_name?: string | null;
 }
 
 interface CiviltakeoffContextState {

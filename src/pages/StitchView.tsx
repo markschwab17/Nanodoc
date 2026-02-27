@@ -12,7 +12,6 @@ import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
-import { addPdfBytesToStitchCanvas } from "@/features/stitch/addPdfToStitchCanvas";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
@@ -61,15 +60,15 @@ export default function StitchView() {
     };
   }, [handleRecenter]);
 
-  // CTO stitch preload: when opened from CTO with stitch=1, add the initial PDF to canvas once
+  // CTO stitch preload: when opened from CTO with stitch=1, open Add PDF modal with the initial PDF
+  // so the user can choose which pages to add (instead of auto-adding all).
+  const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
     if (ctx && initial) {
-      addPdfBytesToStitchCanvas(initial.pdfBytes, initial.fileName).catch((e) => {
-        console.error("CTO stitch preload failed", e);
-        useNotificationStore.getState().showNotification("Failed to add initial PDF to canvas.", "error");
-      });
+      setCtoInitialPdf({ pdfBytes: initial.pdfBytes, fileName: initial.fileName });
+      setShowAddPdf(true);
     }
   }, []);
 
@@ -83,6 +82,8 @@ export default function StitchView() {
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [saveDialogIntent, setSaveDialogIntent] = useState<"download" | "open">("download");
   const [saveDialogFilename, setSaveDialogFilename] = useState("Stitched.pdf");
+  const [showSaveToCtoDialog, setShowSaveToCtoDialog] = useState(false);
+  const [saveToCtoNewFileName, setSaveToCtoNewFileName] = useState("Stitched.pdf");
   const [isSaving, setIsSaving] = useState(false);
   const [isExportingTraining, setIsExportingTraining] = useState(false);
   const [contentDeleteMode, setContentDeleteMode] = useState(false);
@@ -236,47 +237,75 @@ export default function StitchView() {
     [loadPDF, navigate, showNotification]
   );
 
-  const handleSaveToCto = useCallback(async () => {
-    const ctx = useCiviltakeoffContextStore.getState().getContext();
-    if (!ctx) return;
+  const handleSaveToCto = useCallback(() => {
     if (tiles.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
     }
-    try {
-      const buffer = await exportStitchToPdf();
-      if (!buffer) {
-        showNotification("Export failed.", "error");
-        return;
-      }
-      // Copy to ArrayBuffer-backed Uint8Array so Blob accepts it (TS BlobPart expects ArrayBuffer, not SharedArrayBuffer)
-      const copy = new Uint8Array(buffer.length);
-      copy.set(buffer);
-      const blob = new Blob([copy], { type: "application/pdf" });
-      const formData = new FormData();
-      formData.append("token", ctx.token);
-      formData.append("file", blob, "stitched.pdf");
-      const res = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Save failed (${res.status})`);
-      }
-      showNotification("Saved to Civiltakeoff.", "success");
-      if (typeof window !== "undefined" && window.opener) {
-        try {
-          window.opener.postMessage({ type: "nanodoc-stitch-saved", success: true }, ctx.api_origin);
-        } catch {
-          // ignore
-        }
-      }
-    } catch (e) {
-      console.error(e);
-      showNotification(e instanceof Error ? e.message : "Failed to save to Civiltakeoff.", "error");
-    }
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    const defaultName = ctx?.project_name?.trim()
+      ? `${ctx.project_name.trim()} - Stitched`
+      : "Stitched";
+    setSaveToCtoNewFileName(defaultName);
+    setShowSaveToCtoDialog(true);
   }, [tiles.length, showNotification]);
+
+  const doSaveToCto = useCallback(
+    async (
+      destination: "overwrite" | "new_file" | "project_page",
+      displayName?: string
+    ) => {
+      const ctx = useCiviltakeoffContextStore.getState().getContext();
+      if (!ctx) return;
+      setShowSaveToCtoDialog(false);
+      setIsSaving(true);
+      try {
+        const buffer = await exportStitchToPdf();
+        if (!buffer) {
+          showNotification("Export failed.", "error");
+          return;
+        }
+        const copy = new Uint8Array(buffer.length);
+        copy.set(buffer);
+        const blob = new Blob([copy], { type: "application/pdf" });
+        const formData = new FormData();
+        formData.append("token", ctx.token);
+        formData.append("file", blob, "stitched.pdf");
+        formData.append("save_destination", destination);
+        if (destination === "new_file" && displayName?.trim()) {
+          formData.append("display_name", displayName.trim());
+        }
+        const res = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `Save failed (${res.status})`);
+        }
+        showNotification("Saved to Civiltakeoff.", "success");
+        if (typeof window !== "undefined" && window.opener) {
+          try {
+            window.opener.postMessage(
+              { type: "nanodoc-stitch-saved", success: true },
+              ctx.api_origin
+            );
+          } catch {
+            // ignore
+          }
+        }
+      } catch (e) {
+        console.error(e);
+        showNotification(
+          e instanceof Error ? e.message : "Failed to save to Civiltakeoff.",
+          "error"
+        );
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [showNotification]
+  );
 
   const handleDownloadForTraining = async () => {
     if (tiles.length === 0) {
@@ -380,7 +409,12 @@ export default function StitchView() {
         canvasVisible={canvasVisible}
         onCanvasVisibleChange={setCanvasVisible}
       />
-      <AddPdfModal open={showAddPdf} onClose={() => setShowAddPdf(false)} />
+      <AddPdfModal
+        open={showAddPdf}
+        onClose={() => setShowAddPdf(false)}
+        initialPdf={ctoInitialPdf}
+        onInitialConsumed={() => setCtoInitialPdf(null)}
+      />
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
           <DialogHeader>
@@ -409,6 +443,59 @@ export default function StitchView() {
               onClick={() => doSaveAndFlatten(saveDialogIntent === "open", saveDialogFilename)}
             >
               {saveDialogIntent === "download" ? "Download" : "Save & open"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={showSaveToCtoDialog} onOpenChange={setShowSaveToCtoDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Save to Civiltakeoff</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground pb-3">
+            Choose how to save the stitched PDF in your project.
+          </p>
+          <div className="grid gap-2">
+            <Button
+              variant="outline"
+              className="justify-start"
+              onClick={() => doSaveToCto("overwrite")}
+            >
+              Overwrite current file
+            </Button>
+            <div className="flex flex-col gap-2">
+              <Button
+                variant="outline"
+                className="justify-start"
+                onClick={() => {
+                  const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
+                  const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+                  doSaveToCto("new_file", finalName);
+                }}
+              >
+                Save as new document
+              </Button>
+              <label className="text-xs text-muted-foreground pl-2">
+                File name (you can edit)
+              </label>
+              <Input
+                value={saveToCtoNewFileName}
+                onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
+                placeholder="Project name - Stitched"
+                className="font-mono text-sm"
+              />
+            </div>
+            <Button
+              variant="outline"
+              className="justify-start"
+              onClick={() => doSaveToCto("project_page")}
+            >
+              Add as project page
+            </Button>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0 pt-2">
+            <Button variant="outline" onClick={() => setShowSaveToCtoDialog(false)}>
+              Cancel
             </Button>
           </DialogFooter>
         </DialogContent>

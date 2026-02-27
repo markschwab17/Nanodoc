@@ -2,7 +2,7 @@
  * Modal to add PDF pages to the stitch canvas: file picker, page selector, Add to canvas.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -44,9 +44,13 @@ type SourceTab = "device" | "cto";
 export function AddPdfModal({
   open,
   onClose,
+  initialPdf,
+  onInitialConsumed,
 }: {
   open: boolean;
   onClose: () => void;
+  initialPdf?: { pdfBytes: Uint8Array; fileName: string } | null;
+  onInitialConsumed?: () => void;
 }) {
   const fileSystem = useFileSystem();
   const { addTiles, canvasWidth, canvasHeight, setReferenceScaleFeetPerInch } = useStitchStore();
@@ -64,6 +68,11 @@ export function AddPdfModal({
   /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
   const [ctoListening, setCtoListening] = useState(false);
+  type CtoDoc = { type: string; displayName: string; token: string; fileId?: string; doc?: string };
+  const [ctoDocuments, setCtoDocuments] = useState<CtoDoc[]>([]);
+  const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
+  const [ctoDocumentsError, setCtoDocumentsError] = useState<string | null>(null);
+  const ctoDocumentsRespondedRef = useRef(false);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -129,6 +138,12 @@ export function AddPdfModal({
       setCtoListening(false);
       return;
     }
+    // When opened from CTO stitch with initial PDF, load it into page selection instead of auto-adding all.
+    if (initialPdf?.pdfBytes && initialPdf?.fileName) {
+      loadPdfFromResult(initialPdf.pdfBytes, initialPdf.fileName);
+      onInitialConsumed?.();
+      return;
+    }
     if (ctoContext) {
       setSourceTab("device");
       return;
@@ -148,9 +163,90 @@ export function AddPdfModal({
     return () => {
       cancelled = true;
     };
-  }, [open, ctoContext, fileSystem, loadPdfFromResult]);
+  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed]);
 
-  // From Civiltakeoff: postMessage listener for nanodoc-add-cto-doc
+  // From Civiltakeoff: request document list from opener and listen for nanodoc-cto-documents
+  useEffect(() => {
+    if (!open || !ctoContext || sourceTab !== "cto") {
+      setCtoDocuments([]);
+      setCtoDocumentsLoading(false);
+      setCtoDocumentsError(null);
+      return;
+    }
+    const projectId = ctoContext.project;
+    if (!projectId) {
+      setCtoDocumentsError("Project not set.");
+      return;
+    }
+    const opener = window.opener;
+    if (!opener) {
+      setCtoDocumentsError("Open stitch from Civiltakeoff to see project documents.");
+      return;
+    }
+    setCtoDocumentsLoading(true);
+    setCtoDocumentsError(null);
+    setCtoDocuments([]);
+    ctoDocumentsRespondedRef.current = false;
+    opener.postMessage({ type: "nanodoc-request-cto-documents", projectId }, ctoContext.api_origin);
+
+    const timeoutId = window.setTimeout(() => {
+      if (!ctoDocumentsRespondedRef.current) {
+        setCtoDocumentsError("Request timed out. Open stitch from Civiltakeoff project documents.");
+        setCtoDocumentsLoading(false);
+      }
+    }, 12000);
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type !== "nanodoc-cto-documents") return;
+      ctoDocumentsRespondedRef.current = true;
+      const list = Array.isArray(event.data?.documents) ? event.data.documents : [];
+      setCtoDocuments(
+        list.filter(
+          (d: unknown) =>
+            d &&
+            typeof d === "object" &&
+            typeof (d as { displayName?: unknown }).displayName === "string" &&
+            typeof (d as { token?: unknown }).token === "string"
+        ) as CtoDoc[]
+      );
+      setCtoDocumentsLoading(false);
+      setCtoDocumentsError(null);
+    };
+    window.addEventListener("message", handleMessage);
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("message", handleMessage);
+      setCtoDocumentsLoading(false);
+    };
+  }, [open, ctoContext, sourceTab]);
+
+  const loadCtoDocument = useCallback(
+    async (doc: CtoDoc) => {
+      if (!ctoContext) return;
+      setCtoDocumentsError(null);
+      setLoading(true);
+      try {
+        const url = `${ctoContext.api_origin}/api/nanodoc/pdf?token=${encodeURIComponent(doc.token)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to load document (${res.status})`);
+        const json = await res.json();
+        const pdfUrl = json?.pdfUrl;
+        if (!pdfUrl || typeof pdfUrl !== "string") throw new Error("Invalid response");
+        const pdfRes = await fetch(pdfUrl);
+        if (!pdfRes.ok) throw new Error("Failed to fetch PDF");
+        const ab = await pdfRes.arrayBuffer();
+        await loadPdfFromResult(new Uint8Array(ab), doc.displayName);
+      } catch (e) {
+        console.error("CTO load document failed", e);
+        setCtoDocumentsError(e instanceof Error ? e.message : "Failed to load document");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [ctoContext, loadPdfFromResult]
+  );
+
+  // From Civiltakeoff: postMessage listener for nanodoc-add-cto-doc (legacy: CTO pushes one doc)
   useEffect(() => {
     if (!open || !ctoContext || sourceTab !== "cto") return;
     setCtoListening(true);
@@ -320,10 +416,35 @@ export function AddPdfModal({
             <Button onClick={handleChooseFile}>Choose file</Button>
           </div>
         ) : ctoContext && sourceTab === "cto" && !pdfBytes ? (
-          <div className="py-12 text-center text-muted-foreground">
-            {ctoListening
-              ? "Waiting for document from Civiltakeoff… (Use “Add to stitch” in Civiltakeoff to send a document.)"
-              : "Select “From Civiltakeoff” and wait for a document to be sent from the Civiltakeoff app."}
+          <div className="py-8 flex flex-col items-stretch gap-4 text-muted-foreground">
+            {ctoDocumentsLoading ? (
+              <div className="flex items-center justify-center gap-2 py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span>Loading project documents…</span>
+              </div>
+            ) : ctoDocumentsError ? (
+              <p className="text-destructive text-center py-4">{ctoDocumentsError}</p>
+            ) : ctoDocuments.length > 0 ? (
+              <>
+                <p className="text-sm text-center">Choose a document to add pages from:</p>
+                <ul className="space-y-2 max-h-64 overflow-auto">
+                  {ctoDocuments.map((doc, idx) => (
+                    <li key={idx}>
+                      <Button
+                        variant="outline"
+                        className="w-full justify-start font-normal"
+                        onClick={() => loadCtoDocument(doc)}
+                        disabled={loading}
+                      >
+                        {doc.displayName}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="text-center py-4">No project PDFs found.</p>
+            )}
           </div>
         ) : pdfBytes && pageCount > 0 ? (
           <>

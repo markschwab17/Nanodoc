@@ -170,6 +170,7 @@ export default function CiviltakeoffView() {
             doc: params.doc,
             token: params.token,
             api_origin: params.api_origin,
+            project_name: params.project_name ?? undefined,
           });
         }
 

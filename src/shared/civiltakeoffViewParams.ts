@@ -28,6 +28,8 @@ export interface CiviltakeoffViewParams {
   read_mode: string | null;
   /** "1" = embedded in CTO project details split view; hide most tools/toolbars. */
   split_screen: string | null;
+  /** Project display name from CTO (for stitch save default filename). */
+  project_name: string | null;
 }
 
 /**
@@ -50,6 +52,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const sidebar = params.get("sidebar") ?? null;
   const read_mode = params.get("read_mode") ?? null;
   const split_screen = params.get("split_screen") ?? null;
+  const project_name = params.get("project_name") ?? null;
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -76,6 +79,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     sidebar,
     read_mode,
     split_screen,
+    project_name,
   };
 }
 
