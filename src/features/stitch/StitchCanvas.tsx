@@ -395,7 +395,7 @@ export function StitchCanvas({
           />
         )}
         {tiles.map((tile) => (
-          <StitchTile key={tile.id} tile={tile} zoomLevel={zoomLevel} />
+          <StitchTile key={tile.id} tile={tile} />
         ))}
         <GroupSelectionOverlay />
         {deleteElementMode && (

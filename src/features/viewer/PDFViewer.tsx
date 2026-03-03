@@ -33,6 +33,8 @@ import { wrapPageOperation } from "@/shared/stores/undoHelpers";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { SpecExtractionPanel } from "@/features/specs/SpecExtractionPanel";
 import { QuestionAnswerPanel } from "@/features/specs/QuestionAnswerPanel";
+import { StatusBar } from "./StatusBar";
+import { AnnotationPropertiesPanel } from "./AnnotationPropertiesPanel";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function PDFViewer() {
@@ -1528,9 +1530,15 @@ export function PDFViewer() {
         onApply={handleApplyDocumentSettings}
       />
 
+      {/* Annotation Properties Panel */}
+      {currentDocument && <AnnotationPropertiesPanel />}
+
+      {/* Status Bar */}
+      {currentDocument && <StatusBar />}
+
       {/* Spec Extraction Panel */}
       {currentDocument && <SpecExtractionPanel />}
-      
+
       {/* Question Answer Panel */}
       {currentDocument && <QuestionAnswerPanel />}
     </div>

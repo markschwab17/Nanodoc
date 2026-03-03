@@ -51,8 +51,18 @@ export function UpdateChecker() {
   }, []);
 
   useEffect(() => {
-    // Check for updates after a short delay to let the app fully initialize
+    // Only check once per day to avoid unnecessary network requests on every startup
+    const LAST_CHECK_KEY = "nanodoc_last_update_check";
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    const lastCheck = localStorage.getItem(LAST_CHECK_KEY);
+    const now = Date.now();
+
+    if (lastCheck && now - parseInt(lastCheck, 10) < ONE_DAY_MS) {
+      return; // Checked recently, skip
+    }
+
     const timer = setTimeout(() => {
+      localStorage.setItem(LAST_CHECK_KEY, String(now));
       checkForUpdates();
     }, 3000);
 

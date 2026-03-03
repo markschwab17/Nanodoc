@@ -12,6 +12,8 @@ export function useUndoRedo() {
     redo,
     canUndo,
     canRedo,
+    getUndoLabel,
+    getRedoLabel,
     pushAction,
     clearHistory,
   } = useUndoRedoStore();
@@ -21,6 +23,8 @@ export function useUndoRedo() {
     redo,
     canUndo: canUndo(),
     canRedo: canRedo(),
+    undoLabel: getUndoLabel(),
+    redoLabel: getRedoLabel(),
     pushAction,
     clearHistory,
   };

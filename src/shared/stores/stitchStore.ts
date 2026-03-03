@@ -65,6 +65,12 @@ interface StitchState {
   setZoomLevel: (level: number) => void;
   setCropRect: (rect: CropRect | null) => void;
   setCropToContent: (margin?: number) => void;
+  /** Update a tile WITHOUT pushing an undo snapshot — use during continuous drag/resize. */
+  updateTileNoUndo: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch">>) => void;
+  /** Update multiple tiles WITHOUT pushing an undo snapshot — use during continuous group drag/resize/rotate. */
+  updateTilesNoUndo: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl">> }>) => void;
+  /** Manually push the current state as an undo snapshot. Call before starting a drag/resize operation. */
+  pushUndoSnapshot: () => void;
   setSnapToEdges: (enabled: boolean) => void;
   setResizeLocked: (locked: boolean) => void;
   setReferenceScaleFeetPerInch: (value: number | null) => void;
@@ -156,6 +162,30 @@ export const useStitchStore = create<StitchState>((set, get) => ({
         redoStack: [],
       };
     }),
+
+  updateTileNoUndo: (id, patch) =>
+    set((state) => ({
+      tiles: state.tiles.map((t) =>
+        t.id === id ? { ...t, ...patch } : t
+      ),
+    })),
+
+  updateTilesNoUndo: (updates) =>
+    set((state) => {
+      const byId = new Map(updates.map((u) => [u.id, u.patch]));
+      return {
+        tiles: state.tiles.map((t) => {
+          const patch = byId.get(t.id);
+          return patch ? { ...t, ...patch } : t;
+        }),
+      };
+    }),
+
+  pushUndoSnapshot: () =>
+    set((state) => ({
+      undoStack: [...state.undoStack, snapshotState(state)].slice(-UNDO_MAX_SIZE),
+      redoStack: [],
+    })),
 
   removeTile: (id) =>
     set((state) => {

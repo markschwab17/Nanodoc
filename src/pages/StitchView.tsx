@@ -30,6 +30,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FilePlus } from "lucide-react";
+import { TourOverlay } from "@/features/tour/TourOverlay";
+import { useTourLauncher } from "@/features/tour/useTourLauncher";
 
 export default function StitchView() {
   const { tiles, setCropRect, setCropToContent, setSelectedTileIds } = useStitchStore();
@@ -77,6 +79,7 @@ export default function StitchView() {
   const { showNotification } = useNotificationStore();
 
   useStitchKeyboard();
+  useTourLauncher("stitch");
 
   const [showAddPdf, setShowAddPdf] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
@@ -374,6 +377,7 @@ export default function StitchView() {
               size="lg"
               className="h-14 px-8 text-lg gap-3 shadow-lg"
               onClick={() => setShowAddPdf(true)}
+              data-tour="stitch-add-pdf"
             >
               <FilePlus className="h-7 w-7" />
               Add PDF
@@ -500,6 +504,7 @@ export default function StitchView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <TourOverlay tourId="stitch" />
     </div>
   );
 }

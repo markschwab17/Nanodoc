@@ -42,7 +42,11 @@ export interface UIState {
   
   // Form tool settings
   currentFieldType: "text" | "checkbox" | "radio" | "dropdown" | "date";
-  
+
+  // Fullscreen mode
+  isFullscreen: boolean;
+  toggleFullscreen: () => void;
+
   // Request to open Document Settings (e.g. after creating a new project)
   requestDocumentSettingsOpen: boolean;
   setRequestDocumentSettingsOpen: (v: boolean) => void;
@@ -140,6 +144,11 @@ export const useUIStore = create<UIState>((set, get) => ({
   
   // Form tool settings
   currentFieldType: "text",
+
+  // Fullscreen mode
+  isFullscreen: false,
+  toggleFullscreen: () => set((s) => ({ isFullscreen: !s.isFullscreen })),
+
   requestDocumentSettingsOpen: false,
   setRequestDocumentSettingsOpen: (v) => set({ requestDocumentSettingsOpen: v }),
   initialSidebarOpen: urlState.initialSidebarOpen,

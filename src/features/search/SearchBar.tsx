@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect } from "react";
-import { Search, X, ChevronUp, ChevronDown } from "lucide-react";
+import { Search, X, ChevronUp, ChevronDown, CaseSensitive, StickyNote } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/stores/pdfStore";
@@ -14,13 +14,16 @@ import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/s
 export function SearchBar() {
   const [query, setQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
-  const { 
-    getCurrentDocument, 
-    setCurrentPage, 
-    setSearchResults, 
-    getSearchResults, 
-    currentSearchResult, 
-    setCurrentSearchResult 
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [searchAnnotations, setSearchAnnotations] = useState(false);
+  const {
+    getCurrentDocument,
+    setCurrentPage,
+    setSearchResults,
+    getSearchResults,
+    getAnnotations,
+    currentSearchResult,
+    setCurrentSearchResult
   } = usePDFStore();
   
   const currentDocument = getCurrentDocument();
@@ -43,7 +46,7 @@ export function SearchBar() {
     }, 300);
 
     return () => clearTimeout(timeoutId);
-  }, [query, currentDocument, setSearchResults, setCurrentSearchResult]);
+  }, [query, currentDocument, caseSensitive, searchAnnotations, setSearchResults, setCurrentSearchResult]);
 
   const performSearch = async (searchQuery: string) => {
     if (!currentDocument) return;
@@ -61,18 +64,64 @@ export function SearchBar() {
           const matches = page.search(searchQuery, 100); // Max 100 matches per page
 
           if (matches && matches.length > 0) {
-            // Flatten: create one SearchMatch per quad
-            for (const quad of matches) {
-              allMatches.push({
-                pageNumber: i,
-                quad: quad,
-                text: searchQuery,
-                matchIndex: matchIndex++,
-              });
+            if (caseSensitive) {
+              // mupdf search is case-insensitive; extract page text and verify case
+              const pageText: string = page.toSText("text") ?? "";
+              for (const quad of matches) {
+                // Check if the exact-case query exists on this page
+                if (pageText.includes(searchQuery)) {
+                  allMatches.push({
+                    pageNumber: i,
+                    quad: quad,
+                    text: searchQuery,
+                    matchIndex: matchIndex++,
+                  });
+                }
+              }
+            } else {
+              // Flatten: create one SearchMatch per quad
+              for (const quad of matches) {
+                allMatches.push({
+                  pageNumber: i,
+                  quad: quad,
+                  text: searchQuery,
+                  matchIndex: matchIndex++,
+                });
+              }
             }
           }
         } catch (error) {
           console.error(`Error searching page ${i}:`, error);
+        }
+      }
+
+      // Search in annotations if enabled
+      if (searchAnnotations) {
+        const docId = currentDocument.getId();
+        const annotations = getAnnotations(docId);
+        for (const annotation of annotations) {
+          const content = annotation.content ?? "";
+          const selectedText = annotation.selectedText ?? "";
+          const textToSearch = content || selectedText;
+          if (!textToSearch) continue;
+
+          const matches = caseSensitive
+            ? textToSearch.includes(searchQuery)
+            : textToSearch.toLowerCase().includes(searchQuery.toLowerCase());
+
+          if (matches) {
+            // Use annotation position as a synthetic quad
+            const x = annotation.x;
+            const y = annotation.y;
+            const w = annotation.width ?? 100;
+            const h = annotation.height ?? 20;
+            allMatches.push({
+              pageNumber: annotation.pageNumber,
+              quad: [[x, y, x + w, y, x + w, y + h, x, y + h]],
+              text: searchQuery,
+              matchIndex: matchIndex++,
+            });
+          }
         }
       }
 
@@ -146,38 +195,55 @@ export function SearchBar() {
         )}
       </div>
 
-      {(totalMatches > 0 || isSearching) && (
-        <div className="flex items-center gap-2">
-          {totalMatches > 0 && (
-            <>
-              <div className="text-xs text-muted-foreground flex-1">
-                {currentResultIndex + 1} of {totalMatches} matches
-              </div>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-7 w-7"
-                onClick={handlePrevious}
-                disabled={totalMatches === 0}
-              >
-                <ChevronUp className="h-3 w-3" />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-7 w-7"
-                onClick={handleNext}
-                disabled={totalMatches === 0}
-              >
-                <ChevronDown className="h-3 w-3" />
-              </Button>
-            </>
-          )}
-          {isSearching && (
-            <div className="text-xs text-muted-foreground">Searching...</div>
-          )}
-        </div>
-      )}
+      <div className="flex items-center gap-1">
+        <Button
+          variant={caseSensitive ? "secondary" : "ghost"}
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setCaseSensitive((v) => !v)}
+          title="Case sensitive"
+        >
+          <CaseSensitive className="h-4 w-4" />
+        </Button>
+        <Button
+          variant={searchAnnotations ? "secondary" : "ghost"}
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setSearchAnnotations((v) => !v)}
+          title="Search in annotations"
+        >
+          <StickyNote className="h-3.5 w-3.5" />
+        </Button>
+
+        {totalMatches > 0 && (
+          <>
+            <div className="text-xs text-muted-foreground flex-1 ml-1">
+              {currentResultIndex + 1} of {totalMatches}
+            </div>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handlePrevious}
+              disabled={totalMatches === 0}
+            >
+              <ChevronUp className="h-3 w-3" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleNext}
+              disabled={totalMatches === 0}
+            >
+              <ChevronDown className="h-3 w-3" />
+            </Button>
+          </>
+        )}
+        {isSearching && (
+          <div className="text-xs text-muted-foreground ml-1">Searching...</div>
+        )}
+      </div>
     </div>
   );
 }

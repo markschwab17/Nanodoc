@@ -16,7 +16,7 @@ function angleDeg(clientX: number, clientY: number, centerX: number, centerY: nu
 }
 
 export function GroupSelectionOverlay() {
-  const { tiles, selectedTileIds, updateTiles, zoomLevel, resizeLocked } = useStitchStore();
+  const { tiles, selectedTileIds, updateTilesNoUndo, zoomLevel, resizeLocked } = useStitchStore();
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [rotationDragStart, setRotationDragStart] = useState<{
     startAngleDeg: number;
@@ -60,6 +60,8 @@ export function GroupSelectionOverlay() {
     (e: React.PointerEvent, dir: string) => {
       e.stopPropagation();
       if (resizeLocked || unlockedTiles.length === 0) return;
+      // Push undo snapshot before continuous resize
+      useStitchStore.getState().pushUndoSnapshot();
       const centerX = bounds.x + bounds.width / 2;
       const centerY = bounds.y + bounds.height / 2;
       resizeStartRef.current = {
@@ -117,9 +119,9 @@ export function GroupSelectionOverlay() {
             },
           };
         });
-        updateTiles(updates);
+        updateTilesNoUndo(updates);
     },
-    [scale, updateTiles]
+    [scale, updateTilesNoUndo]
   );
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
@@ -134,6 +136,8 @@ export function GroupSelectionOverlay() {
       e.stopPropagation();
       e.preventDefault();
       if (resizeLocked || unlockedTiles.length === 0) return;
+      // Push undo snapshot before continuous rotation
+      useStitchStore.getState().pushUndoSnapshot();
       const el = overlayRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
@@ -192,9 +196,9 @@ export function GroupSelectionOverlay() {
           },
         };
       });
-      updateTiles(updates);
+      updateTilesNoUndo(updates);
     },
-    [rotationDragStart, updateTiles]
+    [rotationDragStart, updateTilesNoUndo]
   );
 
   const handleRotatePointerUp = useCallback(

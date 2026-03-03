@@ -750,3 +750,150 @@ export function clearTextCache(documentId: string) {
   keysToDelete.forEach((key) => textCache.delete(key));
 }
 
+// ─── Idle-scheduled async text extraction ───────────────────────────────────
+
+/**
+ * Handle returned by `extractStructuredTextAsync` and `preloadTextForPages`
+ * that allows the caller to cancel a pending idle extraction.
+ */
+export interface IdleExtractionHandle {
+  /** Cancel the pending extraction. The returned promise will reject with an
+   *  `AbortError` DOMException (or a plain Error in environments that lack it). */
+  cancel: () => void;
+  /** Resolves with the extracted spans, or rejects if cancelled. */
+  promise: Promise<TextSpan[]>;
+}
+
+/**
+ * Schedule `extractStructuredText` to run during the browser's idle period so
+ * it does not block user interaction (scrolling, drawing, etc.).
+ *
+ * Uses `requestIdleCallback` when available (most browsers) and falls back to
+ * `setTimeout(fn, 1)` in environments that do not support it (e.g. Safari < 16,
+ * SSR / Node test runners).
+ *
+ * The returned handle exposes a `cancel()` method – call it when the page
+ * changes before extraction finishes to avoid wasted work.
+ *
+ * Results are stored in the same `textCache` used by `getStructuredTextForPage`
+ * so subsequent lookups are instant.
+ *
+ * @param document  The open PDF document.
+ * @param pageNumber  Zero-based page index.
+ * @param timeoutMs  Maximum time (ms) to wait for an idle slot before forcing
+ *                   execution.  Defaults to 200 ms.
+ */
+export function extractStructuredTextAsync(
+  document: PDFDocument,
+  pageNumber: number,
+  timeoutMs: number = 200,
+): IdleExtractionHandle {
+  let cancelled = false;
+  let idleId: number | ReturnType<typeof setTimeout> | null = null;
+
+  const promise = new Promise<TextSpan[]>((resolve, reject) => {
+    // If the result is already cached, resolve immediately without scheduling.
+    const cacheKey = `${document.getId()}_${pageNumber}`;
+    if (textCache.has(cacheKey)) {
+      resolve(textCache.get(cacheKey)!);
+      return;
+    }
+
+    const run = async () => {
+      if (cancelled) {
+        reject(
+          typeof DOMException !== "undefined"
+            ? new DOMException("Extraction cancelled", "AbortError")
+            : new Error("Extraction cancelled"),
+        );
+        return;
+      }
+      try {
+        const spans = await extractStructuredText(document, pageNumber);
+        if (cancelled) {
+          reject(
+            typeof DOMException !== "undefined"
+              ? new DOMException("Extraction cancelled", "AbortError")
+              : new Error("Extraction cancelled"),
+          );
+          return;
+        }
+        // Populate the shared cache so getStructuredTextForPage picks it up.
+        textCache.set(cacheKey, spans);
+        resolve(spans);
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    // Schedule using requestIdleCallback when available.
+    if (typeof requestIdleCallback === "function") {
+      idleId = requestIdleCallback(() => { run(); }, { timeout: timeoutMs });
+    } else {
+      // Fallback: yield to the event loop with a short timeout.
+      idleId = setTimeout(() => { run(); }, 1);
+    }
+  });
+
+  const cancel = () => {
+    cancelled = true;
+    if (idleId !== null) {
+      if (typeof cancelIdleCallback === "function" && typeof idleId === "number") {
+        cancelIdleCallback(idleId);
+      } else {
+        clearTimeout(idleId as ReturnType<typeof setTimeout>);
+      }
+      idleId = null;
+    }
+  };
+
+  return { cancel, promise };
+}
+
+// ─── Preload text for multiple pages ────────────────────────────────────────
+
+/**
+ * Pre-extract text for an array of pages during idle time.
+ *
+ * This is useful for warming the cache for visible / nearby pages so that
+ * search-as-you-type feels instant.
+ *
+ * Each page is scheduled as a separate idle callback so the browser can
+ * interleave rendering frames between extractions.
+ *
+ * Returns a single handle whose `cancel()` aborts **all** pending extractions
+ * and whose `promise` resolves with a `Map<pageNumber, TextSpan[]>` once every
+ * page has finished (or been served from cache).
+ *
+ * @param document    The open PDF document.
+ * @param pageNumbers Array of zero-based page indices to preload.
+ * @param timeoutMs   Per-page idle timeout.  Defaults to 200 ms.
+ */
+export function preloadTextForPages(
+  document: PDFDocument,
+  pageNumbers: number[],
+  timeoutMs: number = 200,
+): { cancel: () => void; promise: Promise<Map<number, TextSpan[]>> } {
+  const handles: IdleExtractionHandle[] = [];
+
+  for (const pageNumber of pageNumbers) {
+    handles.push(extractStructuredTextAsync(document, pageNumber, timeoutMs));
+  }
+
+  const cancel = () => {
+    for (const handle of handles) {
+      handle.cancel();
+    }
+  };
+
+  const promise = Promise.all(
+    handles.map((h, i) =>
+      h.promise.then(
+        (spans) => [pageNumbers[i], spans] as [number, TextSpan[]],
+      ),
+    ),
+  ).then((entries) => new Map<number, TextSpan[]>(entries));
+
+  return { cancel, promise };
+}
+

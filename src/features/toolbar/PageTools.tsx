@@ -26,18 +26,20 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Trash2, Plus, Layers } from "lucide-react";
+import { Trash2, Plus, Layers, FileOutput } from "lucide-react";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { FlattenDialog } from "@/features/export/FlattenDialog";
+import { useFileSystem } from "@/shared/hooks/useFileSystem";
 
 export function PageTools() {
   const { currentDocument } = usePDF();
   const { currentPage, setCurrentPage, documents, getAnnotations } = usePDFStore();
   const { showNotification } = useNotificationStore();
+  const fileSystem = useFileSystem();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showInsertDialog, setShowInsertDialog] = useState(false);
   const [showFlattenDialog, setShowFlattenDialog] = useState(false);
@@ -63,6 +65,37 @@ export function PageTools() {
     };
     initEditor();
   }, []);
+
+  // Listen for toolbar page operation events
+  useEffect(() => {
+    const handleInsert = (e: Event) => {
+      const detail = (e as CustomEvent<{ position: "before" | "after" }>).detail;
+      if (detail?.position) {
+        setInsertPosition(detail.position);
+        setInsertMode("blank");
+        setTargetPageNumber(currentPage + 1);
+        setShowInsertDialog(true);
+      }
+    };
+    const handleDelete = () => {
+      if (currentDocument && currentDocument.getPageCount() > 1) {
+        setShowDeleteDialog(true);
+      }
+    };
+    const handleExtract = () => {
+      handleExtractPage();
+    };
+
+    window.addEventListener("page-tools-insert", handleInsert);
+    window.addEventListener("page-tools-delete", handleDelete);
+    window.addEventListener("page-tools-extract", handleExtract);
+
+    return () => {
+      window.removeEventListener("page-tools-insert", handleInsert);
+      window.removeEventListener("page-tools-delete", handleDelete);
+      window.removeEventListener("page-tools-extract", handleExtract);
+    };
+  }, [currentDocument, currentPage, editor]);
 
   const handleDeletePage = async () => {
     if (!currentDocument || !editor) return;
@@ -425,6 +458,27 @@ export function PageTools() {
     }
   }, [selectedSourceDocumentId, documents]);
 
+  const handleExtractPage = async () => {
+    if (!currentDocument || !editor) return;
+
+    try {
+      const annotations = getAnnotations(currentDocument.getId()).filter(
+        (a) => a.pageNumber === currentPage
+      );
+      const pdfData = await editor.exportPageAsPDF(currentDocument, currentPage, annotations);
+
+      const docName = currentDocument.getName().replace(/\.pdf$/i, "");
+      const fileName = `${docName}_page${currentPage + 1}.pdf`;
+
+      await fileSystem.saveFile(pdfData, fileName);
+      showNotification(`Page ${currentPage + 1} extracted as "${fileName}"`, "success");
+    } catch (error) {
+      console.error("Error extracting page:", error);
+      const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+      showNotification(`Failed to extract page: ${errorMessage}`, "error");
+    }
+  };
+
   const handleFlatten = async (currentPageOnly: boolean) => {
     if (!currentDocument || !editor) return;
 
@@ -489,6 +543,16 @@ export function PageTools() {
         title="Delete Page"
       >
         <Trash2 className="h-3.5 w-3.5" />
+      </Button>
+      <Button
+        variant="outline"
+        size="icon"
+        className="h-7 w-7"
+        onClick={handleExtractPage}
+        disabled={!editor}
+        title="Extract current page to new PDF"
+      >
+        <FileOutput className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant="outline"

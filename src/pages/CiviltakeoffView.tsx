@@ -19,7 +19,6 @@ import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
-import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 
 export default function CiviltakeoffView() {
@@ -143,7 +142,6 @@ export default function CiviltakeoffView() {
 
         const json = await res.json();
         const pdfUrl = json?.pdfUrl;
-        const extraction = json?.extraction;
         if (!pdfUrl || typeof pdfUrl !== "string") {
           throw new Error("Invalid response from server.");
         }
@@ -198,30 +196,9 @@ export default function CiviltakeoffView() {
           ui.setSplitScreenMode(true);
         }
 
-        const raw = extraction?.specHighlights ?? extraction?.spec_highlights;
-        if (Array.isArray(raw) && raw.length > 0) {
-          const specHighlights = raw.filter(
-            (h: unknown) =>
-              h != null &&
-              typeof (h as any).page === "number" &&
-              Array.isArray((h as any).bbox) &&
-              (h as any).bbox.length >= 4 &&
-              typeof (h as any).specId === "string"
-          ).map((h: any) => ({
-            page: Number(h.page),
-            bbox: [Number(h.bbox[0]), Number(h.bbox[1]), Number(h.bbox[2]), Number(h.bbox[3])] as [number, number, number, number],
-            specId: String(h.specId),
-            color: typeof h.color === "string" ? h.color : undefined,
-          }));
-          if (specHighlights.length > 0) {
-            setTimeout(() => {
-              const doc = usePDFStore.getState().getCurrentDocument();
-              if (doc) {
-                useSpecExtractionStore.getState().setSpecHighlights(doc.getId(), specHighlights);
-              }
-            }, 0);
-          }
-        }
+        // Note: extraction?.specHighlights from CTO use AI-provided bbox which is unreliable
+        // (the AI hallucinates coordinates since it works from text, not spatial layout).
+        // Highlights are instead derived from quote_text search in SpecExtractionPanel's sync effect.
 
         // Deep link: navigate to page (0-based)
         if (params.page != null) {

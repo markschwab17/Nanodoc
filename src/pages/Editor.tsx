@@ -30,7 +30,19 @@ import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
+import { TourOverlay } from "@/features/tour/TourOverlay";
+import { useTourLauncher } from "@/features/tour/useTourLauncher";
 
+
+// Pre-initialize mupdf WASM module at app startup so it's ready when the first PDF is opened
+let mupdfPreloadPromise: Promise<any> | null = null;
+function preloadMupdf() {
+  if (!mupdfPreloadPromise) {
+    mupdfPreloadPromise = import("mupdf").catch(() => null);
+  }
+  return mupdfPreloadPromise;
+}
+preloadMupdf();
 
 function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
@@ -98,6 +110,9 @@ function Editor() {
   
   // Enable keyboard shortcuts
   useKeyboard();
+
+  // Auto-start editor tour on first visit
+  useTourLauncher("editor");
   
   // Get current editing annotation for formatting toolbar
   const currentDocument = usePDFStore.getState().getCurrentDocument();
@@ -512,87 +527,51 @@ function Editor() {
 
   // Listen for file open events from Tauri (when PDF is opened from system)
   useEffect(() => {
-    // Check if we're in Tauri environment - comprehensive detection
-    const hasTauri = typeof window !== 'undefined' && '__TAURI__' in window;
-    const hasTauriInternals = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-    const hasTauriInvoke = typeof window !== 'undefined' && '__TAURI_INVOKE__' in window;
-    const hasInvokeAPI = typeof window !== 'undefined' && 'invoke' in window;
-    const hasConvertFileSrc = typeof window !== 'undefined' && 'convertFileSrc' in window;
+    // Only attach in Tauri environment (standard v2 detection)
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
 
-    const isTauri = hasTauri || hasTauriInternals || hasTauriInvoke || hasInvokeAPI || hasConvertFileSrc;
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
 
-    if (isTauri) {
-      // Get the Tauri event listener - try different approaches
-      let listen: any = null;
+    // Use the standard Tauri v2 event API
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      if (cancelled) return;
 
-      // Try the old way first
-      if ((window as any).__TAURI__?.event?.listen) {
-        listen = (window as any).__TAURI__.event.listen;
-      }
-      // Try the new Tauri v2 way
-      else if ((window as any).__TAURI_INTERNALS__?.event?.listen) {
-        listen = (window as any).__TAURI_INTERNALS__.event.listen;
-      }
-      // Try direct window methods
-      else if ((window as any).invoke) {
-        // For newer Tauri versions, we might need to use a different approach
-        // Let's try to import the event module
+      listen<string>("open-pdf-file", async (event) => {
+        const filePath = event.payload;
+        if (!filePath || typeof filePath !== "string") return;
+
+        const pdfStore = usePDFStore.getState();
         try {
-          const tauriEvent = (window as any).event || (window as any).__TAURI_INTERNALS__?.event;
-          if (tauriEvent?.listen) {
-            listen = tauriEvent.listen;
-          }
-        } catch (e) {
-          console.warn("Could not access Tauri event API:", e);
+          pdfStore.setLoading(true);
+          pdfStore.clearError();
+
+          const fileData = await fileSystem.readFile(filePath);
+          const fileName = filePath.split(/[/\\]/).pop() || "file.pdf";
+          const mupdfModule = await import("mupdf");
+          await loadPDF(fileData, fileName, mupdfModule.default, filePath);
+        } catch (error) {
+          console.error("Error opening PDF from system:", error);
+          pdfStore.setLoading(false);
+          const errorMessage = error instanceof Error ? error.message : "Failed to open PDF file";
+          pdfStore.setError(errorMessage);
+          showNotification(errorMessage, "error");
         }
-      }
+      }).then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlistenFn = fn;
+        }
+      });
+    }).catch(() => {
+      // Not in Tauri or event module unavailable - silently skip
+    });
 
-        if (listen) {
-          // Listen for open-pdf-file event
-          const unlisten = listen("open-pdf-file", async (event: any) => {
-            const filePath = event.payload;
-            console.log("Received open-pdf-file event:", filePath);
-
-            if (filePath && typeof filePath === "string") {
-              const pdfStore = usePDFStore.getState();
-              try {
-                pdfStore.setLoading(true);
-                pdfStore.clearError();
-
-                // Read the file
-                console.log("Reading file from path:", filePath);
-                const fileData = await fileSystem.readFile(filePath);
-                console.log("File read successfully, size:", fileData.length);
-
-                const fileName = filePath.split(/[/\\]/).pop() || "file.pdf";
-
-                // Load the PDF
-                console.log("Loading PDF:", fileName);
-                const mupdfModule = await import("mupdf");
-                await loadPDF(fileData, fileName, mupdfModule.default, filePath);
-                console.log("PDF loaded successfully");
-              } catch (error) {
-                console.error("Error opening PDF from system:", error);
-                pdfStore.setLoading(false);
-                const errorMessage = error instanceof Error ? error.message : "Failed to open PDF file";
-                pdfStore.setError(errorMessage);
-                showNotification(errorMessage, "error");
-              }
-            } else {
-              console.warn("Invalid file path received:", filePath);
-            }
-          });
-
-          return () => {
-            unlisten.then((fn: () => void) => fn());
-          };
-      } else {
-        console.warn("Tauri event listener not available despite Tauri detection");
-      }
-    } else {
-      // Not in Tauri environment - file association listener not needed
-      // (Silently skip - this is expected in browser environment)
-    }
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
   }, [fileSystem, loadPDF]);
 
   // Get root props but override title to prevent tooltip (spread all dropzone props so drag-and-drop works)
@@ -690,6 +669,7 @@ function Editor() {
       <div className={cn("flex overflow-hidden relative min-h-0", splitScreenMode ? "flex-1 h-full" : "h-screen")}>
         {/* Left Sidebar - Thumbnails and Bookmarks (collapsible). Content kept mounted when collapsed so thumbnails stay cached. */}
         <aside
+          data-tour="editor-page-sidebar"
           className={cn(
             "border-r bg-secondary/50 flex flex-col overflow-hidden flex-shrink-0 transition-[width] duration-200 ease-out relative",
             leftSidebarCollapsed ? "w-8" : "w-64"
@@ -787,7 +767,7 @@ function Editor() {
         )}
 
         {/* Center - Large Viewer */}
-        <main className="flex-1 flex flex-col overflow-hidden min-h-0 bg-muted">
+        <main className="flex-1 flex flex-col overflow-hidden min-h-0 bg-muted" data-tour="editor-viewer">
           {splitScreenMode && <CTOSplitScreenToolbar />}
           <div className="flex-1 min-h-0 overflow-hidden flex">
             <PDFViewer />
@@ -972,6 +952,8 @@ function Editor() {
         onClose={() => setShowStampCreator(false)}
       />
 
+      {/* Guided Tour Overlay */}
+      <TourOverlay tourId="editor" />
     </div>
   );
 }

@@ -101,7 +101,7 @@ export function StitchBottomToolbar({
   };
 
   return (
-    <footer className="flex items-center justify-center gap-3 border-t shrink-0 px-3 py-2 bg-muted/30">
+    <footer className="flex items-center justify-center gap-3 border-t shrink-0 px-3 py-2 bg-muted/30" data-tour="stitch-canvas-controls">
       <div className="flex items-center gap-2 flex-wrap justify-center text-xs">
         <div className="flex items-center gap-1.5" role="group" aria-label="Canvas size">
           <Select value={currentSizeKey} onValueChange={handleCanvasSizeChange}>

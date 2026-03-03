@@ -281,6 +281,8 @@ export function VirtualizedPageList({
         position: "relative",
         // Ensure background is visible to show gaps between pages
         backgroundColor: "transparent",
+        // Smooth zoom transitions for width/height changes
+        transition: "width 150ms ease-out, height 150ms ease-out",
       }}
     >
       {renderedPages}

@@ -69,6 +69,79 @@ export function SpecExtractionPanel() {
   );
 
   const { selectedSpecId, selectedSpecDocumentId } = useSpecExtractionStore();
+
+  /**
+   * Build spec highlights by searching for each spec's quote_text on the page using mupdf.
+   * The AI-returned bbox is unreliable (hallucinated coordinates), so we find the real
+   * text position via page.search() and derive the bounding box from the search quads.
+   */
+  const buildSpecHighlightsFromQuotes = (
+    specsArr: SpecExtractionResult[],
+    doc: ReturnType<typeof getCurrentDocument>
+  ) => {
+    if (!doc) return [];
+    const highlights: Array<{ page: number; bbox: [number, number, number, number]; specId: string; color: string }> = [];
+    for (let idx = 0; idx < specsArr.length; idx++) {
+      const spec = specsArr[idx];
+      const quoteText = (spec.quote_text || "").trim();
+      if (quoteText.length < 2) continue;
+      const specPage = spec.page ?? 0;
+      if (specPage >= (doc.getPageCount() ?? 0)) continue;
+      try {
+        const mupdfDoc = doc.getMupdfDocument();
+        const page = mupdfDoc.loadPage(specPage);
+        const pageMetadata = doc.getPageMetadata(specPage);
+        const pageHeight = pageMetadata?.height || 792;
+        // Try progressively shorter search strings
+        const searchCandidates = [
+          quoteText.slice(0, 200),
+          quoteText.slice(0, 100),
+          quoteText.slice(0, 60),
+          quoteText.split(/\s+/).slice(0, 8).join(" "),
+        ].filter((s) => s.length >= 2);
+        let found = false;
+        for (const searchText of searchCandidates) {
+          const matches = page.search(searchText, 10);
+          if (matches && matches.length > 0) {
+            const first = matches[0];
+            const quadsRaw: number[][] = Array.isArray(first) && typeof first[0] === "number"
+              ? [first as number[]]
+              : (Array.isArray(first) ? (first as number[][]) : []);
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const q of quadsRaw) {
+              if (!Array.isArray(q) || q.length < 8) continue;
+              for (let i = 0; i < 8; i += 2) {
+                minX = Math.min(minX, q[i]);
+                maxX = Math.max(maxX, q[i]);
+              }
+              for (let i = 1; i < 8; i += 2) {
+                // mupdf search returns display coords (Y=0 at top), convert to PDF coords (Y=0 at bottom)
+                const pdfY = pageHeight - q[i];
+                minY = Math.min(minY, pdfY);
+                maxY = Math.max(maxY, pdfY);
+              }
+            }
+            if (minX !== Infinity) {
+              highlights.push({
+                page: specPage,
+                bbox: [minX, minY, maxX, maxY],
+                specId: spec.spec_id || `spec_${idx}`,
+                color: getColorForCategory(spec.category),
+              });
+              found = true;
+              break;
+            }
+          }
+        }
+        if (!found) {
+          // No search match — skip this spec (don't use AI bbox)
+        }
+      } catch {
+        // ignore errors for individual specs
+      }
+    }
+    return highlights;
+  };
   
   useEffect(() => {
     const handleExtractionRequest = (event: CustomEvent) => {
@@ -277,15 +350,9 @@ export function SpecExtractionPanel() {
         setSpecHighlights(docId, []);
       } else {
         const specsArr = result as SpecExtractionResult[];
-        const specHighlights = specsArr
-          .filter((s) => s.bbox && s.bbox.length >= 4)
-          .map((spec, idx) => ({
-            page: spec.page,
-            bbox: [spec.bbox![0], spec.bbox![1], spec.bbox![2], spec.bbox![3]] as [number, number, number, number],
-            specId: spec.spec_id || `spec_${idx}`,
-            color: getColorForCategory(spec.category),
-          }));
         setExtractedSpecs(docId, specsArr);
+        // Build highlights by searching for quote_text on each page (AI bbox is unreliable)
+        const specHighlights = buildSpecHighlightsFromQuotes(specsArr, document);
         setSpecHighlights(docId, specHighlights);
       }
       
@@ -771,14 +838,8 @@ export function SpecExtractionPanel() {
     if (geotechnicalSummary?.length) {
       syncGeotechnicalHighlightAnnotations(geotechnicalSummary);
     }
-    const specOnlyHighlights = visibleSpecsNow
-      .filter((s) => s.bbox && s.bbox.length >= 4)
-      .map((spec, idx) => ({
-        page: spec.page,
-        bbox: [spec.bbox![0], spec.bbox![1], spec.bbox![2], spec.bbox![3]] as [number, number, number, number],
-        specId: spec.spec_id || `spec_${idx}`,
-        color: getColorForCategory(spec.category),
-      }));
+    // Build highlights by searching for quote_text on each page (AI bbox is unreliable)
+    const specOnlyHighlights = buildSpecHighlightsFromQuotes(visibleSpecsNow, currentDocument);
     setSpecHighlights(documentId, specOnlyHighlights);
   }, [documentId, geotechnicalSummary, currentDocument, pageCount, specs]);
 

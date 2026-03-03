@@ -6,11 +6,11 @@
 
 import { useUIStore } from "@/shared/stores/uiStore";
 import { Button } from "@/components/ui/button";
-import { 
-  MousePointer2, 
-  Hand, 
-  Type, 
-  Highlighter, 
+import {
+  MousePointer2,
+  Hand,
+  Type,
+  Highlighter,
   Eraser,
   Undo2,
   Redo2,
@@ -28,17 +28,21 @@ import {
   ArrowRight,
   FileText,
   Stamp as StampIcon,
-  Layers
+  Layers,
+  FileOutput,
+  FilePlus2,
+  Trash2
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, type ReactNode } from "react";
 import { useUndoRedo } from "@/shared/hooks/useUndoRedo";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { PrintSettingsDialog } from "@/features/print/PrintSettingsDialog";
 import type { PrintSettings } from "@/shared/stores/printStore";
@@ -57,12 +61,29 @@ import {
   setPdfAiMetadata,
 } from "@/shared/browserPdfAiStorage";
 
+/** Wraps a toolbar button with a Radix tooltip shown to the left. */
+function ToolbarTooltip({ label, shortcut, children }: { label: string; shortcut?: string; children: ReactNode }) {
+  return (
+    <Tooltip delayDuration={300}>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="left" className="flex items-center gap-1.5">
+        <span>{label}</span>
+        {shortcut && (
+          <kbd className="pointer-events-none inline-flex h-5 select-none items-center gap-0.5 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
+            {shortcut}
+          </kbd>
+        )}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function Toolbar() {
   const navigate = useNavigate();
   const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType, requestDocumentSettingsOpen, setRequestDocumentSettingsOpen } = useUIStore();
   const { currentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
-  const { undo, redo, canUndo, canRedo } = useUndoRedo();
+  const { undo, redo, canUndo, canRedo, undoLabel, redoLabel } = useUndoRedo();
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [showRecentFiles, setShowRecentFiles] = useState(false);
@@ -241,6 +262,10 @@ export function Toolbar() {
     }
   }, [toolbarSize]);
   
+  // Platform-aware modifier key for tooltip shortcuts
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.includes('Mac');
+  const modKey = isMac ? '\u2318' : 'Ctrl+';
+
   const handleOpenFile = async () => {
     const result = await fileSystem.openFile();
     if (result) {
@@ -579,11 +604,7 @@ export function Toolbar() {
     if (!currentDoc) return;
 
     const isTauriEnv =
-      typeof window !== "undefined" &&
-      ((window as any).__TAURI__ != null ||
-        (window as any).__TAURI_INTERNALS__ != null ||
-        (window as any).__TAURI_INVOKE__ != null ||
-        (window as any).invoke != null);
+      typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
     try {
       let chosenPath: string | null = null;
@@ -620,14 +641,8 @@ export function Toolbar() {
     }
   };
 
-  // Check if we're in Tauri (desktop) or browser - comprehensive detection
-  const hasTauri = typeof window !== 'undefined' && '__TAURI__' in window;
-  const hasTauriInternals = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  const hasTauriInvoke = typeof window !== 'undefined' && '__TAURI_INVOKE__' in window;
-  const hasInvokeAPI = typeof window !== 'undefined' && 'invoke' in window;
-  const hasConvertFileSrc = typeof window !== 'undefined' && 'convertFileSrc' in window;
-
-  const isTauri = hasTauri || hasTauriInternals || hasTauriInvoke || hasInvokeAPI || hasConvertFileSrc;
+  // Check if we're in Tauri (desktop) or browser - standard Tauri v2 detection
+  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
   const handlePrint = () => {
     const currentDoc = getCurrentDocument();
@@ -686,41 +701,47 @@ export function Toolbar() {
   };
 
   return (
-    <div 
+    <TooltipProvider>
+    <div
       ref={toolbarRef}
+      data-tour="editor-toolbar"
       className={`flex flex-col items-center justify-between ${sizeClasses.padding} h-full overflow-y-auto`}
     >
       {/* File Actions */}
       <div className={`flex flex-col ${sizeClasses.gap} pt-1`}>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handleOpenFile}
-          title="Open PDF"
-          className={sizeClasses.button}
-          data-action="open"
-        >
-          <FolderOpen className={sizeClasses.icon} />
-        </Button>
-        <Button
-          ref={recentFilesButtonRef}
-          variant="outline"
-          size="icon"
-          onClick={() => setShowRecentFiles(true)}
-          title="Open Recent"
-          className={sizeClasses.button}
-        >
-          <Clock className={sizeClasses.icon} />
-        </Button>
+        <ToolbarTooltip label="Open PDF" shortcut={`${modKey}O`}>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={handleOpenFile}
+            className={sizeClasses.button}
+            data-action="open"
+            aria-label="Open PDF"
+          >
+            <FolderOpen className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Open Recent">
+          <Button
+            ref={recentFilesButtonRef}
+            variant="outline"
+            size="icon"
+            onClick={() => setShowRecentFiles(true)}
+            className={sizeClasses.button}
+            aria-label="Open Recent"
+          >
+            <Clock className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
         <Popover>
           <PopoverTrigger asChild>
             <Button
               variant="outline"
               size="icon"
               disabled={!currentDocument || savingToCto}
-              title={savingToCto ? "Saving…" : "Save & Export"}
               className={sizeClasses.button}
               data-action="save"
+              aria-label="Save"
             >
               {savingToCto ? (
                 <Loader2 className={`${sizeClasses.icon} animate-spin`} />
@@ -786,99 +807,192 @@ export function Toolbar() {
             </div>
           </PopoverContent>
         </Popover>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={handlePrint}
-          disabled={!currentDocument}
-          title="Print PDF"
-          className={sizeClasses.button}
-        >
-          <Printer className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => navigate("/stitch")}
-          title="Stitch PDFs together"
-          className={sizeClasses.button}
-        >
-          <Layers className={sizeClasses.icon} />
-        </Button>
+        <ToolbarTooltip label="Print" shortcut={`${modKey}P`}>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={handlePrint}
+            disabled={!currentDocument}
+            className={sizeClasses.button}
+            aria-label="Print"
+          >
+            <Printer className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Stitch PDFs">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => navigate("/stitch")}
+            className={sizeClasses.button}
+            aria-label="Stitch PDFs"
+          >
+            <Layers className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        {/* Page Management Popover */}
+        <Popover>
+          <ToolbarTooltip label="Page Operations">
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                disabled={!currentDocument}
+                className={sizeClasses.button}
+                aria-label="Page Operations"
+              >
+                <FileText className={sizeClasses.icon} />
+              </Button>
+            </PopoverTrigger>
+          </ToolbarTooltip>
+          <PopoverContent className="w-56 p-1" side="left" align="start">
+            <div className="flex flex-col">
+              <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                Page Operations
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="justify-start"
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("page-tools-insert", { detail: { position: "before" } }));
+                }}
+              >
+                <FilePlus2 className="h-4 w-4 mr-2" />
+                Insert Blank Page Before
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="justify-start"
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("page-tools-insert", { detail: { position: "after" } }));
+                }}
+              >
+                <FilePlus2 className="h-4 w-4 mr-2" />
+                Insert Blank Page After
+              </Button>
+              <div className="h-px bg-border my-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="justify-start"
+                disabled={!currentDocument || currentDocument.getPageCount() <= 1}
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("page-tools-delete"));
+                }}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Delete Current Page
+              </Button>
+              <div className="h-px bg-border my-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="justify-start"
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("page-tools-extract"));
+                }}
+              >
+                <FileOutput className="h-4 w-4 mr-2" />
+                Extract Page to New PDF
+              </Button>
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
 
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 
       {/* Tool Selection */}
       <div className={`flex flex-col ${sizeClasses.gap}`}>
-        <Button
-          variant={activeTool === "select" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("select")}
-          title="Select Tool"
-          className={sizeClasses.button}
-        >
-          <MousePointer2 className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "selectText" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("selectText")}
-          title="Select Text Tool"
-          className={sizeClasses.button}
-        >
-          <TextSelect className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "pan" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("pan")}
-          title="Pan Tool (or hold Space)"
-          className={sizeClasses.button}
-        >
-          <Hand className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "text" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("text")}
-          title="Text Annotation"
-          className={sizeClasses.button}
-        >
-          <Type className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "highlight" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("highlight")}
-          title="Highlight Text"
-          className={sizeClasses.button}
-        >
-          <Highlighter className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "redact" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("redact")}
-          title="Redact (Permanently Remove Content)"
-          className={sizeClasses.button}
-        >
-          <Eraser className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "draw" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("draw")}
-          title="Draw Tool"
-          className={sizeClasses.button}
-        >
-          <Pencil className={sizeClasses.icon} />
-        </Button>
+        <ToolbarTooltip label="Select" shortcut={`${modKey}A`}>
+          <Button
+            variant={activeTool === "select" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("select")}
+            className={sizeClasses.button}
+            aria-label="Select"
+            data-tour="editor-tool-select"
+          >
+            <MousePointer2 className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Select Text">
+          <Button
+            variant={activeTool === "selectText" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("selectText")}
+            className={sizeClasses.button}
+            aria-label="Select Text"
+          >
+            <TextSelect className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Pan" shortcut="Space">
+          <Button
+            variant={activeTool === "pan" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("pan")}
+            className={sizeClasses.button}
+            aria-label="Pan"
+          >
+            <Hand className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Text" shortcut={`${modKey}T`}>
+          <Button
+            variant={activeTool === "text" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("text")}
+            className={sizeClasses.button}
+            aria-label="Text"
+            data-tour="editor-tool-text"
+          >
+            <Type className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Highlight" shortcut={`${modKey}H`}>
+          <Button
+            variant={activeTool === "highlight" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("highlight")}
+            className={sizeClasses.button}
+            aria-label="Highlight"
+            data-tour="editor-tool-highlight"
+          >
+            <Highlighter className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Redact" shortcut={`${modKey}R`}>
+          <Button
+            variant={activeTool === "redact" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("redact")}
+            className={sizeClasses.button}
+            aria-label="Redact"
+          >
+            <Eraser className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Draw">
+          <Button
+            variant={activeTool === "draw" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("draw")}
+            className={sizeClasses.button}
+            aria-label="Draw"
+            data-tour="editor-tool-draw"
+          >
+            <Pencil className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
         {/* Shape tool: click to draw; hover to open menu to the left (no arrow) */}
         <Popover open={showShapeMenu} onOpenChange={setShowShapeMenu}>
           <PopoverTrigger asChild>
             <div
               className="relative"
+              data-tour="editor-tool-shape"
               onMouseEnter={() => {
                 if (shapeMenuTimeoutRef.current) {
                   clearTimeout(shapeMenuTimeoutRef.current);
@@ -897,8 +1011,8 @@ export function Toolbar() {
                 variant={activeTool === "shape" ? "default" : "outline"}
                 size="icon"
                 onClick={() => setActiveTool("shape")}
-                title={`Shapes – draw ${currentShapeType === "rectangle" ? "rectangle" : currentShapeType === "circle" ? "circle" : "arrow"} (hover to change)`}
                 className={sizeClasses.button}
+                aria-label="Shape"
               >
                 {currentShapeType === "rectangle" && <Square className={sizeClasses.icon} />}
                 {currentShapeType === "circle" && <Circle className={sizeClasses.icon} />}
@@ -968,50 +1082,59 @@ export function Toolbar() {
             </div>
           </PopoverContent>
         </Popover>
-        <Button
-          variant={activeTool === "form" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool("form")}
-          title="Form Fields"
-          className={sizeClasses.button}
-        >
-          <FileText className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant={activeTool === "stamp" ? "default" : "outline"}
-          size="icon"
-          onClick={() => setActiveTool(activeTool === "stamp" ? "select" : "stamp")}
-          title="Stamps"
-          className={sizeClasses.button}
-        >
-          <StampIcon className={sizeClasses.icon} />
-        </Button>
+        <ToolbarTooltip label="Form">
+          <Button
+            variant={activeTool === "form" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("form")}
+            className={sizeClasses.button}
+            aria-label="Form"
+          >
+            <FileText className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Stamp">
+          <Button
+            variant={activeTool === "stamp" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool(activeTool === "stamp" ? "select" : "stamp")}
+            className={sizeClasses.button}
+            aria-label="Stamp"
+            data-tour="editor-tool-stamp"
+          >
+            <StampIcon className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
       </div>
 
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 
       {/* Undo/Redo */}
-      <div className={`flex flex-col ${sizeClasses.gap}`}>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => undo()}
-          disabled={!canUndo}
-          title="Undo (Ctrl+Z)"
-          className={sizeClasses.button}
-        >
-          <Undo2 className={sizeClasses.icon} />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => redo()}
-          disabled={!canRedo}
-          title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
-          className={sizeClasses.button}
-        >
-          <Redo2 className={sizeClasses.icon} />
-        </Button>
+      <div className={`flex flex-col ${sizeClasses.gap}`} data-tour="editor-undo-redo">
+        <ToolbarTooltip label={undoLabel} shortcut={`${modKey}Z`}>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => undo()}
+            disabled={!canUndo}
+            className={sizeClasses.button}
+            aria-label={undoLabel}
+          >
+            <Undo2 className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label={redoLabel} shortcut={isMac ? '\u21E7\u2318Z' : 'Ctrl+Shift+Z'}>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => redo()}
+            disabled={!canRedo}
+            className={sizeClasses.button}
+            aria-label={redoLabel}
+          >
+            <Redo2 className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
       </div>
 
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
@@ -1037,16 +1160,18 @@ export function Toolbar() {
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 
       {/* Help Button */}
-      <div className={`flex flex-col ${sizeClasses.gap} mb-2`}>
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => setShowHelpDialog(true)}
-          title="Help (F1 or Ctrl/Cmd + ?)"
-          className={sizeClasses.button}
-        >
-          <HelpCircle className={sizeClasses.icon} />
-        </Button>
+      <div className={`flex flex-col ${sizeClasses.gap} mb-2`} data-tour="editor-tool-help">
+        <ToolbarTooltip label="Help" shortcut="F1">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => setShowHelpDialog(true)}
+            className={sizeClasses.button}
+            aria-label="Help"
+          >
+            <HelpCircle className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
       </div>
 
       {/* Recent Files Modal */}
@@ -1087,6 +1212,7 @@ export function Toolbar() {
         onOpenChange={setShowHelpDialog}
       />
     </div>
+    </TooltipProvider>
   );
 }
 

@@ -8,6 +8,7 @@ import { create } from "zustand";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import type { Bookmark } from "@/core/pdf/PDFBookmarks";
+import { clearTextCache } from "@/core/pdf/PDFTextExtractor";
 
 // Individual search match (one per text match occurrence)
 export interface SearchMatch {
@@ -118,7 +119,9 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
       };
     }),
 
-  removeDocument: (id) =>
+  removeDocument: (id) => {
+    // Clear text extraction cache for this document (prevents memory leak)
+    clearTextCache(id);
     set((state) => {
       const newDocuments = new Map(state.documents);
       newDocuments.delete(id);
@@ -126,6 +129,8 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
       newPaths.delete(id);
       const newAnnotations = new Map(state.annotations);
       newAnnotations.delete(id);
+      const newSearchResults = new Map(state.searchResults);
+      newSearchResults.delete(id);
       const newPageHorizontalFlips = new Map(state.pageHorizontalFlips);
       newPageHorizontalFlips.delete(id);
 
@@ -139,11 +144,13 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
         documents: newDocuments,
         documentPaths: newPaths,
         annotations: newAnnotations,
+        searchResults: newSearchResults,
         pageHorizontalFlips: newPageHorizontalFlips,
         currentDocumentId: newCurrentId,
         currentPage: 0,
       };
-    }),
+    });
+  },
 
   setDocumentPath: (documentId, path) =>
     set((state) => {

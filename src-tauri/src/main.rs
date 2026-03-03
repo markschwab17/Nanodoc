@@ -3,12 +3,6 @@
 
 use tauri::{Emitter, Manager};
 
-#[tauri::command]
-async fn open_file_path(_file_path: String) -> Result<(), String> {
-    // This command can be called from the frontend
-    Ok(())
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
@@ -20,11 +14,9 @@ fn main() {
             // Handle file opening from command line arguments
             // When a file is opened via file association, Tauri passes it as a command-line argument
             let args: Vec<String> = std::env::args().collect();
-            eprintln!("Command line args: {:?}", args);
-            
+
             if args.len() > 1 {
                 let raw_file_path = &args[1];
-                eprintln!("Processing file path: {}", raw_file_path);
 
                 // Only process if it looks like a file path (not a flag)
                 if !raw_file_path.starts_with('-') {
@@ -35,40 +27,40 @@ fn main() {
                     let is_pdf = file_path.to_lowercase().ends_with(".pdf");
                     let path_exists = std::path::Path::new(file_path).exists();
 
-                    eprintln!("Cleaned path: {}, Is PDF: {}, Path exists: {}", file_path, is_pdf, path_exists);
-
                     if is_pdf || path_exists {
-                        // Emit event to frontend after a delay to ensure window is ready
                         let app_handle = app.handle().clone();
                         let file_path_clone = file_path.to_string();
-                        std::thread::spawn(move || {
-                            // Wait longer to ensure window is fully ready
-                            std::thread::sleep(std::time::Duration::from_millis(1500));
-                            eprintln!("Attempting to emit event for file: {}", file_path_clone);
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                match window.emit("open-pdf-file", &file_path_clone) {
-                                    Ok(_) => eprintln!("Successfully emitted open-pdf-file event"),
-                                    Err(e) => eprintln!("Error emitting event: {:?}", e),
+
+                        // Use on_window_event to emit once the window is ready,
+                        // instead of a hard-coded 1.5s sleep
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let fp = file_path_clone.clone();
+                            // Try emitting immediately since window exists at setup time
+                            std::thread::spawn(move || {
+                                // Small yield to let the webview finish initialization
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                if let Err(e) = window.emit("open-pdf-file", &fp) {
+                                    eprintln!("Error emitting event: {:?}", e);
                                 }
-                            } else {
-                                eprintln!("Window 'main' not found");
-                            }
-                        });
+                            });
+                        } else {
+                            // Window not yet created - use a retry loop with short intervals
+                            std::thread::spawn(move || {
+                                for _ in 0..20 {
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                    if let Some(window) = app_handle.get_webview_window("main") {
+                                        let _ = window.emit("open-pdf-file", &file_path_clone);
+                                        break;
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
             }
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![open_file_path])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
-
-
-
-
-
-
-

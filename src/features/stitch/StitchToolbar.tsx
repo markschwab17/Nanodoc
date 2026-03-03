@@ -318,7 +318,7 @@ export function StitchToolbar({
           </Button>
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />
-        <div className="flex items-center gap-1.5" role="group" aria-label="Tools">
+        <div className="flex items-center gap-1.5" role="group" aria-label="Tools" data-tour="stitch-tools">
           <IconButtonWithTooltip
             variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode ? "default" : "outline"}
             title="Select and move tiles (Ctrl+A: select all)"
@@ -352,7 +352,7 @@ export function StitchToolbar({
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />
         {hasTiles && (
-          <IconButtonWithTooltip variant="outline" title="Add PDF pages to the canvas" label="Add PDF" onClick={onAddPdf}>
+          <IconButtonWithTooltip variant="outline" title="Add PDF pages to the canvas" label="Add PDF" onClick={onAddPdf} data-tour="stitch-add-pdf">
             <FilePlus className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
         )}
@@ -362,6 +362,7 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         )}
         <div className="h-5 w-px bg-border" aria-hidden />
+        <div className="flex items-center gap-0.5" data-tour="stitch-delete-tools">
         <IconButtonWithTooltip
           variant={contentDeleteMode ? "secondary" : "outline"}
           title={deleteContentTip}
@@ -386,6 +387,8 @@ export function StitchToolbar({
         >
           <MousePointerClick className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
+        </div>
+        <div className="flex items-center gap-0.5" data-tour="stitch-align-tools">
         <IconButtonWithTooltip
           variant={pointAlignMode ? "secondary" : "outline"}
           title={canEnterPointAlign
@@ -428,6 +431,7 @@ export function StitchToolbar({
         >
           <Ruler className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
+        </div>
         <IconButtonWithTooltip variant="outline" title="Crop output to the bounding box of all tiles" label="Crop to content" onClick={onCropCanvas}>
           <Crop className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
@@ -437,7 +441,7 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         )}
         <div className="h-5 w-px bg-border" aria-hidden />
-        <div className="flex items-center gap-1" role="group" aria-label="Scale">
+        <div className="flex items-center gap-1" role="group" aria-label="Scale" data-tour="stitch-scale">
           <Button
             variant="outline"
             size="icon"
@@ -522,7 +526,7 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />
-        <div className="flex items-center gap-0.5" role="group" aria-label="Selection">
+        <div className="flex items-center gap-0.5" role="group" aria-label="Selection" data-tour="stitch-selection-actions">
           <IconButtonWithTooltip variant="outline" disabled={tiles.length === 0} title={tiles.length === 0 ? "No pages on canvas" : "Select all pages (Ctrl+A)"} label="Select all" onClick={() => tiles.length > 0 && setSelectedTileIds(tiles.map((t) => t.id))}>
             <CheckSquare className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
@@ -539,7 +543,7 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         </div>
         <div className="flex-1 min-w-2" />
-        <div className="flex items-center gap-0.5" role="group" aria-label="Export">
+        <div className="flex items-center gap-0.5" role="group" aria-label="Export" data-tour="stitch-export">
           <IconButtonWithTooltip variant="outline" disabled={isSaving || tiles.length === 0} title="Download stitched PDF" label={isSaving ? "Saving…" : "Download"} onClick={() => onSaveAndFlatten(false)}>
             <Download className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>

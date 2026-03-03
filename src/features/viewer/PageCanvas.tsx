@@ -4,7 +4,7 @@
  * Renders a single PDF page with enhanced zoom and pan support.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -35,6 +35,7 @@ import { StampEditor } from "@/features/stamps/StampEditor";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
+import { AnnotationContextMenu, type ContextMenuItem } from "./AnnotationContextMenu";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useCtoTextSelectionStore } from "@/shared/stores/ctoTextSelectionStore";
@@ -94,7 +95,7 @@ function ReadModeScaleWrapper({
   );
 }
 
-export function PageCanvas({
+export const PageCanvas = React.memo(function PageCanvas({
   document,
   pageNumber,
   renderer,
@@ -257,6 +258,8 @@ export function PageCanvas({
   const allTextSpansRef = useRef<TextSpan[]>([]);
   // Track which annotation is being hovered (for visual feedback when select tool is active)
   const [hoveredAnnotationId, setHoveredAnnotationId] = useState<string | null>(null);
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; annotationId: string } | null>(null);
 
   // Get annotations for current page - force re-render when annotations change
   const allAnnotations = currentDocument
@@ -1048,7 +1051,20 @@ export function PageCanvas({
       const { displayScale, canvasDisplayWidth, canvasDisplayHeight } = params;
 
       try {
-        const renderScale = displayScale * RENDER_SCALE * dpr;
+        const idealRenderScale = displayScale * RENDER_SCALE * dpr;
+
+        // Cap pixel budget so toPixmap() doesn't block the main thread for seconds.
+        // 8MP keeps 1x zoom on retina (7.7MP) uncapped while limiting high zooms.
+        // At high zoom, text is already large so super-sampling isn't needed —
+        // the slight softness from capping is imperceptible.
+        const MAX_RENDER_PIXELS = 8_000_000;
+        const estimatedPixels =
+          (pageMetadata.width * idealRenderScale) *
+          (pageMetadata.height * idealRenderScale);
+        const renderScale = estimatedPixels > MAX_RENDER_PIXELS
+          ? Math.sqrt(MAX_RENDER_PIXELS / (pageMetadata.width * pageMetadata.height))
+          : idealRenderScale;
+
         const rendered = await renderer.renderPage(mupdfDoc, pageNumber, { scale: renderScale, rotation: 0 });
         if (thisRenderId !== highResRenderIdRef.current || !canvasRef.current) return;
         const canvas = canvasRef.current;
@@ -1062,7 +1078,11 @@ export function PageCanvas({
       }
     };
 
-    // In read mode, update canvas size immediately for smooth visual feedback
+    // In read mode, update canvas CSS size immediately so it matches the
+    // ReadModeScaleWrapper layout. The wrapper already CSS-scales both canvas
+    // AND annotations uniformly, so the old pixel buffer will appear slightly
+    // blurry at the new zoom but annotations stay perfectly aligned.
+    // The debounced re-render below will produce a crisp buffer.
     if (readMode && canvasRef.current && document.isDocumentLoaded()) {
       const pageMetadata = document.getPageMetadata(pageNumber);
       if (pageMetadata) {
@@ -1088,7 +1108,7 @@ export function PageCanvas({
       }
     };
 
-    const debounceMs = readMode ? 350 : 400;
+    const debounceMs = readMode ? 100 : 150;
     renderDebounceTimeoutRef.current = setTimeout(() => {
       renderDebounceTimeoutRef.current = null;
       scheduleRender();
@@ -1998,14 +2018,19 @@ export function PageCanvas({
             // For overlay highlights, use bounding box approach for reliable hover detection
             const strokeWidth = annot.strokeWidth || 15;
             const padding = strokeWidth / 2 + 10; // Half stroke width plus padding for easier selection
-            
-            // Calculate bounding box from path points
-            const allX = annot.path.map((p: { x: number; y: number }) => p.x);
-            const allY = annot.path.map((p: { x: number; y: number }) => p.y);
-            const minX = Math.min(...allX) - padding;
-            const maxX = Math.max(...allX) + padding;
-            const minY = Math.min(...allY) - padding;
-            const maxY = Math.max(...allY) + padding;
+
+            // Calculate bounding box from path points using a single loop (avoids creating temp arrays)
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            for (const p of annot.path) {
+              if (p.x < minX) minX = p.x;
+              if (p.x > maxX) maxX = p.x;
+              if (p.y < minY) minY = p.y;
+              if (p.y > maxY) maxY = p.y;
+            }
+            minX -= padding;
+            maxX += padding;
+            minY -= padding;
+            maxY += padding;
             
             // Check if mouse is within the expanded bounding box
             if (
@@ -2827,10 +2852,43 @@ export function PageCanvas({
 
   // Prevent context menu on middle click
   const handleContextMenu = (e: React.MouseEvent) => {
-    if (e.button === 1) {
-      e.preventDefault();
+    // Always prevent the browser context menu on the canvas
+    e.preventDefault();
+
+    // Show annotation context menu when right-clicking on a hovered annotation
+    if (activeTool === "select" && hoveredAnnotationId) {
+      setContextMenu({ x: e.clientX, y: e.clientY, annotationId: hoveredAnnotationId });
+    } else {
+      setContextMenu(null);
     }
   };
+
+  const contextMenuItems = useMemo((): ContextMenuItem[] => {
+    if (!contextMenu || !currentDocument) return [];
+    const docId = currentDocument.getId();
+    const annot = annotations.find(a => a.id === contextMenu.annotationId);
+    if (!annot) return [];
+
+    return [
+      {
+        label: "Duplicate",
+        onClick: () => {
+          const newId = crypto.randomUUID();
+          const duplicate = { ...annot, id: newId, x: annot.x + 10, y: annot.y - 10 };
+          addAnnotation(docId, duplicate);
+        },
+      },
+      {
+        label: "Delete",
+        onClick: () => {
+          wrapAnnotationOperation(() => {
+            removeAnnotation(docId, annot.id);
+          }, "removeAnnotation", docId, annot.id, annot);
+          setEditingAnnotation(null);
+        },
+      },
+    ];
+  }, [contextMenu, currentDocument, annotations, addAnnotation, removeAnnotation]);
 
   if (error) {
     return (
@@ -5392,8 +5450,17 @@ export function PageCanvas({
             setEditingStampAnnotation(null);
           }}
         />
+        {/* Annotation Context Menu */}
+        {contextMenu && (
+          <AnnotationContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            items={contextMenuItems}
+          />
+        )}
         </div>
       </ReadModeScaleWrapper>
     </div>
   );
-}
+});

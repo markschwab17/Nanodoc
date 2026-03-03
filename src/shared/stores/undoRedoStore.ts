@@ -49,6 +49,17 @@ export interface UndoableAction {
   redo: () => Promise<void> | void;
 }
 
+const actionTypeLabels: Record<UndoableActionType, string> = {
+  addAnnotation: "Add annotation",
+  removeAnnotation: "Delete annotation",
+  updateAnnotation: "Update annotation",
+  deletePages: "Delete pages",
+  insertPages: "Insert pages",
+  reorderPages: "Reorder pages",
+  pastePages: "Paste pages",
+  rotatePages: "Rotate pages",
+};
+
 export interface UndoRedoStoreState {
   history: UndoableAction[];
   currentIndex: number;
@@ -60,6 +71,8 @@ export interface UndoRedoStoreState {
   redo: () => Promise<void>;
   canUndo: () => boolean;
   canRedo: () => boolean;
+  getUndoLabel: () => string;
+  getRedoLabel: () => string;
   clearHistory: () => void;
 }
 
@@ -128,6 +141,21 @@ export const useUndoRedoStore = create<UndoRedoStoreState>((set, get) => ({
   canRedo: () => {
     const state = get();
     return state.currentIndex < state.history.length - 1;
+  },
+
+  getUndoLabel: () => {
+    const state = get();
+    if (state.currentIndex < 0) return "Undo";
+    const action = state.history[state.currentIndex];
+    return `Undo: ${actionTypeLabels[action.type]}`;
+  },
+
+  getRedoLabel: () => {
+    const state = get();
+    const nextIndex = state.currentIndex + 1;
+    if (nextIndex >= state.history.length) return "Redo";
+    const action = state.history[nextIndex];
+    return `Redo: ${actionTypeLabels[action.type]}`;
   },
 
   clearHistory: () => {

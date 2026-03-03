@@ -13,7 +13,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Search, MousePointer2, FileText, Type, ZoomIn, ArrowLeft } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Search, MousePointer2, FileText, Type, ZoomIn, ArrowLeft, PlayCircle } from "lucide-react";
+import { restartTour } from "@/features/tour/useTourLauncher";
 
 interface HelpSection {
   id: string;
@@ -291,9 +293,11 @@ const helpSections: HelpSection[] = [
 interface HelpDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Which tour to restart — defaults to "editor". */
+  tourId?: string;
 }
 
-export function HelpDialog({ open, onOpenChange }: HelpDialogProps) {
+export function HelpDialog({ open, onOpenChange, tourId = "editor" }: HelpDialogProps) {
   const [searchQuery, setSearchQuery] = useState("");
 
   // Filter help items based on search query
@@ -344,6 +348,20 @@ export function HelpDialog({ open, onOpenChange }: HelpDialogProps) {
             Search for tools, features, and keyboard shortcuts
           </DialogDescription>
         </DialogHeader>
+
+        {/* Restart Tour */}
+        <Button
+          variant="outline"
+          size="sm"
+          className="self-start gap-1.5 text-xs"
+          onClick={() => {
+            onOpenChange(false);
+            restartTour(tourId);
+          }}
+        >
+          <PlayCircle className="h-3.5 w-3.5" />
+          Restart guided tour
+        </Button>
 
         {/* Search Bar */}
         <div className="relative">

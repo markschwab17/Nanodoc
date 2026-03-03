@@ -1,9 +1,13 @@
 /**
  * Single tile on the stitch canvas: image, drag to move, resize handles when selected, rotate.
  * Rotation: drag the rotate handle for custom 360° rotation (like main app); angle stored in degrees.
+ *
+ * Performance: wrapped in React.memo so only the tile that changed re-renders.
+ * Uses granular Zustand selectors and getState() in handlers to avoid subscribing
+ * to the full tiles array (which changes on every drag frame).
  */
 
-import { useCallback, useRef, useState } from "react";
+import { memo, useCallback, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
@@ -26,20 +30,14 @@ function angleDeg(clientX: number, clientY: number, centerX: number, centerY: nu
   return Math.atan2(clientY - centerY, clientX - centerX) * (180 / Math.PI);
 }
 
-export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLevel: number }) {
-  const {
-    updateTile,
-    updateTiles,
-    setSelectedTileIds,
-    selectedTileIds,
-    snapToEdges,
-    resizeLocked,
-    tiles,
-    canvasWidth,
-    canvasHeight,
-  } = useStitchStore();
-  const isSelected = selectedTileIds.includes(tile.id);
-  const isSingleSelected = selectedTileIds.length === 1 && selectedTileIds[0] === tile.id;
+export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileType }) {
+  // Granular selectors — only re-render when THIS tile's selection state changes
+  const isSelected = useStitchStore(useCallback((s) => s.selectedTileIds.includes(tile.id), [tile.id]));
+  const isSingleSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length === 1 && s.selectedTileIds[0] === tile.id, [tile.id]));
+  const isMultiSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length > 1 && s.selectedTileIds.includes(tile.id), [tile.id]));
+  const resizeLocked = useStitchStore((s) => s.resizeLocked);
+  const zoomLevel = useStitchStore((s) => s.zoomLevel);
+
   const isLocked = Boolean(tile.locked);
   const dragStartRef = useRef<DragStart | null>(null);
   const tileContainerRef = useRef<HTMLDivElement | null>(null);
@@ -58,24 +56,26 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
     height: number;
     tileX: number;
     tileY: number;
-    aspectRatio: number; // width / height, kept constant during resize
+    aspectRatio: number;
   } | null>(null);
-
-  const scale = Math.max(0.25, zoomLevel);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.stopPropagation();
       e.preventDefault();
-      // Read current selection from store so we never use a stale closure
-      const currentIds = useStitchStore.getState().selectedTileIds;
+      const store = useStitchStore.getState();
+      const currentIds = store.selectedTileIds;
+
+      // Push undo snapshot BEFORE the drag starts so we can undo back to this state
+      store.pushUndoSnapshot();
+
       if (e.shiftKey) {
         const newIds = currentIds.includes(tile.id)
           ? currentIds.filter((i) => i !== tile.id)
           : [...currentIds, tile.id];
-        setSelectedTileIds(newIds);
+        store.setSelectedTileIds(newIds);
         if (newIds.includes(tile.id)) {
-          const currentTiles = useStitchStore.getState().tiles;
+          const currentTiles = store.tiles;
           const unlockedIds = newIds.filter(
             (id) => !currentTiles.find((x) => x.id === id)?.locked
           );
@@ -85,22 +85,16 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
           });
           dragStartRef.current =
             positions.length > 0
-              ? {
-                  type: "group",
-                  x: e.clientX,
-                  y: e.clientY,
-                  positions,
-                }
+              ? { type: "group", x: e.clientX, y: e.clientY, positions }
               : null;
         } else {
           dragStartRef.current = null;
         }
       } else {
-        const currentTiles = useStitchStore.getState().tiles;
+        const currentTiles = store.tiles;
         const currentTile = currentTiles.find((x) => x.id === tile.id);
-        const isLocked = Boolean(currentTile?.locked);
-        // If 2+ tiles are selected and we're clicking on one of them, keep selection and start group drag
-        if (currentIds.length >= 2 && currentIds.includes(tile.id) && !isLocked) {
+        const locked = Boolean(currentTile?.locked);
+        if (currentIds.length >= 2 && currentIds.includes(tile.id) && !locked) {
           const unlockedIds = currentIds.filter(
             (id) => !currentTiles.find((x) => x.id === id)?.locked
           );
@@ -110,16 +104,11 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
           });
           dragStartRef.current =
             positions.length > 0
-              ? {
-                  type: "group",
-                  x: e.clientX,
-                  y: e.clientY,
-                  positions,
-                }
+              ? { type: "group", x: e.clientX, y: e.clientY, positions }
               : null;
         } else {
-          setSelectedTileIds([tile.id]);
-          if (!isLocked && currentTile) {
+          store.setSelectedTileIds([tile.id]);
+          if (!locked && currentTile) {
             dragStartRef.current = {
               type: "single",
               x: e.clientX,
@@ -134,19 +123,26 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       }
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [tile.id, setSelectedTileIds]
+    [tile.id]
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
       const drag = dragStartRef.current;
       const resize = resizeStartRef.current;
+      if (!drag && !resize) return;
+
+      // Read all needed values from store to avoid stale closures and extra subscriptions
+      const store = useStitchStore.getState();
+      const scale = Math.max(0.25, store.zoomLevel);
+
       const dragOrResizeX = drag?.type === "single" ? drag.x : drag?.type === "group" ? drag.x : resize?.x ?? 0;
       const dragOrResizeY = drag?.type === "single" ? drag.y : drag?.type === "group" ? drag.y : resize?.y ?? 0;
       const dxCanvas = (e.clientX - (resize ? resize.x : dragOrResizeX)) / scale;
       const dyCanvas = (e.clientY - (resize ? resize.y : dragOrResizeY)) / scale;
+
       if (resize) {
-        const currentTileForResize = useStitchStore.getState().tiles.find((x) => x.id === tile.id);
+        const currentTileForResize = store.tiles.find((x) => x.id === tile.id);
         if (currentTileForResize?.locked) {
           resizeStartRef.current = null;
           return;
@@ -161,21 +157,14 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
         if (resize.dir === "e" || resize.dir === "w") {
           width = resize.dir === "e" ? Math.max(MIN, w0 + dxCanvas) : Math.max(MIN, w0 - dxCanvas);
           height = width / ar;
-          if (height < MIN) {
-            height = MIN;
-            width = height * ar;
-          }
+          if (height < MIN) { height = MIN; width = height * ar; }
           if (resize.dir === "w") tileX = x0 + w0 - width;
         } else if (resize.dir === "n" || resize.dir === "s") {
           height = resize.dir === "s" ? Math.max(MIN, h0 + dyCanvas) : Math.max(MIN, h0 - dyCanvas);
           width = height * ar;
-          if (width < MIN) {
-            width = MIN;
-            height = width / ar;
-          }
+          if (width < MIN) { width = MIN; height = width / ar; }
           if (resize.dir === "n") tileY = y0 + h0 - height;
         } else {
-          // Corner: uniform scale to preserve aspect ratio
           const scaleX = resize.dir.includes("e") ? (w0 + dxCanvas) / w0 : (w0 - dxCanvas) / w0;
           const scaleY = resize.dir.includes("s") ? (h0 + dyCanvas) / h0 : (h0 - dyCanvas) / h0;
           const minScale = Math.max(MIN / w0, MIN / h0);
@@ -188,27 +177,22 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
 
         let finalX = tileX;
         let finalY = tileY;
-        if (snapToEdges) {
+        if (store.snapToEdges) {
           const snapped = snapTilePosition(
-            tile.id,
-            tileX,
-            tileY,
-            width,
-            height,
-            tiles,
-            canvasWidth,
-            canvasHeight
+            tile.id, tileX, tileY, width, height,
+            store.tiles, store.canvasWidth, store.canvasHeight
           );
           finalX = snapped.x;
           finalY = snapped.y;
         }
-        updateTile(tile.id, { width, height, x: finalX, y: finalY });
+        // No undo during continuous resize — snapshot was pushed on pointerDown
+        store.updateTileNoUndo(tile.id, { width, height, x: finalX, y: finalY });
         return;
       }
+
       if (drag?.type === "group") {
-        const currentTilesForGroup = useStitchStore.getState().tiles;
         const stillUnlocked = new Set(
-          currentTilesForGroup.filter((t) => !t.locked).map((t) => t.id)
+          store.tiles.filter((t) => !t.locked).map((t) => t.id)
         );
         const updates = drag.positions
           .filter(({ id }) => stillUnlocked.has(id))
@@ -216,47 +200,33 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
             id,
             patch: { x: x + dxCanvas, y: y + dyCanvas } as const,
           }));
-        if (updates.length > 0) updateTiles(updates);
+        if (updates.length > 0) store.updateTilesNoUndo(updates);
         return;
       }
+
       if (drag?.type === "single") {
-        const currentTileForDrag = useStitchStore.getState().tiles.find((x) => x.id === tile.id);
+        const currentTileForDrag = store.tiles.find((x) => x.id === tile.id);
         if (currentTileForDrag?.locked) {
           dragStartRef.current = null;
           return;
         }
         let newX = drag.tileX + dxCanvas;
         let newY = drag.tileY + dyCanvas;
-        if (snapToEdges) {
+        if (store.snapToEdges) {
+          const currentTile = store.tiles.find((t) => t.id === tile.id);
           const snapped = snapTilePosition(
-            tile.id,
-            newX,
-            newY,
-            tile.width,
-            tile.height,
-            tiles,
-            canvasWidth,
-            canvasHeight
+            tile.id, newX, newY,
+            currentTile?.width ?? tile.width, currentTile?.height ?? tile.height,
+            store.tiles, store.canvasWidth, store.canvasHeight
           );
           newX = snapped.x;
           newY = snapped.y;
         }
-        updateTile(tile.id, { x: newX, y: newY });
+        // No undo during continuous drag — snapshot was pushed on pointerDown
+        store.updateTileNoUndo(tile.id, { x: newX, y: newY });
       }
     },
-    [
-      tile.id,
-      tile.locked,
-      tile.width,
-      tile.height,
-      scale,
-      updateTile,
-      updateTiles,
-      snapToEdges,
-      tiles,
-      canvasWidth,
-      canvasHeight,
-    ]
+    [tile.id, tile.width, tile.height]
   );
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
@@ -268,7 +238,10 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
       e.stopPropagation();
-      if (resizeLocked || tile.locked) return;
+      const store = useStitchStore.getState();
+      if (store.resizeLocked || tile.locked) return;
+      // Push undo before resize starts
+      store.pushUndoSnapshot();
       const { width, height, x: tileX, y: tileY } = tile;
       resizeStartRef.current = {
         dir,
@@ -282,7 +255,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       };
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [tile.width, tile.height, tile.x, tile.y, tile.locked, resizeLocked]
+    [tile.width, tile.height, tile.x, tile.y, tile.locked]
   );
 
   const baseRotation = (tile.rotation ?? 0) % 360;
@@ -292,7 +265,10 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
     (e: React.PointerEvent) => {
       e.stopPropagation();
       e.preventDefault();
-      if (resizeLocked || tile.locked) return;
+      const store = useStitchStore.getState();
+      if (store.resizeLocked || tile.locked) return;
+      // Push undo before rotate starts
+      store.pushUndoSnapshot();
       const el = tileContainerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
@@ -308,7 +284,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       setRotationWhileDragging(baseRotation);
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     },
-    [tile.locked, resizeLocked, baseRotation]
+    [tile.locked, baseRotation]
   );
 
   const handleRotatePointerMove = useCallback(
@@ -328,21 +304,23 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
     (e: React.PointerEvent) => {
       if (rotationDragStart !== null) {
         const finalRotation = rotationWhileDragging ?? baseRotation;
-        updateTile(tile.id, { rotation: finalRotation });
+        // Use no-undo variant — snapshot was already pushed on rotate start
+        useStitchStore.getState().updateTileNoUndo(tile.id, { rotation: finalRotation });
         setRotationDragStart(null);
         setRotationWhileDragging(null);
       }
       (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
     },
-    [rotationDragStart, rotationWhileDragging, baseRotation, tile.id, updateTile]
+    [rotationDragStart, rotationWhileDragging, baseRotation, tile.id]
   );
 
   const handleToggleLock = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      updateTile(tile.id, { locked: !tile.locked });
+      // Lock toggle is a discrete action — use the normal undo variant
+      useStitchStore.getState().updateTile(tile.id, { locked: !tile.locked });
     },
-    [tile.id, tile.locked, updateTile]
+    [tile.id, tile.locked]
   );
 
   if (!tile.imageDataUrl) return null;
@@ -367,7 +345,7 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
         width: displayWidth,
         height: displayHeight,
         borderColor: isSelected ? "hsl(var(--primary))" : undefined,
-        boxShadow: isSelected && selectedTileIds.length > 1 ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
+        boxShadow: isMultiSelected ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
         transform: displayRotation ? `rotate(${displayRotation}deg)` : undefined,
         transformOrigin: "center center",
       }}
@@ -431,7 +409,6 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
             size="icon"
             className={`absolute -top-12 z-10 border-2 border-border shadow-md ${isLocked ? "left-1/2 -translate-x-1/2" : "right-0 translate-x-1/2"}`}
             style={{
-              // Size in canvas space so that on-screen size stays ~29px (canvas is scaled by zoomLevel)
               width: `${(32 * 0.9) / zoomLevel}px`,
               height: `${(32 * 0.9) / zoomLevel}px`,
             }}
@@ -448,4 +425,4 @@ export function StitchTile({ tile, zoomLevel }: { tile: StitchTileType; zoomLeve
       )}
     </div>
   );
-}
+});

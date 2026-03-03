@@ -73,6 +73,9 @@ export function AddPdfModal({
   const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
   const [ctoDocumentsError, setCtoDocumentsError] = useState<string | null>(null);
   const ctoDocumentsRespondedRef = useRef(false);
+  /** Prevents the file-picker / initial-PDF effect from re-triggering after
+   *  the first run within a single modal session (open→close cycle). */
+  const hasTriggeredFileOpenRef = useRef(false);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -136,8 +139,16 @@ export function AddPdfModal({
       setSelectedPages(new Set());
       setThumbnails({});
       setCtoListening(false);
+      // Reset the guard so the next open triggers the file picker
+      hasTriggeredFileOpenRef.current = false;
       return;
     }
+    // Only trigger file-picker / initial-PDF once per modal session.
+    // Without this guard, unstable deps (inline callbacks, initialPdf going null
+    // after consumption) would re-trigger the effect and reopen the file picker.
+    if (hasTriggeredFileOpenRef.current) return;
+    hasTriggeredFileOpenRef.current = true;
+
     // When opened from CTO stitch with initial PDF, load it into page selection instead of auto-adding all.
     if (initialPdf?.pdfBytes && initialPdf?.fileName) {
       loadPdfFromResult(initialPdf.pdfBytes, initialPdf.fileName);
