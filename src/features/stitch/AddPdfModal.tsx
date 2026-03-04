@@ -67,7 +67,7 @@ export function AddPdfModal({
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
   /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
-  const [ctoListening, setCtoListening] = useState(false);
+  const [_ctoListening, setCtoListening] = useState(false);
   type CtoDoc = { type: string; displayName: string; token: string; fileId?: string; doc?: string };
   const [ctoDocuments, setCtoDocuments] = useState<CtoDoc[]>([]);
   const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
