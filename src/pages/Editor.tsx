@@ -31,7 +31,6 @@ import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
 import { TourOverlay } from "@/features/tour/TourOverlay";
-import { useTourLauncher } from "@/features/tour/useTourLauncher";
 
 
 // Pre-initialize mupdf WASM module at app startup so it's ready when the first PDF is opened
@@ -111,9 +110,6 @@ function Editor() {
   // Enable keyboard shortcuts
   useKeyboard();
 
-  // Auto-start editor tour on first visit
-  useTourLauncher("editor");
-  
   // Get current editing annotation for formatting toolbar
   const currentDocument = usePDFStore.getState().getCurrentDocument();
   const [editorFocusKey, setEditorFocusKey] = useState(0);

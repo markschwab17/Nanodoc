@@ -360,7 +360,7 @@ export function HelpDialog({ open, onOpenChange, tourId = "editor" }: HelpDialog
           }}
         >
           <PlayCircle className="h-3.5 w-3.5" />
-          Restart guided tour
+          Start guided tour
         </Button>
 
         {/* Search Bar */}

@@ -31,7 +31,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FilePlus } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
-import { useTourLauncher } from "@/features/tour/useTourLauncher";
 
 export default function StitchView() {
   const { tiles, setCropRect, setCropToContent, setSelectedTileIds } = useStitchStore();
@@ -79,7 +78,6 @@ export default function StitchView() {
   const { showNotification } = useNotificationStore();
 
   useStitchKeyboard();
-  useTourLauncher("stitch");
 
   const [showAddPdf, setShowAddPdf] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
