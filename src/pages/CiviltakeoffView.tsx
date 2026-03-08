@@ -49,10 +49,13 @@ export default function CiviltakeoffView() {
         const raw = Math.floor(data.page);
         const page = raw >= 1 ? raw - 1 : Math.max(0, raw);
         const specId = typeof data.specId === "string" && data.specId.trim() ? data.specId.trim() : undefined;
+        const quote = typeof data.quote === "string" && data.quote.trim() ? data.quote.trim() : undefined;
+        console.log("[nanodoc] goto-page received:", { rawPage: data.page, resolvedPage: page, specId, quote: quote?.slice(0, 80) });
+        const detail: Record<string, unknown> = { page };
+        if (specId) detail.specId = specId;
+        if (quote) detail.quote = quote;
         window.dispatchEvent(
-          new CustomEvent("scroll-to-spec", {
-            detail: specId ? { page, specId } : { page },
-          })
+          new CustomEvent("scroll-to-spec", { detail })
         );
         return;
       }
@@ -204,15 +207,13 @@ export default function CiviltakeoffView() {
         if (params.page != null) {
           usePDFStore.getState().setCurrentPage(params.page);
         }
-        // Optional: if viewer supports anchor/highlight, scroll to it (e.g. scroll-to-spec)
-        if (params.anchor) {
+        // Optional: if viewer supports anchor/highlight or quote text search, scroll to it
+        if (params.anchor || params.quote) {
+          const detail: Record<string, unknown> = { page: params.page ?? 0 };
+          if (params.anchor) detail.specId = params.anchor;
+          if (params.quote) detail.quote = params.quote;
           window.dispatchEvent(
-            new CustomEvent("scroll-to-spec", {
-              detail: {
-                page: params.page ?? 0,
-                specId: params.anchor,
-              },
-            })
+            new CustomEvent("scroll-to-spec", { detail })
           );
         }
 

@@ -386,12 +386,100 @@ export function PDFViewer() {
   // Handle scroll-to-spec events
   useEffect(() => {
     const handleScrollToSpec = (event: Event) => {
-      const customEvent = event as CustomEvent<{ page: number; bbox?: number[]; specId?: string }>;
-      const { page, bbox, specId } = customEvent.detail;
-      
+      const customEvent = event as CustomEvent<{ page: number; bbox?: number[]; specId?: string; quote?: string }>;
+      const { page: requestedPage, bbox, specId, quote } = customEvent.detail;
+
       if (!currentDocument) return;
-      
+
       const documentId = currentDocument.getId();
+
+      // Helper: use mupdf page.search() to find quote text and return PDF-coordinate quads
+      const searchQuoteOnPage = (quoteText: string, targetPage: number): number[][] | null => {
+        try {
+          const mupdfDoc = currentDocument.getMupdfDocument();
+          const pageCount = currentDocument.getPageCount();
+          if (targetPage < 0 || targetPage >= pageCount) return null;
+
+          const pageMetadata = currentDocument.getPageMetadata(targetPage);
+          const pageHeight = pageMetadata?.height || 792;
+
+          // Normalize whitespace (PDF text may have different line breaks than AI extraction)
+          const normalized = quoteText.replace(/\s+/g, " ").trim();
+
+          // Try progressively shorter snippets: full → first 80 chars → first 40
+          const candidates = [normalized];
+          for (const len of [80, 40]) {
+            if (normalized.length > len) {
+              const sub = normalized.slice(0, len);
+              const lastSpace = sub.lastIndexOf(" ");
+              candidates.push(lastSpace > 10 ? sub.slice(0, lastSpace) : sub);
+            }
+          }
+
+          const mupdfPage = mupdfDoc.loadPage(targetPage);
+          let searchMatches: any[] | null = null;
+          for (const candidate of candidates) {
+            const results = mupdfPage.search(candidate, 10);
+            if (results && results.length > 0) {
+              searchMatches = results;
+              break;
+            }
+          }
+
+          if (!searchMatches || searchMatches.length === 0) return null;
+
+          // page.search() returns Quad[][] — outer = hits, inner = quads per hit (multi-line)
+          // Quad = [x0, y0, x1, y1, x2, y2, x3, y3] in display coords (Y=0 at top)
+          const quoteQuads: number[][] = [];
+          for (const hit of searchMatches) {
+            if (!Array.isArray(hit)) continue;
+            for (const quad of hit) {
+              if (!Array.isArray(quad) || quad.length < 8) continue;
+              // Convert from mupdf display coords (Y=0 top) to PDF coords (Y=0 bottom)
+              quoteQuads.push([
+                quad[0], pageHeight - quad[1],
+                quad[2], pageHeight - quad[3],
+                quad[4], pageHeight - quad[5],
+                quad[6], pageHeight - quad[7],
+              ]);
+            }
+          }
+          return quoteQuads.length > 0 ? quoteQuads : null;
+        } catch (e) {
+          console.warn("Scroll-to-spec: quote text search failed", e);
+          return null;
+        }
+      };
+
+      // Search for quote text — try target page first, then nearby pages (±3) since AI page numbers can be off
+      const searchQuoteNearby = (quoteText: string, targetPage: number): { quads: number[][]; foundPage: number } | null => {
+        const direct = searchQuoteOnPage(quoteText, targetPage);
+        if (direct) return { quads: direct, foundPage: targetPage };
+        const pageCount = currentDocument.getPageCount();
+        for (const offset of [1, -1, 2, -2, 3, -3]) {
+          const p = targetPage + offset;
+          if (p >= 0 && p < pageCount) {
+            const result = searchQuoteOnPage(quoteText, p);
+            if (result) return { quads: result, foundPage: p };
+          }
+        }
+        return null;
+      };
+
+      // When quote text is provided, find the actual page by text search BEFORE scrolling
+      // This corrects wrong page numbers from AI extraction
+      let page = requestedPage;
+      let precomputedQuoteQuads: number[][] | null = null;
+      if (quote) {
+        const found = searchQuoteNearby(quote, requestedPage);
+        if (found) {
+          page = found.foundPage;
+          precomputedQuoteQuads = found.quads;
+          if (page !== requestedPage) {
+            console.log("[nanodoc] quote found on different page:", { requested: requestedPage, actual: page });
+          }
+        }
+      }
 
       // Pre-warm render cache for target page and neighbors so they appear instantly when we scroll
       if (renderer && currentDocument.isDocumentLoaded()) {
@@ -429,8 +517,15 @@ export function PDFViewer() {
       const forAdjacent = allHighlights.filter((h) => h.page === page - 1 || h.page === page + 1);
       const pageHighlights = !specId && (forPage.length > 0 ? forPage : forAdjacent);
       const firstHighlight = Array.isArray(pageHighlights) && pageHighlights.length > 0 ? pageHighlights[0] : null;
-      
+
       const applyTemporaryHighlight = () => {
+        // When quote quads were precomputed (from the text search before scrolling), use them directly
+        if (precomputedQuoteQuads && precomputedQuoteQuads.length > 0) {
+          setTemporaryHighlight({ page, quads: precomputedQuoteQuads, color: "#fbbf24", specId: "_quote" });
+          setTimeout(() => setTemporaryHighlight(null), 5000);
+          return;
+        }
+
         if (firstHighlight) {
           setSelectedSpec(documentId, firstHighlight.specId);
           const [x0, y0, x1, y1] = firstHighlight.bbox;
@@ -483,7 +578,7 @@ export function PDFViewer() {
           setTimeout(() => setTemporaryHighlight(null), 3000);
           return;
         }
-        // Fallback only when there is no spec data for this page at all
+        // Fallback only when there is no spec data or quote match for this page at all
         try {
           const pageMetadata = currentDocument.getPageMetadata(page);
           if (pageMetadata) {

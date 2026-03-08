@@ -30,6 +30,8 @@ export interface CiviltakeoffViewParams {
   split_screen: string | null;
   /** Project display name from CTO (for stitch save default filename). */
   project_name: string | null;
+  /** URL-encoded text to search for and highlight on the target page. */
+  quote: string | null;
 }
 
 /**
@@ -53,6 +55,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const read_mode = params.get("read_mode") ?? null;
   const split_screen = params.get("split_screen") ?? null;
   const project_name = params.get("project_name") ?? null;
+  const quote = params.get("quote") ?? null;
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -80,6 +83,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     read_mode,
     split_screen,
     project_name,
+    quote,
   };
 }
 
