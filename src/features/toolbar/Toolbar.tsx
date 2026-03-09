@@ -228,7 +228,21 @@ export function Toolbar() {
       window.removeEventListener('resize', updateSize);
     };
   }, [calculateToolbarSize]);
-  
+
+  // Listen for programmatic save requests (e.g. from CTO parent via CiviltakeoffView)
+  const handleSaveFileRef = useRef<() => Promise<void>>();
+  useEffect(() => {
+    const handler = () => {
+      if (handleSaveFileRef.current) {
+        handleSaveFileRef.current()
+          .then(() => window.dispatchEvent(new CustomEvent("save-document-complete", { detail: { success: true } })))
+          .catch(() => window.dispatchEvent(new CustomEvent("save-document-complete", { detail: { success: false } })));
+      }
+    };
+    window.addEventListener("save-document-request", handler);
+    return () => window.removeEventListener("save-document-request", handler);
+  }, []);
+
   // Calculate dynamic classes based on toolbar size
   const sizeClasses = useMemo(() => {
     switch (toolbarSize) {
@@ -528,6 +542,7 @@ export function Toolbar() {
     // No path and not CTO: Save As
     await handleSaveAs();
   };
+  handleSaveFileRef.current = handleSaveFile;
 
   /** Save current PDF and extraction to Civiltakeoff only. Shown only when ctoContext is set. */
   const handleSaveToCto = async () => {

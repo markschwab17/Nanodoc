@@ -16,6 +16,7 @@ import {
 } from "@/shared/civiltakeoffViewParams";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { usePDFStore } from "@/shared/stores/pdfStore";
+import { useTabStore } from "@/shared/stores/tabStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
@@ -276,6 +277,64 @@ export default function CiviltakeoffView() {
       }
     })();
   }, [location.search]);
+
+  // Broadcast dirty state to CTO parent whenever any tab's isModified changes.
+  // Use "*" for target origin — dirty state is not sensitive and origin mismatches
+  // between dev/prod silently drop messages.
+  useEffect(() => {
+    if (typeof window === "undefined" || window.parent === window) return;
+
+    const unsub = useTabStore.subscribe((state) => {
+      const hasUnsaved = state.tabs.some((t) => t.isModified);
+      window.parent.postMessage(
+        { type: "nanodoc-dirty-state", hasUnsavedChanges: hasUnsaved },
+        "*"
+      );
+    });
+    return unsub;
+  }, []);
+
+  // Listen for CTO parent messages: check-dirty, save-request
+  useEffect(() => {
+    if (typeof window === "undefined" || window.parent === window) return;
+
+    const handleMessage = (event: MessageEvent) => {
+      const data = event.data;
+
+      // On-demand dirty check: CTO asks "do you have unsaved changes?"
+      if (data?.type === "nanodoc-check-dirty") {
+        const tabs = useTabStore.getState().tabs;
+        const hasUnsaved = tabs.some((t) => t.isModified);
+        window.parent.postMessage(
+          { type: "nanodoc-dirty-response", hasUnsavedChanges: hasUnsaved },
+          "*"
+        );
+        return;
+      }
+
+      // CTO requests save
+      if (data?.type === "nanodoc-save-request") {
+        window.dispatchEvent(new CustomEvent("save-document-request"));
+        return;
+      }
+    };
+
+    // Listen for save completion from Toolbar and forward to parent
+    const handleSaveComplete = (e: Event) => {
+      const success = (e as CustomEvent).detail?.success !== false;
+      window.parent.postMessage(
+        { type: "nanodoc-save-complete", success },
+        "*"
+      );
+    };
+
+    window.addEventListener("message", handleMessage);
+    window.addEventListener("save-document-complete", handleSaveComplete);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      window.removeEventListener("save-document-complete", handleSaveComplete);
+    };
+  }, []);
 
   return <Editor />;
 }

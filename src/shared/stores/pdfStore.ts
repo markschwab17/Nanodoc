@@ -9,6 +9,13 @@ import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import type { Bookmark } from "@/core/pdf/PDFBookmarks";
 import { clearTextCache } from "@/core/pdf/PDFTextExtractor";
+import { useTabStore } from "./tabStore";
+
+/** Mark the tab for a document as modified (unsaved changes). */
+function markDocumentModified(documentId: string) {
+  const tab = useTabStore.getState().getTabByDocumentId(documentId);
+  if (tab) useTabStore.getState().setTabModified(tab.id, true);
+}
 
 // Individual search match (one per text match occurrence)
 export interface SearchMatch {
@@ -175,15 +182,17 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
     return state.documents.get(state.currentDocumentId) || null;
   },
 
-  addAnnotation: (documentId, annotation) =>
+  addAnnotation: (documentId, annotation) => {
     set((state) => {
       const newAnnotations = new Map(state.annotations);
       const docAnnotations = newAnnotations.get(documentId) || [];
       newAnnotations.set(documentId, [...docAnnotations, annotation]);
       return { annotations: newAnnotations };
-    }),
+    });
+    markDocumentModified(documentId);
+  },
 
-  removeAnnotation: (documentId, annotationId) =>
+  removeAnnotation: (documentId, annotationId) => {
     set((state) => {
       const newAnnotations = new Map(state.annotations);
       const docAnnotations = newAnnotations.get(documentId) || [];
@@ -192,9 +201,11 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
         docAnnotations.filter((a) => a.id !== annotationId)
       );
       return { annotations: newAnnotations };
-    }),
+    });
+    markDocumentModified(documentId);
+  },
 
-  updateAnnotation: (documentId, annotationId, updates) =>
+  updateAnnotation: (documentId, annotationId, updates) => {
     set((state) => {
       const newAnnotations = new Map(state.annotations);
       const docAnnotations = newAnnotations.get(documentId) || [];
@@ -205,7 +216,9 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
         )
       );
       return { annotations: newAnnotations };
-    }),
+    });
+    markDocumentModified(documentId);
+  },
 
   getAnnotations: (documentId) => {
     const state = get();
