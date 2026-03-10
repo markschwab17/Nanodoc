@@ -19,8 +19,6 @@ import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
 import { ShapeToolbar } from "@/features/viewer/ShapeToolbar";
 import { FormToolbar } from "@/features/viewer/FormToolbar";
-import { AnnotationPropertiesPanel } from "@/features/viewer/AnnotationPropertiesPanel";
-import { FormFieldPropertiesPanel } from "@/features/viewer/FormFieldPropertiesPanel";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { StampGallery } from "@/features/stamps/StampGallery";
 import { StampCreator } from "@/features/stamps/StampCreator";
@@ -914,14 +912,6 @@ function Editor() {
           </aside>
         )}
       </div>
-
-      {/* Properties Footer - docked at bottom */}
-      {currentDocument && !splitScreenMode && (
-        <>
-          <AnnotationPropertiesPanel />
-          <FormFieldPropertiesPanel />
-        </>
-      )}
 
       {/* Recent Files Modal on Startup */}
       <RecentFilesModal

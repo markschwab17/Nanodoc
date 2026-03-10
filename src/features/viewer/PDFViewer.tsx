@@ -12,7 +12,7 @@ import { useDocumentSettingsStore, getRenderQualityScale } from "@/shared/stores
 import { PageCanvas } from "./PageCanvas";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { VirtualizedPageList } from "./VirtualizedPageList";
-import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize, RotateCw, FlipVertical, FlipHorizontal } from "lucide-react";
+import { ChevronLeft, ChevronRight, BookOpen, Ruler, Settings, ZoomIn, ZoomOut, Maximize, RotateCw, FlipVertical, FlipHorizontal, PanelBottomOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -34,10 +34,11 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { SpecExtractionPanel } from "@/features/specs/SpecExtractionPanel";
 import { QuestionAnswerPanel } from "@/features/specs/QuestionAnswerPanel";
 import { StatusBar } from "./StatusBar";
+import type { Annotation } from "@/core/pdf/types";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function PDFViewer() {
-  const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
+  const { currentPage, setCurrentPage, getCurrentDocument, getAnnotations, updateAnnotation } = usePDFStore();
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, splitScreenMode } = useUIStore();
   const { showRulers, toggleRulers, renderQuality } = useDocumentSettingsStore();
   const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();
@@ -47,6 +48,30 @@ export function PDFViewer() {
   const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
   const [showDocumentSettings, setShowDocumentSettings] = useState(false);
+  const [showProperties, setShowProperties] = useState(false);
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+
+  // Track selected annotation for properties panel
+  useEffect(() => {
+    const handleSelect = (e: Event) => {
+      const detail = (e as CustomEvent<{ annotationId?: string }>).detail;
+      if (detail?.annotationId) {
+        setSelectedAnnotationId(detail.annotationId);
+        setShowProperties(true);
+      }
+    };
+    const handleDeselect = () => {
+      setSelectedAnnotationId(null);
+    };
+    window.addEventListener("annotationSelected", handleSelect);
+    window.addEventListener("annotationDeselected", handleDeselect);
+    window.addEventListener("clearEditingAnnotation", handleDeselect);
+    return () => {
+      window.removeEventListener("annotationSelected", handleSelect);
+      window.removeEventListener("annotationDeselected", handleDeselect);
+      window.removeEventListener("clearEditingAnnotation", handleDeselect);
+    };
+  }, []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const pagesContainerRef = useRef<HTMLDivElement>(null);
   const [baseFitScale, setBaseFitScale] = useState<number>(1.0);
@@ -1265,6 +1290,33 @@ export function PDFViewer() {
   const canGoPrevious = currentPage > 0;
   const canGoNext = currentPage < pageCount - 1;
 
+  // Resolve selected annotation for properties panel
+  const selectedAnnotation: Annotation | null = (() => {
+    if (!selectedAnnotationId || !currentDocument) return null;
+    const anns = getAnnotations(currentDocument.getId());
+    return anns.find((a) => a.id === selectedAnnotationId) ?? null;
+  })();
+
+  const propertyLabel = (() => {
+    if (!selectedAnnotation) return "Properties";
+    if (selectedAnnotation.type === "formField") {
+      const labels: Record<string, string> = {
+        text: "Text Field", number: "Number Field", email: "Email Field",
+        checkbox: "Checkbox", radio: "Radio Button", dropdown: "Dropdown",
+        listbox: "List Box", date: "Date Picker", signature: "Signature",
+      };
+      const name = selectedAnnotation.fieldName || selectedAnnotation.fieldLabel;
+      const typeLabel = labels[selectedAnnotation.fieldType || "text"] || "Form Field";
+      return name ? `${typeLabel}: ${name}` : typeLabel;
+    }
+    const typeLabels: Record<string, string> = {
+      text: "Text Box", highlight: "Highlight", note: "Note", callout: "Callout",
+      redact: "Redaction", image: "Image", draw: "Drawing", shape: "Shape",
+      stamp: "Stamp", signatureField: "Signature",
+    };
+    return typeLabels[selectedAnnotation.type] ?? "Properties";
+  })();
+
   return (
     <div className="flex flex-col h-full w-full min-h-0">
       {/* Page Canvas - Full Height */}
@@ -1313,6 +1365,19 @@ export function PDFViewer() {
         </div>
       </div>
       
+      {/* Properties panel - expands upward from bottom bar */}
+      {showProperties && currentDocument && (
+        <div className="relative z-10 flex-shrink-0 border-t border-border bg-background px-3 py-2 text-xs">
+          {!selectedAnnotation ? (
+            <div className="text-muted-foreground text-center py-1">Select an annotation to view properties</div>
+          ) : selectedAnnotation.type === "formField" ? (
+            <FormFieldProperties annotation={selectedAnnotation} onUpdate={(updates) => updateAnnotation(currentDocument!.getId(), selectedAnnotation.id, updates)} allAnnotations={getAnnotations(currentDocument!.getId())} />
+          ) : (
+            <AnnotationProperties annotation={selectedAnnotation} />
+          )}
+        </div>
+      )}
+
       {/* Bottom toolbar: always show; z-10 so it stays above PDF content and is clickable */}
       <div className="relative z-10 flex flex-shrink-0 items-center justify-between border-t bg-background px-2 py-1.5">
         <div className="flex items-center gap-1">
@@ -1360,6 +1425,18 @@ export function PDFViewer() {
             disabled={!canGoNext}
           >
             <ChevronRight className="h-3.5 w-3.5" />
+          </Button>
+          <div className="h-4 w-px bg-border mx-0.5" />
+          <Button
+            variant={showProperties ? "default" : "outline"}
+            size="sm"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={() => setShowProperties((v) => !v)}
+            title={showProperties ? "Hide properties" : "Show properties"}
+            disabled={!currentDocument}
+          >
+            <PanelBottomOpen className="h-3.5 w-3.5" />
+            <span className="truncate max-w-[160px]">{propertyLabel}</span>
           </Button>
         </div>
         
@@ -1636,3 +1713,114 @@ export function PDFViewer() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Inline property components for the bottom-bar expansion
+// ---------------------------------------------------------------------------
+
+function AnnotationProperties({ annotation }: { annotation: Annotation }) {
+  const x = Math.round(annotation.x);
+  const y = Math.round(annotation.y);
+  const w = annotation.width != null ? Math.round(annotation.width) : null;
+  const h = annotation.height != null ? Math.round(annotation.height) : null;
+  const typeLabels: Record<string, string> = {
+    text: "Text Box", highlight: "Highlight", note: "Note", callout: "Callout",
+    redact: "Redaction", image: "Image", draw: "Drawing", shape: "Shape",
+    stamp: "Stamp", signatureField: "Signature",
+  };
+  return (
+    <div className="flex items-center gap-4 text-muted-foreground">
+      <span className="font-medium text-foreground">{typeLabels[annotation.type] ?? annotation.type}</span>
+      <span>Page {annotation.pageNumber + 1}</span>
+      <span>Pos: {x}, {y}</span>
+      {w != null && h != null && <span>Size: {w} &times; {h}</span>}
+    </div>
+  );
+}
+
+function FormFieldProperties({ annotation, onUpdate, allAnnotations }: { annotation: Annotation; onUpdate: (u: Partial<Annotation>) => void; allAnnotations: Annotation[] }) {
+  const radioGroups = Array.from(new Set(
+    allAnnotations.filter((a) => a.type === "formField" && a.fieldType === "radio" && a.radioGroup).map((a) => a.radioGroup!)
+  ));
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+      {/* Layout info */}
+      <span className="text-muted-foreground">
+        Page {annotation.pageNumber + 1} &middot; {Math.round(annotation.x)}, {Math.round(annotation.y)}
+        {annotation.width != null && annotation.height != null && ` \u00b7 ${Math.round(annotation.width)}\u00d7${Math.round(annotation.height)}`}
+      </span>
+
+      {/* Identity */}
+      <PropInput label="Name" value={annotation.fieldName || ""} onChange={(v) => onUpdate({ fieldName: v })} placeholder="field_name" />
+      <PropInput label="Label" value={annotation.fieldLabel || ""} onChange={(v) => onUpdate({ fieldLabel: v })} placeholder="Label" />
+      <PropInput label="Tooltip" value={annotation.tooltip || ""} onChange={(v) => onUpdate({ tooltip: v })} placeholder="Hover text" />
+
+      {/* Toggles */}
+      <PropToggle label="Required" checked={!!annotation.required} onChange={(v) => onUpdate({ required: v })} />
+      <PropToggle label="Read Only" checked={!!annotation.readOnly} onChange={(v) => onUpdate({ readOnly: v })} />
+      <PropToggle label="Locked" checked={!!annotation.locked} onChange={(v) => onUpdate({ locked: v })} />
+
+      {/* Text-specific */}
+      {(annotation.fieldType === "text" || annotation.fieldType === "number" || annotation.fieldType === "email") && (
+        <>
+          <PropInput label="Placeholder" value={annotation.placeholder || ""} onChange={(v) => onUpdate({ placeholder: v })} placeholder="Placeholder" />
+          {annotation.fieldType === "text" && (
+            <PropToggle label="Multiline" checked={!!annotation.multiline} onChange={(v) => onUpdate({ multiline: v })} />
+          )}
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Max:</span>
+            <input type="number" value={annotation.maxLength || ""} onChange={(e) => onUpdate({ maxLength: e.target.value ? parseInt(e.target.value) : undefined })} className="w-12 px-1 py-0.5 text-xs border rounded bg-background" placeholder="–" min={0} />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Align:</span>
+            <select value={annotation.textAlignment || "left"} onChange={(e) => onUpdate({ textAlignment: e.target.value as "left" | "center" | "right" })} className="px-1 py-0.5 text-xs border rounded bg-background">
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+          </div>
+        </>
+      )}
+
+      {/* Radio */}
+      {annotation.fieldType === "radio" && (
+        <div className="flex items-center gap-1">
+          <span className="text-muted-foreground">Group:</span>
+          <input type="text" value={annotation.radioGroup || ""} onChange={(e) => onUpdate({ radioGroup: e.target.value })} className="w-24 px-1 py-0.5 text-xs border rounded bg-background" placeholder="Group name" list="radio-groups-list" />
+          <datalist id="radio-groups-list">{radioGroups.map((g) => <option key={g} value={g} />)}</datalist>
+        </div>
+      )}
+
+      {/* Dropdown/Listbox */}
+      {(annotation.fieldType === "dropdown" || annotation.fieldType === "listbox") && (
+        <PropInput label="Options" value={(annotation.options || []).join(", ")} onChange={(v) => onUpdate({ options: v.split(",").map((o) => o.trim()).filter(Boolean) })} placeholder="Opt 1, Opt 2" width="w-40" />
+      )}
+
+      {/* Tab order */}
+      <div className="flex items-center gap-1">
+        <span className="text-muted-foreground">Tab:</span>
+        <input type="number" value={annotation.tabOrder ?? ""} onChange={(e) => onUpdate({ tabOrder: e.target.value ? parseInt(e.target.value) : undefined })} className="w-10 px-1 py-0.5 text-xs border rounded bg-background" placeholder="–" min={0} />
+      </div>
+    </div>
+  );
+}
+
+function PropInput({ label, value, onChange, placeholder, width = "w-24" }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; width?: string }) {
+  return (
+    <div className="flex items-center gap-1">
+      <span className="text-muted-foreground">{label}:</span>
+      <input type="text" value={value} onChange={(e) => onChange(e.target.value)} className={`${width} px-1 py-0.5 text-xs border rounded bg-background`} placeholder={placeholder} />
+    </div>
+  );
+}
+
+function PropToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="flex items-center gap-1 cursor-pointer">
+      <span className="text-muted-foreground">{label}</span>
+      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition-colors ${checked ? "bg-blue-500" : "bg-gray-300"}`}>
+        <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${checked ? "translate-x-3" : "translate-x-0.5"}`} />
+      </button>
+    </label>
+  );
+}

@@ -81,7 +81,7 @@ export function AnnotationPropertiesPanel() {
   const h = annotation.height != null ? Math.round(annotation.height) : null;
 
   return (
-    <div className="flex-shrink-0 border-t border-border bg-background text-xs select-none">
+    <div className="flex-shrink-0 bg-background text-xs select-none">
       {/* Header */}
       <button
         className="flex w-full items-center justify-between px-3 py-1 cursor-pointer hover:bg-accent/50 transition-colors"
