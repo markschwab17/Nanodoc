@@ -39,7 +39,6 @@ export default function ESignPrepareToolbar() {
     setActiveRecipient,
     setCurrentFieldType,
     envelopeId,
-    apiOrigin,
   } = useESignStore();
 
   const activeTool = useUIStore((s) => s.activeTool);
