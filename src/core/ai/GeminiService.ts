@@ -865,57 +865,85 @@ export async function callGeminiAPI(
   prompt: string,
   config: GeminiConfig
 ): Promise<string> {
+  const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
-  
+
   // Start with hardcoded model list, then try to discover available models
   let modelVariants = [
-    'gemini-1.5-flash',      // Try requested model first
-    'gemini-1.5-flash-latest', // Variant with -latest suffix
-    'gemini-2.0-flash-exp',  // Newer experimental model
-    'gemini-2.0-flash',      // Newer model
-    'gemini-1.5-pro',        // Pro variant
-    'gemini-pro',            // Legacy model name
+    'gemini-2.0-flash',      // Best current model
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-2.0-flash-exp',
+    'gemini-1.5-pro',
+    'gemini-pro',
   ];
-  
-  // Try to discover available models from API
-  try {
-    const availableModels = await listAvailableModels(config.apiKey, baseUrl);
-    if (availableModels.length > 0) {
-      // Prefer discovered models, but keep fallbacks
-      modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
-      console.log(`Using discovered models for text generation:`, availableModels.slice(0, 3), availableModels.length > 3 ? '...' : '');
+
+  // Try to discover available models from API (skip when using proxy)
+  if (!useCtoProxy) {
+    try {
+      const availableModels = await listAvailableModels(config.apiKey, baseUrl);
+      if (availableModels.length > 0) {
+        modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
+        console.log(`Using discovered models for text generation:`, availableModels.slice(0, 3), availableModels.length > 3 ? '...' : '');
+      }
+    } catch (e) {
+      console.warn('Could not discover models for text generation, using hardcoded list:', e);
     }
-  } catch (e) {
-    console.warn('Could not discover models for text generation, using hardcoded list:', e);
   }
-  
+
   const apiVersions = ['v1beta', 'v1'];
   let lastError: string | null = null;
-  
+
+  const contents = [{ parts: [{ text: prompt }] }];
+  const generationConfig = { temperature: 0.1, topP: 0.8, topK: 40 };
+
   for (const model of modelVariants) {
-    for (const apiVersion of apiVersions) {
+    const cleanModelName = model.replace(/^models\//, '');
+
+    // Route through CTO proxy when available
+    if (useCtoProxy && config.ctoProxy) {
       try {
-        // Ensure model name doesn't have 'models/' prefix
-        const cleanModelName = model.replace(/^models\//, '');
-        const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
-        
-        const response = await fetch(url, {
+        const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, '');
+        const res = await fetch(`${apiOrigin}/api/nanodoc/gemini`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{
-              parts: [{ text: prompt }],
-            }],
-            generationConfig: {
-              temperature: 0.1,
-              topP: 0.8,
-              topK: 40,
-            },
+            token: config.ctoProxy.token,
+            model: cleanModelName,
+            contents,
+            generationConfig,
           }),
         });
-        
+        const result = await res.json();
+        if (!res.ok) {
+          lastError = (result as { message?: string }).message ?? (result as { error?: string }).error ?? `Proxy ${res.status}`;
+          continue;
+        }
+        type GeminiResponse = { response?: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } };
+        const data = (result as GeminiResponse).response;
+        if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          console.log(`✓ Successfully using model via CTO proxy: ${cleanModelName}`);
+          return data.candidates[0].content.parts[0].text;
+        }
+        lastError = 'Proxy returned no text';
+        continue;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : 'Proxy error';
+        continue;
+      }
+    }
+
+    // Direct Gemini API call
+    for (const apiVersion of apiVersions) {
+      try {
+        const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents, generationConfig }),
+        });
+
         if (response.ok) {
           const data = await response.json();
           if (data.candidates && data.candidates[0] && data.candidates[0].content) {
@@ -925,7 +953,6 @@ export async function callGeminiAPI(
         } else {
           const errorText = await response.text();
           lastError = errorText;
-          // Silently skip 404s - model doesn't exist in this API version
           try {
             const errorData = JSON.parse(errorText);
             if (errorData.error?.code !== 404) {
@@ -934,16 +961,14 @@ export async function callGeminiAPI(
           } catch (e) {
             // Not JSON, continue silently
           }
-          // Continue to next model/version combination
           continue;
         }
       } catch (error) {
-        // Continue to next model/version combination
         continue;
       }
     }
   }
-  
+
   throw new Error(`Failed to call Gemini API with any model variant. Last error: ${lastError || 'Unknown error'}`);
 }
 
@@ -960,22 +985,25 @@ export async function callGeminiAPIWithHistory(
   messages: ChatMessage[],
   config: GeminiConfig
 ): Promise<string> {
+  const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
   let modelVariants = [
+    'gemini-2.0-flash',
     'gemini-1.5-flash',
     'gemini-1.5-flash-latest',
     'gemini-2.0-flash-exp',
-    'gemini-2.0-flash',
     'gemini-1.5-pro',
     'gemini-pro',
   ];
-  try {
-    const availableModels = await listAvailableModels(config.apiKey, baseUrl);
-    if (availableModels.length > 0) {
-      modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
+  if (!useCtoProxy) {
+    try {
+      const availableModels = await listAvailableModels(config.apiKey, baseUrl);
+      if (availableModels.length > 0) {
+        modelVariants = [...availableModels, ...modelVariants.filter(m => !availableModels.includes(m))];
+      }
+    } catch {
+      // use defaults
     }
-  } catch {
-    // use defaults
   }
   const apiVersions = ['v1beta', 'v1'];
   let lastError: string | null = null;
@@ -983,18 +1011,51 @@ export async function callGeminiAPIWithHistory(
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
-  for (const m of modelVariants) {
+  const generationConfig = { temperature: 0.1, topP: 0.8, topK: 40 };
+
+  for (const model of modelVariants) {
+    const cleanModelName = model.replace(/^models\//, '');
+
+    // Route through CTO proxy when available
+    if (useCtoProxy && config.ctoProxy) {
+      try {
+        const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, '');
+        const res = await fetch(`${apiOrigin}/api/nanodoc/gemini`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: config.ctoProxy.token,
+            model: cleanModelName,
+            contents,
+            generationConfig,
+          }),
+        });
+        const result = await res.json();
+        if (!res.ok) {
+          lastError = (result as { message?: string }).message ?? (result as { error?: string }).error ?? `Proxy ${res.status}`;
+          continue;
+        }
+        type GeminiResponse = { response?: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } };
+        const data = (result as GeminiResponse).response;
+        if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          return data.candidates[0].content.parts[0].text;
+        }
+        lastError = 'Proxy returned no text';
+        continue;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : 'Proxy error';
+        continue;
+      }
+    }
+
+    // Direct Gemini API call
     for (const apiVersion of apiVersions) {
       try {
-        const cleanModelName = m.replace(/^models\//, '');
         const url = `${baseUrl}/${apiVersion}/models/${cleanModelName}:generateContent?key=${config.apiKey}`;
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents,
-            generationConfig: { temperature: 0.1, topP: 0.8, topK: 40 },
-          }),
+          body: JSON.stringify({ contents, generationConfig }),
         });
         if (response.ok) {
           const data = await response.json();
