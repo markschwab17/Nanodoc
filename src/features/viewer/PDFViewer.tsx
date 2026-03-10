@@ -34,7 +34,6 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { SpecExtractionPanel } from "@/features/specs/SpecExtractionPanel";
 import { QuestionAnswerPanel } from "@/features/specs/QuestionAnswerPanel";
 import { StatusBar } from "./StatusBar";
-import { AnnotationPropertiesPanel } from "./AnnotationPropertiesPanel";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function PDFViewer() {
@@ -1324,7 +1323,7 @@ export function PDFViewer() {
             size="icon"
             className="h-7 w-7"
             onClick={handlePreviousPage}
-            disabled={!canGoPrevious || readMode}
+            disabled={!canGoPrevious}
           >
             <ChevronLeft className="h-3.5 w-3.5" />
           </Button>
@@ -1358,7 +1357,7 @@ export function PDFViewer() {
             size="icon"
             className="h-7 w-7"
             onClick={handleNextPage}
-            disabled={!canGoNext || readMode}
+            disabled={!canGoNext}
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </Button>
@@ -1624,9 +1623,6 @@ export function PDFViewer() {
         currentPage={currentPage}
         onApply={handleApplyDocumentSettings}
       />
-
-      {/* Annotation Properties Panel */}
-      {currentDocument && <AnnotationPropertiesPanel />}
 
       {/* Status Bar */}
       {currentDocument && <StatusBar />}

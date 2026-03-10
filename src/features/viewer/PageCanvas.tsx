@@ -32,6 +32,7 @@ import { getDrawingPath, isCurrentlyDrawing, setDrawPreviewCallback } from "@/fe
 import { useStampStore } from "@/shared/stores/stampStore";
 import { getStampPlacementDimensions } from "@/features/stamps/stampUtils";
 import { StampEditor } from "@/features/stamps/StampEditor";
+import SignatureFieldAnnotation from "@/features/esign/SignatureFieldAnnotation";
 import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
@@ -283,16 +284,23 @@ export const PageCanvas = React.memo(function PageCanvas({
       });
     } else {
       // Dispatch clear event when annotation is deselected
+      // Skip if view mode is switching — the null is from unmounting, not a real deselection
       requestAnimationFrame(() => {
-        window.dispatchEvent(new CustomEvent("clearEditingAnnotation"));
+        const currentReadMode = useUIStore.getState().readMode;
+        const isViewModeSwitch = currentReadMode !== readMode;
+        if (!isViewModeSwitch) {
+          window.dispatchEvent(new CustomEvent("clearEditingAnnotation"));
+        }
       });
     }
-  }, [editingAnnotation?.id]);
+  }, [editingAnnotation?.id, readMode]);
   
   // Listen for clearEditingAnnotation event (from delete handler)
   useEffect(() => {
     const handleClearEditingAnnotation = (e: CustomEvent) => {
-      if (editingAnnotation && editingAnnotation.id === e.detail.annotationId) {
+      // If no detail or no annotationId, it's a generic clear-all — always clear
+      // If annotationId is provided, only clear if it matches the current editing annotation
+      if (!e.detail?.annotationId || (editingAnnotation && editingAnnotation.id === e.detail.annotationId)) {
         setEditingAnnotation(null);
         setAnnotationText("");
         setIsEditingMode(false);
@@ -1515,6 +1523,12 @@ export const PageCanvas = React.memo(function PageCanvas({
   // Note: Focus is now handled by RichTextEditor component
 
   const handleMouseDown = async (e: React.MouseEvent) => {
+    // Skip tool handling when clicking inside form fields (let inputs handle natively)
+    const target = e.target as HTMLElement;
+    if (target.closest?.("[data-form-field]")) {
+      return;
+    }
+
     // Update mouse position for paste location
     const coords = getPDFCoordinates(e);
     if (coords) {
@@ -2243,8 +2257,8 @@ export const PageCanvas = React.memo(function PageCanvas({
       }
     }
     
-    // Handle generic tool mouse move for draw, shape, and form tools
-    if ((activeTool === "draw" || activeTool === "shape" || activeTool === "form") && 
+    // Handle generic tool mouse move for draw, shape, form, and signatureField tools
+    if ((activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "signatureField") &&
         (isSelecting || selectionStart) && currentDocument) {
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler && toolHandler.handleMouseMove) {
@@ -2916,6 +2930,8 @@ export const PageCanvas = React.memo(function PageCanvas({
     : activeTool === "callout"
     ? "crosshair"
     : activeTool === "redact"
+    ? "crosshair"
+    : activeTool === "signatureField"
     ? "crosshair"
     : "default";
 
@@ -4441,8 +4457,11 @@ export const PageCanvas = React.memo(function PageCanvas({
           } else if (annot.type === "stamp") {
             // Stamp annotations are rendered using StampAnnotation component below
             return null;
+          } else if (annot.type === "signatureField") {
+            // Signature fields are rendered using SignatureFieldAnnotation component below
+            return null;
           }
-          
+
           return null;
             })}
           </div>
@@ -5049,7 +5068,7 @@ export const PageCanvas = React.memo(function PageCanvas({
                   <FormField
                     annotation={annot}
                     pdfToCanvas={pdfToCanvas}
-                    scale={readMode ? 1 : undefined}
+                    zoomLevel={readMode ? readModeAnnotationScale : zoomLevel}
                     onValueChange={(value) => {
                       if (!currentDocument) return;
                       updateAnnotation(
@@ -5066,14 +5085,6 @@ export const PageCanvas = React.memo(function PageCanvas({
                         { options }
                       );
                     }}
-                    onLockChange={(locked) => {
-                      if (!currentDocument) return;
-                      updateAnnotation(
-                        currentDocument.getId(),
-                        annot.id,
-                        { locked }
-                      );
-                    }}
                     onMove={(deltaX, deltaY) => {
                       if (!currentDocument) return;
                       const newX = annot.x + deltaX;
@@ -5086,10 +5097,9 @@ export const PageCanvas = React.memo(function PageCanvas({
                     }}
                     isEditable={true}
                     isSelected={isSelected}
-                    zoomLevel={zoomLevel}
                     activeTool={activeTool}
                     onClick={() => {
-                      if (activeTool === "select") {
+                      if (activeTool === "select" || activeTool === "selectText") {
                         setEditingAnnotation(annot);
                       }
                     }}
@@ -5106,8 +5116,7 @@ export const PageCanvas = React.memo(function PageCanvas({
                           updates
                         );
                       }}
-                      zoomLevel={zoomLevel}
-                      scale={readMode ? 1 : undefined}
+                      zoomLevel={readMode ? readModeAnnotationScale : zoomLevel}
                     />
                   )}
                 </div>
@@ -5342,6 +5351,47 @@ export const PageCanvas = React.memo(function PageCanvas({
                     }
                   }}
                 />
+              );
+            });
+        })()}
+
+        {/* Signature field annotations - e-sign prepare/sign mode */}
+        {(() => {
+          const sigFields = annotations.filter(a => a.type === "signatureField" && a.pageNumber === pageNumber);
+          if (sigFields.length === 0) return null;
+          if (zoomLevel <= 0) return null;
+
+          return sigFields
+            .filter(a => a.x != null && a.y != null)
+            .map((annot) => {
+              const isSelected = editingAnnotation?.id === annot.id;
+              return (
+                <div key={annot.id}>
+                  <SignatureFieldAnnotation
+                    annotation={annot}
+                    pdfToCanvas={pdfToCanvas}
+                    isSelected={isSelected}
+                    onSelect={() => {
+                      setEditingAnnotation(annot);
+                      window.dispatchEvent(new CustomEvent("annotationSelected", { detail: { annotationId: annot.id } }));
+                    }}
+                  />
+                  {isSelected && activeTool === "select" && (
+                    <FormFieldHandles
+                      annotation={annot}
+                      pdfToCanvas={pdfToCanvas}
+                      onUpdate={(updates) => {
+                        if (!currentDocument) return;
+                        updateAnnotation(
+                          currentDocument.getId(),
+                          annot.id,
+                          updates
+                        );
+                      }}
+                      zoomLevel={readMode ? readModeAnnotationScale : zoomLevel}
+                    />
+                  )}
+                </div>
               );
             });
         })()}

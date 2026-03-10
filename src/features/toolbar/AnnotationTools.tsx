@@ -283,10 +283,14 @@ export function AnnotationTools() {
             title="Field Type"
           >
             <option value="text">Text Field</option>
+            <option value="number">Number</option>
+            <option value="email">Email</option>
             <option value="checkbox">Checkbox</option>
             <option value="radio">Radio Button</option>
             <option value="dropdown">Dropdown</option>
+            <option value="listbox">List Box</option>
             <option value="date">Date Picker</option>
+            <option value="signature">Signature</option>
           </select>
         )}
       </div>

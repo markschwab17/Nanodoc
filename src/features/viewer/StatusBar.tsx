@@ -23,6 +23,7 @@ const TOOL_LABELS: Record<ToolType, string> = {
   draw: "Draw",
   shape: "Shape",
   stamp: "Stamp",
+  signatureField: "Signature Field",
 };
 
 /** Format bytes into a human-readable string. */

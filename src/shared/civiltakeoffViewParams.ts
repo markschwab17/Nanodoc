@@ -32,6 +32,16 @@ export interface CiviltakeoffViewParams {
   project_name: string | null;
   /** URL-encoded text to search for and highlight on the target page. */
   quote: string | null;
+  /** E-sign mode: "esign_prepare" (sender placing fields) or "esign_sign" (recipient signing). */
+  mode: string | null;
+  /** E-sign envelope ID. */
+  envelope_id: string | null;
+  /** E-sign recipient signing token. */
+  recipient_token: string | null;
+  /** E-sign recipient email address (for display). */
+  signer_email: string | null;
+  /** JSON-encoded array of recipients for esign_prepare mode. */
+  esign_recipients: string | null;
 }
 
 /**
@@ -56,6 +66,11 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const split_screen = params.get("split_screen") ?? null;
   const project_name = params.get("project_name") ?? null;
   const quote = params.get("quote") ?? null;
+  const mode = params.get("mode") ?? null;
+  const envelope_id = params.get("envelope_id") ?? null;
+  const recipient_token = params.get("recipient_token") ?? null;
+  const signer_email = params.get("signer_email") ?? null;
+  const esign_recipients = params.get("esign_recipients") ?? null;
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -84,6 +99,11 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     split_screen,
     project_name,
     quote,
+    mode,
+    envelope_id,
+    recipient_token,
+    signer_email,
+    esign_recipients,
   };
 }
 

@@ -14,6 +14,7 @@ import { DrawTool } from "./DrawTool";
 import { ShapeTool } from "./ShapeTool";
 import { FormTool } from "./FormTool";
 import { StampTool } from "./StampTool";
+import { SignatureFieldTool } from "./SignatureFieldTool";
 
 export const toolHandlers: Record<string, ToolHandler> = {
   text: TextTool,
@@ -25,9 +26,10 @@ export const toolHandlers: Record<string, ToolHandler> = {
   shape: ShapeTool,
   form: FormTool,
   stamp: StampTool,
+  signatureField: SignatureFieldTool,
 };
 
-export { TextTool, HighlightTool, CalloutTool, RedactTool, SelectTextTool, DrawTool, ShapeTool, FormTool, StampTool };
+export { TextTool, HighlightTool, CalloutTool, RedactTool, SelectTextTool, DrawTool, ShapeTool, FormTool, StampTool, SignatureFieldTool };
 export { normalizeSelectionToRect, validatePDFRect } from "./coordinateHelpers";
 export type { ToolHandler, ToolContext } from "./types";
 

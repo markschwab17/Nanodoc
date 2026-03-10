@@ -29,7 +29,7 @@ export function FormFieldHandles({
   const [dragStart, setDragStart] = useState<{ x: number; y: number; annotX: number; annotY: number; annotW: number; annotH: number } | null>(null);
 
   // Don't show handles if field is locked or missing dimensions
-  const isLocked = (annotation as any).locked === true;
+  const isLocked = annotation.locked === true;
   const shouldShowHandles = !isLocked && annotation.width && annotation.height;
 
   // Convert annotation bounds to canvas coordinates
@@ -92,26 +92,38 @@ export function FormFieldHandles({
         let newWidth = dragStart.annotW;
         let newHeight = dragStart.annotH;
 
+        // annotation.y = bottom edge in PDF coords (Y=0 at bottom, increases upward)
+        // For each corner, pin the OPPOSITE corner:
+        //   nw drag → pin bottom-right (x+width stays, y stays)
+        //   ne drag → pin bottom-left  (x stays, y stays)
+        //   sw drag → pin top-right    (x+width stays, y+height stays)
+        //   se drag → pin top-left     (x stays, y+height stays)
         switch (dragType) {
-          case "nw": // Top-left - dragging right/down increases size
-            newX = dragStart.annotX + pdfDx;
-            newY = dragStart.annotY - pdfDy; // Move top edge up (increase Y) when dragging up
-            newWidth = dragStart.annotW - pdfDx;
-            newHeight = dragStart.annotH + pdfDy; // Increase height when dragging down
-            break;
-          case "ne": // Top-right - dragging right/down increases size
-            newY = dragStart.annotY - pdfDy; // Move top edge up (increase Y) when dragging up
-            newWidth = dragStart.annotW + pdfDx;
-            newHeight = dragStart.annotH + pdfDy; // Increase height when dragging down
-            break;
-          case "sw": // Bottom-left - dragging right/up increases size
+          case "nw": // Drag top-left → pin bottom-right
             newX = dragStart.annotX + pdfDx;
             newWidth = dragStart.annotW - pdfDx;
-            newHeight = dragStart.annotH - pdfDy; // Increase height when dragging up
+            // Bottom edge (y) stays fixed; top edge moves
+            newY = dragStart.annotY;
+            newHeight = dragStart.annotH + pdfDy;
             break;
-          case "se": // Bottom-right - dragging right/up increases size
+          case "ne": // Drag top-right → pin bottom-left
             newWidth = dragStart.annotW + pdfDx;
-            newHeight = dragStart.annotH - pdfDy; // Increase height when dragging up
+            // Bottom edge (y) stays fixed; top edge moves
+            newY = dragStart.annotY;
+            newHeight = dragStart.annotH + pdfDy;
+            break;
+          case "sw": // Drag bottom-left → pin top-right
+            newX = dragStart.annotX + pdfDx;
+            newWidth = dragStart.annotW - pdfDx;
+            // Top edge (y+height) stays fixed; bottom edge moves
+            newY = dragStart.annotY + pdfDy;
+            newHeight = dragStart.annotH - pdfDy;
+            break;
+          case "se": // Drag bottom-right → pin top-left
+            newWidth = dragStart.annotW + pdfDx;
+            // Top edge (y+height) stays fixed; bottom edge moves
+            newY = dragStart.annotY + pdfDy;
+            newHeight = dragStart.annotH - pdfDy;
             break;
         }
         

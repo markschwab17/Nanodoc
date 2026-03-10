@@ -12,8 +12,6 @@ import {
   Type,
   Highlighter,
   Eraser,
-  Undo2,
-  Redo2,
   Save,
   Loader2,
   Printer,
@@ -29,15 +27,11 @@ import {
   FileText,
   Stamp as StampIcon,
   Layers,
-  FileOutput,
-  FilePlus2,
-  Trash2
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useState, useEffect, useRef, useMemo, useCallback, type ReactNode } from "react";
-import { useUndoRedo } from "@/shared/hooks/useUndoRedo";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
@@ -83,7 +77,6 @@ export function Toolbar() {
   const { activeTool, setActiveTool, currentShapeType, setCurrentShapeType, requestDocumentSettingsOpen, setRequestDocumentSettingsOpen } = useUIStore();
   const { currentPage, getCurrentDocument } = usePDFStore();
   const currentDocument = getCurrentDocument();
-  const { undo, redo, canUndo, canRedo, undoLabel, redoLabel } = useUndoRedo();
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [showRecentFiles, setShowRecentFiles] = useState(false);
@@ -845,76 +838,6 @@ export function Toolbar() {
             <Layers className={sizeClasses.icon} />
           </Button>
         </ToolbarTooltip>
-        {/* Page Management Popover */}
-        <Popover>
-          <ToolbarTooltip label="Page Operations">
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                size="icon"
-                disabled={!currentDocument}
-                className={sizeClasses.button}
-                aria-label="Page Operations"
-              >
-                <FileText className={sizeClasses.icon} />
-              </Button>
-            </PopoverTrigger>
-          </ToolbarTooltip>
-          <PopoverContent className="w-56 p-1" side="left" align="start">
-            <div className="flex flex-col">
-              <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
-                Page Operations
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="justify-start"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("page-tools-insert", { detail: { position: "before" } }));
-                }}
-              >
-                <FilePlus2 className="h-4 w-4 mr-2" />
-                Insert Blank Page Before
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="justify-start"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("page-tools-insert", { detail: { position: "after" } }));
-                }}
-              >
-                <FilePlus2 className="h-4 w-4 mr-2" />
-                Insert Blank Page After
-              </Button>
-              <div className="h-px bg-border my-1" />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="justify-start"
-                disabled={!currentDocument || currentDocument.getPageCount() <= 1}
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("page-tools-delete"));
-                }}
-              >
-                <Trash2 className="h-4 w-4 mr-2" />
-                Delete Current Page
-              </Button>
-              <div className="h-px bg-border my-1" />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="justify-start"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("page-tools-extract"));
-                }}
-              >
-                <FileOutput className="h-4 w-4 mr-2" />
-                Extract Page to New PDF
-              </Button>
-            </div>
-          </PopoverContent>
-        </Popover>
       </div>
 
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
@@ -1122,35 +1045,6 @@ export function Toolbar() {
         </ToolbarTooltip>
       </div>
 
-      <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
-
-      {/* Undo/Redo */}
-      <div className={`flex flex-col ${sizeClasses.gap}`} data-tour="editor-undo-redo">
-        <ToolbarTooltip label={undoLabel} shortcut={`${modKey}Z`}>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => undo()}
-            disabled={!canUndo}
-            className={sizeClasses.button}
-            aria-label={undoLabel}
-          >
-            <Undo2 className={sizeClasses.icon} />
-          </Button>
-        </ToolbarTooltip>
-        <ToolbarTooltip label={redoLabel} shortcut={isMac ? '\u21E7\u2318Z' : 'Ctrl+Shift+Z'}>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => redo()}
-            disabled={!canRedo}
-            className={sizeClasses.button}
-            aria-label={redoLabel}
-          >
-            <Redo2 className={sizeClasses.icon} />
-          </Button>
-        </ToolbarTooltip>
-      </div>
 
       <div className={`h-px w-full bg-border`} style={{ margin: '0.5rem 0' }} />
 

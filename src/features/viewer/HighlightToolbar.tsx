@@ -80,17 +80,17 @@ export function HighlightToolbar() {
   };
 
   return (
-    <div className="flex items-center gap-2 p-2" data-highlight-toolbar="true">
-      <Highlighter className="h-4 w-4 text-muted-foreground" />
-      
-      <div className="h-6 w-px bg-border" />
+    <div className="flex items-center gap-1 px-1.5 py-1" data-highlight-toolbar="true">
+      <Highlighter className="h-3 w-3 text-muted-foreground" />
+
+      <div className="h-4 w-px bg-border" />
 
       {/* Color Picker */}
       <Popover open={showColorPicker} onOpenChange={setShowColorPicker}>
         <PopoverTrigger asChild>
-          <Button variant="outline" size="icon" className="h-8 w-8">
+          <Button variant="outline" size="icon" className="h-6 w-6">
             <div
-              className="h-4 w-4 rounded border border-border"
+              className="h-3.5 w-3.5 rounded border border-border"
               style={{ backgroundColor: highlightColor }}
             />
           </Button>
@@ -98,17 +98,17 @@ export function HighlightToolbar() {
         <PopoverContent className="w-auto p-3">
           <HexColorPicker color={highlightColor} onChange={handleColorChange} />
           <div
-            className="mt-2 h-8 w-full rounded border"
+            className="mt-2 h-6 w-full rounded border"
             style={{ backgroundColor: highlightColor }}
           />
         </PopoverContent>
       </Popover>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Stroke Width Slider */}
-      <div className="flex items-center gap-2 min-w-[120px]">
-        <span className="text-xs text-muted-foreground whitespace-nowrap">Width</span>
+      <div className="flex items-center gap-1 min-w-[100px]">
+        <span className="text-[10px] text-muted-foreground whitespace-nowrap">Width</span>
         <Slider
           value={[localStrokeWidth]}
           onValueChange={handleStrokeWidthChange}
@@ -120,11 +120,11 @@ export function HighlightToolbar() {
         <span className="text-xs text-muted-foreground w-8">{localStrokeWidth}</span>
       </div>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Opacity Slider */}
-      <div className="flex items-center gap-2 min-w-[200px]">
-        <span className="text-xs text-muted-foreground whitespace-nowrap font-medium">Opacity</span>
+      <div className="flex items-center gap-1 min-w-[160px]">
+        <span className="text-[10px] text-muted-foreground whitespace-nowrap">Opacity</span>
         <Slider
           value={[localOpacity]}
           onValueChange={handleOpacityChange}
@@ -142,7 +142,7 @@ export function HighlightToolbar() {
             value={Math.round(localOpacity * 100)}
             onChange={handleOpacityInputChange}
             onBlur={handleOpacityInputBlur}
-            className="h-7 w-12 text-xs text-center px-1"
+            className="h-5 w-10 text-[10px] text-center px-1"
           />
           <span className="text-xs text-muted-foreground font-medium">%</span>
         </div>

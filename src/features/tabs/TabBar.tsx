@@ -275,14 +275,14 @@ export function TabBar() {
             onDragLeave={handleDragLeave}
             data-plus-button="true"
             className={cn(
-              "h-7 w-7 min-w-[28px] opacity-70 hover:opacity-100 border border-dashed transition-colors",
+              "h-5 w-5 min-w-[20px] opacity-70 hover:opacity-100 border border-dashed transition-colors",
               isDragOver
                 ? "border-primary bg-primary/10 opacity-100"
                 : "border-border/50 hover:border-border"
             )}
             title="Open PDF (or drag PDF here)"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Plus className="h-3 w-3" />
           </Button>
         </div>
       </ScrollArea>

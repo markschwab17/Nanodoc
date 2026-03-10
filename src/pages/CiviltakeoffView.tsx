@@ -21,6 +21,7 @@ import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContext
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { useESignStore } from "@/shared/stores/esignStore";
 
 export default function CiviltakeoffView() {
   const location = useLocation();
@@ -129,7 +130,14 @@ export default function CiviltakeoffView() {
       try {
         const apiOrigin = params.api_origin;
         const token = params.token!;
-        const url = `${apiOrigin}/api/nanodoc/pdf?token=${encodeURIComponent(token)}`;
+
+        // For e-sign signing mode, use the signing endpoint to get the PDF
+        let url: string;
+        if (params.mode === "esign_sign" && params.recipient_token) {
+          url = `${apiOrigin}/api/esign/signing/${encodeURIComponent(params.recipient_token)}/pdf`;
+        } else {
+          url = `${apiOrigin}/api/nanodoc/pdf?token=${encodeURIComponent(token)}`;
+        }
         const res = await fetch(url);
 
         if (!res.ok) {
@@ -216,6 +224,78 @@ export default function CiviltakeoffView() {
           window.dispatchEvent(
             new CustomEvent("scroll-to-spec", { detail })
           );
+        }
+
+        // E-sign mode setup
+        if (params.mode === "esign_prepare" && params.envelope_id) {
+          // Ensure read mode is off so tools work
+          ui.setReadMode(false);
+          const esign = useESignStore.getState();
+          esign.setMode("prepare");
+          esign.setEnvelopeId(params.envelope_id);
+          esign.setApiOrigin(params.api_origin);
+          // Parse recipients from URL param (passed by CTO parent which has auth)
+          if (params.esign_recipients) {
+            try {
+              const parsed = JSON.parse(params.esign_recipients);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                esign.setRecipients(
+                  parsed.map((r: any) => ({
+                    email: r.email,
+                    name: r.name || undefined,
+                  }))
+                );
+              }
+            } catch (err) {
+              console.warn("[CiviltakeoffView] Failed to parse esign_recipients:", err);
+            }
+          }
+          ui.setActiveTool("signatureField");
+        } else if (params.mode === "esign_sign" && params.recipient_token) {
+          const esign = useESignStore.getState();
+          esign.setMode("sign");
+          esign.setRecipientToken(params.recipient_token);
+          esign.setSignerEmail(params.signer_email || null);
+          esign.setApiOrigin(params.api_origin);
+          esign.setEnvelopeId(params.envelope_id || null);
+          // Fetch signing session info to get field placements
+          try {
+            const sessionRes = await fetch(
+              `${params.api_origin}/api/esign/signing/${params.recipient_token}`
+            );
+            if (sessionRes.ok) {
+              const sessionData = await sessionRes.json();
+              if (sessionData.fieldPlacements) {
+                esign.setFieldPlacements(sessionData.fieldPlacements);
+                // Create signatureField annotations from placements
+                const doc = usePDFStore.getState().getCurrentDocument();
+                if (doc) {
+                  const docId = doc.getId();
+                  for (const field of sessionData.fieldPlacements) {
+                    usePDFStore.getState().addAnnotation(docId, {
+                      id: field.id,
+                      type: "signatureField",
+                      pageNumber: field.page,
+                      x: field.x,
+                      y: field.y,
+                      width: field.width,
+                      height: field.height,
+                      signerEmail: field.signerEmail,
+                      signatureFieldType: field.fieldType,
+                      signatureFieldRequired: field.required,
+                      signatureFieldLabel: field.label,
+                      signatureFieldStatus: "empty",
+                      color: "#5070ff",
+                    });
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn("[CiviltakeoffView] Failed to fetch signing session:", err);
+          }
+          // Enter read mode for signing
+          ui.setReadMode(true);
         }
 
         // Auto-run geotechnical extraction when opened from CTO soils report

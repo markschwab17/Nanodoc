@@ -730,12 +730,12 @@ export function TextFormattingToolbar({
   };
 
   return (
-    <div className="flex items-center gap-2 p-2" data-formatting-toolbar="true">
+    <div className="flex items-center gap-1 px-1.5 py-1" data-formatting-toolbar="true">
       {/* Font Family */}
       <select
         value={fontFamily}
         onChange={(e) => handleFontChange(e.target.value)}
-        className="h-8 px-2 text-sm border rounded bg-background"
+        className="h-6 px-1.5 text-xs border rounded bg-background"
         onMouseDown={(e) => {
           // Save selection before select gets focus
           saveSelectionBeforeInputFocus();
@@ -768,14 +768,14 @@ export function TextFormattingToolbar({
 
       {/* Font Size */}
       <div 
-        className="flex items-center gap-2 min-w-[180px]"
+        className="flex items-center gap-1 min-w-[150px]"
         onMouseDown={(e) => {
           // Save selection when mouse down on slider container (before any focus changes)
           saveSelectionBeforeInputFocus();
           e.stopPropagation();
         }}
       >
-        <Type className="h-4 w-4 text-muted-foreground" />
+        <Type className="h-3 w-3 text-muted-foreground" />
         <Slider
           value={[fontSize]}
           onValueChange={handleFontSizeChange}
@@ -803,7 +803,7 @@ export function TextFormattingToolbar({
             // Clear saved selection after applying change
             savedSelectionRef.current = null;
           }}
-          className="w-12 h-8 px-1 text-sm border rounded bg-background text-center"
+          className="w-10 h-6 px-1 text-xs border rounded bg-background text-center"
           min={8}
           max={72}
           onMouseDown={(e) => {
@@ -852,7 +852,7 @@ export function TextFormattingToolbar({
               ref={colorPickerTriggerRef}
               variant="outline" 
               size="icon" 
-              className="h-8 w-8"
+              className="h-6 w-6"
               onMouseDown={(e) => {
                 // Save selection before popover opens
                 saveSelectionBeforeInputFocus();
@@ -861,7 +861,7 @@ export function TextFormattingToolbar({
                 e.preventDefault();
               }}
             >
-              <Palette className="h-4 w-4" />
+              <Palette className="h-3.5 w-3.5" />
             </Button>
           </PopoverTrigger>
           <PopoverContent 
@@ -1005,13 +1005,13 @@ export function TextFormattingToolbar({
         </Popover>
       )}
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Text Style Buttons */}
       <Button
         variant={isBold ? "default" : "outline"}
         size="icon"
-        className="h-8 w-8"
+        className="h-6 w-6"
         onClick={() => {
           handleFormat("bold");
           // Update state immediately for visual feedback
@@ -1019,12 +1019,12 @@ export function TextFormattingToolbar({
         }}
         title="Bold (Ctrl+B)"
       >
-        <Bold className="h-4 w-4" />
+        <Bold className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant={isItalic ? "default" : "outline"}
         size="icon"
-        className="h-8 w-8"
+        className="h-6 w-6"
         onClick={() => {
           handleFormat("italic");
           // Update state immediately for visual feedback
@@ -1032,12 +1032,12 @@ export function TextFormattingToolbar({
         }}
         title="Italic (Ctrl+I)"
       >
-        <Italic className="h-4 w-4" />
+        <Italic className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant={isUnderline ? "default" : "outline"}
         size="icon"
-        className="h-8 w-8"
+        className="h-6 w-6"
         onClick={() => {
           handleFormat("underline");
           // Update state immediately for visual feedback
@@ -1045,68 +1045,68 @@ export function TextFormattingToolbar({
         }}
         title="Underline (Ctrl+U)"
       >
-        <Underline className="h-4 w-4" />
+        <Underline className="h-3.5 w-3.5" />
       </Button>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Alignment */}
       <Button
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="h-6 w-6"
         onClick={() => handleFormat("justifyLeft")}
         title="Align Left"
       >
-        <AlignLeft className="h-4 w-4" />
+        <AlignLeft className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="h-6 w-6"
         onClick={() => handleFormat("justifyCenter")}
         title="Align Center"
       >
-        <AlignCenter className="h-4 w-4" />
+        <AlignCenter className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="h-6 w-6"
         onClick={() => handleFormat("justifyRight")}
         title="Align Right"
       >
-        <AlignRight className="h-4 w-4" />
+        <AlignRight className="h-3.5 w-3.5" />
       </Button>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Delete Button - only show when something is selected */}
       {onDelete && hasSelection && (
         <Button
           variant="outline"
           size="icon"
-          className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+          className="h-6 w-6 text-destructive hover:text-destructive hover:bg-destructive/10"
           onClick={(e) => {
             e.stopPropagation();
             onDelete();
           }}
           title="Delete Annotation"
         >
-          <Trash2 className="h-4 w-4" />
+          <Trash2 className="h-3.5 w-3.5" />
         </Button>
       )}
 
       {/* Background controls - only show in edit mode */}
       {isEditing && (
         <>
-          <div className="h-6 w-px bg-border" />
+          <div className="h-4 w-px bg-border" />
 
           {/* Background Toggle */}
           <Button
             variant={hasBackground ? "default" : "outline"}
             size="icon"
-            className="h-8 w-8"
+            className="h-6 w-6"
             onClick={() => {
               const newValue = !hasBackground;
               setHasBackground(newValue);
@@ -1114,7 +1114,7 @@ export function TextFormattingToolbar({
             }}
             title="Toggle Background"
           >
-            <div className="h-4 w-4 border border-current" />
+            <div className="h-3.5 w-3.5 border border-current" />
           </Button>
 
           {/* Background Color Picker - only show when background is enabled */}
@@ -1134,7 +1134,7 @@ export function TextFormattingToolbar({
                 <Button 
                   variant="outline" 
                   size="icon" 
-                  className="h-8 w-8"
+                  className="h-6 w-6"
                   onMouseDown={(e) => {
                     // Save selection before popover opens
                     saveSelectionBeforeInputFocus();
@@ -1144,7 +1144,7 @@ export function TextFormattingToolbar({
                   }}
                 >
                   <div
-                    className="h-4 w-4 rounded border border-border"
+                    className="h-3.5 w-3.5 rounded border border-border"
                     style={{ 
                       backgroundColor: (() => {
                         const rgb = getRgbFromColor(backgroundColor);

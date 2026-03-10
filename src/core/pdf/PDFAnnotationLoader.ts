@@ -50,7 +50,7 @@ export class PDFAnnotationLoader {
 
   let rect: number[] | null = null;
 
-  if (type !== "Line" && type !== "Ink") {
+  if (type !== "Line" && type !== "Ink" && type !== "PolyLine" && type !== "Polygon") {
 
   try {
 
@@ -58,16 +58,14 @@ export class PDFAnnotationLoader {
 
   } catch (e) {
 
-  // Some annotation types don't have rect
-
-  console.warn(`Annotation type ${type} has no rect:`, e);
+  // Some annotation types (Highlight, PolyLine) don't have a Rect property — this is normal for 3rd-party PDFs
 
   }
 
   }
 
-  // Ink annotations use ink list, not rect; we don't load them into the editor yet
-  if (type === "Ink") continue;
+  // Ink/PolyLine/Polygon annotations use vertex lists, not rect; we don't load them into the editor yet
+  if (type === "Ink" || type === "PolyLine" || type === "Polygon") continue;
 
   const contents = pdfAnnot.getContents() || "";
 
@@ -292,244 +290,225 @@ export class PDFAnnotationLoader {
   // This is a form field - process it directly
 
   const rect = pdfAnnot.getRect();
-
   const annotObj = pdfAnnot.getObject();
-
   const pageBounds = page.getBounds();
-
   const pageHeight = pageBounds[3] - pageBounds[1];
 
+  // Helper: walk up Parent chain for inherited PDF properties
+  function getInheritedField(obj: any, key: string): any {
+    let cur = obj;
+    while (cur) {
+      try {
+        const val = cur.get(key);
+        if (val) return val;
+        cur = cur.get("Parent");
+      } catch { break; }
+    }
+    return null;
+  }
 
-  let fieldType: "text" | "checkbox" | "radio" | "dropdown" | "date" = "text";
+  // Helper: normalize PDF name (strip leading slash)
+  function normName(obj: any): string {
+    if (!obj) return "";
+    let name = obj.getName ? obj.getName() : obj.toString();
+    if (name.startsWith("/")) name = name.substring(1);
+    return name;
+  }
 
+  let fieldType: Annotation["fieldType"] = "text";
   let fieldName = "";
-
   let fieldValue: string | boolean = "";
-
   let options: string[] = [];
-
   let readOnly = false;
-
   let required = false;
-
   let multiline = false;
-
   let radioGroup = "";
-
+  // Extended metadata
+  let maxLength: number | undefined;
+  let tooltip: string | undefined;
+  let defaultValue: string | boolean | undefined;
+  let textAlignment: "left" | "center" | "right" | undefined;
+  let fontColor: string | undefined;
+  let fieldFontSize: number | undefined;
+  let placeholder: string | undefined;
 
   if (annotObj) {
 
-  const ftObj = annotObj.get("FT");
+  // Use inherited lookup for FT (field type), Ff (flags), Opt, DA, Q
+  const ftObj = getInheritedField(annotObj, "FT");
+  const ftName = normName(ftObj);
+  const ffObj = getInheritedField(annotObj, "Ff");
+  const flags = ffObj && typeof ffObj.valueOf === "function" ? ffObj.valueOf() : 0;
 
-  let ftName = ftObj && ftObj.getName ? ftObj.getName() : (ftObj ? ftObj.toString() : "");
-  // CRITICAL FIX: Strip leading slash from PDF name objects (e.g., "/Btn" -> "Btn")
-  // PDF name objects return "/Name" from toString(), but we need "Name" for comparison
-  if (ftName.startsWith("/")) {
-    ftName = ftName.substring(1);
-  }
-
+  readOnly = (flags & 1) !== 0;
+  required = (flags & 2) !== 0;
 
   if (ftName === "Tx") {
-  // Check if this is a date field by field name pattern (date fields are created with names like "date_1234567890")
-  // We'll check the field name later after we get it from the T field
-  fieldType = "text";
+    fieldType = "text";
+    multiline = (flags & 4096) !== 0;
 
-  const ff = annotObj.get("Ff");
-
-  if (ff && typeof ff.valueOf === "function") {
-
-  const flags = ff.valueOf();
-
-  multiline = (flags & 4096) !== 0; // Multiline flag
-
-  readOnly = (flags & 1) !== 0; // Read-only flag
-
-  required = (flags & 2) !== 0; // Required flag
-
-  }
+    // MaxLen for text fields
+    const maxLenObj = getInheritedField(annotObj, "MaxLen");
+    if (maxLenObj) {
+      try { maxLength = typeof maxLenObj.valueOf === "function" ? maxLenObj.valueOf() : parseInt(maxLenObj.toString()); } catch {}
+    }
 
   } else if (ftName === "Btn") {
-
-  const ff = annotObj.get("Ff");
-
-  if (ff && typeof ff.valueOf === "function") {
-
-  const flags = ff.valueOf();
-
-  if ((flags & 32768) !== 0) {
-
-  fieldType = "radio";
-
-  } else {
-
-  fieldType = "checkbox";
-
-  }
-
-  readOnly = (flags & 1) !== 0;
-
-  required = (flags & 2) !== 0;
-
-  } else {
-
-  fieldType = "checkbox";
-
-  }
+    fieldType = (flags & 32768) !== 0 ? "radio" : "checkbox";
 
   } else if (ftName === "Ch") {
+    // Combo flag (bit 18) — set = dropdown, unset = list box
+    fieldType = (flags & (1 << 17)) !== 0 ? "dropdown" : "listbox";
 
-  fieldType = "dropdown";
+    // Parse options with better handling
+    const optObj = getInheritedField(annotObj, "Opt");
+    if (optObj) {
+      try {
+        const len = optObj.length ?? 0;
+        for (let oi = 0; oi < len; oi++) {
+          try {
+            let item: any;
+            // Try get(index) accessor (mupdf array object) then direct index
+            if (typeof optObj.get === "function") {
+              item = optObj.get(oi);
+            } else {
+              item = optObj[oi];
+            }
+            if (!item) continue;
+            // Two-element array [exportValue, displayValue] — use display value
+            if (item.length && item.length >= 2) {
+              let displayItem = typeof item.get === "function" ? item.get(1) : item[1];
+              let val = displayItem?.toString ? displayItem.toString() : String(displayItem);
+              if (val.startsWith("/")) val = val.substring(1);
+              options.push(val);
+            } else {
+              let val = item.toString ? item.toString() : String(item);
+              if (val.startsWith("/")) val = val.substring(1);
+              options.push(val);
+            }
+          } catch { /* skip bad option */ }
+        }
+      } catch (e) {
+        console.warn("Error parsing dropdown/listbox options:", e);
+      }
+    }
 
-  const ff = annotObj.get("Ff");
-
-  if (ff && typeof ff.valueOf === "function") {
-
-  const flags = ff.valueOf();
-
-  readOnly = (flags & 1) !== 0;
-
-  required = (flags & 2) !== 0;
-
+  } else if (ftName === "Sig") {
+    fieldType = "signature";
   }
 
-  const optObj = annotObj.get("Opt");
-
-  if (optObj) {
-
-  if (Array.isArray(optObj)) {
-
-  options = optObj.map((o: any) => o.toString ? o.toString() : String(o));
-
-  } else {
-
-  // Opt might be an array of arrays for export values
-
-  try {
-
-  const optArray = optObj;
-
-  if (optArray && optArray.length) {
-
-  options = optArray.map((o: any) => {
-
-  if (Array.isArray(o) && o.length > 0) {
-
-  return o[0].toString ? o[0].toString() : String(o[0]);
-
-  }
-
-  return o.toString ? o.toString() : String(o);
-
-  });
-
-  }
-
-  } catch (e) {
-
-  console.warn("Error parsing dropdown options:", e);
-
-  }
-
-  }
-
-  }
-
-  }
-
-
-  const tObj = annotObj.get("T");
-
+  // Field name (T)
+  const tObj = getInheritedField(annotObj, "T");
   if (tObj) {
-
-  fieldName = tObj.toString ? tObj.toString() : String(tObj);
-  
-  // Detect date fields by field name pattern (date fields are created with names like "date_1234567890")
-  if (fieldName.startsWith("date_") && ftName === "Tx") {
-    fieldType = "date";
+    fieldName = tObj.toString ? tObj.toString() : String(tObj);
+    // Detect our date fields by naming convention
+    if (fieldName.startsWith("date_") && ftName === "Tx") {
+      fieldType = "date";
+    }
   }
 
-  }
-
-
+  // Value (V)
   const vObj = annotObj.get("V");
-
   if (vObj) {
-
-  if (fieldType === "checkbox" || fieldType === "radio") {
-
-  const vName = vObj.getName ? vObj.getName() : vObj.toString();
-  // Strip leading slash if present (PDF name objects)
-  const normalizedName = vName.startsWith("/") ? vName.substring(1) : vName;
-
-  fieldValue = normalizedName === "Yes" || normalizedName === "On";
-
-  } else {
-
-  fieldValue = vObj.toString ? vObj.toString() : String(vObj);
-
+    if (fieldType === "checkbox" || fieldType === "radio") {
+      const normalizedName = normName(vObj);
+      fieldValue = normalizedName === "Yes" || normalizedName === "On";
+    } else {
+      fieldValue = vObj.toString ? vObj.toString() : String(vObj);
+    }
   }
 
-  }
-  
-  // Also check AS (appearance state) for radio buttons and checkboxes if V wasn't set
+  // Appearance state fallback for checkbox/radio
   if ((fieldType === "checkbox" || fieldType === "radio") && fieldValue === undefined) {
     const asObj = annotObj.get("AS");
     if (asObj) {
-      const asName = asObj.getName ? asObj.getName() : asObj.toString();
-      const normalizedAsName = asName.startsWith("/") ? asName.substring(1) : asName;
+      const normalizedAsName = normName(asObj);
       fieldValue = normalizedAsName === "Yes" || normalizedAsName === "On";
     } else {
-      // Default to unchecked if no V or AS
       fieldValue = false;
     }
   }
 
-
-  // Get radio group name
-
+  // Radio group name
   if (fieldType === "radio" && tObj) {
-
-  radioGroup = tObj.toString ? tObj.toString() : String(tObj);
-
+    radioGroup = tObj.toString ? tObj.toString() : String(tObj);
   }
 
+  // Default value (DV)
+  const dvObj = annotObj.get("DV");
+  if (dvObj) {
+    if (fieldType === "checkbox" || fieldType === "radio") {
+      defaultValue = normName(dvObj) === "Yes" || normName(dvObj) === "On";
+    } else {
+      defaultValue = dvObj.toString ? dvObj.toString() : String(dvObj);
+    }
   }
 
+  // Tooltip (TU)
+  const tuObj = getInheritedField(annotObj, "TU");
+  if (tuObj) {
+    tooltip = tuObj.toString ? tuObj.toString() : String(tuObj);
+  }
 
-  const formFieldAnnot = {
-  id: `form_${pageNumber}_${rect[0]}_${rect[1]}_${Math.random().toString(36).substr(2, 9)}`,
+  // Text alignment (Q): 0=left, 1=center, 2=right
+  const qObj = getInheritedField(annotObj, "Q");
+  if (qObj) {
+    try {
+      const q = typeof qObj.valueOf === "function" ? qObj.valueOf() : parseInt(qObj.toString());
+      textAlignment = q === 1 ? "center" : q === 2 ? "right" : "left";
+    } catch {}
+  }
 
-  type: "formField" as const,
+  // Default Appearance (DA) — parse font size and color
+  const daObj = getInheritedField(annotObj, "DA");
+  if (daObj) {
+    try {
+      const daStr = daObj.toString ? daObj.toString() : String(daObj);
+      // Format: "/FontName FontSize Tf R G B rg" or similar
+      const tfMatch = daStr.match(/([\d.]+)\s+Tf/);
+      if (tfMatch) fieldFontSize = parseFloat(tfMatch[1]);
+      const rgMatch = daStr.match(/([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg/);
+      if (rgMatch) {
+        const r = Math.round(parseFloat(rgMatch[1]) * 255);
+        const g = Math.round(parseFloat(rgMatch[2]) * 255);
+        const b = Math.round(parseFloat(rgMatch[3]) * 255);
+        fontColor = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+      }
+    } catch {}
+  }
 
-  pageNumber,
+  } // end if (annotObj)
 
-  x: rect[0],
 
-  y: pageHeight - rect[3], // Convert to display coordinates
-
-  width: rect[2] - rect[0],
-
-  height: rect[3] - rect[1],
-
-  fieldType,
-
-  fieldName,
-
-  fieldValue,
-
-  options: options.length > 0 ? options : undefined,
-
-  readOnly,
-
-  required,
-
-  multiline,
-
-  radioGroup: radioGroup || undefined,
-
-  pdfAnnotation: pdfAnnot, // Store reference for updates
-
+  const formFieldAnnot: Annotation = {
+    id: `form_${pageNumber}_${rect[0]}_${rect[1]}_${Math.random().toString(36).substr(2, 9)}`,
+    type: "formField" as const,
+    pageNumber,
+    x: rect[0],
+    y: pageHeight - rect[3],
+    width: rect[2] - rect[0],
+    height: rect[3] - rect[1],
+    fieldType,
+    fieldName,
+    fieldValue,
+    options: options.length > 0 ? options : undefined,
+    readOnly,
+    required,
+    multiline,
+    radioGroup: radioGroup || undefined,
+    maxLength,
+    tooltip,
+    defaultValue,
+    textAlignment,
+    fontColor,
+    placeholder,
+    pdfAnnotation: pdfAnnot,
   };
+
+  // Only set fontSize if we parsed one from DA (avoid overriding auto-scale)
+  if (fieldFontSize && fieldFontSize > 0) {
+    formFieldAnnot.fontSize = fieldFontSize;
+  }
 
   annotations.push(formFieldAnnot);
 

@@ -92,7 +92,7 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename, onDragStart
   return (
     <div
       className={cn(
-        "flex items-center gap-1.5 px-2 py-1 border-b-2 cursor-pointer transition-colors rounded-t group",
+        "flex items-center gap-1 px-2 py-0.5 border-b-2 cursor-pointer transition-colors rounded-t group",
         isActive
           ? "border-primary bg-background"
           : "border-transparent bg-muted/30 hover:bg-muted/50"
@@ -109,14 +109,14 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename, onDragStart
           onChange={(e) => setEditValue(e.target.value)}
           onBlur={handleSave}
           onKeyDown={handleKeyDown}
-          className="h-6 text-xs px-1.5 max-w-[150px]"
+          className="h-5 text-[11px] px-1 max-w-[140px]"
           onClick={(e) => e.stopPropagation()}
         />
       ) : (
         <>
           <span
             className={cn(
-              "text-xs truncate max-w-[150px]",
+              "text-[11px] truncate max-w-[140px]",
               isActive ? "font-medium" : "text-muted-foreground"
             )}
           >
@@ -126,7 +126,7 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename, onDragStart
           <Button
             variant="ghost"
             size="icon"
-            className="h-4 w-4 opacity-0 group-hover:opacity-70 hover:opacity-100 transition-opacity"
+            className="h-3.5 w-3.5 opacity-0 group-hover:opacity-70 hover:opacity-100 transition-opacity"
             onClick={handleEdit}
             title="Rename"
           >
@@ -137,7 +137,7 @@ export function TabItem({ tab, isActive, onClick, onClose, onRename, onDragStart
       <Button
         variant="ghost"
         size="icon"
-        className="h-4 w-4 opacity-70 hover:opacity-100"
+        className="h-3.5 w-3.5 opacity-70 hover:opacity-100"
         onClick={handleClose}
         title="Close"
       >

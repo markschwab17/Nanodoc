@@ -6,7 +6,7 @@
 
 import { create } from "zustand";
 
-export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectText" | "form" | "draw" | "shape" | "stamp";
+export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectText" | "form" | "draw" | "shape" | "stamp" | "signatureField";
 export type ViewMode = "single" | "spread" | "thumbnails";
 
 export interface UIState {
@@ -41,7 +41,7 @@ export interface UIState {
   arrowHeadSize: number;
   
   // Form tool settings
-  currentFieldType: "text" | "checkbox" | "radio" | "dropdown" | "date";
+  currentFieldType: "text" | "checkbox" | "radio" | "dropdown" | "date" | "number" | "email" | "signature" | "listbox";
 
   // Fullscreen mode
   isFullscreen: boolean;
@@ -89,7 +89,7 @@ export interface UIState {
   setShapeFillColor: (color: string) => void;
   setShapeFillOpacity: (opacity: number) => void;
   setArrowHeadSize: (size: number) => void;
-  setCurrentFieldType: (type: "text" | "checkbox" | "radio" | "dropdown" | "date") => void;
+  setCurrentFieldType: (type: "text" | "checkbox" | "radio" | "dropdown" | "date" | "number" | "email" | "signature" | "listbox") => void;
 }
 
 /** Read CTO view params from URL so first paint is correct when opened in split-screen. */

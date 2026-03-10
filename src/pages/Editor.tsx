@@ -19,15 +19,21 @@ import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
 import { ShapeToolbar } from "@/features/viewer/ShapeToolbar";
 import { FormToolbar } from "@/features/viewer/FormToolbar";
+import { AnnotationPropertiesPanel } from "@/features/viewer/AnnotationPropertiesPanel";
+import { FormFieldPropertiesPanel } from "@/features/viewer/FormFieldPropertiesPanel";
 import { RecentFilesModal } from "@/features/recent/RecentFilesModal";
 import { StampGallery } from "@/features/stamps/StampGallery";
 import { StampCreator } from "@/features/stamps/StampCreator";
+import ESignPrepareToolbar from "@/features/esign/ESignPrepareToolbar";
+import ESignSigningView from "@/features/esign/ESignSigningView";
+import { useESignStore } from "@/shared/stores/esignStore";
 import { Button } from "@/components/ui/button";
-import { FileText, Upload, File, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { FileText, Upload, File, X, ChevronLeft, ChevronRight, Undo2, Redo2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
 import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
+import { useUndoRedo } from "@/shared/hooks/useUndoRedo";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
 import { TourOverlay } from "@/features/tour/TourOverlay";
@@ -48,10 +54,12 @@ function Editor() {
   const { tabs } = useTabStore();
   const { setCurrentDocument } = usePDFStore();
   const { getRecentFiles } = useRecentFilesStore();
-  const { readMode, activeTool, setRequestDocumentSettingsOpen, initialSidebarOpen, splitScreenMode } = useUIStore();
+  const { activeTool, setRequestDocumentSettingsOpen, initialSidebarOpen, splitScreenMode } = useUIStore();
+  const esignMode = useESignStore((s) => s.mode);
   const fileSystem = useFileSystem();
   const { loadPDF, loading } = usePDF();
   const { showNotification } = useNotificationStore();
+  const { undo, redo, canUndo, canRedo } = useUndoRedo();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
   const [showStampCreator, setShowStampCreator] = useState(false);
   const [stampGalleryWidth, setStampGalleryWidth] = useState(320); // Default width in pixels
@@ -661,8 +669,129 @@ function Editor() {
         </div>
       )}
 
+      {/* Top Toolbar - Tabs + Tool-specific settings */}
+      {currentDocument && !splitScreenMode && (
+        <div className="flex-shrink-0 border-b border-border bg-background/95 backdrop-blur-sm">
+          {/* Tool-specific toolbar row - fixed height */}
+          <div className="h-8 flex items-center border-b border-border/50" data-tour="editor-undo-redo">
+            {activeTool === "highlight" && <HighlightToolbar />}
+            {activeTool === "draw" && <DrawToolbar />}
+            {activeTool === "select" && editingAnnotation?.type === "draw" && (
+              <DrawToolbar selectedAnnotation={editingAnnotation} />
+            )}
+            {activeTool === "shape" && <ShapeToolbar />}
+            {activeTool === "select" && editingAnnotation?.type === "shape" && (
+              <ShapeToolbar selectedAnnotation={editingAnnotation} />
+            )}
+            {activeTool === "form" && <FormToolbar />}
+            {(activeTool === "text" || activeTool === "selectText" || (activeTool === "select" && (!editingAnnotation || (editingAnnotation.type !== "shape" && editingAnnotation.type !== "draw")))) && (
+              <TextFormattingToolbar
+                onFormat={(_command, _value) => {}}
+                onFontChange={(font) => {
+                  const annot = getEditingAnnotation();
+                  if (annot && currentDocument) {
+                    wrapAnnotationUpdate(currentDocument.getId(), annot.id, { fontFamily: font });
+                  }
+                }}
+                onFontSizeChange={(size) => {
+                  const annot = getEditingAnnotation();
+                  if (annot && currentDocument) {
+                    wrapAnnotationUpdate(currentDocument.getId(), annot.id, { fontSize: size });
+                  }
+                }}
+                onColorChange={(color) => {
+                  const annot = getEditingAnnotation();
+                  if (annot && currentDocument) {
+                    wrapAnnotationUpdate(currentDocument.getId(), annot.id, { color: color });
+                  }
+                }}
+                onBackgroundToggle={(enabled) => {
+                  const annot = getEditingAnnotation();
+                  if (annot && currentDocument) {
+                    wrapAnnotationUpdate(currentDocument.getId(), annot.id, { hasBackground: enabled });
+                  }
+                }}
+                onBackgroundColorChange={(color) => {
+                  const annot = getEditingAnnotation();
+                  if (annot && currentDocument) {
+                    wrapAnnotationUpdate(currentDocument.getId(), annot.id, { backgroundColor: color });
+                  }
+                }}
+                defaultFont={editingAnnotation?.fontFamily || "Arial"}
+                defaultFontSize={editingAnnotation?.fontSize || 12}
+                defaultColor={editingAnnotation?.color || "rgba(0, 0, 0, 1)"}
+                defaultHasBackground={editingAnnotation?.hasBackground !== undefined ? editingAnnotation.hasBackground : true}
+                defaultBackgroundColor={editingAnnotation?.backgroundColor || "rgba(255, 255, 255, 0)"}
+                isEditing={isEditing}
+                hasSelection={!!editingAnnotation}
+                onDelete={async () => {
+                  let annot = editingAnnotation;
+                  if (!annot) { annot = getEditingAnnotation(); }
+                  if (!annot || !currentDocument) return;
+                  try {
+                    const mupdfModule = await import("mupdf");
+                    const { PDFEditor } = await import("@/core/pdf/PDFEditor");
+                    const editor = new PDFEditor(mupdfModule.default);
+                    await editor.deleteAnnotation(currentDocument, annot);
+                    const { wrapAnnotationOperation } = await import("@/shared/stores/undoHelpers");
+                    wrapAnnotationOperation(
+                      () => {
+                        usePDFStore.getState().removeAnnotation(currentDocument.getId(), annot.id);
+                        const activeElement = document.activeElement as HTMLElement;
+                        if (activeElement && activeElement.hasAttribute("data-rich-text-editor")) {
+                          activeElement.blur();
+                        }
+                        const selectedHighlights = document.querySelectorAll('[data-highlight-selected="true"]');
+                        selectedHighlights.forEach((el) => { el.setAttribute("data-highlight-selected", "false"); });
+                        window.dispatchEvent(new CustomEvent("clearEditingAnnotation", { detail: { annotationId: annot.id } }));
+                      },
+                      "removeAnnotation",
+                      currentDocument.getId(),
+                      annot.id,
+                      undefined,
+                      annot
+                    );
+                  } catch (error) {
+                    console.error("Error deleting annotation:", error);
+                  }
+                }}
+              />
+            )}
+
+            {/* Spacer + Undo/Redo */}
+            <div className="flex-1" />
+            <div className="flex items-center gap-0.5 pr-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => undo()}
+                disabled={!canUndo}
+                className="h-6 w-6"
+                title="Undo"
+              >
+                <Undo2 className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => redo()}
+                disabled={!canRedo}
+                className="h-6 w-6"
+                title="Redo"
+              >
+                <Redo2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+          {/* Tabs row */}
+          <div className="h-7 flex items-center">
+            <TabBar />
+          </div>
+        </div>
+      )}
+
       {/* Main Content - Sidebar + Viewer; use h-full in split-screen to fill iframe and remove bottom gap */}
-      <div className={cn("flex overflow-hidden relative min-h-0", splitScreenMode ? "flex-1 h-full" : "h-screen")}>
+      <div className={cn("flex overflow-hidden relative min-h-0 flex-1", splitScreenMode && "h-full")}>
         {/* Left Sidebar - Thumbnails and Bookmarks (collapsible). Content kept mounted when collapsed so thumbnails stay cached. */}
         <aside
           data-tour="editor-page-sidebar"
@@ -771,7 +900,12 @@ function Editor() {
         </main>
         
         {/* Right Sidebar - AI panel (collapsible) + Tools (hidden in split-screen mode) */}
-        {!splitScreenMode && (
+        {!splitScreenMode && esignMode === "prepare" && (
+          <aside className="flex border-l bg-secondary/50 overflow-hidden h-full">
+            <ESignPrepareToolbar />
+          </aside>
+        )}
+        {!splitScreenMode && !esignMode && (
           <aside className="flex border-l bg-secondary/50 overflow-hidden h-full">
             <AISidePanel />
             <div className="w-16 flex flex-col overflow-hidden shrink-0">
@@ -781,158 +915,12 @@ function Editor() {
         )}
       </div>
 
-      {/* Floating Context Toolbar - changes based on active tool (hidden in split-screen) */}
-      {currentDocument && !readMode && !splitScreenMode && (
-        <div
-          className={cn(
-            "absolute top-4 right-16 z-40 flex justify-center",
-            leftSidebarCollapsed ? "left-8" : "left-64"
-          )}
-        >
-          <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-lg flex flex-col">
-            {/* Tool-specific toolbar */}
-            {activeTool === "highlight" && <HighlightToolbar />}
-            {/* Draw toolbar - show when draw tool is active OR when a draw annotation is selected */}
-            {activeTool === "draw" && <DrawToolbar />}
-            {activeTool === "select" && editingAnnotation?.type === "draw" && (
-              <DrawToolbar selectedAnnotation={editingAnnotation} />
-            )}
-            {/* Shape toolbar - only show when shape tool is active OR when a shape is explicitly selected */}
-            {activeTool === "shape" && <ShapeToolbar />}
-            {activeTool === "select" && editingAnnotation?.type === "shape" && (
-              <ShapeToolbar selectedAnnotation={editingAnnotation} />
-            )}
-            {activeTool === "form" && <FormToolbar />}
-            
-            {/* Text formatting toolbar - shown for text tool or when select tool is active (default, but not for shape or draw) */}
-            {(activeTool === "text" || (activeTool === "select" && (!editingAnnotation || (editingAnnotation.type !== "shape" && editingAnnotation.type !== "draw")))) && (
-            <TextFormattingToolbar
-              onFormat={(_command, _value) => {
-                // Formatting is handled by document.execCommand in the toolbar
-              }}
-              onFontChange={(font) => {
-                // Update annotation font family with undo/redo support
-                const annot = getEditingAnnotation();
-                if (annot && currentDocument) {
-                  wrapAnnotationUpdate(
-                    currentDocument.getId(),
-                    annot.id,
-                    { fontFamily: font }
-                  );
-                }
-              }}
-              onFontSizeChange={(size) => {
-                // Update annotation font size with undo/redo support
-                const annot = getEditingAnnotation();
-                if (annot && currentDocument) {
-                  wrapAnnotationUpdate(
-                    currentDocument.getId(),
-                    annot.id,
-                    { fontSize: size }
-                  );
-                }
-              }}
-              onColorChange={(color) => {
-                // Update annotation color with undo/redo support
-                const annot = getEditingAnnotation();
-                if (annot && currentDocument) {
-                  wrapAnnotationUpdate(
-                    currentDocument.getId(),
-                    annot.id,
-                    { color: color }
-                  );
-                }
-              }}
-              onBackgroundToggle={(enabled) => {
-                // Update annotation background with undo/redo support
-                const annot = getEditingAnnotation();
-                if (annot && currentDocument) {
-                  wrapAnnotationUpdate(
-                    currentDocument.getId(),
-                    annot.id,
-                    { hasBackground: enabled }
-                  );
-                }
-              }}
-              onBackgroundColorChange={(color) => {
-                // Update annotation background color with undo/redo support
-                const annot = getEditingAnnotation();
-                if (annot && currentDocument) {
-                  wrapAnnotationUpdate(
-                    currentDocument.getId(),
-                    annot.id,
-                    { backgroundColor: color }
-                  );
-                }
-              }}
-              defaultFont={editingAnnotation?.fontFamily || "Arial"}
-              defaultFontSize={editingAnnotation?.fontSize || 12}
-              defaultColor={editingAnnotation?.color || "rgba(0, 0, 0, 1)"}
-              defaultHasBackground={editingAnnotation?.hasBackground !== undefined ? editingAnnotation.hasBackground : true}
-              defaultBackgroundColor={editingAnnotation?.backgroundColor || "rgba(255, 255, 255, 0)"}
-              isEditing={isEditing}
-              hasSelection={!!editingAnnotation}
-              onDelete={async () => {
-                // Use editingAnnotation from memo as primary source (works for all annotation types including stamps)
-                // Only fall back to getEditingAnnotation() if editingAnnotation is null (for text/highlight that might not use selectedAnnotationId)
-                let annot = editingAnnotation;
-                if (!annot) {
-                  annot = getEditingAnnotation();
-                }
-                if (!annot || !currentDocument) {
-                  console.log("No annotation to delete");
-                  return;
-                }
-                
-                try {
-                  // Import mupdf and create editor instance
-                  const mupdfModule = await import("mupdf");
-                  const { PDFEditor } = await import("@/core/pdf/PDFEditor");
-                  const editor = new PDFEditor(mupdfModule.default);
-                  
-                  // Delete from PDF
-                  await editor.deleteAnnotation(currentDocument, annot);
-                  
-                  // Delete from state with undo/redo support
-                  const { wrapAnnotationOperation } = await import("@/shared/stores/undoHelpers");
-                  wrapAnnotationOperation(
-                    () => {
-                      usePDFStore.getState().removeAnnotation(
-                        currentDocument.getId(),
-                        annot.id
-                      );
-                      // Clear editing annotation - handle both text boxes and highlights
-                      const activeElement = document.activeElement as HTMLElement;
-                      if (activeElement && activeElement.hasAttribute("data-rich-text-editor")) {
-                        activeElement.blur();
-                      }
-                      // Clear highlight selection by removing data attribute
-                      const selectedHighlights = document.querySelectorAll('[data-highlight-selected="true"]');
-                      selectedHighlights.forEach((el) => {
-                        el.setAttribute("data-highlight-selected", "false");
-                      });
-                      // Dispatch a custom event to notify PageCanvas to clear editingAnnotation
-                      window.dispatchEvent(new CustomEvent("clearEditingAnnotation", { detail: { annotationId: annot.id } }));
-                    },
-                    "removeAnnotation",
-                    currentDocument.getId(),
-                    annot.id,
-                    undefined,
-                    annot
-                  );
-                } catch (error) {
-                  console.error("Error deleting annotation:", error);
-                }
-              }}
-            />
-            )}
-            
-            {/* Tabs in separate row at bottom edge */}
-            <div className="border-t border-border">
-              <TabBar />
-            </div>
-          </div>
-        </div>
+      {/* Properties Footer - docked at bottom */}
+      {currentDocument && !splitScreenMode && (
+        <>
+          <AnnotationPropertiesPanel />
+          <FormFieldPropertiesPanel />
+        </>
       )}
 
       {/* Recent Files Modal on Startup */}
@@ -950,6 +938,11 @@ function Editor() {
 
       {/* Guided Tour Overlay */}
       <TourOverlay tourId="editor" />
+
+      {/* E-Sign signing mode overlay */}
+      {esignMode === "sign" && (
+        <ESignSigningView documentSubject="Document" />
+      )}
     </div>
   );
 }

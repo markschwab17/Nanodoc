@@ -103,12 +103,12 @@ export function DrawToolbar({ selectedAnnotation }: DrawToolbarProps) {
   };
 
   return (
-    <div className="flex items-center gap-2 p-2">
-      <span className="text-sm font-medium">Draw:</span>
+    <div className="flex items-center gap-1 px-1.5 py-1">
+      <span className="text-xs font-medium text-muted-foreground">Draw</span>
 
       {/* Stroke width */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-muted-foreground">Width:</span>
+      <div className="flex items-center gap-1">
+        <span className="text-[10px] text-muted-foreground">Width</span>
         <Slider
           value={[drawingStrokeWidth]}
           onValueChange={([value]) => {
@@ -125,11 +125,11 @@ export function DrawToolbar({ selectedAnnotation }: DrawToolbarProps) {
         <span className="text-xs w-6">{drawingStrokeWidth}</span>
       </div>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Opacity */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-muted-foreground">Opacity:</span>
+      <div className="flex items-center gap-1">
+        <span className="text-[10px] text-muted-foreground">Opacity</span>
         <Slider
           value={[drawingOpacity * 100]}
           onValueChange={([value]) => {
@@ -147,44 +147,44 @@ export function DrawToolbar({ selectedAnnotation }: DrawToolbarProps) {
         <span className="text-xs w-8">{Math.round(drawingOpacity * 100)}%</span>
       </div>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Color picker */}
       <Popover>
         <PopoverTrigger asChild>
-          <Button variant="outline" size="sm" className="gap-2">
+          <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-xs">
             <div
-              className="h-4 w-4 rounded border"
+              className="h-3 w-3 rounded border"
               style={{ backgroundColor: drawingColor }}
             />
             Color
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-3">
-          <HexColorPicker 
-            color={drawingColor} 
+          <HexColorPicker
+            color={drawingColor}
             onChange={(color) => {
               setDrawingColor(color);
               if (selectedAnnotation) {
                 updateSelectedDrawing({ color });
               }
-            }} 
+            }}
           />
         </PopoverContent>
       </Popover>
-      
+
       {/* Delete button - only show when editing a selected drawing */}
       {selectedAnnotation && (
         <>
-          <div className="h-6 w-px bg-border" />
+          <div className="h-4 w-px bg-border" />
           <Button
             variant="outline"
-            size="sm"
+            size="icon"
             onClick={handleDelete}
             title="Delete"
-            className="text-destructive hover:text-destructive"
+            className="h-6 w-6 text-destructive hover:text-destructive"
           >
-            <Trash2 className="h-4 w-4" />
+            <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </>
       )}

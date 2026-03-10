@@ -118,35 +118,38 @@ export function ShapeToolbar({ selectedAnnotation }: ShapeToolbarProps) {
   };
 
   return (
-    <div className="flex items-center gap-2 p-2">
-      <span className="text-sm font-medium">Shape:</span>
+    <div className="flex items-center gap-1 px-1.5 py-1">
+      <span className="text-xs font-medium text-muted-foreground">Shape</span>
       
       {/* Shape type buttons - only show when not editing a selected shape */}
       {!selectedAnnotation && (
         <div className="flex items-center gap-1">
           <Button
             variant={currentShapeType === "rectangle" ? "default" : "outline"}
-            size="sm"
+            size="icon"
             onClick={() => setCurrentShapeType("rectangle")}
             title="Rectangle"
+            className="h-6 w-6"
           >
-            <Square className="h-4 w-4" />
+            <Square className="h-3 w-3" />
           </Button>
           <Button
             variant={currentShapeType === "circle" ? "default" : "outline"}
-            size="sm"
+            size="icon"
             onClick={() => setCurrentShapeType("circle")}
             title="Circle"
+            className="h-6 w-6"
           >
-            <Circle className="h-4 w-4" />
+            <Circle className="h-3 w-3" />
           </Button>
           <Button
             variant={currentShapeType === "arrow" ? "default" : "outline"}
-            size="sm"
+            size="icon"
             onClick={() => setCurrentShapeType("arrow")}
             title="Arrow"
+            className="h-6 w-6"
           >
-            <ArrowRight className="h-4 w-4" />
+            <ArrowRight className="h-3 w-3" />
           </Button>
         </div>
       )}
@@ -162,17 +165,17 @@ export function ShapeToolbar({ selectedAnnotation }: ShapeToolbarProps) {
         </div>
       )}
       
-      {!selectedAnnotation && <div className="h-6 w-px bg-border" />}
+      {!selectedAnnotation && <div className="h-4 w-px bg-border" />}
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Stroke settings */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="gap-1">
+            <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-xs">
               <div
-                className="h-4 w-4 rounded border"
+                className="h-3 w-3 rounded border"
                 style={{ backgroundColor: shapeStrokeColor }}
               />
               <span className="text-xs">Stroke</span>
@@ -191,7 +194,7 @@ export function ShapeToolbar({ selectedAnnotation }: ShapeToolbarProps) {
           </PopoverContent>
         </Popover>
         <div className="flex items-center gap-1">
-          <span className="text-xs text-muted-foreground">Thickness:</span>
+          <span className="text-[10px] text-muted-foreground">Thickness:</span>
           <Slider
             value={[shapeStrokeWidth]}
             onValueChange={([value]) => {
@@ -208,18 +211,18 @@ export function ShapeToolbar({ selectedAnnotation }: ShapeToolbarProps) {
         </div>
       </div>
 
-      <div className="h-6 w-px bg-border" />
+      <div className="h-4 w-px bg-border" />
 
       {/* Fill settings */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="gap-1">
+            <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-xs">
               <div
-                className="h-4 w-4 rounded border"
-                style={{ 
+                className="h-3 w-3 rounded border"
+                style={{
                   backgroundColor: shapeFillColor,
-                  opacity: shapeFillOpacity 
+                  opacity: shapeFillOpacity
                 }}
               />
               <span className="text-xs">Fill</span>
@@ -259,9 +262,9 @@ export function ShapeToolbar({ selectedAnnotation }: ShapeToolbarProps) {
       {/* Arrow head size (only for arrows) */}
       {(currentShapeType === "arrow" || selectedAnnotation?.shapeType === "arrow") && (
         <>
-          <div className="h-6 w-px bg-border" />
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Head:</span>
+          <div className="h-4 w-px bg-border" />
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-muted-foreground">Head:</span>
             <Slider
               value={[arrowHeadSize]}
               onValueChange={([value]) => {
@@ -282,15 +285,15 @@ export function ShapeToolbar({ selectedAnnotation }: ShapeToolbarProps) {
       {/* Delete button - only show when editing a selected shape */}
       {selectedAnnotation && (
         <>
-          <div className="h-6 w-px bg-border" />
+          <div className="h-4 w-px bg-border" />
           <Button
             variant="outline"
-            size="sm"
+            size="icon"
             onClick={handleDelete}
             title="Delete"
-            className="text-destructive hover:text-destructive"
+            className="h-6 w-6 text-destructive hover:text-destructive"
           >
-            <Trash2 className="h-4 w-4" />
+            <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </>
       )}

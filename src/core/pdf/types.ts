@@ -11,7 +11,7 @@ export interface PageReorderOperation {
 
 export interface Annotation {
   id: string;
-  type: "text" | "highlight" | "note" | "callout" | "redact" | "image" | "formField" | "draw" | "shape" | "stamp";
+  type: "text" | "highlight" | "note" | "callout" | "redact" | "image" | "formField" | "draw" | "shape" | "stamp" | "signatureField";
   pageNumber: number;
   x: number;
   y: number;
@@ -49,15 +49,24 @@ export interface Annotation {
   pdfAnnotation?: any;
   
   // For form fields
-  fieldType?: "text" | "checkbox" | "radio" | "dropdown" | "date";
+  fieldType?: "text" | "checkbox" | "radio" | "dropdown" | "date" | "number" | "email" | "signature" | "listbox";
   fieldName?: string;
   fieldValue?: string | boolean;
-  options?: string[]; // For dropdowns and radio buttons
+  options?: string[]; // For dropdowns, radio buttons, and list boxes
   required?: boolean;
   readOnly?: boolean;
   multiline?: boolean;
   radioGroup?: string; // For grouping radio buttons
   locked?: boolean; // Lock position and size
+  placeholder?: string; // Placeholder text for text/dropdown/number/email fields
+  maxLength?: number; // Max character length for text fields
+  validationType?: "none" | "email" | "number"; // Input validation type
+  tabOrder?: number; // Tab order for form navigation
+  fieldLabel?: string; // Visible label shown above/beside field
+  tooltip?: string; // Tooltip text (maps to PDF TU field)
+  defaultValue?: string | boolean; // Default/reset value (maps to PDF DV field)
+  textAlignment?: "left" | "center" | "right"; // Text alignment within field
+  fontColor?: string; // Text color within the field
   
   // For drawing annotations
   drawingStyle?: "marker" | "pencil" | "pen";
@@ -77,6 +86,15 @@ export interface Annotation {
   stampId?: string; // Reference to stamp in store
   stampData?: StampData; // Embedded copy of stamp data
   stampType?: "text" | "image" | "signature";
+
+  // For e-signature fields (prepare mode: sender places these; sign mode: recipient fills them)
+  signerEmail?: string;
+  signatureFieldType?: "signature" | "initials" | "date" | "name" | "text";
+  signatureFieldRequired?: boolean;
+  signatureFieldLabel?: string;
+  signatureFieldStatus?: "empty" | "filled";
+  /** Base64 PNG of the signature image after the recipient signs. */
+  signatureImageData?: string;
 }
 
 export interface StampData {
