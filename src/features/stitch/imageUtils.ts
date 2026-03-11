@@ -7,6 +7,22 @@
 const DEFAULT_WHITE_THRESHOLD = 248;
 
 /**
+ * Makes white (and near-white) pixels fully transparent **in place**.
+ * Mutates the provided ImageData directly — no allocation.
+ */
+export function makeWhiteTransparentInPlace(
+  imageData: ImageData,
+  threshold: number = DEFAULT_WHITE_THRESHOLD
+): void {
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] >= threshold && data[i + 1] >= threshold && data[i + 2] >= threshold) {
+      data[i + 3] = 0;
+    }
+  }
+}
+
+/**
  * Returns a new ImageData with white (and near-white) pixels made fully transparent.
  * Non-white pixels keep their RGB and full opacity.
  * Use when importing PDFs so only the vector/content shows, not the page background.
@@ -172,14 +188,68 @@ export async function eraseConnectedAt(
   }
 
   const { imageData, width: imgWidth, height: imgHeight } = await imageDataUrlToImageData(imageSource);
+
+  const rect = floodFillErase(imageData, imgWidth, imgHeight, tile, canvasX, canvasY, colorTolerance, skipBackground, whiteThreshold);
+  if (!rect) return null;
+
+  return {
+    dataUrl: imageDataToDataUrl(imageData),
+    canvasRect: rect,
+  };
+}
+
+// ─── Direct ImageData API (no data-URL round-trips) ─────────────────────────
+
+/** Options for direct (in-memory) flood-fill erase — no encode/decode. */
+export interface EraseConnectedDirectOptions {
+  colorTolerance?: number;
+  skipBackground?: boolean;
+  whiteThreshold?: number;
+}
+
+/**
+ * Load a tile's image data URL into raw ImageData (one-time decode at stroke start).
+ */
+export async function decodeTileImage(dataUrl: string): Promise<{ imageData: ImageData; width: number; height: number }> {
+  return imageDataUrlToImageData(dataUrl);
+}
+
+/**
+ * Encode raw ImageData back to a PNG data URL (one-time encode at stroke end).
+ */
+export function encodeTileImage(imageData: ImageData): string {
+  return imageDataToDataUrl(imageData);
+}
+
+/**
+ * Flood-fill erase directly on an ImageData buffer — NO encode/decode.
+ * Mutates `imageData` in place.  Returns the canvas-space bounding rect of the
+ * erased region, or null if nothing was erased (transparent / background hit).
+ *
+ * Uses an index-based flat queue (Int32Array) instead of Array.shift() for O(n)
+ * total instead of O(n²), and squared colour distance to avoid Math.sqrt per pixel.
+ */
+export function floodFillErase(
+  imageData: ImageData,
+  imgWidth: number,
+  imgHeight: number,
+  tile: { x: number; y: number; width: number; height: number },
+  canvasX: number,
+  canvasY: number,
+  colorTolerance: number = 45,
+  skipBackground: boolean = true,
+  whiteThreshold: number = 248,
+): CanvasRect | null {
   const data = imageData.data;
 
+  // Convert canvas coords → pixel coords
   const relX = (canvasX - tile.x) / tile.width;
   const relY = (canvasY - tile.y) / tile.height;
   const px = Math.floor(relX * imgWidth);
   const py = Math.floor(relY * imgHeight);
-  const idx = (py * imgWidth + px) * 4;
+  if (px < 0 || px >= imgWidth || py < 0 || py >= imgHeight) return null;
 
+  const idx = (py * imgWidth + px) * 4;
   const r0 = data[idx];
   const g0 = data[idx + 1];
   const b0 = data[idx + 2];
@@ -188,66 +258,74 @@ export async function eraseConnectedAt(
   if (a0 === 0) return null;
   if (skipBackground && r0 >= whiteThreshold && g0 >= whiteThreshold && b0 >= whiteThreshold) return null;
 
-  const colorDist = (r: number, g: number, b: number) =>
-    Math.sqrt((r - r0) ** 2 + (g - g0) ** 2 + (b - b0) ** 2);
+  // Pre-square tolerance so we never call Math.sqrt
+  const tolSq = colorTolerance * colorTolerance;
 
-  const linear = (x: number, y: number) => y * imgWidth + x;
-  const visited = new Uint8Array(imgWidth * imgHeight);
-  const queue: [number, number][] = [[px, py]];
-  visited[linear(px, py)] = 1;
+  // Flat queue: pairs of (x, y) stored in a typed array.
+  // Worst case: every pixel queued once → imgWidth * imgHeight entries.
+  const totalPixels = imgWidth * imgHeight;
+  const queue = new Int32Array(totalPixels * 2);
+  let head = 0;
+  let tail = 0;
+
+  const visited = new Uint8Array(totalPixels);
+
+  // Seed
+  const seedLi = py * imgWidth + px;
+  visited[seedLi] = 1;
+  queue[tail++] = px;
+  queue[tail++] = py;
 
   let minPx = px;
   let maxPx = px;
   let minPy = py;
   let maxPy = py;
 
-  while (queue.length > 0) {
-    const [x, y] = queue.shift()!;
-    const i = (y * imgWidth + x) * 4;
-    data[i + 3] = 0;
-    minPx = Math.min(minPx, x);
-    maxPx = Math.max(maxPx, x);
-    minPy = Math.min(minPy, y);
-    maxPy = Math.max(maxPy, y);
+  // Neighbour offsets (8-connected) – inlined to avoid allocations
+  const dxs = [-1, 1, 0, 0, -1, 1, -1, 1];
+  const dys = [0, 0, -1, 1, -1, -1, 1, 1];
 
-    const neighbors: [number, number][] = [
-      [x - 1, y],
-      [x + 1, y],
-      [x, y - 1],
-      [x, y + 1],
-      [x - 1, y - 1],
-      [x + 1, y - 1],
-      [x - 1, y + 1],
-      [x + 1, y + 1],
-    ];
-    for (const [nx, ny] of neighbors) {
+  while (head < tail) {
+    const x = queue[head++];
+    const y = queue[head++];
+
+    const i = (y * imgWidth + x) * 4;
+    data[i + 3] = 0; // erase
+
+    if (x < minPx) minPx = x;
+    if (x > maxPx) maxPx = x;
+    if (y < minPy) minPy = y;
+    if (y > maxPy) maxPy = y;
+
+    for (let d = 0; d < 8; d++) {
+      const nx = x + dxs[d];
+      const ny = y + dys[d];
       if (nx < 0 || nx >= imgWidth || ny < 0 || ny >= imgHeight) continue;
-      const li = linear(nx, ny);
+      const li = ny * imgWidth + nx;
       if (visited[li]) continue;
       const j = li * 4;
       if (data[j + 3] === 0) continue;
-      if (skipBackground && data[j] >= whiteThreshold && data[j + 1] >= whiteThreshold && data[j + 2] >= whiteThreshold)
-        continue;
-      if (colorDist(data[j], data[j + 1], data[j + 2]) <= colorTolerance) {
+      if (skipBackground && data[j] >= whiteThreshold && data[j + 1] >= whiteThreshold && data[j + 2] >= whiteThreshold) continue;
+      const dr = data[j] - r0;
+      const dg = data[j + 1] - g0;
+      const db = data[j + 2] - b0;
+      if (dr * dr + dg * dg + db * db <= tolSq) {
         visited[li] = 1;
-        queue.push([nx, ny]);
+        queue[tail++] = nx;
+        queue[tail++] = ny;
       }
     }
   }
 
+  // Convert pixel bbox → canvas-space rect
   const relMinX = minPx / imgWidth;
   const relMinY = minPy / imgHeight;
   const relMaxX = (maxPx + 1) / imgWidth;
   const relMaxY = (maxPy + 1) / imgHeight;
-  const canvasRect: CanvasRect = {
+  return {
     x: tile.x + relMinX * tile.width,
     y: tile.y + relMinY * tile.height,
     w: (relMaxX - relMinX) * tile.width,
     h: (relMaxY - relMinY) * tile.height,
-  };
-
-  return {
-    dataUrl: imageDataToDataUrl(imageData),
-    canvasRect,
   };
 }

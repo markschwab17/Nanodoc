@@ -108,8 +108,12 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
 }
 
 /**
- * Whether the current URL has enough params to attempt loading a PDF from Civiltakeoff (token required).
+ * Whether the current URL has enough params to attempt loading a PDF from Civiltakeoff.
+ * Requires either a CTO token or an e-sign recipient_token.
  */
 export function hasCiviltakeoffToken(params: CiviltakeoffViewParams): boolean {
-  return Boolean(params.token && params.token.trim().length > 0);
+  return Boolean(
+    (params.token && params.token.trim().length > 0) ||
+    (params.mode === "esign_sign" && params.recipient_token && params.recipient_token.trim().length > 0)
+  );
 }

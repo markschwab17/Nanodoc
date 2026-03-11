@@ -1,10 +1,21 @@
 /**
  * Content-delete and delete-element-along-path logic for stitch view.
+ *
+ * Performance: stroke-based delete now decodes each tile's image ONCE,
+ * runs all flood-fills directly on the raw ImageData buffer (no PNG
+ * encode/decode between points), and encodes back to a data URL ONCE
+ * at the end.  This eliminates ~1000 PNG round-trips per stroke.
  */
 
 import { useState, useCallback } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
-import { eraseRectFromTile, eraseConnectedAt } from "./imageUtils";
+import {
+  eraseRectFromTile,
+  eraseConnectedAt,
+  decodeTileImage,
+  encodeTileImage,
+  floodFillErase,
+} from "./imageUtils";
 import {
   DELETE_ELEMENT_COLOR_TOLERANCE,
   STROKE_BRUSH_OFFSETS,
@@ -63,6 +74,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
       setIsDeletingAlongPath(true);
       try {
         if (path.length === 1) {
+          // Single click — use the original async path (one decode, one encode)
           const { x: canvasX, y: canvasY } = path[0];
           for (const tile of tiles) {
             const result = await eraseConnectedAt(tile, canvasX, canvasY, {
@@ -75,11 +87,13 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
             }
           }
         } else {
+          // Stroke: decode each tile ONCE, flood-fill all points on raw pixels, encode ONCE.
           const densePath = interpolatePath(path, 1);
           const pathMinX = Math.min(...densePath.map((p) => p.x));
           const pathMaxX = Math.max(...densePath.map((p) => p.x));
           const pathMinY = Math.min(...densePath.map((p) => p.y));
           const pathMaxY = Math.max(...densePath.map((p) => p.y));
+
           for (const tile of tiles) {
             const tileRight = tile.x + tile.width;
             const tileBottom = tile.y + tile.height;
@@ -90,31 +104,39 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
               pathMinY >= tileBottom
             )
               continue;
-            let currentImageDataUrl = tile.imageDataUrl;
+
+            if (!tile.imageDataUrl) continue;
+
+            // Decode ONCE
+            const { imageData, width: imgW, height: imgH } = await decodeTileImage(tile.imageDataUrl);
+            let changed = false;
+
+            // Yield to keep UI responsive before heavy loop
+            await new Promise<void>((r) => setTimeout(r, 0));
+
             for (const pt of densePath) {
               for (const [dx, dy] of STROKE_BRUSH_OFFSETS) {
                 const x = pt.x + dx;
                 const y = pt.y + dy;
-                if (
-                  x < tile.x ||
-                  x >= tileRight ||
-                  y < tile.y ||
-                  y >= tileBottom
-                )
-                  continue;
-                const result = await eraseConnectedAt(tile, x, y, {
-                  colorTolerance: DELETE_ELEMENT_COLOR_TOLERANCE,
-                  skipBackground: true,
-                  currentImageDataUrl,
-                });
-                if (result) {
-                  currentImageDataUrl = result.dataUrl;
-                  rects.push(result.canvasRect);
+                if (x < tile.x || x >= tileRight || y < tile.y || y >= tileBottom) continue;
+
+                const rect = floodFillErase(
+                  imageData, imgW, imgH,
+                  tile, x, y,
+                  DELETE_ELEMENT_COLOR_TOLERANCE,
+                  true, // skipBackground
+                  248,  // whiteThreshold
+                );
+                if (rect) {
+                  rects.push(rect);
+                  changed = true;
                 }
               }
             }
-            if (currentImageDataUrl !== tile.imageDataUrl && currentImageDataUrl != null) {
-              updates.push({ id: tile.id, patch: { imageDataUrl: currentImageDataUrl } });
+
+            if (changed) {
+              // Encode ONCE
+              updates.push({ id: tile.id, patch: { imageDataUrl: encodeTileImage(imageData) } });
             }
           }
         }

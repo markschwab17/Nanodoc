@@ -4,7 +4,7 @@
  */
 
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { makeWhiteTransparent } from "@/features/stitch/imageUtils";
+import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import type { StitchTile } from "@/features/stitch/stitchTypes";
 
@@ -90,9 +90,9 @@ export async function addPdfBytesToStitchCanvas(
     const rendered = await renderer.renderPage(doc, pageIndex, {
       scale: TILE_RENDER_SCALE,
     });
-    let imageData = rendered.imageData as ImageData;
+    const imageData = rendered.imageData as ImageData;
     if (imageData?.data && removeWhiteBackground) {
-      imageData = makeWhiteTransparent(imageData);
+      makeWhiteTransparentInPlace(imageData);
     }
     const dataUrl = imageData?.data ? imageDataToDataUrl(imageData) : undefined;
     const tileData: TileInput = {

@@ -47,6 +47,10 @@ interface ESignState {
   // Computed
   allRequiredFieldsFilled: boolean;
 
+  // Navigation
+  getNextUnfilledField: (afterFieldId?: string) => ESignFieldPlacement | null;
+  scrollToField: (field: ESignFieldPlacement) => void;
+
   // Actions
   setMode: (mode: ESignMode) => void;
   setEnvelopeId: (id: string | null) => void;
@@ -119,6 +123,38 @@ export const useESignStore = create<ESignState>((set, get) => ({
       .filter((f) => f.required)
       .every((f) => current[f.id]);
     set({ signatureImages: current, allRequiredFieldsFilled: allFilled });
+  },
+
+  getNextUnfilledField: (afterFieldId?: string) => {
+    const { fieldPlacements, signatureImages } = get();
+    // Sort by page first, then by Y descending (PDF Y=0 at bottom, so higher Y = higher on page)
+    const sorted = [...fieldPlacements].sort((a, b) => {
+      if (a.page !== b.page) return a.page - b.page;
+      return b.y - a.y; // higher Y = top of page in PDF coords
+    });
+    const unfilled = sorted.filter((f) => !signatureImages[f.id]);
+    if (unfilled.length === 0) return null;
+    if (!afterFieldId) return unfilled[0];
+    // Find position of afterFieldId in sorted order
+    const afterIdx = sorted.findIndex((f) => f.id === afterFieldId);
+    if (afterIdx === -1) return unfilled[0];
+    // Look for the next unfilled field after afterIdx in sorted order
+    for (let i = afterIdx + 1; i < sorted.length; i++) {
+      if (!signatureImages[sorted[i].id]) return sorted[i];
+    }
+    // Wrap around — return first unfilled
+    return unfilled[0];
+  },
+
+  scrollToField: (field) => {
+    window.dispatchEvent(
+      new CustomEvent("scroll-to-spec", {
+        detail: {
+          page: field.page,
+          bbox: [field.x, field.y, field.x + field.width, field.y + field.height],
+        },
+      })
+    );
   },
 
   reset: () =>

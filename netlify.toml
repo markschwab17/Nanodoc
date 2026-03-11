@@ -19,7 +19,7 @@
 [[headers]]
   for = "/*"
   [headers.values]
-    Content-Security-Policy = "frame-ancestors 'self' https://civiltakeoffai.com https://*.civiltakeoffai.com https://*.netlify.app"
+    Content-Security-Policy = "frame-ancestors 'self' http://localhost:* http://127.0.0.1:* https://civiltakeoffai.com https://*.civiltakeoffai.com https://*.netlify.app"
     X-Content-Type-Options = "nosniff"
     X-XSS-Protection = "1; mode=block"
     Referrer-Policy = "strict-origin-when-cross-origin"

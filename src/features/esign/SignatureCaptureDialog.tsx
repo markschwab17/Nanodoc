@@ -1,36 +1,57 @@
 /**
  * Signature Capture Dialog
  *
- * Modal with Draw and Type tabs for capturing a signature.
- * Used in signing mode when the recipient clicks a signature field.
+ * Modal with Draw and Type tabs for capturing a signature or initials.
+ * Only used for signature/initials fields — text/name/date use inline editing.
+ *
+ * The canvas matches the field's aspect ratio so the drawn/typed content
+ * fills the placed box exactly without distortion.
  */
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
 interface Props {
   fieldType: "signature" | "initials" | "date" | "name" | "text";
+  /** PDF-unit width of the field box */
+  fieldWidth: number;
+  /** PDF-unit height of the field box */
+  fieldHeight: number;
   signerName?: string;
   onConfirm: (imageData: string) => void;
   onCancel: () => void;
 }
 
-export default function SignatureCaptureDialog({ fieldType, signerName, onConfirm, onCancel }: Props) {
-  const [tab, setTab] = useState<"draw" | "type">(fieldType === "date" ? "type" : "draw");
+/** Scale factor so the internal canvas is crisp on high-DPI screens */
+const PX_PER_PT = 3;
+
+export default function SignatureCaptureDialog({
+  fieldType,
+  fieldWidth,
+  fieldHeight,
+  signerName,
+  onConfirm,
+  onCancel,
+}: Props) {
+  const [tab, setTab] = useState<"draw" | "type">("draw");
   const [typedText, setTypedText] = useState(() => {
-    if (fieldType === "date") return new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-    if (fieldType === "name") return signerName || "";
+    if (fieldType === "initials" && signerName) {
+      return signerName.split(" ").map(w => w[0]?.toUpperCase() || "").join("");
+    }
     return "";
   });
-  const [typedFont, setTypedFont] = useState("'Dancing Script', cursive");
+
+  // Internal canvas dimensions derived from field aspect ratio
+  const CANVAS_W = Math.round(fieldWidth * PX_PER_PT);
+  const CANVAS_H = Math.round(fieldHeight * PX_PER_PT);
+
+  // Display height in the dialog — keep it reasonable
+  const DISPLAY_H = Math.min(Math.max(CANVAS_H / PX_PER_PT * 2, 80), 200);
 
   // Drawing canvas state
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDrawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const hasDrawnRef = useRef(false);
-
-  const CANVAS_W = 600;
-  const CANVAS_H = 200;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -39,7 +60,7 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
     if (!ctx) return;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-  }, []);
+  }, [CANVAS_W, CANVAS_H]);
 
   const getCanvasCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current!;
@@ -48,7 +69,7 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
       x: ((e.clientX - rect.left) / rect.width) * CANVAS_W,
       y: ((e.clientY - rect.top) / rect.height) * CANVAS_H,
     };
-  }, []);
+  }, [CANVAS_W, CANVAS_H]);
 
   function handleCanvasMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
     isDrawingRef.current = true;
@@ -65,7 +86,7 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
     ctx.moveTo(lastPointRef.current.x, lastPointRef.current.y);
     ctx.lineTo(point.x, point.y);
     ctx.strokeStyle = "#1a1a2e";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = Math.max(2, CANVAS_H * 0.02);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.stroke();
@@ -93,7 +114,7 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
       onConfirm(canvas.toDataURL("image/png"));
     } else {
       if (!typedText.trim()) return;
-      // Render typed text to canvas
+      // Render typed text to canvas sized to the field
       const canvas = document.createElement("canvas");
       canvas.width = CANVAS_W;
       canvas.height = CANVAS_H;
@@ -101,15 +122,24 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
       ctx.fillStyle = "#1a1a2e";
-      const baseFontFamily = typedFont.replace(/'/g, "");
-      ctx.font = `${fieldType === "initials" ? 48 : 36}px ${baseFontFamily}, cursive`;
+      const padding = Math.round(CANVAS_W * 0.04);
+      const maxTextWidth = CANVAS_W - padding * 2;
+      // Start large, shrink until text fits width
+      let fontSize = Math.round(CANVAS_H * 0.6);
+      const minFontSize = 8;
       ctx.textBaseline = "middle";
-      ctx.fillText(typedText, 20, CANVAS_H / 2);
+      while (fontSize > minFontSize) {
+        ctx.font = `${fontSize}px 'Dancing Script', cursive`;
+        if (ctx.measureText(typedText).width <= maxTextWidth) break;
+        fontSize -= 1;
+      }
+      ctx.font = `${fontSize}px 'Dancing Script', cursive`;
+      ctx.fillText(typedText, padding, CANVAS_H / 2);
       onConfirm(canvas.toDataURL("image/png"));
     }
   }
 
-  const showDrawTab = fieldType === "signature" || fieldType === "initials";
+  const title = fieldType === "signature" ? "Add Your Signature" : "Add Your Initials";
 
   return (
     <div
@@ -138,52 +168,49 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
         {/* Header */}
         <div style={{ padding: "16px 20px", borderBottom: "1px solid #e2e8f0" }}>
           <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: "#1a1a2e" }}>
-            {fieldType === "signature" ? "Add Your Signature" :
-             fieldType === "initials" ? "Add Your Initials" :
-             fieldType === "date" ? "Confirm Date" :
-             fieldType === "name" ? "Enter Your Name" : "Enter Text"}
+            {title}
           </h2>
         </div>
 
         {/* Tabs */}
-        {showDrawTab && (
-          <div style={{ display: "flex", borderBottom: "1px solid #e2e8f0" }}>
-            <button
-              onClick={() => setTab("draw")}
-              style={{
-                flex: 1,
-                padding: "10px 0",
-                border: "none",
-                borderBottom: tab === "draw" ? "2px solid #5070ff" : "2px solid transparent",
-                background: "transparent",
-                color: tab === "draw" ? "#5070ff" : "#666",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              Draw
-            </button>
-            <button
-              onClick={() => setTab("type")}
-              style={{
-                flex: 1,
-                padding: "10px 0",
-                border: "none",
-                borderBottom: tab === "type" ? "2px solid #5070ff" : "2px solid transparent",
-                background: "transparent",
-                color: tab === "type" ? "#5070ff" : "#666",
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              Type
-            </button>
-          </div>
-        )}
+        <div style={{ display: "flex", borderBottom: "1px solid #e2e8f0" }}>
+          <button
+            onClick={() => setTab("draw")}
+            style={{
+              flex: 1,
+              padding: "10px 0",
+              border: "none",
+              borderBottom: tab === "draw" ? "2px solid #5070ff" : "2px solid transparent",
+              background: "transparent",
+              color: tab === "draw" ? "#5070ff" : "#666",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Draw
+          </button>
+          <button
+            onClick={() => setTab("type")}
+            style={{
+              flex: 1,
+              padding: "10px 0",
+              border: "none",
+              borderBottom: tab === "type" ? "2px solid #5070ff" : "2px solid transparent",
+              background: "transparent",
+              color: tab === "type" ? "#5070ff" : "#666",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Type
+          </button>
+        </div>
 
         {/* Content */}
         <div style={{ padding: 20 }}>
-          {tab === "draw" && showDrawTab ? (
+          {tab === "draw" ? (
             <div>
               <canvas
                 ref={canvasRef}
@@ -191,7 +218,7 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
                 height={CANVAS_H}
                 style={{
                   width: "100%",
-                  height: 160,
+                  height: DISPLAY_H,
                   border: "1px solid #e2e8f0",
                   borderRadius: 8,
                   cursor: "crosshair",
@@ -225,46 +252,20 @@ export default function SignatureCaptureDialog({ fieldType, signerName, onConfir
                 type="text"
                 value={typedText}
                 onChange={(e) => setTypedText(e.target.value)}
-                placeholder={fieldType === "date" ? "Date" : fieldType === "name" ? "Full name" : "Type here..."}
+                onKeyDown={(e) => e.key === "Enter" && handleConfirm()}
+                placeholder={fieldType === "initials" ? "Your initials" : "Type your signature..."}
                 autoFocus
                 style={{
                   width: "100%",
                   padding: "12px 16px",
-                  fontSize: fieldType === "date" ? 16 : 28,
-                  fontFamily: fieldType === "date" ? "inherit" : typedFont,
+                  fontSize: 28,
+                  fontFamily: "'Dancing Script', cursive",
                   border: "1px solid #e2e8f0",
                   borderRadius: 8,
                   outline: "none",
                   boxSizing: "border-box",
                 }}
               />
-              {fieldType !== "date" && (
-                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                  {[
-                    "'Dancing Script', cursive",
-                    "'Caveat', cursive",
-                    "serif",
-                    "monospace",
-                  ].map((font) => (
-                    <button
-                      key={font}
-                      onClick={() => setTypedFont(font)}
-                      style={{
-                        flex: 1,
-                        padding: "8px 4px",
-                        border: typedFont === font ? "2px solid #5070ff" : "1px solid #ddd",
-                        borderRadius: 6,
-                        background: typedFont === font ? "#f0f4ff" : "#fff",
-                        cursor: "pointer",
-                        fontFamily: font,
-                        fontSize: 16,
-                      }}
-                    >
-                      Abc
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
           )}
         </div>

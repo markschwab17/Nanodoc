@@ -5,7 +5,7 @@
  * a "Finish & Sign" button, and manages the consent + submission flow.
  */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useESignStore } from "@/shared/stores/esignStore";
 import ESignConsentDialog from "./ESignConsentDialog";
 
@@ -21,6 +21,8 @@ export default function ESignSigningView({ documentSubject }: Props) {
     fieldPlacements,
     signatureImages,
     allRequiredFieldsFilled,
+    getNextUnfilledField,
+    scrollToField,
   } = useESignStore();
 
   const [showConsent, setShowConsent] = useState(false);
@@ -30,6 +32,22 @@ export default function ESignSigningView({ documentSubject }: Props) {
 
   const filledCount = Object.keys(signatureImages).length;
   const totalCount = fieldPlacements.length;
+  const nextField = getNextUnfilledField();
+
+  // Auto-scroll to first unfilled field on mount
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const first = getNextUnfilledField();
+      if (first) scrollToField(first);
+    }, 600); // slight delay for viewer to finish rendering
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleNextField() {
+    const next = getNextUnfilledField();
+    if (next) scrollToField(next);
+  }
 
   async function handleSubmit(consent: { agreed: boolean; timestamp: string; text: string }) {
     if (!recipientToken || !apiOrigin) return;
@@ -155,6 +173,28 @@ export default function ESignSigningView({ documentSubject }: Props) {
         >
           Decline
         </button>
+
+        {nextField && (
+          <button
+            onClick={handleNextField}
+            style={{
+              padding: "8px 16px",
+              border: "1px solid #5070ff",
+              borderRadius: 6,
+              background: "transparent",
+              color: "#5070ff",
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 600,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            Next
+            <span style={{ fontSize: 11 }}>↓</span>
+          </button>
+        )}
 
         <button
           onClick={() => setShowConsent(true)}

@@ -16,7 +16,7 @@ import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { makeWhiteTransparent } from "@/features/stitch/imageUtils";
+import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -343,9 +343,9 @@ export function AddPdfModal({
         const rendered = await renderer.renderPage(mupdfDoc, pageIndex, {
           scale: TILE_RENDER_SCALE,
         });
-        let imageData = rendered.imageData as ImageData;
+        const imageData = rendered.imageData as ImageData;
         if (imageData && imageData.data && removeWhiteBackground)
-          imageData = makeWhiteTransparent(imageData);
+          makeWhiteTransparentInPlace(imageData);
         const dataUrl = imageData && imageData.data ? imageDataToDataUrl(imageData) : undefined;
         const tileData: TileData = {
           sourcePdfBytes: pdfBytes,
