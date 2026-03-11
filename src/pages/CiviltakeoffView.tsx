@@ -256,6 +256,7 @@ export default function CiviltakeoffView() {
           esign.setMode("sign");
           esign.setRecipientToken(params.recipient_token);
           esign.setSignerEmail(params.signer_email || null);
+          esign.setSignerName(params.signer_name || null);
           esign.setApiOrigin(params.api_origin);
           esign.setEnvelopeId(params.envelope_id || null);
           // Fetch signing session info to get field placements

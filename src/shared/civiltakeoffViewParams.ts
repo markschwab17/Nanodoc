@@ -40,6 +40,8 @@ export interface CiviltakeoffViewParams {
   recipient_token: string | null;
   /** E-sign recipient email address (for display). */
   signer_email: string | null;
+  /** E-sign recipient display name. */
+  signer_name: string | null;
   /** JSON-encoded array of recipients for esign_prepare mode. */
   esign_recipients: string | null;
 }
@@ -70,6 +72,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const envelope_id = params.get("envelope_id") ?? null;
   const recipient_token = params.get("recipient_token") ?? null;
   const signer_email = params.get("signer_email") ?? null;
+  const signer_name = params.get("signer_name") ?? null;
   const esign_recipients = params.get("esign_recipients") ?? null;
 
   let page: number | null = null;
@@ -103,6 +106,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     envelope_id,
     recipient_token,
     signer_email,
+    signer_name,
     esign_recipients,
   };
 }

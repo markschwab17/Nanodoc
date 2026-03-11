@@ -338,16 +338,18 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     <div
       ref={tileContainerRef}
       data-stitch-tile
-      className="absolute border-2 border-transparent hover:border-primary/50"
+      className="absolute hover:outline hover:outline-2 hover:outline-primary/50"
       style={{
-        left: tile.x,
-        top: tile.y,
+        left: 0,
+        top: 0,
         width: displayWidth,
         height: displayHeight,
-        borderColor: isSelected ? "hsl(var(--primary))" : undefined,
+        outline: isSelected ? "2px solid hsl(var(--primary))" : undefined,
+        outlineOffset: isSelected ? "-2px" : undefined,
         boxShadow: isMultiSelected ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
-        transform: displayRotation ? `rotate(${displayRotation}deg)` : undefined,
+        transform: `translate(${tile.x}px, ${tile.y}px)${displayRotation ? ` rotate(${displayRotation}deg)` : ""}`,
         transformOrigin: "center center",
+        willChange: "transform",
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}

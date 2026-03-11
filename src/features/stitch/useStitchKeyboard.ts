@@ -1,17 +1,16 @@
 /**
  * Keyboard shortcuts for stitch view: Undo, Redo, Delete/Backspace, Arrow-key nudge.
  *
- * Arrow keys move selected tiles by 1pt (≈1px).  Hold Shift for 10pt steps.
- * This enables precise sub-snap alignment that mouse dragging can't achieve.
+ * Nudge is zoom-aware: each arrow press moves exactly 1 screen pixel
+ * (1/zoomLevel document points). This gives ultra-fine control when
+ * zoomed in and reasonable steps when zoomed out.
+ *
+ *   Arrow        → 1 screen pixel  (= 1/zoom pt)
+ *   Shift+Arrow  → 10 screen pixels (= 10/zoom pt)
  */
 
 import { useEffect } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
-
-/** Default nudge distance in points (1pt ≈ 1/72 inch). */
-const NUDGE_SMALL = 1;
-/** Shift+arrow nudge distance. */
-const NUDGE_LARGE = 10;
 
 export function useStitchKeyboard() {
   const { selectedTileIds, removeTile, undo, redo, tiles, setSelectedTileIds } = useStitchStore();
@@ -46,7 +45,7 @@ export function useStitchKeyboard() {
         return;
       }
 
-      // Arrow-key nudge
+      // Arrow-key nudge: 1 screen pixel per press (zoom-aware)
       if (
         (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") &&
         !inInput &&
@@ -55,7 +54,9 @@ export function useStitchKeyboard() {
         e.preventDefault();
         e.stopPropagation();
         const store = useStitchStore.getState();
-        const step = e.shiftKey ? NUDGE_LARGE : NUDGE_SMALL;
+        const zoom = Math.max(0.25, store.zoomLevel);
+        const step = e.shiftKey ? 10 / zoom : 1 / zoom;
+
         let dx = 0;
         let dy = 0;
         if (e.key === "ArrowUp") dy = -step;

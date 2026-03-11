@@ -51,11 +51,11 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
 
   const handleContentDeleteRect = useCallback(
     async (rect: { x: number; y: number; w: number; h: number }) => {
-      const updates: Array<{ id: string; patch: { imageDataUrl: string } }> = [];
+      const updates: Array<{ id: string; patch: { imageDataUrl: string; imageModified: true } }> = [];
       for (const tile of tiles) {
         const newDataUrl = await eraseRectFromTile(tile, rect);
         if (newDataUrl) {
-          updates.push({ id: tile.id, patch: { imageDataUrl: newDataUrl } });
+          updates.push({ id: tile.id, patch: { imageDataUrl: newDataUrl, imageModified: true } });
         }
       }
       if (updates.length > 0) {
@@ -70,7 +70,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
     async (path: Array<{ x: number; y: number }>) => {
       if (path.length === 0) return;
       const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
-      const updates: Array<{ id: string; patch: { imageDataUrl: string } }> = [];
+      const updates: Array<{ id: string; patch: { imageDataUrl: string; imageModified: true } }> = [];
       setIsDeletingAlongPath(true);
       try {
         if (path.length === 1) {
@@ -82,7 +82,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
               skipBackground: true,
             });
             if (result) {
-              updates.push({ id: tile.id, patch: { imageDataUrl: result.dataUrl } });
+              updates.push({ id: tile.id, patch: { imageDataUrl: result.dataUrl, imageModified: true } });
               rects.push(result.canvasRect);
             }
           }
@@ -136,7 +136,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
 
             if (changed) {
               // Encode ONCE
-              updates.push({ id: tile.id, patch: { imageDataUrl: encodeTileImage(imageData) } });
+              updates.push({ id: tile.id, patch: { imageDataUrl: encodeTileImage(imageData), imageModified: true } });
             }
           }
         }

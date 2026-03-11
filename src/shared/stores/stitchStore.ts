@@ -47,9 +47,9 @@ interface StitchState {
   redoStack: StitchUndoSnapshot[];
   setCanvasSize: (width: number, height: number) => void;
   addTiles: (tiles: Omit<StitchTile, "id">[]) => void;
-  updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch">>) => void;
+  updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified">>) => void;
   /** Apply patches to multiple tiles in one update (one undo step). */
-  updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl">> }>) => void;
+  updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl" | "imageModified">> }>) => void;
   removeTile: (id: string) => void;
   /** Move tile(s) to the back (lowest layer). Pass one id or multiple. */
   sendTileToBack: (id: string) => void;
@@ -66,9 +66,9 @@ interface StitchState {
   setCropRect: (rect: CropRect | null) => void;
   setCropToContent: (margin?: number) => void;
   /** Update a tile WITHOUT pushing an undo snapshot — use during continuous drag/resize. */
-  updateTileNoUndo: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch">>) => void;
+  updateTileNoUndo: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified">>) => void;
   /** Update multiple tiles WITHOUT pushing an undo snapshot — use during continuous group drag/resize/rotate. */
-  updateTilesNoUndo: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl">> }>) => void;
+  updateTilesNoUndo: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl" | "imageModified">> }>) => void;
   /** Manually push the current state as an undo snapshot. Call before starting a drag/resize operation. */
   pushUndoSnapshot: () => void;
   setSnapToEdges: (enabled: boolean) => void;
@@ -110,7 +110,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   zoomLevel: 1,
   selectedTileIds: [],
   cropRect: null,
-  snapToEdges: true,
+  snapToEdges: false,
   resizeLocked: true,
   referenceScaleFeetPerInch: null,
   compositionScaleFactor: 1,
@@ -375,7 +375,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       zoomLevel: 1,
       selectedTileIds: [],
       cropRect: null,
-      snapToEdges: true,
+      snapToEdges: false,
       resizeLocked: true,
       referenceScaleFeetPerInch: null,
       compositionScaleFactor: 1,

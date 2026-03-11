@@ -33,6 +33,7 @@ interface ESignState {
   envelopeId: string | null;
   recipientToken: string | null;
   signerEmail: string | null;
+  signerName: string | null;
   apiOrigin: string | null;
 
   // Prepare mode state
@@ -56,6 +57,7 @@ interface ESignState {
   setEnvelopeId: (id: string | null) => void;
   setRecipientToken: (token: string | null) => void;
   setSignerEmail: (email: string | null) => void;
+  setSignerName: (name: string | null) => void;
   setApiOrigin: (origin: string | null) => void;
   setRecipients: (recipients: Array<{ email: string; name?: string; color?: string }>) => void;
   setActiveRecipient: (email: string | null) => void;
@@ -77,6 +79,7 @@ export const useESignStore = create<ESignState>((set, get) => ({
   envelopeId: null,
   recipientToken: null,
   signerEmail: null,
+  signerName: null,
   apiOrigin: null,
   recipients: [],
   activeRecipient: null,
@@ -89,6 +92,7 @@ export const useESignStore = create<ESignState>((set, get) => ({
   setEnvelopeId: (id) => set({ envelopeId: id }),
   setRecipientToken: (token) => set({ recipientToken: token }),
   setSignerEmail: (email) => set({ signerEmail: email }),
+  setSignerName: (name) => set({ signerName: name }),
   setApiOrigin: (origin) => set({ apiOrigin: origin }),
 
   setRecipients: (recipients) => {
@@ -163,6 +167,7 @@ export const useESignStore = create<ESignState>((set, get) => ({
       envelopeId: null,
       recipientToken: null,
       signerEmail: null,
+      signerName: null,
       apiOrigin: null,
       recipients: [],
       activeRecipient: null,

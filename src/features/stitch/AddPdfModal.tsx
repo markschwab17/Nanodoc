@@ -1,5 +1,9 @@
 /**
  * Modal to add PDF pages to the stitch canvas: file picker, page selector, Add to canvas.
+ *
+ * Thumbnails are generated progressively — the page grid appears immediately
+ * with placeholders, and each thumbnail streams in as it renders.  A progress
+ * bar shows how many pages have been processed.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -63,7 +67,11 @@ export function AddPdfModal({
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [thumbnails, setThumbnails] = useState<Record<number, string>>({});
   const [loading, setLoading] = useState(false);
+  /** How many thumbnail pages have been rendered so far (for progress). */
+  const [thumbProgress, setThumbProgress] = useState(0);
   const [adding, setAdding] = useState(false);
+  /** Progress while adding pages to canvas. */
+  const [addingProgress, setAddingProgress] = useState({ done: 0, total: 0 });
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
   /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
@@ -76,6 +84,8 @@ export function AddPdfModal({
   /** Prevents the file-picker / initial-PDF effect from re-triggering after
    *  the first run within a single modal session (open→close cycle). */
   const hasTriggeredFileOpenRef = useRef(false);
+  /** Cancellation token for thumbnail generation — abort when modal closes or PDF changes. */
+  const thumbCancelRef = useRef(false);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -94,10 +104,18 @@ export function AddPdfModal({
     setSelectedPages(new Set());
   }, []);
 
-  /** Load PDF from bytes + name into modal state (thumbnails, page count, etc.). */
+  /** Load PDF from bytes + name into modal state.
+   *  Shows the page grid immediately, then streams thumbnails progressively. */
   const loadPdfFromResult = useCallback(
     async (data: Uint8Array, name: string) => {
+      // Cancel any in-flight thumbnail generation
+      thumbCancelRef.current = true;
+      await yieldToMain();
+      thumbCancelRef.current = false;
+
       setLoading(true);
+      setThumbnails({});
+      setThumbProgress(0);
       try {
         const mupdf = await import("mupdf").then((m) => m.default);
         const doc = mupdf.Document.openDocument(data, "application/pdf");
@@ -107,18 +125,29 @@ export function AddPdfModal({
         setMupdfDoc(doc);
         setPageCount(count);
         setSelectedPages(new Set());
+        // Show the page grid right away (loading = false), then generate thumbs in background
+        setLoading(false);
+
+        // Stream thumbnails progressively
         const renderer = new PDFRenderer(mupdf);
-        const thumbs: Record<number, string> = {};
         for (let i = 0; i < count; i++) {
+          if (thumbCancelRef.current) return;
           await yieldToMain();
-          const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE });
-          const id = rendered.imageData as ImageData;
-          if (id?.data) thumbs[i] = imageDataToDataUrl(id);
+          if (thumbCancelRef.current) return;
+          try {
+            const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE });
+            const id = rendered.imageData as ImageData;
+            if (id?.data) {
+              const url = imageDataToDataUrl(id);
+              setThumbnails((prev) => ({ ...prev, [i]: url }));
+            }
+          } catch {
+            // Skip failed thumbnails silently
+          }
+          setThumbProgress(i + 1);
         }
-        setThumbnails(thumbs);
       } catch (e) {
         console.error(e);
-      } finally {
         setLoading(false);
       }
     },
@@ -132,20 +161,20 @@ export function AddPdfModal({
 
   useEffect(() => {
     if (!open) {
+      thumbCancelRef.current = true;
       setPdfBytes(null);
       setPdfFileName("");
       setMupdfDoc(null);
       setPageCount(0);
       setSelectedPages(new Set());
       setThumbnails({});
+      setThumbProgress(0);
       setCtoListening(false);
       // Reset the guard so the next open triggers the file picker
       hasTriggeredFileOpenRef.current = false;
       return;
     }
     // Only trigger file-picker / initial-PDF once per modal session.
-    // Without this guard, unstable deps (inline callbacks, initialPdf going null
-    // after consumption) would re-trigger the effect and reopen the file picker.
     if (hasTriggeredFileOpenRef.current) return;
     hasTriggeredFileOpenRef.current = true;
 
@@ -303,10 +332,11 @@ export function AddPdfModal({
   const handleAddToCanvas = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
     setAdding(true);
+    const selected = Array.from(selectedPages).sort((a, b) => a - b);
+    setAddingProgress({ done: 0, total: selected.length });
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       const renderer = new PDFRenderer(mupdf);
-      const selected = Array.from(selectedPages).sort((a, b) => a - b);
       type TileData = {
         sourcePdfBytes: Uint8Array;
         sourcePageIndex: number;
@@ -331,7 +361,8 @@ export function AddPdfModal({
         rowBuffer.length = 0;
       };
 
-      for (const pageIndex of selected) {
+      for (let idx = 0; idx < selected.length; idx++) {
+        const pageIndex = selected[idx];
         await yieldToMain();
         const page = mupdfDoc.loadPage(pageIndex);
         const bounds = page.getBounds();
@@ -357,6 +388,7 @@ export function AddPdfModal({
         };
         rowBuffer.push({ tile: tileData, w: tileW, h: tileH });
         if (rowBuffer.length === TILES_PER_ROW) flushRow();
+        setAddingProgress({ done: idx + 1, total: selected.length });
       }
       flushRow();
       const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
@@ -372,9 +404,11 @@ export function AddPdfModal({
     }
   }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, canvasWidth, canvasHeight, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch]);
 
+  const thumbsStillLoading = pageCount > 0 && thumbProgress < pageCount;
+
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+      <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>Add PDF pages to canvas</DialogTitle>
         </DialogHeader>
@@ -385,6 +419,7 @@ export function AddPdfModal({
               size="sm"
               onClick={() => {
                 setSourceTab("device");
+                thumbCancelRef.current = true;
                 setPdfBytes(null);
                 setPdfFileName("");
                 setMupdfDoc(null);
@@ -400,6 +435,7 @@ export function AddPdfModal({
               size="sm"
               onClick={() => {
                 setSourceTab("cto");
+                thumbCancelRef.current = true;
                 setPdfBytes(null);
                 setPdfFileName("");
                 setMupdfDoc(null);
@@ -415,11 +451,20 @@ export function AddPdfModal({
         {adding ? (
           <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
             <Loader2 className="h-10 w-10 animate-spin" />
-            <p>Adding pages to canvas…</p>
+            <p>Rendering page {addingProgress.done} of {addingProgress.total}…</p>
+            {addingProgress.total > 0 && (
+              <div className="w-48 h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all duration-200"
+                  style={{ width: `${(addingProgress.done / addingProgress.total) * 100}%` }}
+                />
+              </div>
+            )}
           </div>
         ) : loading ? (
-          <div className="py-12 text-center text-muted-foreground">
-            Loading PDF…
+          <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
+            <Loader2 className="h-8 w-8 animate-spin" />
+            <p>Loading PDF…</p>
           </div>
         ) : ctoContext && sourceTab === "device" && !pdfBytes && !loading ? (
           <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground">
@@ -467,7 +512,16 @@ export function AddPdfModal({
                 <Button variant="outline" size="sm" onClick={selectNone}>
                   Select none
                 </Button>
+                <Button variant="outline" size="sm" onClick={handleChooseFile}>
+                  Change file
+                </Button>
               </div>
+              <span className="text-xs text-muted-foreground">
+                {pageCount} page{pageCount !== 1 ? "s" : ""}
+                {pdfFileName ? ` — ${pdfFileName}` : ""}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 pb-2">
               <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -475,27 +529,43 @@ export function AddPdfModal({
                   onChange={(e) => setRemoveWhiteBackground(e.target.checked)}
                   className="rounded border-input"
                 />
-                Remove white background (import content only)
+                Remove white background
               </label>
               <label className="flex items-center gap-2 text-sm">
-                <span className="text-muted-foreground whitespace-nowrap">Scale (e.g. 1"=20'):</span>
+                <span className="text-muted-foreground whitespace-nowrap">Scale 1&quot;=</span>
                 <input
                   type="text"
                   inputMode="numeric"
                   placeholder="20"
                   value={scaleFeetPerInch}
                   onChange={(e) => setScaleFeetPerInch(e.target.value)}
-                  className="w-20 rounded border border-input bg-background px-2 py-1 text-sm"
+                  className="w-14 rounded border border-input bg-background px-2 py-1 text-sm"
                 />
-                <span className="text-muted-foreground text-xs">feet per inch</span>
+                <span className="text-muted-foreground text-xs">ft</span>
               </label>
             </div>
+            {/* Thumbnail progress bar */}
+            {thumbsStillLoading && (
+              <div className="flex items-center gap-2 pb-1">
+                <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full bg-primary/60 rounded-full transition-all duration-150"
+                    style={{ width: `${(thumbProgress / pageCount) * 100}%` }}
+                  />
+                </div>
+                <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                  {thumbProgress}/{pageCount}
+                </span>
+              </div>
+            )}
             <div className="flex-1 overflow-auto grid grid-cols-4 gap-2 py-2 min-h-[200px]">
               {Array.from({ length: pageCount }, (_, i) => (
                 <label
                   key={i}
-                  className={`flex flex-col items-center p-2 border rounded cursor-pointer ${
-                    selectedPages.has(i) ? "border-primary bg-primary/5" : "border-border"
+                  className={`flex flex-col items-center p-2 border rounded cursor-pointer transition-colors ${
+                    selectedPages.has(i)
+                      ? "border-primary bg-primary/5 ring-1 ring-primary/30"
+                      : "border-border hover:border-muted-foreground/40"
                   }`}
                 >
                   <input
@@ -512,7 +582,11 @@ export function AddPdfModal({
                     />
                   ) : (
                     <div className="w-full h-24 bg-muted rounded flex items-center justify-center text-xs text-muted-foreground">
-                      Page {i + 1}
+                      {thumbProgress <= i ? (
+                        <Loader2 className="h-4 w-4 animate-spin opacity-40" />
+                      ) : (
+                        `Page ${i + 1}`
+                      )}
                     </div>
                   )}
                   <span className="text-xs mt-1">Page {i + 1}</span>
@@ -531,7 +605,7 @@ export function AddPdfModal({
             onClick={handleAddToCanvas}
             disabled={!pdfBytes || selectedPages.size === 0 || adding}
           >
-            {adding ? "Adding…" : `Add ${selectedPages.size} page(s) to canvas`}
+            {adding ? "Adding…" : `Add ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""} to canvas`}
           </Button>
         </DialogFooter>
       </DialogContent>

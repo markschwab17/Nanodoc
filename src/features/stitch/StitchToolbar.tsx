@@ -5,7 +5,7 @@
 import type { ComponentProps } from "react";
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -301,11 +301,9 @@ export function StitchToolbar({
     <header className="flex flex-col gap-1.5 border-b shrink-0 px-2.5 py-2 bg-muted/30">
       <div className="flex items-center gap-1.5 flex-wrap text-xs">
         <div className="flex items-center gap-1.5">
-          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" asChild>
-            <Link to="/editor" title="Back to editor">
-              <ArrowLeft className="h-3.5 w-3.5" />
-            </Link>
-          </Button>
+          <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
+            <ArrowLeft className="h-3.5 w-3.5" />
+          </Link>
           <span className="font-semibold text-sm">Stitch PDFs</span>
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />

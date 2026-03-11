@@ -21,6 +21,8 @@ export interface StitchTile {
   isScaleStamp?: boolean;
   /** Scale bar only: 1" = this many feet (e.g. 20). Used to render stamp at canonical size so bar is exactly 1". */
   scaleStampFeetPerInch?: number;
+  /** Set to true when content-delete has modified this tile's image. Export will use raster instead of vector source. */
+  imageModified?: boolean;
 }
 
 export interface CropRect {

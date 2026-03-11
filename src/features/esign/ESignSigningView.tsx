@@ -72,9 +72,9 @@ export default function ESignSigningView({ documentSubject }: Props) {
 
       setSubmitted(true);
 
-      // Notify parent (CTO landing page)
-      if (window.parent !== window) {
-        window.parent.postMessage({ type: "esign_complete" }, "*");
+      // Notify parent (CTO landing page) — use apiOrigin for security
+      if (window.parent !== window && apiOrigin) {
+        window.parent.postMessage({ type: "esign_complete" }, apiOrigin);
       }
     } catch (err: any) {
       setError(err.message || "Submission failed");
@@ -92,8 +92,8 @@ export default function ESignSigningView({ documentSubject }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: reason || undefined }),
       });
-      if (window.parent !== window) {
-        window.parent.postMessage({ type: "esign_declined" }, "*");
+      if (window.parent !== window && apiOrigin) {
+        window.parent.postMessage({ type: "esign_declined" }, apiOrigin);
       }
     } catch {
       // Best effort

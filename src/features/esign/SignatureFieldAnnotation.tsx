@@ -63,6 +63,7 @@ export default function SignatureFieldAnnotation({
   const signatureImages = useESignStore((s) => s.signatureImages);
   const setSignatureImage = useESignStore((s) => s.setSignatureImage);
   const signerEmail = useESignStore((s) => s.signerEmail);
+  const signerName = useESignStore((s) => s.signerName);
   const getNextUnfilledField = useESignStore((s) => s.getNextUnfilledField);
   const scrollToField = useESignStore((s) => s.scrollToField);
 
@@ -131,10 +132,16 @@ export default function SignatureFieldAnnotation({
         });
         const imageData = renderTextToImage(dateStr, annotW, annotH);
         fillAndAdvance(annotation.id, imageData);
-      } else if (fieldType === "name" && signerEmail && !isFilled) {
-        // Name: pre-fill with email username, allow editing
-        setEditText(signerEmail.split("@")[0] || "");
-        setIsEditing(true);
+      } else if (fieldType === "name" && !isFilled) {
+        if (signerName) {
+          // Auto-fill with signer's name
+          const imageData = renderTextToImage(signerName, annotW, annotH);
+          fillAndAdvance(annotation.id, imageData);
+        } else {
+          // No name available — fall back to editing
+          setEditText("");
+          setIsEditing(true);
+        }
       } else {
         // Text or re-edit
         setEditText("");
@@ -275,7 +282,7 @@ export default function SignatureFieldAnnotation({
           fieldType={fieldType}
           fieldWidth={annotW}
           fieldHeight={annotH}
-          signerName={signerEmail || undefined}
+          signerName={signerName || signerEmail || undefined}
           onConfirm={handleCaptureConfirm}
           onCancel={() => setShowCapture(false)}
         />
