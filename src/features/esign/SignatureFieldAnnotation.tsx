@@ -62,6 +62,7 @@ export default function SignatureFieldAnnotation({
   const mode = useESignStore((s) => s.mode);
   const signatureImages = useESignStore((s) => s.signatureImages);
   const setSignatureImage = useESignStore((s) => s.setSignatureImage);
+  const fieldPlacements = useESignStore((s) => s.fieldPlacements);
   const signerEmail = useESignStore((s) => s.signerEmail);
   const signerName = useESignStore((s) => s.signerName);
   const getNextUnfilledField = useESignStore((s) => s.getNextUnfilledField);
@@ -154,8 +155,24 @@ export default function SignatureFieldAnnotation({
   }
 
   function handleCaptureConfirm(imageData: string) {
-    fillAndAdvance(annotation.id, imageData);
+    // Fill this field
+    setSignatureImage(annotation.id, imageData);
+
+    // Auto-fill all other unfilled fields of the same type (signature → signature, initials → initials)
+    const currentImages = useESignStore.getState().signatureImages;
+    for (const field of fieldPlacements) {
+      if (field.id !== annotation.id && field.fieldType === fieldType && !currentImages[field.id]) {
+        setSignatureImage(field.id, imageData);
+      }
+    }
+
     setShowCapture(false);
+
+    // Scroll to next unfilled field (of any type)
+    setTimeout(() => {
+      const next = getNextUnfilledField(annotation.id);
+      if (next) scrollToField(next);
+    }, 350);
   }
 
   return (

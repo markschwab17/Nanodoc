@@ -9,6 +9,7 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { createPortal } from "react-dom";
 
 interface Props {
   fieldType: "signature" | "initials" | "date" | "name" | "text";
@@ -141,7 +142,7 @@ export default function SignatureCaptureDialog({
 
   const title = fieldType === "signature" ? "Add Your Signature" : "Add Your Initials";
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -310,6 +311,7 @@ export default function SignatureCaptureDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

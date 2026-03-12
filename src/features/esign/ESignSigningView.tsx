@@ -36,10 +36,11 @@ export default function ESignSigningView({ documentSubject }: Props) {
 
   // Auto-scroll to first unfilled field on mount
   useEffect(() => {
+    // Wait for viewer to fully render before scrolling
     const timer = setTimeout(() => {
       const first = getNextUnfilledField();
       if (first) scrollToField(first);
-    }, 600); // slight delay for viewer to finish rendering
+    }, 1200);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
