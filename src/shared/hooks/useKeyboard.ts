@@ -12,7 +12,9 @@ import { useUndoRedo } from "./useUndoRedo";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 
 export function useKeyboard() {
-  const { currentPage, setCurrentPage, getCurrentDocument } = usePDFStore();
+  const currentPage = usePDFStore((s) => s.currentPage);
+  const setCurrentPage = usePDFStore((s) => s.setCurrentPage);
+  const getCurrentDocument = usePDFStore((s) => s.getCurrentDocument);
   const currentDocument = getCurrentDocument();
   const { setZoomLevel, zoomLevel, toggleReadMode, activeTool, setActiveTool, readMode, zoomToCenter } = useUIStore();
   const { closeCurrentDocument } = usePDF();

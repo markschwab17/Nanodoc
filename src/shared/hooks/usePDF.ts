@@ -25,19 +25,22 @@ import {
 const SIDECAR_SUFFIX = ".ai.json";
 
 export function usePDF() {
-  const pdfStore = usePDFStore();
+  // Use selectors to avoid re-rendering host components when unrelated state (e.g. annotations) changes.
+  const currentPage = usePDFStore((s) => s.currentPage);
+  const loading = usePDFStore((s) => s.loading);
+  const error = usePDFStore((s) => s.error);
+  const getCurrentDocument = usePDFStore((s) => s.getCurrentDocument);
+  const currentDocument = getCurrentDocument();
   const tabStore = useTabStore();
   const recentFilesStore = useRecentFilesStore();
   const fileSystem = useFileSystem();
   const { setActiveTool } = useUIStore();
 
-  // Access loading state reactively
-  const loading = usePDFStore((state) => state.loading);
-  const currentDocument = pdfStore.getCurrentDocument();
   const activeTab = tabStore.getActiveTab();
 
   const loadPDF = useCallback(
     async (data: Uint8Array, name: string, mupdf: any, filePath?: string | null) => {
+      const pdfStore = usePDFStore.getState();
       try {
         // Set loading state and ensure it's visible
         pdfStore.setLoading(true);
@@ -282,46 +285,46 @@ export function usePDF() {
         pdfStore.setLoading(false);
       }
     },
-    [pdfStore, tabStore, recentFilesStore, fileSystem, setActiveTool]
+    [tabStore, recentFilesStore, fileSystem, setActiveTool]
   );
 
   const closeCurrentDocument = useCallback(() => {
     if (!currentDocument) return;
-    
+
     const documentId = currentDocument.getId();
     const tab = tabStore.getTabByDocumentId(documentId);
     if (tab) {
       tabStore.removeTab(tab.id);
     }
-    
+
     // Clean up print settings for this document
     import("@/shared/stores/printStore").then(({ usePrintStore }) => {
       usePrintStore.getState().removeDocumentSettings(documentId);
     });
-    
-    pdfStore.removeDocument(documentId);
-  }, [currentDocument, pdfStore, tabStore]);
+
+    usePDFStore.getState().removeDocument(documentId);
+  }, [currentDocument, tabStore]);
 
   return {
     currentDocument,
     activeTab,
     loadPDF,
     closeCurrentDocument,
-    setCurrentPage: pdfStore.setCurrentPage,
-    currentPage: pdfStore.currentPage,
+    setCurrentPage: usePDFStore.getState().setCurrentPage,
+    currentPage,
     loading,
-    error: pdfStore.error,
+    error,
     annotations: currentDocument
-      ? pdfStore.getAnnotations(currentDocument.getId())
+      ? usePDFStore.getState().getAnnotations(currentDocument.getId())
       : [],
     addAnnotation: (annotation: any) => {
       if (currentDocument) {
-        pdfStore.addAnnotation(currentDocument.getId(), annotation);
+        usePDFStore.getState().addAnnotation(currentDocument.getId(), annotation);
       }
     },
     removeAnnotation: (annotationId: string) => {
       if (currentDocument) {
-        pdfStore.removeAnnotation(currentDocument.getId(), annotationId);
+        usePDFStore.getState().removeAnnotation(currentDocument.getId(), annotationId);
       }
     },
     updateAnnotation: (
@@ -329,7 +332,7 @@ export function usePDF() {
       updates: Partial<any>
     ) => {
       if (currentDocument) {
-        pdfStore.updateAnnotation(
+        usePDFStore.getState().updateAnnotation(
           currentDocument.getId(),
           annotationId,
           updates

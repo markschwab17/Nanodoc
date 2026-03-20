@@ -38,7 +38,14 @@ import type { Annotation } from "@/core/pdf/types";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 
 export function PDFViewer() {
-  const { currentPage, setCurrentPage, getCurrentDocument, getAnnotations, updateAnnotation } = usePDFStore();
+  // Use individual selectors to avoid re-rendering when unrelated state (e.g. annotations) changes.
+  // Without selectors, adding a highlight triggers a full PDFViewer re-render which can
+  // cause the scroll position to jump back to page 1 in read mode.
+  const currentPage = usePDFStore((s) => s.currentPage);
+  const setCurrentPage = usePDFStore((s) => s.setCurrentPage);
+  const getCurrentDocument = usePDFStore((s) => s.getCurrentDocument);
+  const getAnnotations = usePDFStore((s) => s.getAnnotations);
+  const updateAnnotation = usePDFStore((s) => s.updateAnnotation);
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, splitScreenMode } = useUIStore();
   const { showRulers, toggleRulers, renderQuality } = useDocumentSettingsStore();
   const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();

@@ -50,7 +50,7 @@ preloadMupdf();
 function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
   const { tabs } = useTabStore();
-  const { setCurrentDocument } = usePDFStore();
+  const setCurrentDocument = usePDFStore((s) => s.setCurrentDocument);
   const { getRecentFiles } = useRecentFilesStore();
   const { activeTool, setRequestDocumentSettingsOpen, initialSidebarOpen, splitScreenMode } = useUIStore();
   const esignMode = useESignStore((s) => s.mode);

@@ -172,7 +172,11 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
   },
 
   setCurrentDocument: (id) =>
-    set({ currentDocumentId: id, currentPage: 0 }),
+    set((state) => {
+      // Don't reset currentPage when the document hasn't actually changed
+      if (state.currentDocumentId === id) return state;
+      return { currentDocumentId: id, currentPage: 0 };
+    }),
 
   setCurrentPage: (page) => set({ currentPage: page }),
 
