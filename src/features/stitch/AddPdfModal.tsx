@@ -188,21 +188,8 @@ export function AddPdfModal({
       setSourceTab("device");
       return;
     }
-    let cancelled = false;
-    const run = async () => {
-      setLoading(true);
-      try {
-        const result = await fileSystem.openFile();
-        if (!result || cancelled) return;
-        await loadPdfFromResult(result.data, result.name ?? "");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-    };
+    // Don't auto-open file picker — let the user see the modal first
+    // and click "Choose file" themselves for a clearer flow.
   }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed]);
 
   // From Civiltakeoff: request document list from opener and listen for nanodoc-cto-documents
@@ -595,7 +582,10 @@ export function AddPdfModal({
             </div>
           </>
         ) : !loading && !pdfBytes && !adding && !ctoContext ? (
-          <p className="text-muted-foreground py-4">Open a PDF to select pages.</p>
+          <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground">
+            <p>Choose a PDF file to select pages from.</p>
+            <Button onClick={handleChooseFile}>Choose file</Button>
+          </div>
         ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>

@@ -39,6 +39,7 @@ export default function ESignPrepareToolbar() {
     setActiveRecipient,
     setCurrentFieldType,
     envelopeId,
+    apiOrigin,
   } = useESignStore();
 
   const activeTool = useUIStore((s) => s.activeTool);
@@ -87,6 +88,14 @@ export default function ESignPrepareToolbar() {
         label: a.signatureFieldLabel,
       }));
 
+      // Validate all recipients have at least one field
+      const recipientsWithFields = new Set(fieldPlacements.map((f) => f.signerEmail));
+      const missingRecipients = recipients.filter((r) => !recipientsWithFields.has(r.email));
+      if (missingRecipients.length > 0) {
+        const names = missingRecipients.map((r) => r.name || r.email).join(", ");
+        throw new Error(`No fields assigned to: ${names}`);
+      }
+
       if (window.parent === window) {
         throw new Error("Must be opened from CivilTakeoff.");
       }
@@ -110,7 +119,7 @@ export default function ESignPrepareToolbar() {
 
         window.parent.postMessage(
           { type: "esign_prepare_send", envelopeId, fieldPlacements },
-          "*"
+          apiOrigin || "*"
         );
       });
 
@@ -123,7 +132,7 @@ export default function ESignPrepareToolbar() {
       // Notify parent that prepare flow is complete
       window.parent.postMessage(
         { type: "esign_prepare_complete", envelopeId, success: true },
-        "*"
+        apiOrigin || "*"
       );
     } catch (err: any) {
       setError(err.message || "Failed to send");

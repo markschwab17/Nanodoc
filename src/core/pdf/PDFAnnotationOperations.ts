@@ -606,11 +606,11 @@ export class PDFAnnotationOperations {
 
   const page = pdfDoc.loadPage(annotation.pageNumber);
 
-  // Create FreeText annotation to store image metadata
-
-  // The actual image data is stored in the contents field as base64
-
-  // For proper PDF embedding, we'd need to use mupdf's image insertion APIs
+  // Create FreeText annotation as a tracking marker in mupdf.
+  // The actual image is rendered by the React ImageAnnotation component in-app,
+  // and embedded as page content via pdf-lib during save.
+  // Contents are left empty so mupdf doesn't render any visible text
+  // (e.g. in thumbnails). Image data lives in the annotation store in memory.
 
   const rect: [number, number, number, number] = [
 
@@ -628,25 +628,8 @@ export class PDFAnnotationOperations {
 
   annot.setRect(rect);
 
-  // Store image data and metadata in contents as JSON
-
-  const imageMetadata = {
-
-  type: "image",
-
-  imageData: annotation.imageData,
-
-  imageWidth: annotation.imageWidth,
-
-  imageHeight: annotation.imageHeight,
-
-  preserveAspectRatio: annotation.preserveAspectRatio !== false,
-
-  rotation: annotation.rotation || 0,
-
-  };
-
-  annot.setContents(JSON.stringify(imageMetadata));
+  // Leave contents empty — no visible text in mupdf rendering / thumbnails
+  annot.setContents("");
 
   // Store custom properties for easier retrieval
 
@@ -657,6 +640,7 @@ export class PDFAnnotationOperations {
   if (annotObj) {
 
   annotObj.put("ImageType", "embedded");
+  annotObj.put("ImageAnnotation", true);
 
   if (annotation.imageWidth) {
 

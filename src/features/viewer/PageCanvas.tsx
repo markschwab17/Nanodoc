@@ -37,7 +37,6 @@ import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } 
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 import { AnnotationContextMenu, type ContextMenuItem } from "./AnnotationContextMenu";
-import { useTabStore } from "@/shared/stores/tabStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useCtoTextSelectionStore } from "@/shared/stores/ctoTextSelectionStore";
 import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
@@ -1104,19 +1103,14 @@ export const PageCanvas = React.memo(function PageCanvas({
       clearTimeout(renderDebounceTimeoutRef.current);
     }
 
+    // Enqueue directly — the render queue already serializes and yields via setTimeout(0).
+    // Removed the extra requestIdleCallback layer which added up to 100ms latency.
     const scheduleRender = () => {
-      const run = () => {
-        scheduledRunIdRef.current = null;
-        enqueuePageRender(() => runQueuedRender());
-      };
-      if (typeof requestIdleCallback !== "undefined") {
-        scheduledRunIdRef.current = requestIdleCallback(run, { timeout: 100 });
-      } else {
-        scheduledRunIdRef.current = setTimeout(run, 0) as unknown as number;
-      }
+      scheduledRunIdRef.current = null;
+      enqueuePageRender(() => runQueuedRender());
     };
 
-    const debounceMs = readMode ? 100 : 150;
+    const debounceMs = readMode ? 50 : 100;
     renderDebounceTimeoutRef.current = setTimeout(() => {
       renderDebounceTimeoutRef.current = null;
       scheduleRender();
@@ -1127,14 +1121,6 @@ export const PageCanvas = React.memo(function PageCanvas({
       if (renderDebounceTimeoutRef.current) {
         clearTimeout(renderDebounceTimeoutRef.current);
         renderDebounceTimeoutRef.current = null;
-      }
-      if (scheduledRunIdRef.current != null) {
-        if (typeof cancelIdleCallback !== "undefined") {
-          cancelIdleCallback(scheduledRunIdRef.current);
-        } else {
-          clearTimeout(scheduledRunIdRef.current);
-        }
-        scheduledRunIdRef.current = null;
       }
     };
   }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode, displayWidthProp, displayHeightProp]);
@@ -2542,6 +2528,9 @@ export const PageCanvas = React.memo(function PageCanvas({
 
       if (imageFile && currentDocument && canvasRef.current) {
         console.log("Image file detected:", imageFile.name, imageFile.type);
+        // Save the current page before async operations — something else
+        // could reset currentPage during the await gap
+        const savedPageNumber = pageNumber;
         try {
           // Convert image to base64 data URL
           // Use FileReader to avoid stack overflow with large images
@@ -2661,10 +2650,10 @@ export const PageCanvas = React.memo(function PageCanvas({
           // Select the new image annotation
           setEditingAnnotation(imageAnnotation);
 
-          // Mark tab as modified
-          const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
-          if (tab) {
-            useTabStore.getState().setTabModified(tab.id, true);
+          // Defensive: restore currentPage if it was changed during async ops
+          const currentPageAfter = usePDFStore.getState().currentPage;
+          if (currentPageAfter !== savedPageNumber) {
+            usePDFStore.getState().setCurrentPage(savedPageNumber);
           }
 
           showNotification("Image added successfully!", "success");
@@ -3379,6 +3368,8 @@ export const PageCanvas = React.memo(function PageCanvas({
                       ? "border-blue-500 bg-blue-400/20"
                       : activeTool === "redact"
                       ? "border-red-500 bg-red-400/30"
+                      : activeTool === "selectionBox"
+                      ? "border-cyan-500 bg-cyan-400/20 border-dashed"
                       : "border-primary bg-primary/10"
                   )}
                   style={{
@@ -4924,7 +4915,6 @@ export const PageCanvas = React.memo(function PageCanvas({
                   }}
                   onResize={(width, height) => {
                     if (!currentDocument) return;
-                    // If this is the start of a resize, capture initial size
                     if (!resizingAnnotationRef.current || resizingAnnotationRef.current.id !== annot.id) {
                       resizingAnnotationRef.current = {
                         id: annot.id,
@@ -4932,21 +4922,32 @@ export const PageCanvas = React.memo(function PageCanvas({
                         initialHeight: annot.height || 200,
                       };
                     }
-                    
-                    // Update size directly without undo during resize
                     updateAnnotation(
                       currentDocument.getId(),
                       annot.id,
                       { width, height }
                     );
                   }}
+                  onResizeWithPosition={(x, y, width, height) => {
+                    if (!currentDocument) return;
+                    if (!resizingAnnotationRef.current || resizingAnnotationRef.current.id !== annot.id) {
+                      resizingAnnotationRef.current = {
+                        id: annot.id,
+                        initialWidth: annot.width || 200,
+                        initialHeight: annot.height || 200,
+                      };
+                    }
+                    updateAnnotation(
+                      currentDocument.getId(),
+                      annot.id,
+                      { x, y, width, height }
+                    );
+                  }}
                   onResizeEnd={() => {
-                    // When resize ends, record undo/redo with initial and final sizes
                     if (currentDocument && resizingAnnotationRef.current && resizingAnnotationRef.current.id === annot.id) {
                       const initialSize = resizingAnnotationRef.current;
                       const finalSize = { width: annot.width || 200, height: annot.height || 200 };
-                      
-                      // Only record undo if size actually changed
+
                       if (initialSize.initialWidth !== finalSize.width || initialSize.initialHeight !== finalSize.height) {
                         wrapAnnotationUpdate(
                           currentDocument.getId(),
@@ -4954,8 +4955,7 @@ export const PageCanvas = React.memo(function PageCanvas({
                           finalSize
                         );
                       }
-                      
-                      // Clear resize tracking
+
                       resizingAnnotationRef.current = null;
                     }
                   }}

@@ -63,26 +63,19 @@ export default function SignatureCaptureDialog({
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
   }, [CANVAS_W, CANVAS_H]);
 
-  const getCanvasCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const getCoordsFromClient = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
     return {
-      x: ((e.clientX - rect.left) / rect.width) * CANVAS_W,
-      y: ((e.clientY - rect.top) / rect.height) * CANVAS_H,
+      x: ((clientX - rect.left) / rect.width) * CANVAS_W,
+      y: ((clientY - rect.top) / rect.height) * CANVAS_H,
     };
   }, [CANVAS_W, CANVAS_H]);
 
-  function handleCanvasMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
-    isDrawingRef.current = true;
-    lastPointRef.current = getCanvasCoords(e);
-    hasDrawnRef.current = true;
-  }
-
-  function handleCanvasMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    if (!isDrawingRef.current || !lastPointRef.current) return;
+  function drawTo(point: { x: number; y: number }) {
+    if (!lastPointRef.current) return;
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
-    const point = getCanvasCoords(e);
     ctx.beginPath();
     ctx.moveTo(lastPointRef.current.x, lastPointRef.current.y);
     ctx.lineTo(point.x, point.y);
@@ -94,7 +87,39 @@ export default function SignatureCaptureDialog({
     lastPointRef.current = point;
   }
 
+  function handleCanvasMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    isDrawingRef.current = true;
+    lastPointRef.current = getCoordsFromClient(e.clientX, e.clientY);
+    hasDrawnRef.current = true;
+  }
+
+  function handleCanvasMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (!isDrawingRef.current || !lastPointRef.current) return;
+    drawTo(getCoordsFromClient(e.clientX, e.clientY));
+  }
+
   function handleCanvasMouseUp() {
+    isDrawingRef.current = false;
+    lastPointRef.current = null;
+  }
+
+  function handleTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    isDrawingRef.current = true;
+    lastPointRef.current = getCoordsFromClient(touch.clientX, touch.clientY);
+    hasDrawnRef.current = true;
+  }
+
+  function handleTouchMove(e: React.TouchEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    if (!isDrawingRef.current || !lastPointRef.current) return;
+    const touch = e.touches[0];
+    drawTo(getCoordsFromClient(touch.clientX, touch.clientY));
+  }
+
+  function handleTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
+    e.preventDefault();
     isDrawingRef.current = false;
     lastPointRef.current = null;
   }
@@ -229,6 +254,9 @@ export default function SignatureCaptureDialog({
                 onMouseMove={handleCanvasMouseMove}
                 onMouseUp={handleCanvasMouseUp}
                 onMouseLeave={handleCanvasMouseUp}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
               />
               <div style={{ textAlign: "center", marginTop: 8 }}>
                 <button

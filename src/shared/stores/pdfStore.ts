@@ -117,12 +117,13 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
       newDocuments.set(document.getId(), document);
       const newPaths = new Map(state.documentPaths);
       newPaths.set(document.getId(), originalPath);
+      const isNewCurrentDoc = !state.currentDocumentId;
       return {
         documents: newDocuments,
         documentPaths: newPaths,
         currentDocumentId:
           state.currentDocumentId || document.getId(),
-        currentPage: 0,
+        ...(isNewCurrentDoc ? { currentPage: 0 } : {}),
       };
     }),
 

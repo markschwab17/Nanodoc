@@ -3,7 +3,7 @@
  */
 
 import type { ComponentProps } from "react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -32,7 +32,10 @@ import {
   Undo2,
   Upload,
   X,
+  HelpCircle,
 } from "lucide-react";
+import { startTour } from "@/features/tour/useTourLauncher";
+import { useTourStore } from "@/shared/stores/tourStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { MIN_SCALE, MAX_SCALE, SCALE_STEP } from "./stitchConstants";
 import { generateScaleStampDataUrl, getScaleStampDimensions } from "./scaleStamp";
@@ -287,6 +290,31 @@ export function StitchToolbar({
   const hasSelection = selectedTileIds.length > 0;
   const canUndo = undoStack.length > 0;
   const canRedo = redoStack.length > 0;
+  const activeTourId = useTourStore((s) => s.activeTourId);
+
+  // Show a nudge pointing at the Help button if the user has tiles loaded
+  // but hasn't interacted with any tool for 15 seconds
+  const [showHelpNudge, setShowHelpNudge] = useState(false);
+  const nudgeDismissedRef = useRef(false);
+  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || hasSelection;
+
+  useEffect(() => {
+    // Don't show if: no tiles, user already interacted, nudge was dismissed, or tour is running
+    if (!hasTiles || anyToolActive || nudgeDismissedRef.current || activeTourId) {
+      setShowHelpNudge(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowHelpNudge(true), 15000);
+    return () => clearTimeout(timer);
+  }, [hasTiles, anyToolActive, activeTourId]);
+
+  // Dismiss nudge permanently once any tool is used or tour starts
+  useEffect(() => {
+    if (anyToolActive || activeTourId) {
+      nudgeDismissedRef.current = true;
+      setShowHelpNudge(false);
+    }
+  }, [anyToolActive, activeTourId]);
 
   const handleDeleteSelected = () => {
     selectedTileIds.forEach((id) => removeTile(id));
@@ -563,6 +591,22 @@ export function StitchToolbar({
             >
               <GraduationCap className="h-3.5 w-3.5 shrink-0" />
             </IconButtonWithTooltip>
+          )}
+        </div>
+        <div className="h-5 w-px bg-border" aria-hidden />
+        <div className="relative inline-flex">
+          <IconButtonWithTooltip variant="outline" title="Need help? Take a guided tour of the stitch tools" label="Help" onClick={() => { nudgeDismissedRef.current = true; setShowHelpNudge(false); startTour("stitch"); }}>
+            <HelpCircle className="h-3.5 w-3.5 shrink-0" />
+          </IconButtonWithTooltip>
+          {showHelpNudge && (
+            <div className="absolute right-0 top-full mt-2 z-50 animate-in fade-in-0 slide-in-from-top-2 duration-300">
+              <div className="relative bg-popover border border-border rounded-lg shadow-lg px-3 py-2 text-xs text-popover-foreground w-52">
+                <div className="absolute -top-1.5 right-3 w-3 h-3 bg-popover border-l border-t border-border rotate-45" />
+                <p className="font-medium mb-1">Need help getting started?</p>
+                <p className="text-muted-foreground">Click here for a quick tour of all the stitch tools.</p>
+                <button type="button" className="mt-1.5 text-primary hover:underline text-xs" onClick={() => { nudgeDismissedRef.current = true; setShowHelpNudge(false); }}>Dismiss</button>
+              </div>
+            </div>
           )}
         </div>
       </div>

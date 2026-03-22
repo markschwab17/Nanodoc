@@ -113,11 +113,15 @@ export const useTabStore = create<TabStoreState>((set, get) => ({
   },
 
   setTabModified: (id, modified) =>
-    set((state) => ({
-      tabs: state.tabs.map((t) =>
-        t.id === id ? { ...t, isModified: modified } : t
-      ),
-    })),
+    set((state) => {
+      const tab = state.tabs.find((t) => t.id === id);
+      if (!tab || tab.isModified === modified) return state;
+      return {
+        tabs: state.tabs.map((t) =>
+          t.id === id ? { ...t, isModified: modified } : t
+        ),
+      };
+    }),
 
   setTabLastSaved: (id, timestamp) =>
     set((state) => ({

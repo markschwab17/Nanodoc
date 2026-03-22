@@ -9,8 +9,8 @@ import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { PDFViewer } from "@/features/viewer/PDFViewer";
 import { TabBar } from "@/features/tabs/TabBar";
-import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
+import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { CTOSplitScreenToolbar } from "@/features/toolbar/CTOSplitScreenToolbar";
 import { AISidePanel } from "@/features/specs/AISidePanel";
@@ -26,7 +26,8 @@ import ESignPrepareToolbar from "@/features/esign/ESignPrepareToolbar";
 import ESignSigningView from "@/features/esign/ESignSigningView";
 import { useESignStore } from "@/shared/stores/esignStore";
 import { Button } from "@/components/ui/button";
-import { FileText, Upload, File, X, ChevronLeft, ChevronRight, Undo2, Redo2 } from "lucide-react";
+import { FileText, Upload, File, X, ChevronLeft, ChevronRight, Undo2, Redo2, Layers } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { NotificationToast } from "@/shared/components/NotificationToast";
 import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
@@ -49,6 +50,7 @@ preloadMupdf();
 
 function Editor() {
   const { getRootProps, getInputProps, isDragActive } = useDragDrop();
+  const navigate = useNavigate();
   const { tabs } = useTabStore();
   const setCurrentDocument = usePDFStore((s) => s.setCurrentDocument);
   const { getRecentFiles } = useRecentFilesStore();
@@ -633,15 +635,26 @@ function Editor() {
                 ? "Release to open the PDF file"
                 : "Drag and drop a PDF file here, or click the button below to browse"}
             </p>
-            <Button
-              onClick={handleOpenFileFromButton}
-              size="lg"
-              className="text-lg px-8 py-6 h-auto"
-              data-action="open"
-            >
-              <File className="h-5 w-5 mr-2" />
-              Browse Files
-            </Button>
+            <div className="flex gap-3">
+              <Button
+                onClick={handleOpenFileFromButton}
+                size="lg"
+                className="text-lg px-8 py-6 h-auto"
+                data-action="open"
+              >
+                <File className="h-5 w-5 mr-2" />
+                Browse Files
+              </Button>
+              <Button
+                onClick={() => navigate("/stitch")}
+                size="lg"
+                variant="outline"
+                className="text-lg px-8 py-6 h-auto"
+              >
+                <Layers className="h-5 w-5 mr-2" />
+                Stitch PDFs
+              </Button>
+            </div>
             <p className="text-muted-foreground mt-3 text-sm">
               or{" "}
               <button
@@ -820,9 +833,9 @@ function Editor() {
                   </div>
                 </div>
               )}
-            </div>
             <div className="flex-shrink-0">
               <BookmarksPanel />
+            </div>
             </div>
           </div>
           {/* Expand button: visible when collapsed, on top so it receives clicks */}
@@ -931,7 +944,7 @@ function Editor() {
 
       {/* E-Sign signing mode overlay */}
       {esignMode === "sign" && (
-        <ESignSigningView documentSubject="Document" />
+        <ESignSigningView documentSubject={useTabStore.getState().getActiveTab()?.name?.replace(/\.pdf$/i, '') || "Document"} />
       )}
     </div>
   );

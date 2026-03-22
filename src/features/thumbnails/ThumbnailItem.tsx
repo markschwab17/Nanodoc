@@ -81,6 +81,13 @@ export function ThumbnailItem({
     };
 
     loadThumbnail();
+
+    // Revoke blob URL on cleanup to prevent memory leaks
+    return () => {
+      if (thumbnailUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(thumbnailUrl);
+      }
+    };
   }, [document, pageNumber, renderer, document?.getPageMetadata(pageNumber)?.rotation, document?.getPageCount()]);
 
   // Use fixed aspect ratios: landscape (4:3) or portrait (3:4)

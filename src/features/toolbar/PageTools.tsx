@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Trash2, Plus, Layers, FileOutput } from "lucide-react";
+import { Plus, Layers } from "lucide-react";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
@@ -533,26 +533,6 @@ export function PageTools() {
         title="Insert Page"
       >
         <Plus className="h-3.5 w-3.5" />
-      </Button>
-      <Button
-        variant="outline"
-        size="icon"
-        className="h-7 w-7"
-        onClick={() => setShowDeleteDialog(true)}
-        disabled={currentDocument.getPageCount() <= 1}
-        title="Delete Page"
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </Button>
-      <Button
-        variant="outline"
-        size="icon"
-        className="h-7 w-7"
-        onClick={handleExtractPage}
-        disabled={!editor}
-        title="Extract current page to new PDF"
-      >
-        <FileOutput className="h-3.5 w-3.5" />
       </Button>
       <Button
         variant="outline"

@@ -16,6 +16,7 @@ import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import type { GeotechnicalScope } from "@/core/ai/types";
 import type { ExtractionType } from "./SpecExtractionButton";
 import { GEOTECHNICAL_SCOPES } from "./SpecExtractionButton";
@@ -28,8 +29,9 @@ export function AISidePanel() {
   const { isExtracting, getExtractedSpecs, getGeotechnicalSummary } = useSpecExtractionStore();
   const { getCurrentDocument } = usePDFStore();
   const { getMessages } = useConversationStore();
+  const isCiviltakeoff = !!useCiviltakeoffContextStore((s) => s.context);
 
-  const [mode, setMode] = useState<"extract" | "ask">("extract");
+  const [mode, setMode] = useState<"extract" | "ask">("ask");
   const [extractionType, setExtractionType] = useState<ExtractionType>("specs");
   const [geotechnicalScope, setGeotechnicalScope] = useState<GeotechnicalScope | "">("");
   const [customPrompt, setCustomPrompt] = useState("");
@@ -127,7 +129,7 @@ export function AISidePanel() {
 
   return (
     <div
-      className="flex flex-col h-full border-l bg-popover text-popover-foreground shadow-md shrink-0 overflow-hidden pt-24"
+      className="flex flex-col h-full border-l bg-popover text-popover-foreground shadow-md shrink-0 overflow-hidden"
       style={{ width: PANEL_WIDTH }}
     >
       <div className="flex items-center justify-between p-3 border-b shrink-0">
@@ -144,15 +146,6 @@ export function AISidePanel() {
 
           <div className="flex gap-2 border rounded-md p-1">
             <Button
-              variant={mode === "extract" ? "default" : "ghost"}
-              size="sm"
-              className="flex-1"
-              onClick={() => setMode("extract")}
-            >
-              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-              Extract
-            </Button>
-            <Button
               variant={mode === "ask" ? "default" : "ghost"}
               size="sm"
               className="flex-1"
@@ -160,6 +153,15 @@ export function AISidePanel() {
             >
               <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
               Ask
+            </Button>
+            <Button
+              variant={mode === "extract" ? "default" : "ghost"}
+              size="sm"
+              className="flex-1 text-xs"
+              onClick={() => setMode("extract")}
+            >
+              <Sparkles className="h-3 w-3 mr-1" />
+              Extract
             </Button>
           </div>
 
@@ -293,7 +295,11 @@ export function AISidePanel() {
             </>
           )}
 
-          {apiCreditEstimate ? (
+          {isCiviltakeoff ? (
+            <div className="pt-2 border-t text-xs text-muted-foreground">
+              <span className="font-medium text-primary">Covered by Civiltakeoff plan</span>
+            </div>
+          ) : apiCreditEstimate ? (
             <div className="pt-2 border-t space-y-1">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <DollarSign className="h-3.5 w-3.5" />

@@ -27,6 +27,7 @@ import {
   FileText,
   Stamp as StampIcon,
   Layers,
+  BoxSelect,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -911,6 +912,17 @@ export function Toolbar() {
             aria-label="Redact"
           >
             <Eraser className={sizeClasses.icon} />
+          </Button>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Selection Box">
+          <Button
+            variant={activeTool === "selectionBox" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("selectionBox")}
+            className={sizeClasses.button}
+            aria-label="Selection Box"
+          >
+            <BoxSelect className={sizeClasses.icon} />
           </Button>
         </ToolbarTooltip>
         <ToolbarTooltip label="Draw">

@@ -222,19 +222,23 @@ export async function createChunks(
       
       // Split chunk if too large
       if (tokenCount > targetTokens) {
-        // Split by sentences
+        // Split by sentences, tracking token count incrementally (O(n) instead of O(n^2))
         const sentences = chunk.text.split(/[.!?]+\s+/);
         let currentChunkText = '';
+        let runningTokenCount = 0;
         let currentSpans: TextSpan[] = [];
-        
+
         for (let i = 0; i < sentences.length; i++) {
           const sentence = sentences[i];
-          
-          if (estimateTokenCount(currentChunkText + sentence) > targetTokens && currentChunkText.length > 0) {
+          const sentenceTokens = estimateTokenCount(sentence);
+          // +1 accounts for the space separator token
+          const separatorTokens = currentChunkText.length > 0 ? 1 : 0;
+
+          if (runningTokenCount + sentenceTokens + separatorTokens > targetTokens && currentChunkText.length > 0) {
             // Save current chunk
             const chunkId = `chunk_${chunkIndex++}`;
             const specCandidates = detectSpecCandidates(currentChunkText, currentSpans.map(s => ({ ...s, page: chunk.page })));
-            
+
             allChunks.push({
               chunkId,
               text: currentChunkText.trim(),
@@ -243,26 +247,28 @@ export async function createChunks(
               boundingBoxes: currentSpans.map(s => ({ page: chunk.page, bbox: s.bbox })),
               specCandidates,
               keywords: extractKeywords(currentChunkText),
-              tokenCount: estimateTokenCount(currentChunkText),
+              tokenCount: runningTokenCount,
               specDensity: calculateSpecDensity(currentChunkText),
             });
-            
+
             // Start new chunk with overlap
             const overlapText = getOverlapText(currentChunkText, overlapPercent);
             currentChunkText = overlapText + ' ' + sentence;
+            runningTokenCount = estimateTokenCount(currentChunkText);
             currentSpans = [...currentSpans.slice(-Math.floor(currentSpans.length * overlapPercent / 100))];
           } else {
             currentChunkText += (currentChunkText ? ' ' : '') + sentence;
+            runningTokenCount += sentenceTokens + separatorTokens;
             // Approximate span assignment (simplified)
             currentSpans = [...chunk.spans];
           }
         }
-        
+
         // Add remaining chunk
         if (currentChunkText.trim().length > 0) {
           const chunkId = `chunk_${chunkIndex++}`;
           const specCandidates = detectSpecCandidates(currentChunkText, currentSpans.map(s => ({ ...s, page: chunk.page })));
-          
+
           allChunks.push({
             chunkId,
             text: currentChunkText.trim(),
@@ -271,7 +277,7 @@ export async function createChunks(
             boundingBoxes: currentSpans.map(s => ({ page: chunk.page, bbox: s.bbox })),
             specCandidates,
             keywords: extractKeywords(currentChunkText),
-            tokenCount: estimateTokenCount(currentChunkText),
+            tokenCount: runningTokenCount,
             specDensity: calculateSpecDensity(currentChunkText),
           });
         }

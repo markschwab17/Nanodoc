@@ -14,6 +14,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { Annotation } from "@/core/pdf/types";
 import { useESignStore } from "@/shared/stores/esignStore";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 import SignatureCaptureDialog from "./SignatureCaptureDialog";
 
 interface Props {
@@ -63,6 +64,8 @@ export default function SignatureFieldAnnotation({
   const signatureImages = useESignStore((s) => s.signatureImages);
   const setSignatureImage = useESignStore((s) => s.setSignatureImage);
   const fieldPlacements = useESignStore((s) => s.fieldPlacements);
+  const fieldTexts = useESignStore((s) => s.fieldTexts);
+  const setFieldText = useESignStore((s) => s.setFieldText);
   const signerEmail = useESignStore((s) => s.signerEmail);
   const signerName = useESignStore((s) => s.signerName);
   const getNextUnfilledField = useESignStore((s) => s.getNextUnfilledField);
@@ -111,10 +114,13 @@ export default function SignatureFieldAnnotation({
     const text = editText.trim();
     if (text) {
       const imageData = renderTextToImage(text, annotW, annotH);
+      setFieldText(annotation.id, text);
       fillAndAdvance(annotation.id, imageData);
+    } else if (annotation.signatureFieldRequired !== false) {
+      useNotificationStore.getState().showNotification("This field is required", "error");
     }
     setIsEditing(false);
-  }, [editText, annotation.id, annotW, annotH, fillAndAdvance]);
+  }, [editText, annotation.id, annotation.signatureFieldRequired, annotW, annotH, fillAndAdvance, setFieldText]);
 
   function handleClick() {
     if (mode !== "sign") {
@@ -124,19 +130,21 @@ export default function SignatureFieldAnnotation({
     }
 
     if (isInlineField) {
-      if (fieldType === "date") {
-        // Date: auto-fill immediately
+      if (fieldType === "date" && !isFilled) {
+        // Date: auto-fill immediately on first click
         const dateStr = new Date().toLocaleDateString("en-US", {
           year: "numeric",
           month: "long",
           day: "numeric",
         });
         const imageData = renderTextToImage(dateStr, annotW, annotH);
+        setFieldText(annotation.id, dateStr);
         fillAndAdvance(annotation.id, imageData);
       } else if (fieldType === "name" && !isFilled) {
         if (signerName) {
           // Auto-fill with signer's name
           const imageData = renderTextToImage(signerName, annotW, annotH);
+          setFieldText(annotation.id, signerName);
           fillAndAdvance(annotation.id, imageData);
         } else {
           // No name available — fall back to editing
@@ -144,8 +152,8 @@ export default function SignatureFieldAnnotation({
           setIsEditing(true);
         }
       } else {
-        // Text or re-edit
-        setEditText("");
+        // Text or re-edit — pre-populate with existing text if available
+        setEditText(fieldTexts[annotation.id] || "");
         setIsEditing(true);
       }
     } else {
@@ -160,10 +168,19 @@ export default function SignatureFieldAnnotation({
 
     // Auto-fill all other unfilled fields of the same type (signature → signature, initials → initials)
     const currentImages = useESignStore.getState().signatureImages;
+    let autoFilledCount = 0;
     for (const field of fieldPlacements) {
       if (field.id !== annotation.id && field.fieldType === fieldType && !currentImages[field.id]) {
         setSignatureImage(field.id, imageData);
+        autoFilledCount++;
       }
+    }
+
+    if (autoFilledCount > 0) {
+      useNotificationStore.getState().showNotification(
+        `Applied to ${autoFilledCount} other ${fieldType} field${autoFilledCount > 1 ? "s" : ""}`,
+        "info"
+      );
     }
 
     setShowCapture(false);

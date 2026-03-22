@@ -8,6 +8,7 @@
 import { useState, useEffect } from "react";
 import { useESignStore } from "@/shared/stores/esignStore";
 import ESignConsentDialog from "./ESignConsentDialog";
+import ESignDeclineDialog from "./ESignDeclineDialog";
 
 interface Props {
   documentSubject: string;
@@ -26,8 +27,11 @@ export default function ESignSigningView({ documentSubject }: Props) {
   } = useESignStore();
 
   const [showConsent, setShowConsent] = useState(false);
+  const [showDecline, setShowDecline] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [declined, setDeclined] = useState(false);
+  const [dismissedBanner, setDismissedBanner] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const filledCount = Object.keys(signatureImages).length;
@@ -84,24 +88,52 @@ export default function ESignSigningView({ documentSubject }: Props) {
     }
   }
 
-  async function handleDecline() {
+  async function handleDeclineConfirm(reason: string | undefined) {
     if (!recipientToken || !apiOrigin) return;
-    const reason = window.prompt("Reason for declining (optional):");
+    setShowDecline(false);
+    setError(null);
     try {
       await fetch(`${apiOrigin}/api/esign/signing/${recipientToken}/decline`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: reason || undefined }),
+        body: JSON.stringify({ reason }),
       });
       if (window.parent !== window && apiOrigin) {
         window.parent.postMessage({ type: "esign_declined" }, apiOrigin);
       }
+      setDeclined(true);
     } catch {
-      // Best effort
+      setError("Failed to decline. Please try again.");
     }
   }
 
-  if (submitted) {
+  if (declined) {
+    return (
+      <div
+        style={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          background: "#64748b",
+          color: "#fff",
+          padding: "16px 24px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 12,
+          zIndex: 9999,
+          boxShadow: "0 -4px 20px rgba(0,0,0,0.2)",
+        }}
+      >
+        <span style={{ fontWeight: 600, fontSize: 16 }}>
+          You have declined to sign this document.
+        </span>
+      </div>
+    );
+  }
+
+  if (submitted && !dismissedBanner) {
     return (
       <div
         style={{
@@ -124,6 +156,25 @@ export default function ESignSigningView({ documentSubject }: Props) {
         <span style={{ fontWeight: 600, fontSize: 16 }}>
           Document signed successfully! You will receive a copy via email.
         </span>
+        <button
+          onClick={() => setDismissedBanner(true)}
+          style={{
+            position: "absolute",
+            right: 16,
+            top: "50%",
+            transform: "translateY(-50%)",
+            background: "transparent",
+            border: "none",
+            color: "#fff",
+            fontSize: 18,
+            cursor: "pointer",
+            opacity: 0.7,
+            padding: "4px 8px",
+          }}
+          title="Dismiss"
+        >
+          ✕
+        </button>
       </div>
     );
   }
@@ -161,7 +212,7 @@ export default function ESignSigningView({ documentSubject }: Props) {
         )}
 
         <button
-          onClick={handleDecline}
+          onClick={() => setShowDecline(true)}
           style={{
             padding: "8px 16px",
             border: "1px solid #555",
@@ -222,6 +273,13 @@ export default function ESignSigningView({ documentSubject }: Props) {
           documentSubject={documentSubject}
           onConfirm={handleSubmit}
           onCancel={() => setShowConsent(false)}
+        />
+      )}
+
+      {showDecline && (
+        <ESignDeclineDialog
+          onConfirm={handleDeclineConfirm}
+          onCancel={() => setShowDecline(false)}
         />
       )}
     </>

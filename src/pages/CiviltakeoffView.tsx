@@ -291,9 +291,18 @@ export default function CiviltakeoffView() {
                   }
                 }
               }
+            } else {
+              useNotificationStore.getState().showNotification(
+                "Unable to load signature fields. The signing link may have expired.",
+                "error"
+              );
             }
           } catch (err) {
             console.warn("[CiviltakeoffView] Failed to fetch signing session:", err);
+            useNotificationStore.getState().showNotification(
+              "Failed to load signing fields. Please refresh or contact the sender.",
+              "error"
+            );
           }
           // Enter read mode for signing
           ui.setReadMode(true);

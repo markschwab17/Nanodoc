@@ -18,6 +18,7 @@ const TOOL_LABELS: Record<ToolType, string> = {
   pan: "Pan",
   callout: "Callout",
   redact: "Redact",
+  selectionBox: "Selection Box",
   selectText: "Select Text",
   form: "Form",
   draw: "Draw",

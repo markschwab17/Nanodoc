@@ -98,28 +98,30 @@ export function VirtualizedPageList({
     const viewportTop = scrollTop;
     const viewportBottom = scrollTop + containerRect.height;
 
-    // Find first and last visible pages
-    let start = 0;
-    let end = pageData.length - 1;
-
-    for (let i = 0; i < pageData.length; i++) {
-      const pageTop = pageData[i].top;
-      const pageBottom = pageTop + pageData[i].height;
-
-      if (pageBottom >= viewportTop) {
-        start = Math.max(0, i - bufferPages);
-        break;
+    // Binary search for first page whose bottom >= viewportTop (O(log n) vs O(n))
+    let lo = 0, hi = pageData.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pageData[mid].top + pageData[mid].height < viewportTop) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
       }
     }
+    const start = Math.max(0, lo - bufferPages);
 
-    for (let i = pageData.length - 1; i >= 0; i--) {
-      const pageTop = pageData[i].top;
-
-      if (pageTop <= viewportBottom) {
-        end = Math.min(pageData.length - 1, i + bufferPages);
-        break;
+    // Binary search for last page whose top <= viewportBottom
+    lo = start;
+    hi = pageData.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (pageData[mid].top <= viewportBottom) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
       }
     }
+    const end = Math.min(pageData.length - 1, lo + bufferPages);
 
     setVisibleRange(prev => {
       // Only update if range actually changed to prevent unnecessary re-renders

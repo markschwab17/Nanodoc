@@ -25,23 +25,34 @@ const SPEC_KEYWORDS = [
 ];
 
 /**
- * Regex patterns for detecting spec-like content
+ * Regex patterns for detecting spec-like content.
+ * Global (/g) versions for .match() counting in calculateSpecDensity.
+ * Non-global versions for .test() in detectSpecCandidates (avoids lastIndex statefulness bug).
  */
 const SPEC_PATTERNS = {
   // Numbers with units (e.g., "4000 psi", "25mm", "±0.5")
   numberWithUnit: /\d+\.?\d*\s*(psi|mpa|ksi|mm|cm|m|in|ft|yd|°|deg|±|±\d+)/gi,
-  
+
   // Material codes (e.g., "ASTM A36", "Grade 60", "A992")
   materialCode: /\b(ASTM|ANSI|ISO|AISC|AISI|SAE)\s+[A-Z0-9]+/gi,
-  
+
   // Dimensions (e.g., "12\" x 8\"", "300mm x 200mm")
   dimension: /\d+\.?\d*\s*["'x×]\s*\d+\.?\d*\s*["']/gi,
-  
+
   // Tolerances (e.g., "±0.5", "+/- 2mm")
   tolerance: /[±\+\-]\s*\d+\.?\d*/gi,
-  
+
   // Performance specs (e.g., "4000 psi @ 28 days", "Fy = 50 ksi")
   performance: /\d+\.?\d*\s*(psi|mpa|ksi)\s*(@|at|=)\s*\d+/gi,
+};
+
+/** Non-global versions for .test() — avoids lastIndex statefulness that causes intermittent misses */
+const SPEC_PATTERNS_TEST = {
+  numberWithUnit: /\d+\.?\d*\s*(psi|mpa|ksi|mm|cm|m|in|ft|yd|°|deg|±|±\d+)/i,
+  materialCode: /\b(ASTM|ANSI|ISO|AISC|AISI|SAE)\s+[A-Z0-9]+/i,
+  dimension: /\d+\.?\d*\s*["'x×]\s*\d+\.?\d*\s*["']/i,
+  tolerance: /[±\+\-]\s*\d+\.?\d*/i,
+  performance: /\d+\.?\d*\s*(psi|mpa|ksi)\s*(@|at|=)\s*\d+/i,
 };
 
 /**
@@ -99,34 +110,34 @@ export function detectSpecCandidates(
     let confidence = 0;
     let type: SpecCandidate['type'] = 'other';
     
-    // Check for material codes
-    if (SPEC_PATTERNS.materialCode.test(spanText)) {
+    // Check for material codes (use non-global patterns to avoid lastIndex bugs)
+    if (SPEC_PATTERNS_TEST.materialCode.test(spanText)) {
       confidence += 40;
       type = 'material';
     }
-    
+
     // Check for dimensions
-    if (SPEC_PATTERNS.dimension.test(spanText)) {
+    if (SPEC_PATTERNS_TEST.dimension.test(spanText)) {
       confidence += 30;
       type = 'dimension';
     }
-    
+
     // Check for performance specs
-    if (SPEC_PATTERNS.performance.test(spanText)) {
+    if (SPEC_PATTERNS_TEST.performance.test(spanText)) {
       confidence += 35;
       type = 'performance';
     }
-    
+
     // Check for numbers with units
-    if (SPEC_PATTERNS.numberWithUnit.test(spanText)) {
+    if (SPEC_PATTERNS_TEST.numberWithUnit.test(spanText)) {
       confidence += 25;
       if (type === 'other') {
         type = 'dimension';
       }
     }
-    
+
     // Check for tolerances
-    if (SPEC_PATTERNS.tolerance.test(spanText)) {
+    if (SPEC_PATTERNS_TEST.tolerance.test(spanText)) {
       confidence += 20;
       if (type === 'other') {
         type = 'dimension';

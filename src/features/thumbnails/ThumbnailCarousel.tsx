@@ -24,12 +24,15 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useRef } from "react";
-import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal } from "lucide-react";
+import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal, Plus, FilePlus, FileUp, FileIcon } from "lucide-react";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { useFileSystem } from "@/shared/hooks/useFileSystem";
+import { usePDF } from "@/shared/hooks/usePDF";
 
 type TabType = "pages" | "search";
 
@@ -59,6 +62,9 @@ export function ThumbnailCarousel() {
   const { copyPages, pastePages, hasPages, getSourceInfo } = useClipboard();
   const { showNotification } = useNotificationStore();
   const { hasTextAnnotation } = useTextAnnotationClipboardStore();
+  const fileSystem = useFileSystem();
+  const { loadPDF } = usePDF();
+  const [showAddMenu, setShowAddMenu] = useState(false);
   
   const searchData = currentDocument ? getSearchResults(currentDocument.getId()) : null;
   const totalMatches = searchData?.matches.length ?? 0;
@@ -1299,6 +1305,101 @@ export function ThumbnailCarousel() {
     setPagesToRotate([]);
   };
 
+  // --- Add Page handlers ---
+
+  const handleInsertBlankPageAtEnd = async () => {
+    if (!currentDocument || !editor) return;
+    setShowAddMenu(false);
+    try {
+      const pageCount = currentDocument.getPageCount();
+      const lastMeta = currentDocument.getPageMetadata(pageCount - 1);
+      const w = lastMeta?.width ?? 612;
+      const h = lastMeta?.height ?? 792;
+
+      await editor.insertBlankPage(currentDocument, pageCount, w, h);
+
+      const mupdfDoc = currentDocument.getMupdfDocument();
+      const pdfDoc = mupdfDoc.asPDF();
+      if (pdfDoc) try { pdfDoc.loadPage(pageCount); } catch { /* ignore */ }
+
+      currentDocument.refreshPageMetadata();
+      setTimeout(() => currentDocument.refreshPageMetadata(), 100);
+
+      const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
+      if (tab) useTabStore.getState().setTabModified(tab.id, true);
+
+      setTimeout(() => setCurrentPage(pageCount), 0);
+      showNotification("Blank page added at end", "success");
+    } catch (error) {
+      console.error("Error inserting blank page:", error);
+      showNotification("Failed to insert blank page", "error");
+    }
+  };
+
+  const handleInsertFromOpenPDF = async (sourceDocId: string) => {
+    if (!currentDocument || !editor) return;
+    setShowAddMenu(false);
+    const sourceDocument = documents.get(sourceDocId);
+    if (!sourceDocument || !sourceDocument.isDocumentLoaded()) {
+      showNotification("Source document not available", "error");
+      return;
+    }
+    try {
+      const pageCount = currentDocument.getPageCount();
+      const sourcePageCount = sourceDocument.getPageCount();
+      const allPages = Array.from({ length: sourcePageCount }, (_, i) => i);
+      const documentId = currentDocument.getId();
+
+      await wrapPageOperation(
+        async () => {
+          await editor.insertPagesFromDocument(currentDocument, sourceDocument, pageCount, allPages);
+          currentDocument.refreshPageMetadata();
+
+          const existingAnnotations = getAnnotations(documentId);
+          const remapped = existingAnnotations.map((ann) =>
+            ann.pageNumber >= pageCount ? { ...ann, pageNumber: ann.pageNumber + sourcePageCount } : ann
+          );
+          const pdfStore = usePDFStore.getState();
+          const annMap = new Map(pdfStore.annotations);
+          annMap.set(documentId, remapped);
+          usePDFStore.setState({ annotations: annMap });
+          setCurrentPage(pageCount);
+        },
+        "insertPages",
+        documentId,
+        allPages,
+        pageCount,
+        sourceDocId
+      );
+
+      const tab = useTabStore.getState().getTabByDocumentId(documentId);
+      if (tab) useTabStore.getState().setTabModified(tab.id, true);
+
+      showNotification(`Inserted ${sourcePageCount} page(s) from "${sourceDocument.getName()}"`, "success");
+    } catch (error) {
+      console.error("Error inserting pages:", error);
+      showNotification("Failed to insert pages", "error");
+    }
+  };
+
+  const handleAddPDFFile = async () => {
+    setShowAddMenu(false);
+    try {
+      const result = await fileSystem.openFile();
+      if (!result) return;
+      const mupdfModule = await import("mupdf");
+      await loadPDF(result.data, result.name, mupdfModule.default, result.path || null);
+    } catch (error) {
+      console.error("Error opening PDF:", error);
+      showNotification("Failed to open PDF", "error");
+    }
+  };
+
+  // Other open PDFs (excluding current) for the "Insert from" sub-menu
+  const otherDocuments = Array.from(documents.entries()).filter(
+    ([id]) => id !== currentDocument?.getId()
+  );
+
   if (!showThumbnails || !currentDocument || !renderer) {
     return null;
   }
@@ -1563,6 +1664,61 @@ export function ThumbnailCarousel() {
                 </div>
               </div>
             ))}
+            {/* Add Page button beneath last thumbnail */}
+            <div className="flex justify-center pt-1 pb-2">
+              <Popover open={showAddMenu} onOpenChange={setShowAddMenu}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 w-8 p-0 rounded-full border-dashed"
+                    title="Add or insert pages"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-52 p-1" align="center" side="bottom">
+                  <div className="flex flex-col">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="justify-start gap-2 h-9 px-2"
+                      onClick={handleInsertBlankPageAtEnd}
+                    >
+                      <FilePlus className="h-4 w-4" />
+                      Insert Blank Page
+                    </Button>
+                    {otherDocuments.length > 0 && (
+                      <>
+                        <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">Insert from open PDF</div>
+                        {otherDocuments.map(([docId, doc]) => (
+                          <Button
+                            key={docId}
+                            variant="ghost"
+                            size="sm"
+                            className="justify-start gap-2 h-9 px-2 text-left"
+                            onClick={() => handleInsertFromOpenPDF(docId)}
+                          >
+                            <FileIcon className="h-4 w-4 flex-shrink-0" />
+                            <span className="truncate">{doc.getName()}</span>
+                          </Button>
+                        ))}
+                      </>
+                    )}
+                    <div className="h-px bg-border my-1" />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="justify-start gap-2 h-9 px-2"
+                      onClick={handleAddPDFFile}
+                    >
+                      <FileUp className="h-4 w-4" />
+                      Add a PDF...
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col p-3 gap-3">

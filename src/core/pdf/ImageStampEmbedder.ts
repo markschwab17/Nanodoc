@@ -36,7 +36,9 @@ function stampPosition(_page: any, stamp: Annotation): { x: number; y: number; w
 
 export class ImageStampEmbedder {
   /**
-   * Embed all stamp types (image, text, signature) into a PDF buffer using pdf-lib.
+   * Embed all stamp types (image, text, signature) and image annotations into a PDF buffer using pdf-lib.
+   * Image annotations (type "image") are embedded as actual PDF image XObjects drawn as page content,
+   * so they render correctly in all PDF viewers (Adobe Acrobat, Preview, Chrome, etc.).
    */
   async embedStamps(
     pdfBuffer: Uint8Array,
@@ -44,13 +46,16 @@ export class ImageStampEmbedder {
     aiMetadata?: PDFAIMetadataPayload
   ): Promise<Uint8Array> {
     try {
-      const { PDFDocument, StandardFonts, rgb } = await getPdfLib();
+      const { PDFDocument, StandardFonts, rgb, degrees } = await getPdfLib();
       const pdfDoc = await PDFDocument.load(pdfBuffer);
       const pages = pdfDoc.getPages();
 
       for (const stamp of stamps) {
         try {
-          if (stamp.stampData?.type === 'image') {
+          if (stamp.type === 'image' && stamp.imageData) {
+            // Image annotation (type "image") - embed as page content
+            await this.embedSingleImageAnnotation(pdfDoc, pages, stamp, degrees);
+          } else if (stamp.stampData?.type === 'image') {
             await this.embedSingleImageStamp(pdfDoc, pages, stamp);
           } else if (stamp.stampData?.type === 'text') {
             await this.embedSingleTextStamp(pdfDoc, pages, stamp, StandardFonts, rgb);
@@ -58,7 +63,7 @@ export class ImageStampEmbedder {
             await this.embedSingleSignatureStamp(pdfDoc, pages, stamp, rgb);
           }
         } catch (stampError) {
-          console.error(`[ImageStampEmbedder] Failed to embed stamp ${stamp.id}:`, stampError);
+          console.error(`[ImageStampEmbedder] Failed to embed stamp/image ${stamp.id}:`, stampError);
         }
       }
 
@@ -111,6 +116,55 @@ export class ImageStampEmbedder {
     }
 
     page.drawImage(pdfImage, { x, y, width, height });
+  }
+
+  /**
+   * Embed an image annotation (type "image") as actual page content.
+   * Uses pdf-lib to embed the image as an XObject and draw it on the page,
+   * so it renders correctly in all PDF viewers.
+   */
+  private async embedSingleImageAnnotation(
+    pdfDoc: any,
+    pages: any[],
+    annotation: Annotation,
+    degrees: (deg: number) => any
+  ): Promise<void> {
+    if (!annotation.imageData || annotation.type !== 'image') return;
+
+    const pageIndex = annotation.pageNumber;
+    if (pageIndex >= pages.length) return;
+    const page = pages[pageIndex];
+
+    const width = annotation.width || annotation.imageWidth || 200;
+    const height = annotation.height || annotation.imageHeight || 200;
+    // annotation.x = left edge, annotation.y = bottom edge (PDF coordinates)
+    const x = annotation.x;
+    const y = annotation.y;
+
+    const base64Data = annotation.imageData.split(',')[1] || annotation.imageData;
+    const imageBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+
+    let pdfImage;
+    if (annotation.imageData.startsWith('data:image/png')) {
+      pdfImage = await pdfDoc.embedPng(imageBytes);
+    } else if (annotation.imageData.startsWith('data:image/jpeg') || annotation.imageData.startsWith('data:image/jpg')) {
+      pdfImage = await pdfDoc.embedJpg(imageBytes);
+    } else {
+      // Try PNG as fallback for unknown formats
+      try {
+        pdfImage = await pdfDoc.embedPng(imageBytes);
+      } catch {
+        console.warn(`[ImageStampEmbedder] Unsupported image format for annotation ${annotation.id}`);
+        return;
+      }
+    }
+
+    const drawOpts: any = { x, y, width, height };
+    if (annotation.rotation) {
+      drawOpts.rotate = degrees(annotation.rotation);
+    }
+
+    page.drawImage(pdfImage, drawOpts);
   }
 
   private async embedSingleTextStamp(

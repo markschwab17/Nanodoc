@@ -137,7 +137,7 @@ export function StitchCanvas({
       ro.disconnect();
       win?.removeEventListener("scroll", update, true);
     };
-  }, [pointAlignMode, scaleAlignMode, contentDeleteMode]);
+  }, [pointAlignMode, scaleAlignMode, contentDeleteMode, deleteElementMode]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -398,71 +398,11 @@ export function StitchCanvas({
           <StitchTile key={tile.id} tile={tile} />
         ))}
         <GroupSelectionOverlay />
-        {deleteElementMode && (
-          <div
-            className="absolute left-0 top-0 z-10 cursor-crosshair"
-            style={{
-              width: canvasWidth,
-              height: canvasHeight,
-              pointerEvents: "auto",
-            }}
-            onPointerDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (e.button !== 0 || !onDeleteElementAlongPath) return;
-              const coords = clientToCanvas(e.clientX, e.clientY);
-              if (coords) {
-                (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-                const path = [coords];
-                deleteStrokePathRef.current = path;
-                setDeleteStrokePath(path);
-                setDeleteStrokeCurrent(coords);
-              }
-            }}
-            onPointerMove={(e) => {
-              if (deleteStrokePathRef.current.length === 0) return;
-              const coords = clientToCanvas(e.clientX, e.clientY);
-              if (!coords) return;
-              setDeleteStrokeCurrent(coords);
-              const last = deleteStrokePathRef.current[deleteStrokePathRef.current.length - 1];
-              const dx = coords.x - last.x;
-              const dy = coords.y - last.y;
-              if (dx * dx + dy * dy >= STROKE_POINT_MIN_DIST * STROKE_POINT_MIN_DIST) {
-                const next = [...deleteStrokePathRef.current, coords];
-                deleteStrokePathRef.current = next;
-                setDeleteStrokePath(next);
-              }
-            }}
-            onPointerUp={(e) => {
-              if (e.button !== 0) return;
-              try {
-                (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
-              } catch (_) {}
-              const current = deleteStrokeCurrent;
-              setDeleteStrokeCurrent(null);
-              let path = [...deleteStrokePathRef.current];
-              if (current && path.length > 0) {
-                const last = path[path.length - 1];
-                if (last.x !== current.x || last.y !== current.y) path = [...path, current];
-              }
-              deleteStrokePathRef.current = [];
-              setDeleteStrokePath([]);
-              if (path.length > 0 && onDeleteElementAlongPath) onDeleteElementAlongPath(path);
-            }}
-            onPointerLeave={() => {
-              if (deleteStrokePathRef.current.length > 0) {
-                setDeleteStrokeCurrent(null);
-                const path = [...deleteStrokePathRef.current];
-                deleteStrokePathRef.current = [];
-                setDeleteStrokePath([]);
-                if (onDeleteElementAlongPath) onDeleteElementAlongPath(path);
-              }
-            }}
-          />
-        )}
+        {/* Delete-element stroke visualization: positioned in canvas-space so it tracks the stroke path */}
         {(deleteStrokePath.length >= 1 || deleteStrokeCurrent) && (
           <svg
             className="absolute left-0 top-0 pointer-events-none z-[15]"
+            style={{ overflow: "visible" }}
             width={canvasWidth}
             height={canvasHeight}
             viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
@@ -580,6 +520,74 @@ export function StitchCanvas({
                 if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onContentDeleteRect({ x, y, w, h });
                 isDeleteSelectingRef.current = false;
                 setDeleteSelection(null);
+              }
+            }}
+          />,
+          document.body
+        )}
+      {/* Delete-element overlay: portal so flood-fill erase works on tile content outside canvas bounds */}
+      {deleteElementMode &&
+        containerRect &&
+        createPortal(
+          <div
+            className="fixed z-[100] cursor-crosshair"
+            style={{
+              left: containerRect.left,
+              top: containerRect.top,
+              width: containerRect.width,
+              height: containerRect.height,
+              pointerEvents: "auto",
+            }}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (e.button !== 0 || !onDeleteElementAlongPath) return;
+              const coords = clientToCanvas(e.clientX, e.clientY);
+              if (coords) {
+                (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+                const path = [coords];
+                deleteStrokePathRef.current = path;
+                setDeleteStrokePath(path);
+                setDeleteStrokeCurrent(coords);
+              }
+            }}
+            onPointerMove={(e) => {
+              if (deleteStrokePathRef.current.length === 0) return;
+              const coords = clientToCanvas(e.clientX, e.clientY);
+              if (!coords) return;
+              setDeleteStrokeCurrent(coords);
+              const last = deleteStrokePathRef.current[deleteStrokePathRef.current.length - 1];
+              const dx = coords.x - last.x;
+              const dy = coords.y - last.y;
+              if (dx * dx + dy * dy >= STROKE_POINT_MIN_DIST * STROKE_POINT_MIN_DIST) {
+                const next = [...deleteStrokePathRef.current, coords];
+                deleteStrokePathRef.current = next;
+                setDeleteStrokePath(next);
+              }
+            }}
+            onPointerUp={(e) => {
+              if (e.button !== 0) return;
+              try {
+                (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+              } catch (_) {}
+              const current = deleteStrokeCurrent;
+              setDeleteStrokeCurrent(null);
+              let path = [...deleteStrokePathRef.current];
+              if (current && path.length > 0) {
+                const last = path[path.length - 1];
+                if (last.x !== current.x || last.y !== current.y) path = [...path, current];
+              }
+              deleteStrokePathRef.current = [];
+              setDeleteStrokePath([]);
+              if (path.length > 0 && onDeleteElementAlongPath) onDeleteElementAlongPath(path);
+            }}
+            onPointerLeave={() => {
+              if (deleteStrokePathRef.current.length > 0) {
+                setDeleteStrokeCurrent(null);
+                const path = [...deleteStrokePathRef.current];
+                deleteStrokePathRef.current = [];
+                setDeleteStrokePath([]);
+                if (onDeleteElementAlongPath) onDeleteElementAlongPath(path);
               }
             }}
           />,

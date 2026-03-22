@@ -44,6 +44,7 @@ interface ESignState {
   // Signing mode state
   fieldPlacements: ESignFieldPlacement[]; // fields the signer needs to fill
   signatureImages: Record<string, string>; // fieldId -> base64 PNG
+  fieldTexts: Record<string, string>; // fieldId -> raw text (for re-editing inline fields)
 
   // Computed
   allRequiredFieldsFilled: boolean;
@@ -65,6 +66,7 @@ interface ESignState {
   setFieldPlacements: (placements: ESignFieldPlacement[]) => void;
   setSignatureImage: (fieldId: string, imageData: string) => void;
   clearSignatureImage: (fieldId: string) => void;
+  setFieldText: (fieldId: string, text: string) => void;
   reset: () => void;
 }
 
@@ -86,6 +88,7 @@ export const useESignStore = create<ESignState>((set, get) => ({
   currentFieldType: "signature",
   fieldPlacements: [],
   signatureImages: {},
+  fieldTexts: {},
   allRequiredFieldsFilled: false,
 
   setMode: (mode) => set({ mode }),
@@ -127,6 +130,10 @@ export const useESignStore = create<ESignState>((set, get) => ({
       .filter((f) => f.required)
       .every((f) => current[f.id]);
     set({ signatureImages: current, allRequiredFieldsFilled: allFilled });
+  },
+
+  setFieldText: (fieldId, text) => {
+    set({ fieldTexts: { ...get().fieldTexts, [fieldId]: text } });
   },
 
   getNextUnfilledField: (afterFieldId?: string) => {
@@ -174,6 +181,7 @@ export const useESignStore = create<ESignState>((set, get) => ({
       currentFieldType: "signature",
       fieldPlacements: [],
       signatureImages: {},
+      fieldTexts: {},
       allRequiredFieldsFilled: false,
     }),
 }));

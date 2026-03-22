@@ -31,9 +31,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FilePlus } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
+import { useTourStore } from "@/shared/stores/tourStore";
 
 export default function StitchView() {
   const { tiles, setCropRect, setCropToContent, setSelectedTileIds } = useStitchStore();
+  const prevTileCountRef = useRef(0);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
 
   const handleRecenter = useCallback(() => {
@@ -93,10 +95,17 @@ export default function StitchView() {
   const [canvasVisible, setCanvasVisible] = useState(true);
 
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
-  // Auto-open Add PDF modal on first load only when not from CTO (CTO lands with preloaded PDF)
+
+  // Auto-launch the guided tour the first time a user imports a PDF into stitch mode
   useEffect(() => {
-    if (!ctoContext) setShowAddPdf(true);
-  }, [ctoContext]);
+    const hadNoTiles = prevTileCountRef.current === 0;
+    prevTileCountRef.current = tiles.length;
+    if (hadNoTiles && tiles.length > 0 && !useTourStore.getState().hasCompletedTour("stitch")) {
+      // Small delay so the canvas renders before the tour spotlight targets elements
+      const timer = setTimeout(() => useTourStore.getState().startTour("stitch"), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [tiles.length]);
 
   const pointAlign = usePointAlignMode();
   const scaleAlign = useScaleAlignMode();
@@ -370,7 +379,14 @@ export default function StitchView() {
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
         {tiles.length === 0 && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-muted/50">
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50">
+            <FilePlus className="h-16 w-16 text-muted-foreground mb-4" />
+            <h2 className="text-2xl font-bold mb-2 text-foreground">Stitch PDFs Together</h2>
+            <p className="text-sm text-muted-foreground mb-6 text-center max-w-md">
+              Arrange multiple PDF pages onto one canvas — remove white backgrounds,
+              resize, rotate, and export as a single PDF. Get started by selecting
+              a PDF and choosing the pages you want to stitch.
+            </p>
             <Button
               size="lg"
               className="h-14 px-8 text-lg gap-3 shadow-lg"

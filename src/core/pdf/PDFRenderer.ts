@@ -71,9 +71,12 @@ export class PDFRenderer {
     const rotation = options.rotation ?? 0;
     const cacheKey = this.getCacheKey(pageNumber, scale, rotation);
 
-    // Check cache
+    // Check cache — on hit, move entry to end of Map for true LRU eviction order
     if (this.renderCache.has(cacheKey)) {
-      return this.renderCache.get(cacheKey)!;
+      const cached = this.renderCache.get(cacheKey)!;
+      this.renderCache.delete(cacheKey);
+      this.renderCache.set(cacheKey, cached);
+      return cached;
     }
 
     try {
@@ -99,10 +102,13 @@ export class PDFRenderer {
       // CRITICAL: Exclude annotations from base rendering (false) since we render them with React
       // This prevents duplicate rendering - native PDF annotations would appear on the canvas
       // and we also render them as interactive React components, causing duplicates
+      // PERF: Request RGBA directly (alpha=true) so toPixmap returns 4 components.
+      // This lets us use the fast data.set() memcpy path instead of a per-pixel
+      // RGB→RGBA conversion loop (saves 10-50ms per page render).
       const pixmap = page.toPixmap(
         matrix,
         this.mupdf.ColorSpace.DeviceRGB,
-        false,
+        true,
         false  // Don't include annotations - we render them with React
       );
 
@@ -175,17 +181,10 @@ export class PDFRenderer {
         true
       );
 
-      // Convert pixmap to PNG directly
+      // Convert pixmap to PNG and return as blob URL (avoids FileReader + base64 overhead)
       const pngData = pixmap.asPNG();
-      
-      // Convert to data URL using Blob for better performance
       const blob = new Blob([pngData], { type: 'image/png' });
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
+      return URL.createObjectURL(blob);
     } catch (error) {
       console.error(`Error rendering thumbnail for page ${pageNumber}:`, error);
       throw error;

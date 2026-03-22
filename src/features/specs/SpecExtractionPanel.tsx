@@ -54,6 +54,8 @@ export function SpecExtractionPanel() {
   const [extractionInProgress, setExtractionInProgress] = useState(false);
   const highlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const hoverHighlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const geoQuadsCacheRef = useRef<Map<string, { page: number; quads: number[][] } | null>>(new Map());
+  const resizeRafRef = useRef<number | null>(null);
   
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() || null;
@@ -81,6 +83,10 @@ export function SpecExtractionPanel() {
   ) => {
     if (!doc) return [];
     const highlights: Array<{ page: number; bbox: [number, number, number, number]; specId: string; color: string }> = [];
+    // Cache page objects and metadata across specs to avoid redundant loadPage() calls
+    const mupdfDoc = doc.getMupdfDocument();
+    const pageCache = new Map<number, any>();
+    const pageHeightCache = new Map<number, number>();
     for (let idx = 0; idx < specsArr.length; idx++) {
       const spec = specsArr[idx];
       const quoteText = (spec.quote_text || "").trim();
@@ -88,10 +94,13 @@ export function SpecExtractionPanel() {
       const specPage = spec.page ?? 0;
       if (specPage >= (doc.getPageCount() ?? 0)) continue;
       try {
-        const mupdfDoc = doc.getMupdfDocument();
-        const page = mupdfDoc.loadPage(specPage);
-        const pageMetadata = doc.getPageMetadata(specPage);
-        const pageHeight = pageMetadata?.height || 792;
+        if (!pageCache.has(specPage)) {
+          pageCache.set(specPage, mupdfDoc.loadPage(specPage));
+          const meta = doc.getPageMetadata(specPage);
+          pageHeightCache.set(specPage, meta?.height || 792);
+        }
+        const page = pageCache.get(specPage)!;
+        const pageHeight = pageHeightCache.get(specPage)!;
         // Try progressively shorter search strings
         const searchCandidates = [
           quoteText.slice(0, 200),
@@ -569,8 +578,13 @@ export function SpecExtractionPanel() {
   
   const GEO_HIGHLIGHT_COLOR = "#f59e0b"; // amber-500 for permanent geo highlights
 
-  /** Get quads for a geotechnical row: prefer the value (exact location), then quote. PDF coords. */
+  /** Get quads for a geotechnical row: prefer the value (exact location), then quote. PDF coords. Memoized per characteristicKey. */
   const getGeotechnicalQuads = (row: GeotechnicalSoilRow): { page: number; quads: number[][] } | null => {
+    // Return cached result if available (avoids expensive mupdf search calls on repeated hovers)
+    const cacheKey = row.characteristicKey;
+    if (geoQuadsCacheRef.current.has(cacheKey)) {
+      return geoQuadsCacheRef.current.get(cacheKey)!;
+    }
     if (!currentDocument) return null;
     const page = row.page ?? 0;
     if (pageCount > 0 && page >= pageCount) return null;
@@ -606,7 +620,11 @@ export function SpecExtractionPanel() {
       // Prefer value (e.g. "12–14%", "8.2%") so highlight lands on the actual value
       if (valueText.length >= 2 && valueText !== "N/A") {
         const valueQuads = runSearch([valueText, valueText.replace(/\s*–\s*/g, "-"), valueText.replace(/\s+/g, " ")]);
-        if (valueQuads) return { page, quads: valueQuads };
+        if (valueQuads) {
+          const result = { page, quads: valueQuads };
+          geoQuadsCacheRef.current.set(cacheKey, result);
+          return result;
+        }
       }
       // Fall back to quote (short location phrase)
       if (quoteText.length >= 2) {
@@ -615,11 +633,16 @@ export function SpecExtractionPanel() {
           quoteText.slice(0, 80),
           quoteText.split(/\s+/).slice(0, 12).join(" "),
         ]);
-        if (quoteQuads) return { page, quads: quoteQuads };
+        if (quoteQuads) {
+          const result = { page, quads: quoteQuads };
+          geoQuadsCacheRef.current.set(cacheKey, result);
+          return result;
+        }
       }
     } catch {
       // ignore
     }
+    geoQuadsCacheRef.current.set(cacheKey, null);
     return null;
   };
 
@@ -835,6 +858,8 @@ export function SpecExtractionPanel() {
     const sig = `${documentId}-${pageCount}-${geotechnicalSummary?.length ?? 0}-${(geotechnicalSummary?.map((r) => r.characteristicKey).join(",")) ?? ""}-${specs.length}-${visibleSpecsNow.map((s) => (s.spec_id ?? "") + (s.page ?? 0)).join(",")}`;
     if (geoSpecSyncSignatureRef.current === sig) return;
     geoSpecSyncSignatureRef.current = sig;
+    // Invalidate memoized geo quads cache on data change
+    geoQuadsCacheRef.current = new Map();
     if (geotechnicalSummary?.length) {
       syncGeotechnicalHighlightAnnotations(geotechnicalSummary);
     }
@@ -843,27 +868,39 @@ export function SpecExtractionPanel() {
     setSpecHighlights(documentId, specOnlyHighlights);
   }, [documentId, geotechnicalSummary, currentDocument, pageCount, specs]);
 
-  // Handle panel resize
+  // Handle panel resize — throttled via requestAnimationFrame to limit renders to display refresh rate
   useEffect(() => {
     if (!isResizing) return;
-    
+
     const handleMouseMove = (e: MouseEvent) => {
-      const newWidth = window.innerWidth - e.clientX;
-      // Constrain width between 200px and 800px
-      const constrainedWidth = Math.max(200, Math.min(800, newWidth));
-      setPanelWidth(constrainedWidth);
+      if (resizeRafRef.current !== null) return; // Already scheduled
+      resizeRafRef.current = requestAnimationFrame(() => {
+        const newWidth = window.innerWidth - e.clientX;
+        // Constrain width between 200px and 800px
+        const constrainedWidth = Math.max(200, Math.min(800, newWidth));
+        setPanelWidth(constrainedWidth);
+        resizeRafRef.current = null;
+      });
     };
-    
+
     const handleMouseUp = () => {
+      if (resizeRafRef.current !== null) {
+        cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
       setIsResizing(false);
     };
-    
+
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
-    
+
     return () => {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
+      if (resizeRafRef.current !== null) {
+        cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
     };
   }, [isResizing]);
   

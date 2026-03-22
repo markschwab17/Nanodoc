@@ -168,25 +168,41 @@ export class PDFDocumentOperations {
           }
           // Delete custom text annotations (FreeText with CustomAnnotation flag)
           // Also delete stamp annotations (FreeText with StampAnnotation flag, or Stamp type)
+          // Also delete image annotations (FreeText with ImageAnnotation/ImageType flag)
           if (pdfType === "FreeText" || pdfType === "Stamp") {
             try {
               const annotObj = pdfAnnot.getObject();
               if (annotObj) {
                 const customFlag = annotObj.get("CustomAnnotation");
                 const stampFlag = annotObj.get("StampAnnotation");
+                const imageFlag = annotObj.get("ImageAnnotation");
+                const imageTypeFlag = annotObj.get("ImageType");
                 // Check for custom text annotation (only for FreeText)
                 if (pdfType === "FreeText" && customFlag) {
                   const flagStr = customFlag.toString();
-                  if (flagStr === "true" || flagStr === "/true" || 
+                  if (flagStr === "true" || flagStr === "/true" ||
                       (typeof customFlag === 'boolean' && customFlag === true) ||
                       (customFlag.valueOf && customFlag.valueOf() === true)) {
+                    annotationsToDelete.push(pdfAnnot);
+                  }
+                }
+                // Check for image annotation (FreeText with ImageAnnotation or ImageType flag)
+                if (pdfType === "FreeText" && (imageFlag || imageTypeFlag)) {
+                  const checkFlag = (f: any) => {
+                    if (!f) return false;
+                    const s = f.toString();
+                    return s === "true" || s === "/true" || s === "embedded" || s === "/embedded" ||
+                      (typeof f === 'boolean' && f === true) ||
+                      (f.valueOf && (f.valueOf() === true || f.valueOf() === "embedded"));
+                  };
+                  if (checkFlag(imageFlag) || checkFlag(imageTypeFlag)) {
                     annotationsToDelete.push(pdfAnnot);
                   }
                 }
                 // Check for stamp annotation (FreeText with StampAnnotation flag, or Stamp type)
                 if (stampFlag) {
                   const flagStr = stampFlag.toString();
-                  if (flagStr === "true" || flagStr === "/true" || 
+                  if (flagStr === "true" || flagStr === "/true" ||
                       (typeof stampFlag === 'boolean' && stampFlag === true) ||
                       (stampFlag.valueOf && stampFlag.valueOf() === true)) {
                     annotationsToDelete.push(pdfAnnot);
@@ -318,8 +334,13 @@ export class PDFDocumentOperations {
 
   if (annotations && annotations.length > 0) {
 
+  // Filter out image annotations from sync — they are NOT stored as mupdf annotations
+  // in the saved PDF. Instead they are embedded as page content by pdf-lib after mupdf saves.
+  // This prevents duplicates on re-open (FreeText annotation + page content image).
+  const annotationsForSync = annotations.filter(a => a.type !== "image");
+
   try {
-    await this.syncAllAnnotationsExtended(document, annotations, pageInstances);
+    await this.syncAllAnnotationsExtended(document, annotationsForSync, pageInstances);
   } catch (syncError) {
     console.error('[PDFDocumentOperations] syncAllAnnotationsExtended failed:', syncError);
     console.warn('[PDFDocumentOperations] Continuing with PDF save despite annotation sync errors');
@@ -513,43 +534,46 @@ export class PDFDocumentOperations {
     writeAIMetadata(mupdfDoc, aiMetadata);
   }
 
-  // Set NoView (F flag bit 6 = 32) on all stamp annotations so the saved PDF hides them; we draw content with pdf-lib.
+  // Set NoView (F flag bit 6 = 32) on all stamp annotations so the saved PDF hides them;
+  // we draw their actual content with pdf-lib as page content that renders in all PDF viewers.
+  // Image annotations are NOT synced to mupdf during save (filtered out above), so NoView is not needed for them.
   const NO_VIEW_FLAG = 32;
   const stampAnnots = annotations ? annotations.filter((a): a is Annotation =>
     a.type === "stamp" && !!a.stampData && !!a.pdfAnnotation && ImageStampEmbedder.isStampToEmbed(a)
   ) : [];
-  const stampFlagsBefore: number[] = [];
-  for (const annot of stampAnnots) {
+  const annotsToHide = stampAnnots;
+  const flagsBefore: number[] = [];
+  for (const annot of annotsToHide) {
     try {
       const annotObj = annot.pdfAnnotation!.getObject?.();
       if (annotObj && this.mupdf?.newNumber) {
         const fObj = annotObj.get?.("F");
         const prev = fObj != null && typeof fObj.valueOf === "function" ? (fObj.valueOf() | 0) : 0;
-        stampFlagsBefore.push(prev);
+        flagsBefore.push(prev);
         annotObj.put("F", this.mupdf.newNumber(prev | NO_VIEW_FLAG));
         if (typeof annotObj.update === "function") annotObj.update();
       } else {
-        stampFlagsBefore.push(0);
+        flagsBefore.push(0);
         if (typeof annot.pdfAnnotation!.getFlags === "function" && typeof annot.pdfAnnotation!.setFlags === "function") {
           const flags = annot.pdfAnnotation!.getFlags();
           annot.pdfAnnotation!.setFlags(flags | NO_VIEW_FLAG);
         }
       }
     } catch (e) {
-      stampFlagsBefore.push(0);
-      console.warn("Could not set NoView on stamp annotation:", e);
+      flagsBefore.push(0);
+      console.warn("Could not set NoView on annotation:", e);
     }
   }
 
   const buffer = pdfDoc.saveToBuffer();
   let savedData = buffer.asUint8Array();
 
-  for (let i = 0; i < stampAnnots.length; i++) {
-    const annot = stampAnnots[i];
+  for (let i = 0; i < annotsToHide.length; i++) {
+    const annot = annotsToHide[i];
     try {
       const annotObj = annot.pdfAnnotation!.getObject?.();
       if (annotObj && this.mupdf?.newNumber) {
-        const prev = stampFlagsBefore[i] ?? 0;
+        const prev = flagsBefore[i] ?? 0;
         annotObj.put("F", this.mupdf.newNumber(prev & ~NO_VIEW_FLAG));
         if (typeof annotObj.update === "function") annotObj.update();
       } else if (typeof annot.pdfAnnotation!.setFlags === "function") {
@@ -562,18 +586,20 @@ export class PDFDocumentOperations {
   }
 
   const stampsToEmbed = annotations ? annotations.filter(annot => ImageStampEmbedder.isStampToEmbed(annot)) : [];
+  const imagesToEmbed = annotations ? annotations.filter(annot => annot.type === "image" && !!annot.imageData) : [];
+  const allToEmbed = [...stampsToEmbed, ...imagesToEmbed];
 
-  if (stampsToEmbed.length > 0) {
+  if (allToEmbed.length > 0) {
     try {
       const { ImageStampEmbedder } = await import('./ImageStampEmbedder');
       const embedder = new ImageStampEmbedder();
-      savedData = await embedder.embedStamps(savedData, stampsToEmbed, aiMetadata ?? undefined);
+      savedData = await embedder.embedStamps(savedData, allToEmbed, aiMetadata ?? undefined);
     } catch (embedError) {
-      console.error('[PDFDocumentOperations] Failed to embed stamps:', embedError);
+      console.error('[PDFDocumentOperations] Failed to embed stamps/images:', embedError);
     }
   }
 
-  if (aiMetadata && stampsToEmbed.length === 0) {
+  if (aiMetadata && allToEmbed.length === 0) {
     try {
       return await attachAIMetadataToPdfBuffer(savedData, aiMetadata);
     } catch (e) {
@@ -1102,7 +1128,59 @@ export class PDFDocumentOperations {
       }
     }
   }
-  
+
+  // Before syncing image annotations, delete ALL image FreeText annotations from this page
+  // This prevents duplicates when image annotations are moved and saved multiple times
+  const hasImageAnnotations = pageAnnotations.some(annot => annot.type === "image");
+  if (hasImageAnnotations) {
+    const currentPageAnnots = page.getAnnotations();
+    const imageAnnotationsToDelete: any[] = [];
+
+    for (const pdfAnnot of currentPageAnnots) {
+      try {
+        const pdfType = pdfAnnot.getType();
+        if (pdfType === "FreeText") {
+          try {
+            const annotObj = pdfAnnot.getObject();
+            if (annotObj) {
+              const imageFlag = annotObj.get("ImageAnnotation");
+              const imageTypeFlag = annotObj.get("ImageType");
+              const checkFlag = (f: any) => {
+                if (!f) return false;
+                const s = f.toString();
+                return s === "true" || s === "/true" || s === "embedded" || s === "/embedded" ||
+                  (typeof f === 'boolean' && f === true) ||
+                  (f.valueOf && (f.valueOf() === true || f.valueOf() === "embedded"));
+              };
+              if (checkFlag(imageFlag) || checkFlag(imageTypeFlag)) {
+                imageAnnotationsToDelete.push(pdfAnnot);
+              }
+            }
+          } catch (e) {
+            // Skip if we can't check the flag
+          }
+        }
+      } catch (e) {
+        // Skip if we can't determine type
+      }
+    }
+
+    for (const pdfAnnot of imageAnnotationsToDelete) {
+      try {
+        page.deleteAnnotation(pdfAnnot);
+      } catch (deleteError) {
+        console.warn(`Could not delete image annotation:`, deleteError);
+      }
+    }
+
+    // Clear pdfAnnotation references for all image annotations we're about to sync
+    for (const annot of pageAnnotations) {
+      if (annot.type === "image") {
+        annot.pdfAnnotation = undefined;
+      }
+    }
+  }
+
   // CRITICAL FIX: Before syncing highlights and drawings, delete ALL Ink and Highlight annotations from this page
   // This prevents duplicates when highlights/drawings are moved and saved multiple times
   // Same approach as text, shapes, and form fields - delete all, then recreate from store
@@ -2048,27 +2126,17 @@ export class PDFDocumentOperations {
   }
 
 
-  // Update image annotations
+  // Update image annotations — keep contents empty so mupdf doesn't render JSON text
+  // Image data lives in the annotation store and is embedded as page content via pdf-lib on save.
 
   if (annot.type === "image" && annot.imageData) {
 
-  const imageMetadata = {
+  annot.pdfAnnotation.setContents("");
 
-  type: "image",
-
-  imageData: annot.imageData,
-
-  imageWidth: annot.imageWidth,
-
-  imageHeight: annot.imageHeight,
-
-  preserveAspectRatio: annot.preserveAspectRatio !== false,
-
-  rotation: annot.rotation || 0,
-
-  };
-
-  annot.pdfAnnotation.setContents(JSON.stringify(imageMetadata));
+  // Update rect position
+  const w = annot.width || annot.imageWidth || 200;
+  const h = annot.height || annot.imageHeight || 200;
+  annot.pdfAnnotation.setRect([annot.x, annot.y, annot.x + w, annot.y + h]);
 
   }
 
