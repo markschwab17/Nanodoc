@@ -14,6 +14,7 @@ import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { CTOSplitScreenToolbar } from "@/features/toolbar/CTOSplitScreenToolbar";
 import { AISidePanel } from "@/features/specs/AISidePanel";
+import { RedlinePanel } from "@/features/redline/RedlinePanel";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
 import { HighlightToolbar } from "@/features/viewer/HighlightToolbar";
 import { DrawToolbar } from "@/features/viewer/DrawToolbar";
@@ -918,6 +919,7 @@ function Editor() {
         )}
         {!splitScreenMode && !esignMode && (
           <aside className="flex border-l bg-secondary/50 overflow-hidden h-full">
+            <RedlinePanel />
             <AISidePanel />
             <div className="w-16 flex flex-col overflow-hidden shrink-0">
               <Toolbar />

@@ -44,6 +44,8 @@ export interface CiviltakeoffViewParams {
   signer_name: string | null;
   /** JSON-encoded array of recipients for esign_prepare mode. */
   esign_recipients: string | null;
+  /** Contract ID for contract_redline mode. */
+  contract_id: string | null;
 }
 
 /**
@@ -74,6 +76,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const signer_email = params.get("signer_email") ?? null;
   const signer_name = params.get("signer_name") ?? null;
   const esign_recipients = params.get("esign_recipients") ?? null;
+  const contract_id = params.get("contract_id") ?? null;
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -108,6 +111,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     signer_email,
     signer_name,
     esign_recipients,
+    contract_id,
   };
 }
 

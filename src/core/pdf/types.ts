@@ -11,7 +11,7 @@ export interface PageReorderOperation {
 
 export interface Annotation {
   id: string;
-  type: "text" | "highlight" | "note" | "callout" | "redact" | "image" | "formField" | "draw" | "shape" | "stamp" | "signatureField";
+  type: "text" | "highlight" | "note" | "callout" | "redact" | "image" | "formField" | "draw" | "shape" | "stamp" | "signatureField" | "strikethrough" | "comment";
   pageNumber: number;
   x: number;
   y: number;
@@ -95,6 +95,14 @@ export interface Annotation {
   signatureFieldStatus?: "empty" | "filled";
   /** Base64 PNG of the signature image after the recipient signs. */
   signatureImageData?: string;
+
+  // For redline/contract review annotations
+  commentAuthor?: string;
+  commentContent?: string;
+  redlineSeverity?: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  redlineSuggestion?: string;
+  redlineSourceId?: string;
+  redlineCategory?: string;
 }
 
 export interface StampData {

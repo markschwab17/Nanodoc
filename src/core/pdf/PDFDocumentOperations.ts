@@ -94,6 +94,11 @@ export class PDFDocumentOperations {
 
   await this.annotationOps.addHighlightAnnotation(document, annot);
 
+  } else if (annot.type === "strikethrough") {
+
+  // Use the same highlight annotation method but it will be handled as StrikeOut in the extended sync
+  await this.annotationOps.addHighlightAnnotation(document, annot);
+
   } else if (annot.type === "callout") {
 
   await this.annotationOps.addCalloutAnnotation(document, annot);
@@ -160,6 +165,14 @@ export class PDFDocumentOperations {
           }
           // Delete Highlight annotations (used by text highlights)
           if (pdfType === "Highlight") {
+            annotationsToDelete.push(pdfAnnot);
+          }
+          // Delete StrikeOut annotations (used by strikethrough/redline)
+          if (pdfType === "StrikeOut") {
+            annotationsToDelete.push(pdfAnnot);
+          }
+          // Delete Popup annotations (associated with StrikeOut comments)
+          if (pdfType === "Popup") {
             annotationsToDelete.push(pdfAnnot);
           }
           // Delete shape annotations (Line, Square, Circle)
@@ -678,6 +691,10 @@ export class PDFDocumentOperations {
 
   await this.addHighlightAnnotationToPage(page, annot, 0);
 
+  } else if (annot.type === "strikethrough") {
+
+  await this.addStrikethroughAnnotationToPage(page, annot);
+
   } else if (annot.type === "callout") {
 
   await this.addCalloutAnnotationToPage(page, annot, 0);
@@ -796,6 +813,61 @@ export class PDFDocumentOperations {
 
   annot.update();
 
+  }
+
+
+  private async addStrikethroughAnnotationToPage(page: any, annotation: Annotation): Promise<void> {
+    if (!annotation.quads || annotation.quads.length === 0) return;
+
+    // Create a native StrikeOut annotation — standard PDF type supported by all viewers
+    const annot = page.createAnnotation("StrikeOut");
+
+    const quadList: number[] = [];
+    for (const quad of annotation.quads) {
+      quadList.push(...quad);
+    }
+    annot.setQuadPoints(quadList);
+
+    if (annotation.color) {
+      const color = parseColor(annotation.color);
+      annot.setColor(color);
+    }
+
+    // Set the comment/note text as Contents
+    const commentParts: string[] = [];
+    if (annotation.commentContent) commentParts.push(annotation.commentContent);
+    if (annotation.redlineSuggestion) commentParts.push(`Suggested: ${annotation.redlineSuggestion}`);
+    const contentsText = commentParts.join('\n\n');
+    if (contentsText) annot.setContents(contentsText);
+
+    // Create a Popup annotation so PDF viewers show the comment on click
+    if (contentsText) {
+      try {
+        const pageBounds = page.getBounds();
+        const pageHeight = pageBounds[3] - pageBounds[1];
+        const popup = page.createAnnotation("Popup");
+        const popupRect = [
+          (annotation.x || 72) + (annotation.width || 100) + 10,
+          pageHeight - (annotation.y || 0) - 150,
+          (annotation.x || 72) + (annotation.width || 100) + 250,
+          pageHeight - (annotation.y || 0),
+        ];
+        popup.setRect(popupRect);
+
+        const annotObj = annot.getObject();
+        const popupObj = popup.getObject();
+        if (annotObj && popupObj) {
+          annotObj.put("Popup", popupObj);
+          popupObj.put("Parent", annotObj);
+          try { popupObj.put("Open", false); } catch { /* ignore */ }
+        }
+        popup.update();
+      } catch (e) {
+        console.warn("Could not create popup for strikethrough:", e);
+      }
+    }
+
+    annot.update();
   }
 
 
@@ -2398,6 +2470,9 @@ export class PDFDocumentOperations {
   await this.annotationOps.addTextAnnotation(document, annot);
 
   } else if (annot.type === "highlight") {
+  await this.annotationOps.addHighlightAnnotation(document, annot);
+
+  } else if (annot.type === "strikethrough") {
   await this.annotationOps.addHighlightAnnotation(document, annot);
 
   } else if (annot.type === "callout") {

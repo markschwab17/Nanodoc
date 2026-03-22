@@ -22,6 +22,8 @@ import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore"
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useESignStore } from "@/shared/stores/esignStore";
+import { useRedlineStore } from "@/shared/stores/redlineStore";
+import type { ContractRedlineResponse } from "@/types/redline";
 
 export default function CiviltakeoffView() {
   const location = useLocation();
@@ -306,6 +308,208 @@ export default function CiviltakeoffView() {
           }
           // Enter read mode for signing
           ui.setReadMode(true);
+        }
+
+        // Contract redline mode: fetch redline data from CTO and inject annotations
+        if (params.mode === "contract_redline" && params.contract_id) {
+          try {
+            const redlineRes = await fetch(
+              `${params.api_origin}/api/nanodoc/contract-redlines?token=${encodeURIComponent(params.token!)}&contract_id=${encodeURIComponent(params.contract_id)}`
+            );
+            if (redlineRes.ok) {
+              const redlineData: ContractRedlineResponse = await redlineRes.json();
+              const doc = usePDFStore.getState().getCurrentDocument();
+              if (doc && redlineData.annotations) {
+                const docId = doc.getId();
+                for (const ann of redlineData.annotations) {
+                  usePDFStore.getState().addAnnotation(docId, {
+                    id: ann.id,
+                    type: ann.type,
+                    pageNumber: ann.pageNumber,
+                    x: ann.x || 72,
+                    y: ann.y || 720,
+                    width: ann.width,
+                    height: ann.height,
+                    selectedText: ann.selectedText,
+                    quads: ann.quads || [],
+                    color: ann.color,
+                    commentAuthor: ann.commentAuthor,
+                    commentContent: ann.commentContent,
+                    redlineSeverity: ann.redlineSeverity,
+                    redlineSuggestion: ann.redlineSuggestion,
+                    redlineSourceId: ann.redlineSourceId,
+                    redlineCategory: ann.redlineCategory,
+                  });
+                }
+
+                // Client-side quad resolution: search PDF text for clause positions
+                // Follows the exact pattern from PDFViewer.tsx searchQuoteOnPage
+                try {
+                  const mupdfDoc = doc.getMupdfDocument();
+                  if (mupdfDoc) {
+                    const annotations = usePDFStore.getState().getAnnotations(docId);
+                    for (const annot of annotations) {
+                      if (annot.type === "strikethrough" && annot.selectedText && (!annot.quads || annot.quads.length === 0)) {
+                        try {
+                          const pageMetadata = doc.getPageMetadata(annot.pageNumber);
+                          const pageHeight = pageMetadata?.height || 792;
+
+                          // Normalize whitespace
+                          const normalized = annot.selectedText.replace(/\s+/g, " ").trim();
+
+                          // Try progressively shorter snippets
+                          const candidates = [normalized];
+                          for (const len of [80, 40]) {
+                            if (normalized.length > len) {
+                              const sub = normalized.slice(0, len);
+                              const lastSpace = sub.lastIndexOf(" ");
+                              candidates.push(lastSpace > 10 ? sub.slice(0, lastSpace) : sub);
+                            }
+                          }
+
+                          const mupdfPage = mupdfDoc.loadPage(annot.pageNumber);
+                          let searchMatches: any[] | null = null;
+                          for (const candidate of candidates) {
+                            const results = mupdfPage.search(candidate, 10);
+                            if (results && results.length > 0) {
+                              searchMatches = results;
+                              break;
+                            }
+                          }
+
+                          if (searchMatches && searchMatches.length > 0) {
+                            // page.search() returns Quad[][] — outer = hits, inner = quads per hit
+                            // Quad = [x0,y0,x1,y1,x2,y2,x3,y3] in display coords (Y=0 at top)
+                            const pdfQuads: number[][] = [];
+                            for (const hit of searchMatches) {
+                              if (!Array.isArray(hit)) continue;
+                              for (const quad of hit) {
+                                if (!Array.isArray(quad) || quad.length < 8) continue;
+                                // Convert display coords → PDF coords (flip Y)
+                                pdfQuads.push([
+                                  quad[0], pageHeight - quad[1],
+                                  quad[2], pageHeight - quad[3],
+                                  quad[4], pageHeight - quad[5],
+                                  quad[6], pageHeight - quad[7],
+                                ]);
+                              }
+                            }
+                            if (pdfQuads.length > 0) {
+                              usePDFStore.getState().updateAnnotation(docId, annot.id, { quads: pdfQuads });
+                            }
+                          }
+                        } catch (quadErr) {
+                          console.warn("[CiviltakeoffView] Quad resolution failed for annotation:", annot.id, quadErr);
+                        }
+                      }
+                    }
+                  }
+                } catch (quadErr) {
+                  console.warn("[CiviltakeoffView] Client-side quad resolution failed:", quadErr);
+                }
+
+                // Set risk score and open the redline panel
+                useRedlineStore.getState().setRiskScore(redlineData.riskScore);
+                useRedlineStore.getState().setPanelOpen(true);
+              }
+            } else {
+              console.warn("[CiviltakeoffView] Failed to fetch contract redlines:", redlineRes.status);
+            }
+          } catch (err) {
+            console.warn("[CiviltakeoffView] Contract redline injection failed:", err);
+          }
+          // Ensure read mode is off so annotations are interactive
+          ui.setReadMode(false);
+        }
+
+        // Auto-highlight soils extraction results when opening a soils report
+        if (params.doc === "soils_report" && params.token) {
+          try {
+            const highlightRes = await fetch(
+              `${params.api_origin}/api/nanodoc/soils-highlights?token=${encodeURIComponent(params.token)}`
+            );
+            if (highlightRes.ok) {
+              const highlightData = await highlightRes.json();
+              const doc = usePDFStore.getState().getCurrentDocument();
+              if (doc && highlightData.annotations && highlightData.annotations.length > 0) {
+                const docId = doc.getId();
+                for (const ann of highlightData.annotations) {
+                  usePDFStore.getState().addAnnotation(docId, {
+                    id: ann.id,
+                    type: "highlight",
+                    pageNumber: ann.pageNumber,
+                    x: 72,
+                    y: 720,
+                    selectedText: ann.selectedText,
+                    quads: [],
+                    color: ann.color || "#FCD34D",
+                    opacity: 0.4,
+                    highlightMode: "text",
+                    commentContent: ann.commentContent,
+                    commentAuthor: ann.commentAuthor || "",
+                  });
+                }
+
+                // Client-side quad resolution for soils highlights
+                try {
+                  const mupdfDoc = doc.getMupdfDocument();
+                  if (mupdfDoc) {
+                    const annotations = usePDFStore.getState().getAnnotations(docId);
+                    for (const annot of annotations) {
+                      if (annot.id.startsWith("soils_highlight_") && annot.selectedText && (!annot.quads || annot.quads.length === 0)) {
+                        try {
+                          const pageMetadata = doc.getPageMetadata(annot.pageNumber);
+                          const pageHeight = pageMetadata?.height || 792;
+                          const normalized = annot.selectedText.replace(/\s+/g, " ").trim();
+                          const candidates = [normalized];
+                          for (const len of [80, 40]) {
+                            if (normalized.length > len) {
+                              const sub = normalized.slice(0, len);
+                              const lastSpace = sub.lastIndexOf(" ");
+                              candidates.push(lastSpace > 10 ? sub.slice(0, lastSpace) : sub);
+                            }
+                          }
+                          const mupdfPage = mupdfDoc.loadPage(annot.pageNumber);
+                          let searchMatches: any[] | null = null;
+                          for (const candidate of candidates) {
+                            const results = mupdfPage.search(candidate, 10);
+                            if (results && results.length > 0) {
+                              searchMatches = results;
+                              break;
+                            }
+                          }
+                          if (searchMatches && searchMatches.length > 0) {
+                            const pdfQuads: number[][] = [];
+                            for (const hit of searchMatches) {
+                              if (!Array.isArray(hit)) continue;
+                              for (const quad of hit) {
+                                if (!Array.isArray(quad) || quad.length < 8) continue;
+                                pdfQuads.push([
+                                  quad[0], pageHeight - quad[1],
+                                  quad[2], pageHeight - quad[3],
+                                  quad[4], pageHeight - quad[5],
+                                  quad[6], pageHeight - quad[7],
+                                ]);
+                              }
+                            }
+                            if (pdfQuads.length > 0) {
+                              usePDFStore.getState().updateAnnotation(docId, annot.id, { quads: pdfQuads });
+                            }
+                          }
+                        } catch (quadErr) {
+                          console.warn("[CiviltakeoffView] Soils highlight quad resolution failed:", annot.id, quadErr);
+                        }
+                      }
+                    }
+                  }
+                } catch (quadErr) {
+                  console.warn("[CiviltakeoffView] Soils highlight quad resolution failed:", quadErr);
+                }
+              }
+            }
+          } catch (err) {
+            console.warn("[CiviltakeoffView] Soils highlight injection failed:", err);
+          }
         }
 
         // Auto-run geotechnical extraction when opened from CTO soils report

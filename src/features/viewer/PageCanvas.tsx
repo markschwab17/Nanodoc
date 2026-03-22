@@ -19,6 +19,7 @@ import { ImageAnnotation } from "./ImageAnnotation";
 import { StampAnnotation } from "./StampAnnotation";
 import { FormField } from "./FormField";
 import { CalloutAnnotation } from "./CalloutAnnotation";
+import { RedlinePopupPortal } from "@/features/redline/RedlinePopup";
 import { FormFieldHandles } from "./FormFieldHandles";
 import { ShapeHandles } from "./ShapeHandles";
 import { HorizontalRuler } from "./HorizontalRuler";
@@ -432,7 +433,7 @@ export const PageCanvas = React.memo(function PageCanvas({
       }
       
       // Only handle if we're in the middle of a highlight drag
-      if (activeTool === "highlight" && isSelecting && selectionStart && overlayHighlightPath.length > 0 && !selectionEnd) {
+      if ((activeTool === "highlight" || activeTool === "strikethrough") && isSelecting && selectionStart && overlayHighlightPath.length > 0 && !selectionEnd) {
         // Use the last point in the path as selectionEnd
         const lastPoint = overlayHighlightPath[overlayHighlightPath.length - 1];
         if (lastPoint) {
@@ -1549,7 +1550,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     }
 
     // Initialize overlay path for highlight tool - will be set based on text detection
-    if (activeTool === "highlight") {
+    if ((activeTool === "highlight" || activeTool === "strikethrough")) {
       const coords = getPDFCoordinates(e);
       if (coords) {
         // Clear previous state
@@ -1595,8 +1596,8 @@ export const PageCanvas = React.memo(function PageCanvas({
           isSelecting,
           selectionStart,
           setSelectedTextSpans,
-          overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
-          setOverlayHighlightPath: activeTool === "highlight" ? setOverlayHighlightPath : undefined,
+          overlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? overlayHighlightPath : undefined,
+          setOverlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? setOverlayHighlightPath : undefined,
           setIsHighlightTextMode,
         };
         
@@ -1863,7 +1864,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     }
     
     // Track mouse position for cursor preview (when highlight tool is active)
-    if (activeTool === "highlight" && !isDragging && !isSelecting) {
+    if ((activeTool === "highlight" || activeTool === "strikethrough") && !isDragging && !isSelecting) {
       if (coords) {
         const canvasPos = pdfToCanvas(coords.x, coords.y);
         // Canvas pixel = display coordinates (1:1 mapping)
@@ -1937,14 +1938,14 @@ export const PageCanvas = React.memo(function PageCanvas({
       if (coords) {
         // For highlight tool with shift, the tool handler will update selectionEnd with locked coordinates
         // So we should use the updated selectionEnd for path tracking, not raw coords
-        if (activeTool === "highlight" && e.shiftKey) {
+        if ((activeTool === "highlight" || activeTool === "strikethrough") && e.shiftKey) {
           // Let the tool handler update selectionEnd first, then we'll track it
           setSelectionEnd(coords);
         } else {
           setSelectionEnd(coords);
           
           // Track overlay path directly here for live preview - update immediately
-          if (activeTool === "highlight") {
+          if ((activeTool === "highlight" || activeTool === "strikethrough")) {
             setOverlayHighlightPath(prev => {
               // Always add the new point for smooth continuous preview
               // Only skip if it's exactly the same (within very small tolerance)
@@ -1961,7 +1962,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     }
     
     // For selectText or highlight tool, check if hovering over text for cursor changes
-    if ((activeTool === "selectText" || activeTool === "highlight") && !isSelecting && !selectionStart) {
+    if ((activeTool === "selectText" || (activeTool === "highlight" || activeTool === "strikethrough")) && !isSelecting && !selectionStart) {
       const coords = getPDFCoordinates(e);
       if (coords && allTextSpansRef.current.length > 0) {
         // Check if mouse is over any text span
@@ -2067,9 +2068,26 @@ export const PageCanvas = React.memo(function PageCanvas({
               break;
             }
           }
+        } else if (annot.type === "strikethrough") {
+          // Reuse highlight quad hit-testing for strikethroughs
+          if (annot.quads && annot.quads.length > 0) {
+            const isOverQuad = annot.quads.some((quad: number[]) => {
+              if (!Array.isArray(quad) || quad.length < 8) return false;
+              const minX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+              const minY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+              const maxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+              const maxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+              return coords.x >= minX && coords.x <= maxX && coords.y >= minY && coords.y <= maxY;
+            });
+            if (isOverQuad) {
+              setHoveredAnnotationId(annot.id);
+              foundHover = true;
+              break;
+            }
+          }
         }
       }
-      
+
       if (!foundHover) {
         setHoveredAnnotationId(null);
       }
@@ -2165,7 +2183,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     }
     
     // Handle highlight tool mouse move for overlay path and shift+drag
-    if (activeTool === "highlight" && isSelecting && selectionStart && currentDocument) {
+    if ((activeTool === "highlight" || activeTool === "strikethrough") && isSelecting && selectionStart && currentDocument) {
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler && toolHandler.handleMouseMove) {
         const toolContext = {
@@ -2188,7 +2206,7 @@ export const PageCanvas = React.memo(function PageCanvas({
             setSelectionEnd(coords);
             // Track overlay path using the updated selectionEnd (includes shift-locked coordinates)
             // Only add to overlay path if NOT in text mode (text mode shows text selection preview instead)
-            if (coords && activeTool === "highlight" && !isHighlightTextMode) {
+            if (coords && (activeTool === "highlight" || activeTool === "strikethrough") && !isHighlightTextMode) {
               setOverlayHighlightPath(prev => {
                 // Always add the first point if path is empty
                 if (prev.length === 0) {
@@ -2234,8 +2252,8 @@ export const PageCanvas = React.memo(function PageCanvas({
           isSelecting,
           selectionStart,
           setSelectedTextSpans,
-          overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
-          setOverlayHighlightPath: activeTool === "highlight" ? setOverlayHighlightPath : undefined,
+          overlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? overlayHighlightPath : undefined,
+          setOverlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? setOverlayHighlightPath : undefined,
           setIsHighlightTextMode,
         };
         
@@ -2811,14 +2829,14 @@ export const PageCanvas = React.memo(function PageCanvas({
           isSelecting,
           selectionStart,
           setSelectedTextSpans,
-          overlayHighlightPath: activeTool === "highlight" ? overlayHighlightPath : undefined,
-          setOverlayHighlightPath: activeTool === "highlight" ? setOverlayHighlightPath : undefined,
+          overlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? overlayHighlightPath : undefined,
+          setOverlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? setOverlayHighlightPath : undefined,
           setIsHighlightTextMode,
         };
         
         // For highlight tool, ensure we have selectionEnd from the path if it's missing
         let finalSelectionEnd = selectionEnd;
-        if (activeTool === "highlight") {
+        if ((activeTool === "highlight" || activeTool === "strikethrough")) {
           if (!finalSelectionEnd && selectionStart && overlayHighlightPath.length > 0) {
             // Use the last point in the path as selectionEnd
             finalSelectionEnd = overlayHighlightPath[overlayHighlightPath.length - 1];
@@ -2841,7 +2859,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     
     // Clean up overlay highlight path - but only after highlight is committed
     // Don't clear if we're still in the process of creating it
-    if (activeTool === "highlight" && !isSelecting) {
+    if ((activeTool === "highlight" || activeTool === "strikethrough") && !isSelecting) {
       // Use setTimeout to ensure cleanup happens after highlight is committed
       // Give it a longer delay to ensure the tool handler has finished
       setTimeout(() => {
@@ -2910,7 +2928,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     ? "text"
     : activeTool === "selectText"
     ? "text" // Always show text cursor so user sees the tool is active (e.g. in CTO split screen)
-    : activeTool === "highlight"
+    : (activeTool === "highlight" || activeTool === "strikethrough")
     ? isSelecting 
       ? "text" // Show text cursor while selecting/dragging
       : isHoveringOverText
@@ -2942,7 +2960,7 @@ export const PageCanvas = React.memo(function PageCanvas({
       onMouseUp={handleMouseUp}
       onMouseLeave={(e) => {
         // If we're in the middle of a highlight drag, commit it before cleaning up
-        if (activeTool === "highlight" && isSelecting && selectionStart && overlayHighlightPath.length > 0) {
+        if ((activeTool === "highlight" || activeTool === "strikethrough") && isSelecting && selectionStart && overlayHighlightPath.length > 0) {
           // Use the last point in the path as selectionEnd to ensure we commit the highlight
           const lastPoint = overlayHighlightPath[overlayHighlightPath.length - 1];
           if (lastPoint) {
@@ -3095,7 +3113,7 @@ export const PageCanvas = React.memo(function PageCanvas({
 
         {/* Render overlay highlight preview - only show in overlay mode (not text mode) */}
         {/* Need at least 2 points for a polyline to be visible */}
-        {activeTool === "highlight" && !isHighlightTextMode && overlayHighlightPath.length >= 2 && (isSelecting || selectionStart) && (() => {
+        {(activeTool === "highlight" || activeTool === "strikethrough") && !isHighlightTextMode && overlayHighlightPath.length >= 2 && (isSelecting || selectionStart) && (() => {
           const { highlightColor, highlightStrokeWidth, highlightOpacity } = useUIStore.getState();
           
           // If shift is pressed and we have start and end, show straight line preview
@@ -3179,7 +3197,7 @@ export const PageCanvas = React.memo(function PageCanvas({
         })()}
 
         {/* Cursor preview circle for highlight tool */}
-        {activeTool === "highlight" && !isSelecting && mousePosition && (() => {
+        {(activeTool === "highlight" || activeTool === "strikethrough") && !isSelecting && mousePosition && (() => {
           const { highlightColor, highlightStrokeWidth, highlightOpacity } = useUIStore.getState();
           
           return (
@@ -3452,14 +3470,14 @@ export const PageCanvas = React.memo(function PageCanvas({
         {(() => {
           // Show highlights if we have spans, whether we're dragging or not
           // Also show for highlight tool to give live preview of text being selected
-          const shouldShowHighlights = (activeTool === "selectText" || activeTool === "highlight") && selectedTextSpans.length > 0;
+          const shouldShowHighlights = (activeTool === "selectText" || (activeTool === "highlight" || activeTool === "strikethrough")) && selectedTextSpans.length > 0;
           
           if (!shouldShowHighlights) return null;
           
           // Get highlight color for preview when using highlight tool
           const { highlightColor, highlightOpacity } = useUIStore.getState();
-          const previewColor = activeTool === "highlight" ? highlightColor : null;
-          const isHighlightPreview = activeTool === "highlight" && isSelecting;
+          const previewColor = activeTool === "strikethrough" ? "#EF4444" : (activeTool === "highlight" || activeTool === "strikethrough") ? highlightColor : null;
+          const isHighlightPreview = (activeTool === "highlight" || activeTool === "strikethrough") && isSelecting;
           
           // Group spans by line (same Y coordinate, within tolerance)
           const lineGroups: { [key: string]: typeof selectedTextSpans } = {};
@@ -3929,9 +3947,10 @@ export const PageCanvas = React.memo(function PageCanvas({
                     "absolute",
                     activeTool === "select" ? "cursor-pointer" : ""
                   )}
-                  style={{ 
-                    pointerEvents: activeTool === "select" ? "auto" : "none", 
-                    zIndex: 30,
+                  style={{
+                    pointerEvents: activeTool === "select" ? "auto" : "none",
+                    zIndex: isSelected ? 50 : 30,
+                    overflow: "visible",
                     // Position the clickable area at the bounding box
                     left: `${hoverBoxX}px`,
                     top: `${hoverBoxY}px`,
@@ -4011,9 +4030,199 @@ export const PageCanvas = React.memo(function PageCanvas({
                       />
                     );
                   })}
+                  {/* Comment indicator icon — shown when highlight has a comment */}
+                  {(annot.commentContent || annot.redlineSuggestion) && (
+                    <div
+                      className="absolute"
+                      style={{
+                        right: "-24px",
+                        top: "-4px",
+                        width: "20px",
+                        height: "20px",
+                        pointerEvents: "auto",
+                        cursor: "pointer",
+                        zIndex: 32,
+                      }}
+                      title="Click to view comment"
+                    >
+                      <svg viewBox="0 0 20 20" fill={highlightColor} className="w-5 h-5 drop-shadow-sm">
+                        <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v6a2 2 0 01-2 2H8l-4 3V13H4a2 2 0 01-2-2V5z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                  )}
+                  {/* Comment popup — always shown when selected so user can add/edit comments */}
+                  {isSelected && (
+                    <RedlinePopupPortal
+                      annotation={annot}
+                      anchorRef={annot.id}
+                      onClose={() => {
+                        setEditingAnnotation(null);
+                        setHoveredAnnotationId(null);
+                      }}
+                    />
+                  )}
                 </div>
               );
             }
+          } else if (annot.type === "strikethrough") {
+            // Render strikethrough annotations — red line through text quads
+            if (annot.quads && annot.quads.length > 0) {
+              const strikeColor = annot.color || "#EF4444";
+              const isHovered = hoveredAnnotationId === annot.id && activeTool === "select";
+              const isSelected = editingAnnotation?.id === annot.id;
+
+              // Calculate bounding box for all quads
+              let minQuadX = Infinity, minQuadY = Infinity, maxQuadX = -Infinity, maxQuadY = -Infinity;
+              annot.quads.forEach((quad: number[]) => {
+                if (Array.isArray(quad) && quad.length >= 8) {
+                  minQuadX = Math.min(minQuadX, quad[0], quad[2], quad[4], quad[6]);
+                  minQuadY = Math.min(minQuadY, quad[1], quad[3], quad[5], quad[7]);
+                  maxQuadX = Math.max(maxQuadX, quad[0], quad[2], quad[4], quad[6]);
+                  maxQuadY = Math.max(maxQuadY, quad[1], quad[3], quad[5], quad[7]);
+                }
+              });
+
+              const minCanvas = pdfToCanvas(minQuadX, minQuadY);
+              const maxCanvas = pdfToCanvas(maxQuadX, maxQuadY);
+              const hoverBoxX = Math.min(minCanvas.x, maxCanvas.x);
+              const hoverBoxY = Math.min(minCanvas.y, maxCanvas.y);
+              const hoverBoxWidth = Math.abs(maxCanvas.x - minCanvas.x);
+              const hoverBoxHeight = Math.abs(maxCanvas.y - minCanvas.y);
+
+              return (
+                <div
+                  key={annot.id}
+                  data-annotation-id={annot.id}
+                  className={cn("absolute", activeTool === "select" ? "cursor-pointer" : "")}
+                  style={{
+                    pointerEvents: activeTool === "select" ? "auto" : "none",
+                    zIndex: isSelected ? 50 : 30,
+                    left: `${hoverBoxX}px`,
+                    top: `${hoverBoxY}px`,
+                    width: `${hoverBoxWidth}px`,
+                    height: `${hoverBoxHeight}px`,
+                    overflow: "visible",
+                  }}
+                  onClick={(e) => {
+                    if (activeTool === "select") {
+                      e.stopPropagation();
+                      setEditingAnnotation(annot);
+                      setAnnotationText(annot.content || "");
+                      setHoveredAnnotationId(annot.id);
+                    }
+                  }}
+                  onMouseEnter={() => { if (activeTool === "select") setHoveredAnnotationId(annot.id); }}
+                  onMouseLeave={() => { if (activeTool === "select" && !isSelected) setHoveredAnnotationId(null); }}
+                >
+                  {(isHovered || isSelected) && (
+                    <div
+                      className="absolute border-2 border-primary pointer-events-none"
+                      style={{
+                        left: `-4px`, top: `-4px`,
+                        width: `${hoverBoxWidth + 8}px`, height: `${hoverBoxHeight + 8}px`,
+                        borderRadius: "4px", zIndex: 31,
+                        boxShadow: "0 0 0 2px rgba(59, 130, 246, 0.3)",
+                      }}
+                    />
+                  )}
+                  {annot.quads.map((quad, idx) => {
+                    if (!Array.isArray(quad) || quad.length < 8) return null;
+                    const quadMinX = Math.min(quad[0], quad[2], quad[4], quad[6]);
+                    const quadMinY = Math.min(quad[1], quad[3], quad[5], quad[7]);
+                    const quadMaxX = Math.max(quad[0], quad[2], quad[4], quad[6]);
+                    const quadMaxY = Math.max(quad[1], quad[3], quad[5], quad[7]);
+                    const quadMinCanvas = pdfToCanvas(quadMinX, quadMinY);
+                    const quadMaxCanvas = pdfToCanvas(quadMaxX, quadMaxY);
+                    const quadCanvasX = Math.min(quadMinCanvas.x, quadMaxCanvas.x);
+                    const quadCanvasY = Math.min(quadMinCanvas.y, quadMaxCanvas.y);
+                    const quadCanvasWidth = Math.abs(quadMaxCanvas.x - quadMinCanvas.x);
+                    const quadCanvasHeight = Math.abs(quadMaxCanvas.y - quadMinCanvas.y);
+                    const relativeLeft = quadCanvasX - hoverBoxX;
+                    const relativeTop = quadCanvasY - hoverBoxY;
+
+                    return (
+                      <div key={idx} className="absolute" style={{ left: `${relativeLeft}px`, top: `${relativeTop}px`, width: `${quadCanvasWidth}px`, height: `${quadCanvasHeight}px` }}>
+                        {/* Strikethrough line through the middle */}
+                        <div className="absolute" style={{
+                          left: 0, right: 0,
+                          top: '50%', transform: 'translateY(-50%)',
+                          height: '2px',
+                          backgroundColor: strikeColor,
+                          opacity: 0.8,
+                        }} />
+                      </div>
+                    );
+                  })}
+                  {/* Comment indicator icon — always visible on strikethroughs with comments */}
+                  {(annot.commentContent || annot.redlineSuggestion) && (
+                    <div
+                      className="absolute"
+                      style={{
+                        right: "-24px",
+                        top: "-4px",
+                        width: "20px",
+                        height: "20px",
+                        pointerEvents: "auto",
+                        cursor: "pointer",
+                        zIndex: 32,
+                      }}
+                      title="Click to view comment"
+                    >
+                      <svg viewBox="0 0 20 20" fill={strikeColor} className="w-5 h-5 drop-shadow-sm">
+                        <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v6a2 2 0 01-2 2H8l-4 3V13H4a2 2 0 01-2-2V5z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                  )}
+                  {/* Expandable comment popup — shown when annotation is selected, portaled to body */}
+                  {isSelected && (
+                    <RedlinePopupPortal
+                      annotation={annot}
+                      anchorRef={annot.id}
+                      onClose={() => {
+                        setEditingAnnotation(null);
+                        setHoveredAnnotationId(null);
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            }
+          } else if (annot.type === "comment") {
+            // Comment annotations render as a small colored marker at the position
+            if (!annot.commentContent && !annot.redlineSuggestion) return null;
+            const commentPos = pdfToCanvas(annot.x, annot.y);
+            const severityColors: Record<string, string> = {
+              critical: '#EF4444', high: '#F97316', medium: '#F59E0B', low: '#3B82F6', info: '#9CA3AF',
+            };
+            const markerColor = severityColors[annot.redlineSeverity || 'info'] || '#9CA3AF';
+            return (
+              <div
+                key={annot.id}
+                data-annotation-id={annot.id}
+                className="absolute cursor-pointer"
+                style={{
+                  left: `${commentPos.x - 8}px`,
+                  top: `${commentPos.y - 8}px`,
+                  width: '16px',
+                  height: '16px',
+                  zIndex: 30,
+                  pointerEvents: 'auto',
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditingAnnotation(annot);
+                }}
+                title={annot.commentContent || annot.redlineSuggestion || ''}
+              >
+                <div style={{
+                  width: '16px', height: '16px',
+                  borderRadius: '50%',
+                  backgroundColor: markerColor,
+                  border: '2px solid white',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                }} />
+              </div>
+            );
           } else if (annot.type === "callout") {
             // Callout annotations are rendered using CalloutAnnotation component below
             return null;

@@ -490,9 +490,9 @@ export class PDFAnnotationOperations {
 
   }
 
-  // Create highlight annotation for text highlights
+  // Create the correct annotation type natively — StrikeOut for strikethroughs, Highlight otherwise
 
-  const annot = page.createAnnotation("Highlight");
+  const annot = page.createAnnotation(annotation.type === "strikethrough" ? "StrikeOut" : "Highlight");
 
   // Set quads - convert from PDF coordinates to display coordinates
 
@@ -568,10 +568,43 @@ export class PDFAnnotationOperations {
 
   }
 
-  if (annotation.content) {
+  // Build contents text from comment fields or annotation content
+  let contentsText = "";
+  if (annotation.commentContent || annotation.redlineSuggestion) {
+    const parts: string[] = [];
+    if (annotation.commentContent) parts.push(annotation.commentContent);
+    if (annotation.redlineSuggestion) parts.push(`Suggested: ${annotation.redlineSuggestion}`);
+    contentsText = parts.join('\n\n');
+  } else if (annotation.content) {
+    contentsText = annotation.content;
+  }
 
-  annot.setContents(annotation.content);
+  if (contentsText) {
+    annot.setContents(contentsText);
 
+    // Create a Popup annotation so PDF viewers show the comment on click
+    // Works for both highlights and strikethroughs
+    try {
+      const popup = page.createAnnotation("Popup");
+      const popupRect = [
+        annotation.x + (annotation.width || 100) + 10,
+        pageHeight - annotation.y - 150,
+        annotation.x + (annotation.width || 100) + 250,
+        pageHeight - annotation.y,
+      ];
+      popup.setRect(popupRect);
+
+      const annotObj = annot.getObject();
+      const popupObj = popup.getObject();
+      if (annotObj && popupObj) {
+        annotObj.put("Popup", popupObj);
+        popupObj.put("Parent", annotObj);
+        try { popupObj.put("Open", false); } catch { /* ignore */ }
+      }
+      popup.update();
+    } catch (e) {
+      console.warn("Could not create popup for annotation:", e);
+    }
   }
 
   annot.update();

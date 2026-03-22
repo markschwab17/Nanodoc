@@ -55,6 +55,8 @@ import {
   hashPdfBytes,
   setPdfAiMetadata,
 } from "@/shared/browserPdfAiStorage";
+import { SaveRedlineDialog } from "@/features/redline/SaveRedlineDialog";
+import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
 
 /** Wraps a toolbar button with a Radix tooltip shown to the left. */
 function ToolbarTooltip({ label, shortcut, children }: { label: string; shortcut?: string; children: ReactNode }) {
@@ -87,6 +89,12 @@ export function Toolbar() {
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showShapeMenu, setShowShapeMenu] = useState(false);
   const [savingToCto, setSavingToCto] = useState(false);
+  const [showRedlineSaveDialog, setShowRedlineSaveDialog] = useState(false);
+  const [savingRedline, setSavingRedline] = useState(false);
+
+  // Detect contract_redline mode from URL params
+  const ctoParams = useMemo(() => parseCiviltakeoffViewParams(), []);
+  const isContractRedlineMode = ctoParams.mode === "contract_redline" && !!ctoParams.contract_id;
   const recentFilesButtonRef = useRef<HTMLButtonElement>(null);
   const shapeMenuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -450,6 +458,12 @@ export function Toolbar() {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
+    // Contract redline mode: show version save dialog instead of normal save
+    if (isContractRedlineMode) {
+      setShowRedlineSaveDialog(true);
+      return;
+    }
+
     const originalPath = usePDFStore.getState().getDocumentPath(currentDoc.getId());
     const ctx = useCiviltakeoffContextStore.getState().getContext();
 
@@ -537,6 +551,47 @@ export function Toolbar() {
     await handleSaveAs();
   };
   handleSaveFileRef.current = handleSaveFile;
+
+  /** Save redlined contract as a new version. Called from SaveRedlineDialog. */
+  const handleSaveRedlineVersion = async (versionName: string, notes: string) => {
+    const currentDoc = getCurrentDocument();
+    if (!currentDoc) return;
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    if (!ctx || !ctoParams.contract_id) return;
+    setSavingRedline(true);
+    try {
+      await syncAndSavePDF(async (pdfData) => {
+        const form = new FormData();
+        form.append("token", ctx.token);
+        form.append("contract_id", ctoParams.contract_id!);
+        form.append("version_name", versionName);
+        if (notes.trim()) form.append("notes", notes);
+        form.append("pdf", new Blob([pdfData as BlobPart], { type: "application/pdf" }), `${versionName}.pdf`);
+        const res = await fetch(`${ctx.api_origin}/api/nanodoc/save-contract-redline`, {
+          method: "POST",
+          body: form,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error((err as { message?: string }).message ?? "Failed to save redlined version");
+        }
+        const result = await res.json();
+        useNotificationStore.getState().showNotification(
+          `Saved as ${result.versionName || versionName}`,
+          "success"
+        );
+      });
+      setShowRedlineSaveDialog(false);
+    } catch (error) {
+      console.error("Error saving redlined version:", error);
+      useNotificationStore.getState().showNotification(
+        error instanceof Error ? error.message : "Failed to save redlined version",
+        "error"
+      );
+    } finally {
+      setSavingRedline(false);
+    }
+  };
 
   /** Save current PDF and extraction to Civiltakeoff only. Shown only when ctoContext is set. */
   const handleSaveToCto = async () => {
@@ -903,6 +958,20 @@ export function Toolbar() {
             <Highlighter className={sizeClasses.icon} />
           </Button>
         </ToolbarTooltip>
+        <ToolbarTooltip label="Strikethrough & Comment">
+          <Button
+            variant={activeTool === "strikethrough" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setActiveTool("strikethrough")}
+            className={sizeClasses.button}
+            aria-label="Strikethrough & Comment"
+          >
+            <svg className={sizeClasses.icon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+              <line x1="4" y1="12" x2="20" y2="12" />
+              <path d="M7 7h10M7 17h10" strokeWidth={1.5} />
+            </svg>
+          </Button>
+        </ToolbarTooltip>
         <ToolbarTooltip label="Redact" shortcut={`${modKey}R`}>
           <Button
             variant={activeTool === "redact" ? "default" : "outline"}
@@ -1131,6 +1200,15 @@ export function Toolbar() {
       <HelpDialog
         open={showHelpDialog}
         onOpenChange={setShowHelpDialog}
+      />
+
+      {/* Contract Redline Save Dialog */}
+      <SaveRedlineDialog
+        open={showRedlineSaveDialog}
+        onOpenChange={setShowRedlineSaveDialog}
+        defaultVersionName={`${getCurrentDocument()?.getName()?.replace(/\.pdf$/i, '') || 'Contract'} - R1 - ${new Date().toISOString().split('T')[0]}`}
+        onSave={handleSaveRedlineVersion}
+        saving={savingRedline}
       />
     </div>
     </TooltipProvider>

@@ -67,6 +67,10 @@ export class PDFAnnotationLoader {
   // Ink/PolyLine/Polygon annotations use vertex lists, not rect; we don't load them into the editor yet
   if (type === "Ink" || type === "PolyLine" || type === "Polygon") continue;
 
+  // Skip Popup annotations — they're visual containers for comments on markup annotations (StrikeOut, Highlight)
+  // The comment text is read from the parent annotation's Contents field instead
+  if (type === "Popup") continue;
+
   const contents = pdfAnnot.getContents() || "";
 
 
@@ -223,6 +227,15 @@ export class PDFAnnotationLoader {
   }
 
 
+  // Parse comment content from Contents (if this highlight has an AI note or user comment)
+  let highlightCommentContent = contents || "";
+  let highlightSuggestion = "";
+  const highlightSugIdx = highlightCommentContent.indexOf("Suggested: ");
+  if (highlightSugIdx >= 0) {
+    highlightSuggestion = highlightCommentContent.substring(highlightSugIdx + 11).trim();
+    highlightCommentContent = highlightCommentContent.substring(0, highlightSugIdx).trim();
+  }
+
   annotations.push({
 
   id,
@@ -243,6 +256,10 @@ export class PDFAnnotationLoader {
 
   content: contents,
 
+  commentContent: highlightCommentContent || undefined,
+
+  redlineSuggestion: highlightSuggestion || undefined,
+
   color: highlightColor,
 
   opacity,
@@ -251,6 +268,72 @@ export class PDFAnnotationLoader {
 
   pdfAnnotation: pdfAnnot,
 
+  });
+
+  } else if (type === "StrikeOut") {
+  // Load strikethrough annotation — same quad logic as Highlight
+  let quadPoints: number[][] = [];
+  try {
+    const quads = pdfAnnot.getQuadPoints();
+    if (quads && Array.isArray(quads)) {
+      const pageBounds = page.getBounds();
+      const pageHeight = pageBounds[3] - pageBounds[1];
+      quadPoints = quads.map((q: any) => {
+        if (Array.isArray(q) && q.length >= 8) {
+          return [q[0], pageHeight - q[1], q[2], pageHeight - q[3], q[4], pageHeight - q[5], q[6], pageHeight - q[7]];
+        }
+        return [0, 0, 0, 0, 0, 0, 0, 0];
+      });
+    }
+  } catch (err) { console.error("Error getting StrikeOut quad points:", err); }
+
+  let sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
+  if (quadPoints.length > 0) {
+    for (const quad of quadPoints) {
+      if (quad.length >= 8) {
+        for (let i = 0; i < 8; i += 2) {
+          sMinX = Math.min(sMinX, quad[i]); sMaxX = Math.max(sMaxX, quad[i]);
+          sMinY = Math.min(sMinY, quad[i + 1]); sMaxY = Math.max(sMaxY, quad[i + 1]);
+        }
+      }
+    }
+  } else if (rect) {
+    sMinX = rect[0]; sMinY = rect[1]; sMaxX = rect[2]; sMaxY = rect[3];
+  } else { continue; }
+  if (!isFinite(sMinX) || !isFinite(sMinY) || !isFinite(sMaxX) || !isFinite(sMaxY) || sMinX >= sMaxX || sMinY >= sMaxY) continue;
+
+  let strikeColor = "#EF4444";
+  try {
+    const color = pdfAnnot.getColor();
+    if (color && color.length >= 3) {
+      strikeColor = `#${Math.round(color[0]*255).toString(16).padStart(2,'0')}${Math.round(color[1]*255).toString(16).padStart(2,'0')}${Math.round(color[2]*255).toString(16).padStart(2,'0')}`;
+    }
+  } catch { /* default */ }
+
+  // Parse comment text from Contents
+  const commentText = contents || "";
+  let commentContent = commentText;
+  let redlineSuggestion = "";
+  const suggestedIdx = commentText.indexOf("Suggested: ");
+  if (suggestedIdx >= 0) {
+    commentContent = commentText.substring(0, suggestedIdx).trim();
+    redlineSuggestion = commentText.substring(suggestedIdx + 11).trim();
+  }
+
+  annotations.push({
+    id,
+    type: "strikethrough",
+    pageNumber,
+    x: sMinX,
+    y: sMinY,
+    width: sMaxX - sMinX,
+    height: sMaxY - sMinY,
+    quads: quadPoints,
+    color: strikeColor,
+    highlightMode: "text",
+    commentContent,
+    redlineSuggestion,
+    pdfAnnotation: pdfAnnot,
   });
 
   } else if (type === "Redact") {

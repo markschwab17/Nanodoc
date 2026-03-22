@@ -6,7 +6,7 @@
 
 import { create } from "zustand";
 
-export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectionBox" | "selectText" | "form" | "draw" | "shape" | "stamp" | "signatureField";
+export type ToolType = "select" | "text" | "highlight" | "note" | "pan" | "callout" | "redact" | "selectionBox" | "selectText" | "form" | "draw" | "shape" | "stamp" | "signatureField" | "strikethrough";
 export type ViewMode = "single" | "spread" | "thumbnails";
 
 export interface UIState {
