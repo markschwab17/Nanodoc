@@ -599,6 +599,13 @@ export function Toolbar() {
     if (!currentDoc) return;
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     if (!ctx) return;
+
+    // Contract redline mode: use version save flow instead of overwriting original
+    if (isContractRedlineMode) {
+      setShowRedlineSaveDialog(true);
+      return;
+    }
+
     setSavingToCto(true);
     try {
       await syncAndSavePDF(async (pdfData) => {

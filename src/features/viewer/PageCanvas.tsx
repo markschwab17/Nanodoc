@@ -3476,7 +3476,8 @@ export const PageCanvas = React.memo(function PageCanvas({
           
           // Get highlight color for preview when using highlight tool
           const { highlightColor, highlightOpacity } = useUIStore.getState();
-          const previewColor = activeTool === "strikethrough" ? "#EF4444" : (activeTool === "highlight" || activeTool === "strikethrough") ? highlightColor : null;
+          const tool = activeTool as string;
+          const previewColor = tool === "strikethrough" ? "#EF4444" : (tool === "highlight" || tool === "strikethrough") ? highlightColor : null;
           const isHighlightPreview = (activeTool === "highlight" || activeTool === "strikethrough") && isSelecting;
           
           // Group spans by line (same Y coordinate, within tolerance)

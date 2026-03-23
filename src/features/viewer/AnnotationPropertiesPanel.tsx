@@ -26,6 +26,8 @@ function annotationTypeLabel(type: Annotation["type"]): string {
     shape: "Shape",
     stamp: "Stamp",
     signatureField: "Signature Field",
+    strikethrough: "Strikethrough",
+    comment: "Comment",
   };
   return labels[type] ?? type;
 }
