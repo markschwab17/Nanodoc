@@ -103,6 +103,7 @@ export interface Annotation {
   redlineSuggestion?: string;
   redlineSourceId?: string;
   redlineCategory?: string;
+  redlineAccepted?: boolean;
 }
 
 export interface StampData {

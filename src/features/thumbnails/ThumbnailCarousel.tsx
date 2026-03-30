@@ -33,6 +33,7 @@ import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationC
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
+import { useESignStore } from "@/shared/stores/esignStore";
 
 type TabType = "pages" | "search";
 
@@ -40,6 +41,7 @@ export function ThumbnailCarousel() {
   const { currentPage, setCurrentPage, getCurrentDocument, setSearchResults, getSearchResults, currentSearchResult, setCurrentSearchResult, getAnnotations, documents } = usePDFStore();
   const currentDocument = getCurrentDocument();
   const { showThumbnails } = useUIStore();
+  const esignMode = useESignStore((s) => s.mode);
   const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   const [draggedPage, setDraggedPage] = useState<number | null>(null);
@@ -1658,14 +1660,14 @@ export function ThumbnailCarousel() {
                     renderer={renderer}
                     isActive={i === currentPage || selectedPages.has(i)}
                     onClick={(e) => handleThumbnailClick(e, i)}
-                    onDelete={(e) => handleThumbnailDelete(e, i)}
-                    onRotate={(e) => handleThumbnailRotate(e, i)}
+                    onDelete={esignMode !== "sign" ? (e) => handleThumbnailDelete(e, i) : undefined}
+                    onRotate={esignMode !== "sign" ? (e) => handleThumbnailRotate(e, i) : undefined}
                   />
                 </div>
               </div>
             ))}
-            {/* Add Page button beneath last thumbnail */}
-            <div className="flex justify-center pt-1 pb-2">
+            {/* Add Page button beneath last thumbnail (hidden during e-sign signing) */}
+            {esignMode !== "sign" && <div className="flex justify-center pt-1 pb-2">
               <Popover open={showAddMenu} onOpenChange={setShowAddMenu}>
                 <PopoverTrigger asChild>
                   <Button
@@ -1718,7 +1720,7 @@ export function ThumbnailCarousel() {
                   </div>
                 </PopoverContent>
               </Popover>
-            </div>
+            </div>}
           </div>
         ) : (
           <div className="flex flex-col p-3 gap-3">

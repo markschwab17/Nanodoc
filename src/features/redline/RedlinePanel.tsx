@@ -6,11 +6,12 @@
  */
 
 import { useMemo, useState } from "react";
-import { X, Check, XCircle, FileText } from "lucide-react";
+import { X, Check, XCircle, FileText, Plus, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useRedlineStore } from "@/shared/stores/redlineStore";
+import { useUIStore } from "@/shared/stores/uiStore";
 import type { Annotation } from "@/core/pdf/types";
 
 const PANEL_WIDTH = 384;
@@ -45,9 +46,11 @@ export function RedlinePanel() {
   const focusedRedlineId = useRedlineStore((s) => s.focusedRedlineId);
   const setFocusedRedlineId = useRedlineStore((s) => s.setFocusedRedlineId);
   const riskScore = useRedlineStore((s) => s.riskScore);
-  const { getCurrentDocument, getAnnotations, removeAnnotation } = usePDFStore();
+  const { getCurrentDocument, getAnnotations, removeAnnotation, updateAnnotation } = usePDFStore();
+  const setActiveTool = useUIStore((s) => s.setActiveTool);
 
   const [activeFilter, setActiveFilter] = useState<SeverityKey | "all">("all");
+  const [showTooltip, setShowTooltip] = useState(true);
 
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() ?? null;
@@ -82,19 +85,39 @@ export function RedlinePanel() {
   const handleScrollTo = (annot: Annotation) => {
     setFocusedRedlineId(annot.id);
     const quoteText = annot.selectedText?.replace(/\s+/g, " ").trim().substring(0, 80) || undefined;
+    // If the annotation has resolved quads, compute a bbox to help the viewer scroll precisely
+    let bbox: number[] | undefined;
+    if (annot.quads && annot.quads.length > 0) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const q of annot.quads) {
+        for (let i = 0; i < q.length; i += 2) {
+          const px = q[i], py = q[i + 1];
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+      if (isFinite(minX)) bbox = [minX, minY, maxX, maxY];
+    }
     window.dispatchEvent(new CustomEvent("scroll-to-spec", {
-      detail: { page: annot.pageNumber, quote: quoteText }
+      detail: { page: annot.pageNumber, quote: quoteText, bbox }
     }));
   };
 
-  const handleReject = (annot: Annotation) => {
+  const handleDismiss = (annot: Annotation) => {
     if (!documentId) return;
     removeAnnotation(documentId, annot.id);
   };
 
   const handleAccept = (annot: Annotation) => {
     if (!documentId) return;
-    removeAnnotation(documentId, annot.id);
+    updateAnnotation(documentId, annot.id, { redlineAccepted: true });
+  };
+
+  const handleUnaccept = (annot: Annotation) => {
+    if (!documentId) return;
+    updateAnnotation(documentId, annot.id, { redlineAccepted: false });
   };
 
   if (!panelOpen) return null;
@@ -165,6 +188,43 @@ export function RedlinePanel() {
         </div>
       </div>
 
+      {/* Onboarding tooltip */}
+      {showTooltip && (
+        <div className="mx-3 mt-3 mb-1 rounded-lg border border-blue-200 bg-blue-50 dark:bg-blue-950/30 dark:border-blue-800 p-3 relative">
+          <button
+            onClick={() => setShowTooltip(false)}
+            className="absolute top-1.5 right-1.5 text-blue-400 hover:text-blue-600 dark:text-blue-500"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+          <div className="flex gap-2">
+            <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+            <div className="text-xs text-blue-800 dark:text-blue-300 space-y-1 pr-3">
+              <p className="font-semibold">AI-Generated Redline Drafts</p>
+              <p>These are suggested redlines based on your contract analysis. Review each one:</p>
+              <p><span className="font-medium text-emerald-700 dark:text-emerald-400">Accept</span> keeps the redline as a valid markup. <span className="font-medium text-red-700 dark:text-red-400">Dismiss</span> removes it.</p>
+              <p>You can also add your own redlines using the button below. When you save, the redlined version will be available in your <span className="font-medium">Document Viewer</span> under the <span className="font-medium">Contracts</span> folder.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add your own redline button */}
+      <div className="px-3 pt-2 pb-1">
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-full h-7 text-xs gap-1.5"
+          onClick={() => {
+            setActiveTool("strikethrough");
+            setPanelOpen(false);
+          }}
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Add Your Own Redline
+        </Button>
+      </div>
+
       {/* Redline list */}
       <ScrollArea className="flex-1">
         <div className="p-3 space-y-2">
@@ -181,9 +241,9 @@ export function RedlinePanel() {
             return (
               <div
                 key={annot.id}
-                className={`rounded-lg border bg-card ${style.border} border-l-4 p-3 cursor-pointer transition-all ${
-                  isFocused ? "ring-2 ring-blue-400 ring-offset-1" : "hover:bg-muted/50"
-                }`}
+                className={`rounded-lg border bg-card ${annot.redlineAccepted ? "border-l-emerald-500" : style.border} border-l-4 p-3 cursor-pointer transition-all ${
+                  annot.redlineAccepted ? "bg-emerald-50/50 opacity-75" : ""
+                } ${isFocused ? "ring-2 ring-blue-400 ring-offset-1" : "hover:bg-muted/50"}`}
                 onClick={() => handleScrollTo(annot)}
               >
                 {/* Header row */}
@@ -219,25 +279,37 @@ export function RedlinePanel() {
                   </div>
                 )}
 
-                {/* Accept/Reject buttons */}
+                {/* Accept/Dismiss buttons */}
                 <div className="flex items-center gap-2 mt-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
-                    onClick={(e) => { e.stopPropagation(); handleAccept(annot); }}
-                  >
-                    <Check className="w-3 h-3 mr-1" />
-                    Accept
-                  </Button>
+                  {annot.redlineAccepted ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-emerald-700 bg-emerald-100 hover:bg-emerald-50"
+                      onClick={(e) => { e.stopPropagation(); handleUnaccept(annot); }}
+                    >
+                      <Check className="w-3 h-3 mr-1" />
+                      Accepted
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+                      onClick={(e) => { e.stopPropagation(); handleAccept(annot); }}
+                    >
+                      <Check className="w-3 h-3 mr-1" />
+                      Accept
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
                     className="h-6 px-2 text-xs text-red-600 hover:text-red-700 hover:bg-red-50"
-                    onClick={(e) => { e.stopPropagation(); handleReject(annot); }}
+                    onClick={(e) => { e.stopPropagation(); handleDismiss(annot); }}
                   >
                     <XCircle className="w-3 h-3 mr-1" />
-                    Reject
+                    Dismiss
                   </Button>
                 </div>
               </div>
