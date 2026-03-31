@@ -13,6 +13,9 @@ export default defineConfig(async () => ({
   build: {
     target: "esnext", // Support top-level await
   },
+  worker: {
+    format: "es", // ES modules for workers (required for dynamic import of mupdf WASM)
+  },
   optimizeDeps: {
     exclude: ["mupdf"], // Don't pre-bundle mupdf
   },

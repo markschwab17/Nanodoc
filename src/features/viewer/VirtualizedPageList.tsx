@@ -237,15 +237,17 @@ export function VirtualizedPageList({
             position: "absolute",
             top: `${pageInfo.top}px`,
             left: 0,
-            width: `${pageInfo.width}px`, // Use exact width from pageData
+            width: `${pageInfo.width}px`,
             height: `${pageInfo.height}px`,
             margin: 0,
             padding: 0,
             lineHeight: 0,
             fontSize: 0,
-            display: "block", // Block display to eliminate flex spacing
-            boxSizing: "border-box", // Ensure no extra spacing from borders/padding
-            overflow: "visible", // Allow gap to be visible between pages
+            display: "block",
+            boxSizing: "border-box",
+            overflow: "visible",
+            backgroundColor: "var(--color-card, #ffffff)",
+            boxShadow: "0 1px 3px 0 rgba(0,0,0,0.1)",
           }}
         >
           <PageCanvas

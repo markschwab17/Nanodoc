@@ -1,9 +1,17 @@
 /**
  * PDF Renderer Abstraction
- * 
+ *
  * Provides a unified interface for rendering PDF pages using mupdf-js
  * with caching and performance optimizations.
+ *
+ * Heavy rendering (toPixmap) runs in a Web Worker so the main thread
+ * stays responsive during scroll, pan, and zoom.
+ *
+ * If the worker gets stuck on an oversized page (head-of-line blocking),
+ * it is terminated and restarted so other pages can continue.
  */
+
+import type { WorkerRequest, WorkerResponse } from "./pdfRender.worker";
 
 export interface RenderOptions {
   scale?: number;
@@ -13,65 +21,166 @@ export interface RenderOptions {
 
 export interface RenderedPage {
   pageNumber: number;
-  imageData: ImageData | string; // ImageData for canvas, string for data URL
+  imageData: ImageData | string;
   width: number;
   height: number;
   scale: number;
 }
 
+/** How long to wait for a worker render before killing and restarting (ms) */
+const WORKER_RENDER_TIMEOUT = 15_000;
+
 export class PDFRenderer {
   private mupdf: any;
   private renderCache: Map<string, RenderedPage> = new Map();
 
-  // Adaptive cache sizing based on render scale
+  // Worker state
+  private worker: Worker | null = null;
+  private workerReady = false;
+  private nextRequestId = 0;
+  private pendingRequests = new Map<
+    number,
+    { resolve: (r: RenderedPage) => void; reject: (e: Error) => void; pageNumber: number; scale: number; timer: ReturnType<typeof setTimeout> }
+  >();
+  private workerDocId: string | null = null;
+
   private getAdaptiveCacheSize(scale: number): number {
-    // Higher scales use more memory per page, so reduce cache size
-    if (scale >= 3.0) return 20; // Ultra quality
-    if (scale >= 2.0) return 30; // High quality
-    if (scale >= 1.5) return 40; // Medium quality
-    return 50; // Low quality
+    // Generous cache so scrolling back to previously-viewed pages is instant.
+    // Each entry is an ImageData: at 2MP (~8MB) to 29MP (~116MB) depending on page size.
+    if (scale >= 3.0) return 50;
+    if (scale >= 2.0) return 80;
+    if (scale >= 1.5) return 100;
+    return 150;
   }
 
   constructor(mupdf: any) {
     this.mupdf = mupdf;
+    this.spawnWorker();
+  }
+
+  // ─── Worker lifecycle ───────────────────────────────────────────────
+
+  private spawnWorker() {
+    try {
+      this.worker = new Worker(
+        new URL("./pdfRender.worker.ts", import.meta.url),
+        { type: "module" }
+      );
+
+      this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+        const msg = event.data;
+        if (msg.type === "ready") {
+          this.workerReady = true;
+          return;
+        }
+        if (msg.type === "renderResult") {
+          const pending = this.pendingRequests.get(msg.id);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingRequests.delete(msg.id);
+            const imageData = new ImageData(
+              new Uint8ClampedArray(msg.buffer),
+              msg.width,
+              msg.height
+            );
+            const rendered: RenderedPage = {
+              pageNumber: pending.pageNumber,
+              imageData,
+              width: msg.width,
+              height: msg.height,
+              scale: pending.scale,
+            };
+            this.cacheRender(this.getCacheKey(pending.pageNumber, pending.scale, 0), rendered);
+            pending.resolve(rendered);
+          }
+          return;
+        }
+        if (msg.type === "error") {
+          const pending = this.pendingRequests.get(msg.id);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingRequests.delete(msg.id);
+            pending.reject(new Error(msg.message));
+          }
+        }
+      };
+
+      this.worker.onerror = (e) => {
+        console.warn("Render worker error, falling back to main thread:", e.message);
+        this.killWorker();
+      };
+
+      this.worker.postMessage({ type: "init" } satisfies WorkerRequest);
+    } catch (e) {
+      console.warn("Could not create render worker, using main thread:", e);
+      this.worker = null;
+    }
   }
 
   /**
-   * Generate cache key for a page render
-   * Note: We don't include rotation in the cache key because PDF rotation
-   * is already applied by mupdf when loading the page, so it's part of the
-   * page's intrinsic state, not a rendering parameter.
+   * Terminate the current worker, reject all pending requests, and
+   * optionally restart. Used when the worker is stuck on a massive page.
    */
-  private getCacheKey(
-    pageNumber: number,
-    scale: number,
-    rotation: number
-  ): string {
-    // Include rotation in cache key for now, but ideally we shouldn't need to
-    // since PDF rotation is already applied by mupdf
-    return `${pageNumber}_${scale}_${rotation}`;
+  private killWorker(restart = true) {
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.workerReady = false;
+    this.workerDocId = null;
+
+    // Reject everything still waiting
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Worker terminated (render timeout)"));
+    }
+    this.pendingRequests.clear();
+
+    if (restart) {
+      this.spawnWorker();
+    }
   }
 
-  /**
-   * Clear render cache
-   */
+  // ─── Cache helpers ──────────────────────────────────────────────────
+
+  private getCacheKey(pageNumber: number, scale: number, rotation: number): string {
+    // Round scale to 4 decimals so floating-point drift doesn't cause cache misses
+    return `${pageNumber}_${Math.round(scale * 10000) / 10000}_${rotation}`;
+  }
+
   clearCache(): void {
     this.renderCache.clear();
   }
 
+  clearCacheForPage(pageNumber: number): void {
+    const prefix = `${pageNumber}_`;
+    for (const key of this.renderCache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.renderCache.delete(key);
+      }
+    }
+  }
+
   /**
-   * Render a PDF page to ImageData
+   * Check if a render is already in cache (for skip-debounce fast path).
    */
+  hasCachedRender(pageNumber: number, scale: number, rotation = 0): boolean {
+    return this.renderCache.has(this.getCacheKey(pageNumber, scale, rotation));
+  }
+
+  // ─── Render API ─────────────────────────────────────────────────────
+
   async renderPage(
     document: any,
     pageNumber: number,
-    options: RenderOptions = {}
+    options: RenderOptions = {},
+    pdfData?: Uint8Array | null,
+    docId?: string
   ): Promise<RenderedPage> {
     const scale = options.scale ?? 1.0;
     const rotation = options.rotation ?? 0;
     const cacheKey = this.getCacheKey(pageNumber, scale, rotation);
 
-    // Check cache — on hit, move entry to end of Map for true LRU eviction order
     if (this.renderCache.has(cacheKey)) {
       const cached = this.renderCache.get(cacheKey)!;
       this.renderCache.delete(cacheKey);
@@ -79,82 +188,102 @@ export class PDFRenderer {
       return cached;
     }
 
+    // Try worker path
+    if (this.worker && this.workerReady && pdfData && docId) {
+      return this.renderPageInWorker(docId, pdfData, pageNumber, scale, rotation);
+    }
+
+    // Fallback: main-thread rendering
+    return this.renderPageMainThread(document, pageNumber, scale, rotation);
+  }
+
+  private renderPageInWorker(
+    docId: string,
+    pdfData: Uint8Array,
+    pageNumber: number,
+    scale: number,
+    rotation: number
+  ): Promise<RenderedPage> {
+    return new Promise((resolve, reject) => {
+      const id = this.nextRequestId++;
+
+      // Timeout: if the worker is stuck on a massive page, kill it and restart
+      // so other pages can proceed. The timed-out page falls back to main thread.
+      const timer = setTimeout(() => {
+        const pending = this.pendingRequests.get(id);
+        if (pending) {
+          this.pendingRequests.delete(id);
+          console.warn(`Worker render timeout for page ${pageNumber} (scale ${scale.toFixed(2)}), restarting worker`);
+          this.killWorker(true);
+          pending.reject(new Error("Render timeout"));
+        }
+      }, WORKER_RENDER_TIMEOUT);
+
+      this.pendingRequests.set(id, { resolve, reject, pageNumber, scale, timer });
+
+      const needsData = this.workerDocId !== docId;
+      const msg: WorkerRequest = {
+        type: "render",
+        id,
+        docId,
+        data: needsData ? pdfData : undefined,
+        pageNumber,
+        scale,
+        rotation,
+      };
+      this.worker!.postMessage(msg);
+      if (needsData) this.workerDocId = docId;
+    });
+  }
+
+  private async renderPageMainThread(
+    document: any,
+    pageNumber: number,
+    scale: number,
+    rotation: number
+  ): Promise<RenderedPage> {
     try {
       const page = document.loadPage(pageNumber);
 
-      // Create transformation matrix
-      // IMPORTANT: mupdf already applies the PDF's Rotate field when loading the page.
-      // The page.getBounds() and page.toPixmap() already account for rotation.
-      // So we should NOT apply additional rotation here unless we want to rotate
-      // beyond what's specified in the PDF (which we don't).
-      // 
-      // The rotation parameter is kept for backwards compatibility, but should
-      // typically be 0 since PDF rotation is already applied.
       let matrix = this.mupdf.Matrix.scale(scale, scale);
       if (rotation !== 0) {
-        // Only apply rotation if explicitly requested (for special cases)
-        // In normal rendering, rotation should be 0 because PDF Rotate is already applied
         const rotationMatrix = this.mupdf.Matrix.rotate(rotation);
         matrix = this.mupdf.Matrix.concat(matrix, rotationMatrix);
       }
 
-      // Render to pixmap
-      // CRITICAL: Exclude annotations from base rendering (false) since we render them with React
-      // This prevents duplicate rendering - native PDF annotations would appear on the canvas
-      // and we also render them as interactive React components, causing duplicates
-      // PERF: Request RGBA directly (alpha=true) so toPixmap returns 4 components.
-      // This lets us use the fast data.set() memcpy path instead of a per-pixel
-      // RGB→RGBA conversion loop (saves 10-50ms per page render).
       const pixmap = page.toPixmap(
         matrix,
         this.mupdf.ColorSpace.DeviceRGB,
         true,
-        false  // Don't include annotations - we render them with React
+        false
       );
 
-      // Get image data
       const width = pixmap.getWidth();
       const height = pixmap.getHeight();
       const pixels = pixmap.getPixels();
 
-      // Convert to ImageData
-      // Pixmap.getPixels() returns Uint8ClampedArray
       const imageData = new ImageData(width, height);
       const data = imageData.data;
-      const pixelData = pixels;
-
-      // Copy pixel data
       const numPixels = width * height;
       const components = pixmap.getNumberOfComponents();
-      
+
       if (components === 4) {
-        // Already RGBA - copy directly
-        data.set(pixelData.subarray(0, numPixels * 4));
+        data.set(pixels.subarray(0, numPixels * 4));
       } else if (components === 3) {
-        // RGB - convert to RGBA
         for (let i = 0; i < numPixels; i++) {
           const srcIdx = i * 3;
           const dstIdx = i * 4;
-          data[dstIdx] = pixelData[srcIdx]; // R
-          data[dstIdx + 1] = pixelData[srcIdx + 1]; // G
-          data[dstIdx + 2] = pixelData[srcIdx + 2]; // B
-          data[dstIdx + 3] = 255; // A
+          data[dstIdx] = pixels[srcIdx];
+          data[dstIdx + 1] = pixels[srcIdx + 1];
+          data[dstIdx + 2] = pixels[srcIdx + 2];
+          data[dstIdx + 3] = 255;
         }
       } else {
         throw new Error(`Unsupported color components: ${components}`);
       }
 
-      const rendered: RenderedPage = {
-        pageNumber,
-        imageData,
-        width,
-        height,
-        scale,
-      };
-
-      // Cache the result
-      this.cacheRender(cacheKey, rendered);
-
+      const rendered: RenderedPage = { pageNumber, imageData, width, height, scale };
+      this.cacheRender(this.getCacheKey(pageNumber, scale, rotation), rendered);
       return rendered;
     } catch (error) {
       console.error(`Error rendering page ${pageNumber}:`, error);
@@ -163,7 +292,7 @@ export class PDFRenderer {
   }
 
   /**
-   * Render a PDF page to data URL (for thumbnails)
+   * Render a PDF page to data URL (for thumbnails) — always main thread
    */
   async renderPageToDataURL(
     document: any,
@@ -171,7 +300,7 @@ export class PDFRenderer {
     options: RenderOptions = {}
   ): Promise<string> {
     try {
-      const scale = options.scale ?? 0.15; // Smaller scale for thumbnails
+      const scale = options.scale ?? 0.15;
       const page = document.loadPage(pageNumber);
       const matrix = this.mupdf.Matrix.scale(scale, scale);
       const pixmap = page.toPixmap(
@@ -181,7 +310,6 @@ export class PDFRenderer {
         true
       );
 
-      // Convert pixmap to PNG and return as blob URL (avoids FileReader + base64 overhead)
       const pngData = pixmap.asPNG();
       const blob = new Blob([pngData], { type: 'image/png' });
       return URL.createObjectURL(blob);
@@ -191,14 +319,16 @@ export class PDFRenderer {
     }
   }
 
-  /**
-   * Cache a rendered page
-   */
-  private cacheRender(key: string, rendered: RenderedPage): void {
-    // Adaptive cache sizing based on render scale
-    const adaptiveMaxSize = this.getAdaptiveCacheSize(rendered.scale);
+  cancelPendingRequests(): void {
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Render cancelled"));
+    }
+    this.pendingRequests.clear();
+  }
 
-    // Simple LRU: remove oldest if cache is full
+  private cacheRender(key: string, rendered: RenderedPage): void {
+    const adaptiveMaxSize = this.getAdaptiveCacheSize(rendered.scale);
     if (this.renderCache.size >= adaptiveMaxSize) {
       const firstKey = this.renderCache.keys().next().value;
       if (firstKey) {
@@ -208,4 +338,3 @@ export class PDFRenderer {
     this.renderCache.set(key, rendered);
   }
 }
-

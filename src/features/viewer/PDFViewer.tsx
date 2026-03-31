@@ -528,7 +528,7 @@ export function PDFViewer() {
               if (pageMeta) {
                 const displayScale = viewportWidth / pageMeta.width;
                 const renderScale = displayScale * qualityScale * dpr;
-                renderer.renderPage(mupdfDoc, p, { scale: renderScale, rotation: 0 });
+                renderer.renderPage(mupdfDoc, p, { scale: renderScale, rotation: 0 }, currentDocument.getPdfData?.(), currentDocument.getId?.());
               }
             }
           }
@@ -1352,7 +1352,17 @@ export function PDFViewer() {
                 zoomLevel={zoomLevel}
                 baseFitScale={baseFitScale}
                 pageGap={8}
-                bufferPages={6}
+                bufferPages={(() => {
+                  // Buffer pages stay mounted so scrolling back is instant (cache hit).
+                  // Worker renders off-thread so more mounted pages don't block the UI.
+                  const meta = currentDocument.getPageMetadata(0);
+                  if (!meta) return 6;
+                  const pageArea = meta.width * meta.height;
+                  const letterArea = 612 * 792;
+                  if (pageArea > letterArea * 4) return 3; // Large plans (24x36"+)
+                  if (pageArea > letterArea * 2) return 4; // Tabloid+
+                  return 6; // Normal documents
+                })()}
                 onPageVisible={handlePageVisible}
                 scrollContainerRef={scrollContainerRef}
               />

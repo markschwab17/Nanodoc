@@ -27,6 +27,8 @@ export class PDFDocument {
   private metadata: PDFDocumentMetadata;
   private isLoaded: boolean = false;
   private originalFilePath: string | null = null;
+  private metadataListeners: Set<() => void> = new Set();
+  private pdfData: Uint8Array | null = null;
 
   constructor(id: string, name: string, fileSize: number) {
     this.metadata = {
@@ -40,10 +42,29 @@ export class PDFDocument {
   }
 
   /**
+   * Subscribe to metadata changes (rotation, page dimensions, page count).
+   * Returns an unsubscribe function.
+   */
+  onMetadataChange(callback: () => void): () => void {
+    this.metadataListeners.add(callback);
+    return () => {
+      this.metadataListeners.delete(callback);
+    };
+  }
+
+  /**
    * Load PDF document from binary data
    */
+  /**
+   * Get the raw PDF data for off-thread rendering
+   */
+  getPdfData(): Uint8Array | null {
+    return this.pdfData;
+  }
+
   async loadFromData(data: Uint8Array, mupdf: any): Promise<void> {
     try {
+      this.pdfData = data;
       this.mupdfDoc = mupdf.Document.openDocument(data, "application/pdf");
       
       this.metadata.pageCount = this.mupdfDoc.countPages();
@@ -201,6 +222,15 @@ export class PDFDocument {
       }
     } catch (error) {
       console.error("Error refreshing page metadata:", error);
+    }
+
+    // Notify subscribers that metadata has changed
+    for (const listener of this.metadataListeners) {
+      try {
+        listener();
+      } catch (e) {
+        console.error("Error in metadata change listener:", e);
+      }
     }
   }
 

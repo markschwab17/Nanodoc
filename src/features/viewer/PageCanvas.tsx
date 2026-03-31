@@ -26,7 +26,8 @@ import { HorizontalRuler } from "./HorizontalRuler";
 import { VerticalRuler } from "./VerticalRuler";
 import { wrapAnnotationUpdate, wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 import { PDFDocument as PDFDocumentClass } from "@/core/pdf/PDFDocument";
-import { enqueuePageRender } from "@/core/pdf/renderQueue";
+// Render queue no longer used — worker handles off-thread rendering,
+// each page calls runQueuedRender() directly after debounce.
 import { toolHandlers } from "@/features/tools";
 import { getSelectedStamp, getStampPreviewPosition, setPreviewUpdateCallback } from "@/features/tools/StampTool";
 import { getDrawingPath, isCurrentlyDrawing, setDrawPreviewCallback } from "@/features/tools/DrawTool";
@@ -107,12 +108,49 @@ export const PageCanvas = React.memo(function PageCanvas({
 }: PageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isRendering, _setIsRendering] = useState(false);
+  const [hasRendered, setHasRendered] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
   const { renderQuality } = useDocumentSettingsStore();
   const BASE_SCALE = 1.0; // Fixed 1:1 mapping between canvas pixels and PDF points
   const RENDER_SCALE = getRenderQualityScale(renderQuality); // Quality multiplier for rendering
+
+  // Shared pixel budget cap — adaptive based on page area.
+  //
+  //   Page size          Area (sq pts)   Budget    Notes
+  //   ─────────────────  ─────────────   ────────  ──────────────────────────
+  //   Letter (8.5×11")       484,704      8 MP     Baseline
+  //   Tabloid (11×17")       950,400     ~11 MP
+  //   Arch D (24×36")      4,478,976     ~24 MP    Standard construction plan
+  //   Arch E (30×42")      6,531,840     ~29 MP
+  //   ≥ 36×48" (huge)     ≥ 8,957,952    2 MP     Site plans, mega sheets — hard cap
+  //
+  const LETTER_AREA = 612 * 792; // ~484,704 sq points
+  const HUGE_PAGE_AREA = LETTER_AREA * 18; // ~36×48" and above
+  const capRenderScale = useCallback((pageW: number, pageH: number, idealScale: number): number => {
+    const pageArea = pageW * pageH;
+
+    // Huge pages (site plans, oversized sheets) get a hard 2MP cap
+    // so they render in < 1 second instead of blocking the worker for 30s+
+    if (pageArea >= HUGE_PAGE_AREA) {
+      const maxPixels = 2_000_000;
+      const estimated = (pageW * idealScale) * (pageH * idealScale);
+      if (estimated > maxPixels) {
+        return Math.sqrt(maxPixels / pageArea);
+      }
+      return idealScale;
+    }
+
+    // Normal large pages: scale budget with sqrt of area ratio, cap at 32MP
+    const sizeRatio = pageArea / LETTER_AREA;
+    const maxPixels = Math.min(32_000_000, Math.max(8_000_000, 8_000_000 * Math.sqrt(sizeRatio)));
+    const estimated = (pageW * idealScale) * (pageH * idealScale);
+    if (estimated > maxPixels) {
+      return Math.sqrt(maxPixels / pageArea);
+    }
+    return idealScale;
+  }, []);
+
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
   const { zoomLevel, fitMode, activeTool, setActiveTool, setZoomLevel, setFitMode, setZoomToCenterCallback, readMode: globalReadMode } = useUIStore();
@@ -1035,6 +1073,7 @@ export const PageCanvas = React.memo(function PageCanvas({
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
         ctx.putImageData(rendered.imageData, 0, 0);
+        setHasRendered(true);
       }
     };
 
@@ -1057,32 +1096,46 @@ export const PageCanvas = React.memo(function PageCanvas({
       if (thisRenderId !== highResRenderIdRef.current) return;
 
       const { displayScale, canvasDisplayWidth, canvasDisplayHeight } = params;
+      const pdfData = document.getPdfData?.();
+      const docId = document.getId?.();
 
       try {
         const idealRenderScale = displayScale * RENDER_SCALE * dpr;
+        const renderScale = capRenderScale(pageMetadata.width, pageMetadata.height, idealRenderScale);
 
-        // Cap pixel budget so toPixmap() doesn't block the main thread for seconds.
-        // 8MP keeps 1x zoom on retina (7.7MP) uncapped while limiting high zooms.
-        // At high zoom, text is already large so super-sampling isn't needed —
-        // the slight softness from capping is imperceptible.
-        const MAX_RENDER_PIXELS = 8_000_000;
-        const estimatedPixels =
-          (pageMetadata.width * idealRenderScale) *
-          (pageMetadata.height * idealRenderScale);
-        const renderScale = estimatedPixels > MAX_RENDER_PIXELS
-          ? Math.sqrt(MAX_RENDER_PIXELS / (pageMetadata.width * pageMetadata.height))
-          : idealRenderScale;
-
-        const rendered = await renderer.renderPage(mupdfDoc, pageNumber, { scale: renderScale, rotation: 0 });
+        const rendered = await renderer.renderPage(
+          mupdfDoc, pageNumber, { scale: renderScale, rotation: 0 },
+          pdfData, docId
+        );
         if (thisRenderId !== highResRenderIdRef.current || !canvasRef.current) return;
-        const canvas = canvasRef.current;
-        applyRenderedToCanvas(canvas, rendered, canvasDisplayWidth, canvasDisplayHeight);
+        applyRenderedToCanvas(canvasRef.current, rendered, canvasDisplayWidth, canvasDisplayHeight);
         setActualScale(RENDER_SCALE);
       } catch (err) {
-        if (thisRenderId === highResRenderIdRef.current) {
-          setError(err instanceof Error ? err.message : "Failed to render page");
-          console.error("Error rendering page:", err);
+        if (thisRenderId !== highResRenderIdRef.current) return;
+
+        // If the worker timed out on a massive page, retry at very low quality
+        // so the page shows *something* instead of staying permanently blank.
+        const isTimeout = err instanceof Error && err.message.includes("timeout");
+        if (isTimeout) {
+          console.warn(`Page ${pageNumber}: worker timed out, retrying at low quality`);
+          try {
+            // Render at ~0.5MP — fast enough even for the most complex pages
+            const fallbackScale = Math.sqrt(500_000 / (pageMetadata.width * pageMetadata.height));
+            const fallback = await renderer.renderPage(
+              mupdfDoc, pageNumber, { scale: Math.max(0.25, fallbackScale), rotation: 0 },
+              pdfData, docId
+            );
+            if (thisRenderId !== highResRenderIdRef.current || !canvasRef.current) return;
+            applyRenderedToCanvas(canvasRef.current, fallback, canvasDisplayWidth, canvasDisplayHeight);
+            setActualScale(RENDER_SCALE);
+            return;
+          } catch {
+            // Even fallback failed — show error
+          }
         }
+
+        setError(err instanceof Error ? err.message : "Failed to render page");
+        console.error("Error rendering page:", err);
       }
     };
 
@@ -1104,14 +1157,45 @@ export const PageCanvas = React.memo(function PageCanvas({
       clearTimeout(renderDebounceTimeoutRef.current);
     }
 
-    // Enqueue directly — the render queue already serializes and yields via setTimeout(0).
-    // Removed the extra requestIdleCallback layer which added up to 100ms latency.
     const scheduleRender = () => {
       scheduledRunIdRef.current = null;
-      enqueuePageRender(() => runQueuedRender());
+      runQueuedRender();
     };
 
-    const debounceMs = readMode ? 50 : 100;
+    // Fast path: if the render is already cached, apply immediately with no debounce.
+    // This makes scrolling back to previously-viewed pages instant.
+    const currentPageMeta = document.getPageMetadata(pageNumber);
+    if (currentPageMeta && readMode) {
+      const dpr = window.devicePixelRatio || 1;
+      let checkScale: number;
+      if (displayWidthProp != null && displayWidthProp > 0) {
+        checkScale = (displayWidthProp / currentPageMeta.width) * RENDER_SCALE * dpr;
+      } else {
+        const firstMeta = document.getPageMetadata(0);
+        const viewportWidth = firstMeta ? firstMeta.width * zoomLevel : currentPageMeta.width * zoomLevel;
+        checkScale = (viewportWidth / currentPageMeta.width) * RENDER_SCALE * dpr;
+      }
+      const cappedScale = capRenderScale(currentPageMeta.width, currentPageMeta.height, checkScale);
+      if (renderer.hasCachedRender(pageNumber, cappedScale, 0)) {
+        // Cache hit — render immediately, no debounce
+        scheduleRender();
+        return () => {
+          highResRenderIdRef.current += 1;
+          if (renderDebounceTimeoutRef.current) {
+            clearTimeout(renderDebounceTimeoutRef.current);
+            renderDebounceTimeoutRef.current = null;
+          }
+        };
+      }
+    }
+
+    // Cache miss — debounce to avoid spamming the worker during rapid zoom/scroll.
+    // Larger pages get more time since the CSS transform preview covers the gap.
+    const pageArea = (currentPageMeta?.width ?? 612) * (currentPageMeta?.height ?? 792);
+    const sizeRatio = pageArea / LETTER_AREA;
+    const debounceMs = readMode
+      ? Math.min(300, Math.max(50, Math.round(50 * Math.sqrt(sizeRatio))))
+      : 100;
     renderDebounceTimeoutRef.current = setTimeout(() => {
       renderDebounceTimeoutRef.current = null;
       scheduleRender();
@@ -1176,82 +1260,83 @@ export const PageCanvas = React.memo(function PageCanvas({
   // Ref to track previous metadata values for change detection
   const previousMetadataRef = useRef({ rotation: pageRotation, width: pageWidth, height: pageHeight });
   
-  // Effect to watch for metadata changes and update state
+  // Listen for metadata changes via event-driven notification (replaces polling)
   useEffect(() => {
     const checkMetadata = () => {
       const currentMetadata = document?.getPageMetadata(pageNumber);
       const currentRotation = currentMetadata?.rotation ?? 0;
       const currentWidth = currentMetadata?.width ?? 0;
       const currentHeight = currentMetadata?.height ?? 0;
-      
+
       const prevRotation = previousMetadataRef.current.rotation;
       const prevWidth = previousMetadataRef.current.width;
       const prevHeight = previousMetadataRef.current.height;
-      
-      
-      // If rotation or dimensions changed, update state to force re-render
+
       if (currentRotation !== prevRotation || currentWidth !== prevWidth || currentHeight !== prevHeight) {
         previousMetadataRef.current = { rotation: currentRotation, width: currentWidth, height: currentHeight };
         setMetadataVersion(prev => prev + 1);
       }
     };
-    
-    // Check immediately
+
+    // Check immediately on mount / dependency change
     checkMetadata();
-    
-    // Check periodically to catch metadata changes
-    const intervalId = setInterval(checkMetadata, 100);
-    
-    return () => clearInterval(intervalId);
+
+    // Subscribe to metadata change events (fired by refreshPageMetadata)
+    const unsubscribe = document.onMetadataChange(checkMetadata);
+
+    return () => unsubscribe();
   }, [document, pageNumber]);
   
-  // CRITICAL: Clear renderer cache and canvas when document changes to prevent artifacts
-  // This ensures that when switching PDFs, the previous PDF's rendered content doesn't appear
+  // Clear renderer cache and canvas when switching to a DIFFERENT document.
+  // Uses a ref to track the previous document ID so we only clear on actual changes,
+  // NOT on every PageCanvas mount (which would nuke the cache for all pages in read mode).
+  const prevDocIdRef = useRef<string | undefined>(document?.getId());
   useEffect(() => {
-    if (renderer && document) {
-      renderer.clearCache();
-    }
-    
-    // Clear the canvas to remove any rendered content from previous document
-    if (canvasRef.current) {
-      const ctx = canvasRef.current.getContext("2d");
-      if (ctx) {
-        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    const currentDocId = document?.getId();
+    if (prevDocIdRef.current !== undefined && prevDocIdRef.current !== currentDocId) {
+      // Document actually changed — clear cache and canvas
+      if (renderer) {
+        renderer.clearCache();
       }
+      if (canvasRef.current) {
+        const ctx = canvasRef.current.getContext("2d");
+        if (ctx) {
+          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+      }
+      setEditingAnnotation(null);
+      setAnnotationText("");
+      setIsEditingMode(false);
     }
-    
-    // Clear editing state when document changes
-    setEditingAnnotation(null);
-    setAnnotationText("");
-    setIsEditingMode(false);
+    prevDocIdRef.current = currentDocId;
   }, [document?.getId(), renderer]);
   
   // Effect to force re-render when rotation or dimensions change
   // This ensures the page re-renders with updated dimensions after rotation
   useEffect(() => {
-    
+
     if (!document.isDocumentLoaded() || !renderer || !canvasRef.current) return;
-    
-    // Clear cache when rotation or dimensions change
-    renderer.clearCache();
-    
+
+    // Only clear cache for the affected page (preserve other pages' cache)
+    renderer.clearCacheForPage(pageNumber);
+
     // Force a re-render by re-running the render logic
     const forceReRender = async () => {
       try {
         const mupdfDoc = document.getMupdfDocument();
         const metadata = document.getPageMetadata(pageNumber);
         if (!metadata) return;
-        
-        // High-DPI rendering for crisp text
+
+        // High-DPI rendering for crisp text — apply same pixel budget cap as main render path
         const dpr = window.devicePixelRatio || 1;
-        const renderScale = BASE_SCALE * RENDER_SCALE * dpr;
-        
+        const idealRenderScale = BASE_SCALE * RENDER_SCALE * dpr;
+        const renderScale = capRenderScale(metadata.width, metadata.height, idealRenderScale);
+
         // Render without additional rotation (PDF Rotate is already applied by mupdf)
         const rendered = await renderer.renderPage(mupdfDoc, pageNumber, {
-          scale: renderScale,
-          rotation: 0,
-        });
-        
+          scale: renderScale, rotation: 0,
+        }, document.getPdfData?.(), document.getId?.());
+
         const canvas = canvasRef.current;
         if (canvas) {
           // High-DPI: canvas backing buffer is DPR times larger than display
@@ -1278,7 +1363,7 @@ export const PageCanvas = React.memo(function PageCanvas({
             
             // Draw the rendered image data
             ctx.putImageData(rendered.imageData, 0, 0);
-            
+            setHasRendered(true);
           }
         }
       } catch (err) {
@@ -1509,6 +1594,43 @@ export const PageCanvas = React.memo(function PageCanvas({
 
   // Note: Focus is now handled by RichTextEditor component
 
+  // Shared base tool context — avoids creating 10 identical objects per mouse event.
+  // Extended with extra props (overlayHighlightPath, setActiveTool, etc.) at call sites that need them.
+  const baseToolContext = useMemo(() => ({
+    document,
+    pageNumber,
+    currentDocument,
+    annotations,
+    activeTool,
+    getPDFCoordinates,
+    pdfToCanvas,
+    pdfToContainer,
+    addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
+    removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
+    setEditingAnnotation,
+    setAnnotationText,
+    setIsEditingMode,
+    setIsSelecting,
+    setSelectionStart,
+    setSelectionEnd,
+    setIsCreatingTextBox,
+    setTextBoxStart,
+    editor,
+    renderer,
+    canvasRef,
+    containerRef,
+    BASE_SCALE,
+    zoomLevelRef,
+    fitMode,
+    panOffset,
+    panOffsetRef,
+    isSelecting,
+    selectionStart,
+    setSelectedTextSpans,
+    setIsHighlightTextMode,
+  }), [document, pageNumber, currentDocument, annotations, activeTool,
+       editor, renderer, fitMode, panOffset, isSelecting, selectionStart]);
+
   const handleMouseDown = async (e: React.MouseEvent) => {
     // Skip tool handling when clicking inside form fields (let inputs handle natively)
     const target = e.target as HTMLElement;
@@ -1565,42 +1687,10 @@ export const PageCanvas = React.memo(function PageCanvas({
     if (currentDocument && activeTool !== "select" && activeTool !== "pan") {
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler) {
-        const toolContext = {
-          document,
-          pageNumber,
-          currentDocument,
-          annotations,
-          activeTool,
-          getPDFCoordinates,
-          pdfToCanvas,
-          pdfToContainer,
-          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-          setEditingAnnotation,
-          setAnnotationText,
-          setIsEditingMode,
-          setIsSelecting,
-          setSelectionStart,
-          setSelectionEnd,
-          setIsCreatingTextBox,
-          setTextBoxStart,
-          editor,
-          renderer,
-          canvasRef,
-          containerRef,
-          BASE_SCALE,
-          zoomLevelRef,
-          fitMode,
-          panOffset,
-          panOffsetRef,
-          isSelecting,
-          selectionStart,
-          setSelectedTextSpans,
-          overlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? overlayHighlightPath : undefined,
-          setOverlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? setOverlayHighlightPath : undefined,
-          setIsHighlightTextMode,
-        };
-        
+        const toolContext = (activeTool === "highlight" || activeTool === "strikethrough")
+          ? { ...baseToolContext, overlayHighlightPath, setOverlayHighlightPath }
+          : baseToolContext;
+
         const result = await toolHandler.handleMouseDown(e, toolContext);
         if (result === true) {
           // Handler indicates it fully handled the event
@@ -1622,41 +1712,7 @@ export const PageCanvas = React.memo(function PageCanvas({
       
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler) {
-        const toolContext = {
-          document,
-          pageNumber,
-          currentDocument,
-          annotations,
-          activeTool,
-          getPDFCoordinates,
-          pdfToCanvas,
-          pdfToContainer,
-          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-          setEditingAnnotation,
-          setAnnotationText,
-          setIsEditingMode,
-          setIsSelecting,
-          setSelectionStart,
-          setSelectionEnd,
-          setIsCreatingTextBox,
-          setTextBoxStart,
-          editor,
-          renderer,
-          canvasRef,
-          containerRef,
-          BASE_SCALE,
-          zoomLevelRef,
-          fitMode,
-          panOffset,
-          panOffsetRef,
-          isSelecting,
-          selectionStart,
-          setSelectedTextSpans,
-          setIsHighlightTextMode,
-        };
-        
-        await toolHandler.handleMouseDown(e, toolContext);
+        await toolHandler.handleMouseDown(e, baseToolContext);
       }
     }
 
@@ -2102,40 +2158,7 @@ export const PageCanvas = React.memo(function PageCanvas({
       if (coords && currentDocument) {
         const toolHandler = toolHandlers[activeTool];
         if (toolHandler && toolHandler.handleMouseMove) {
-          const toolContext = {
-            document,
-            pageNumber,
-            currentDocument,
-            annotations,
-            activeTool,
-            getPDFCoordinates,
-            pdfToCanvas,
-            pdfToContainer,
-            addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-            removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-            setEditingAnnotation,
-            setAnnotationText,
-            setIsEditingMode,
-            setIsSelecting,
-            setSelectionStart,
-            setSelectionEnd,
-            setIsCreatingTextBox,
-            setTextBoxStart,
-            editor,
-            renderer,
-            canvasRef,
-            containerRef,
-            BASE_SCALE,
-            zoomLevelRef,
-            fitMode,
-            panOffset,
-            panOffsetRef,
-            isSelecting,
-            selectionStart,
-            setSelectedTextSpans,
-          };
-          
-          toolHandler.handleMouseMove(e, toolContext);
+          toolHandler.handleMouseMove(e, baseToolContext);
         }
       }
     } else if (isSelecting && selectionStart && activeTool === "selectText") {
@@ -2144,64 +2167,17 @@ export const PageCanvas = React.memo(function PageCanvas({
       if (coords && currentDocument) {
         const toolHandler = toolHandlers[activeTool];
         if (toolHandler && toolHandler.handleMouseMove) {
-          const toolContext = {
-            document,
-            pageNumber,
-            currentDocument,
-            annotations,
-            activeTool,
-            getPDFCoordinates,
-            pdfToCanvas,
-            pdfToContainer,
-            addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-            removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-            setEditingAnnotation,
-            setAnnotationText,
-            setIsEditingMode,
-            setIsSelecting,
-            setSelectionStart,
-            setSelectionEnd,
-            setIsCreatingTextBox,
-            setTextBoxStart,
-            editor,
-            renderer,
-            canvasRef,
-            containerRef,
-            BASE_SCALE,
-            zoomLevelRef,
-            fitMode,
-            panOffset,
-            panOffsetRef,
-            isSelecting,
-            selectionStart,
-            setSelectedTextSpans,
-          };
-          
-          toolHandler.handleMouseMove(e, toolContext);
+          toolHandler.handleMouseMove(e, baseToolContext);
         }
       }
     }
-    
+
     // Handle highlight tool mouse move for overlay path and shift+drag
     if ((activeTool === "highlight" || activeTool === "strikethrough") && isSelecting && selectionStart && currentDocument) {
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler && toolHandler.handleMouseMove) {
-        const toolContext = {
-          document,
-          pageNumber,
-          currentDocument,
-          annotations,
-          activeTool,
-          getPDFCoordinates,
-          pdfToCanvas,
-          pdfToContainer,
-          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-          setEditingAnnotation,
-          setAnnotationText,
-          setIsEditingMode,
-          setIsSelecting,
-          setSelectionStart,
+        const highlightToolContext = {
+          ...baseToolContext,
           setSelectionEnd: (coords: { x: number; y: number } | null) => {
             setSelectionEnd(coords);
             // Track overlay path using the updated selectionEnd (includes shift-locked coordinates)
@@ -2212,135 +2188,50 @@ export const PageCanvas = React.memo(function PageCanvas({
                 if (prev.length === 0) {
                   return [coords];
                 }
-                
+
                 // For subsequent points, add if coordinates changed significantly
-                // Use a very small tolerance (0.05 points) to avoid duplicate points but allow smooth drawing
-                // Also check if this exact point already exists in the path to avoid duplicates
                 const lastPoint = prev[prev.length - 1];
                 const dx = Math.abs(lastPoint.x - coords.x);
                 const dy = Math.abs(lastPoint.y - coords.y);
                 const distance = Math.sqrt(dx * dx + dy * dy);
                 const shouldAdd = distance > 0.05;
-                
+
                 // Also check if this exact point (within tolerance) already exists in the path
                 const pointExists = prev.some(p => {
                   const pDx = Math.abs(p.x - coords.x);
                   const pDy = Math.abs(p.y - coords.y);
                   return Math.sqrt(pDx * pDx + pDy * pDy) <= 0.05;
                 });
-                
-                const finalShouldAdd = shouldAdd && !pointExists;
-                
-                if (finalShouldAdd) {
+
+                if (shouldAdd && !pointExists) {
                   return [...prev, coords];
                 }
                 return prev;
               });
             }
           },
-          setIsCreatingTextBox,
-          setTextBoxStart,
-          editor,
-          renderer,
-          canvasRef,
-          containerRef,
-          BASE_SCALE,
-          zoomLevelRef,
-          fitMode,
-          panOffset,
-          panOffsetRef,
-          isSelecting,
-          selectionStart,
-          setSelectedTextSpans,
-          overlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? overlayHighlightPath : undefined,
-          setOverlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? setOverlayHighlightPath : undefined,
-          setIsHighlightTextMode,
+          overlayHighlightPath,
+          setOverlayHighlightPath,
         };
-        
-        toolHandler.handleMouseMove(e, toolContext);
+
+        toolHandler.handleMouseMove(e, highlightToolContext);
       }
     }
-    
+
     // Handle generic tool mouse move for draw, shape, form, and signatureField tools
     if ((activeTool === "draw" || activeTool === "shape" || activeTool === "form" || activeTool === "signatureField") &&
         (isSelecting || selectionStart) && currentDocument) {
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler && toolHandler.handleMouseMove) {
-        const toolContext = {
-          document,
-          pageNumber,
-          currentDocument,
-          annotations,
-          activeTool,
-          getPDFCoordinates,
-          pdfToCanvas,
-          pdfToContainer,
-          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-          setEditingAnnotation,
-          setAnnotationText,
-          setIsEditingMode,
-          setIsSelecting,
-          setSelectionStart,
-          setSelectionEnd,
-          setIsCreatingTextBox,
-          setTextBoxStart,
-          editor,
-          renderer,
-          canvasRef,
-          containerRef,
-          BASE_SCALE,
-          zoomLevelRef,
-          fitMode,
-          panOffset,
-          panOffsetRef,
-          isSelecting,
-          selectionStart,
-          setSelectedTextSpans,
-        };
-        
-        toolHandler.handleMouseMove(e, toolContext);
+        toolHandler.handleMouseMove(e, baseToolContext);
       }
     }
-    
+
     // Handle stamp tool mouse move for preview - always call when stamp tool is active
     if (activeTool === "stamp" && currentDocument) {
       const toolHandler = toolHandlers["stamp"];
       if (toolHandler && toolHandler.handleMouseMove) {
-        const toolContext = {
-          document,
-          pageNumber,
-          currentDocument,
-          annotations,
-          activeTool,
-          getPDFCoordinates,
-          pdfToCanvas,
-          pdfToContainer,
-          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-          setEditingAnnotation,
-          setAnnotationText,
-          setIsEditingMode,
-          setIsSelecting,
-          setSelectionStart,
-          setSelectionEnd,
-          setIsCreatingTextBox,
-          setTextBoxStart,
-          editor,
-          renderer,
-          canvasRef,
-          containerRef,
-          BASE_SCALE,
-          zoomLevelRef,
-          fitMode,
-          panOffset,
-          panOffsetRef,
-          isSelecting,
-          selectionStart,
-          setSelectedTextSpans,
-        };
-        
-        toolHandler.handleMouseMove(e, toolContext);
+        toolHandler.handleMouseMove(e, baseToolContext);
       }
     }
   };
@@ -2797,43 +2688,10 @@ export const PageCanvas = React.memo(function PageCanvas({
       // Use tool handlers for ALL tools that have mouse up logic (not just text tool)
       const toolHandler = toolHandlers[activeTool];
       if (toolHandler && toolHandler.handleMouseUp) {
-        const toolContext = {
-          document,
-          pageNumber,
-          currentDocument,
-          annotations,
-          activeTool,
-          getPDFCoordinates,
-          pdfToCanvas,
-          pdfToContainer,
-          addAnnotation: (documentId: string, annotation: Annotation) => addAnnotation(documentId, annotation),
-          removeAnnotation: (documentId: string, annotationId: string) => removeAnnotation(documentId, annotationId),
-          setEditingAnnotation,
-          setAnnotationText,
-          setIsEditingMode,
-          setIsSelecting,
-          setSelectionStart,
-          setSelectionEnd,
-          setIsCreatingTextBox,
-          setTextBoxStart,
-          setActiveTool,
-          editor,
-          renderer,
-          canvasRef,
-          containerRef,
-          BASE_SCALE,
-          zoomLevelRef,
-          fitMode,
-          panOffset,
-          panOffsetRef,
-          isSelecting,
-          selectionStart,
-          setSelectedTextSpans,
-          overlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? overlayHighlightPath : undefined,
-          setOverlayHighlightPath: (activeTool === "highlight" || activeTool === "strikethrough") ? setOverlayHighlightPath : undefined,
-          setIsHighlightTextMode,
-        };
-        
+        const toolContext = (activeTool === "highlight" || activeTool === "strikethrough")
+          ? { ...baseToolContext, setActiveTool, overlayHighlightPath, setOverlayHighlightPath }
+          : { ...baseToolContext, setActiveTool };
+
         // For highlight tool, ensure we have selectionEnd from the path if it's missing
         let finalSelectionEnd = selectionEnd;
         if ((activeTool === "highlight" || activeTool === "strikethrough")) {
@@ -2910,6 +2768,52 @@ export const PageCanvas = React.memo(function PageCanvas({
       },
     ];
   }, [contextMenu, currentDocument, annotations, addAnnotation, removeAnnotation]);
+
+  // Viewport culling: skip rendering annotations that are entirely off-screen.
+  // Only applies in non-read mode (single-page view with pan/zoom) when there are many annotations.
+  // In read mode, VirtualizedPageList handles page-level culling and CSS scaling handles the rest.
+  const ANNOTATION_CULL_THRESHOLD = 30;
+  const visibleAnnotations = useMemo(() => {
+    if (readMode || annotations.length < ANNOTATION_CULL_THRESHOLD) return annotations;
+
+    const containerEl = containerRef.current;
+    if (!containerEl || !pageMetadata) return annotations;
+
+    const containerWidth = containerEl.clientWidth;
+    const containerHeight = containerEl.clientHeight;
+    if (containerWidth <= 0 || containerHeight <= 0) return annotations;
+
+    // Viewport bounds in PDF coordinate space
+    const viewLeft = -panOffset.x / zoomLevel;
+    const viewTop = -panOffset.y / zoomLevel;
+    const viewRight = viewLeft + containerWidth / zoomLevel;
+    const viewBottom = viewTop + containerHeight / zoomLevel;
+
+    // Convert viewport to PDF coords (Y axis flip: PDF Y=0 at bottom)
+    const pageH = pageMetadata.height;
+    const pdfViewLeft = viewLeft;
+    const pdfViewRight = viewRight;
+    const pdfViewBottom = pageH - viewBottom;
+    const pdfViewTop = pageH - viewTop;
+
+    const padding = 200; // PDF points (~2.8in) to prevent pop-in
+
+    return annotations.filter(annot => {
+      // Path-based annotations (highlights, drawings) have complex bounds — skip culling
+      if (annot.type === "highlight" || annot.type === "strikethrough" || annot.type === "draw") return true;
+
+      const ax = annot.x ?? 0;
+      const ay = annot.y ?? 0;
+      const aw = annot.width || 200;
+      const ah = annot.height || 100;
+
+      // Check if annotation bbox overlaps visible viewport (with padding)
+      return !(ax + aw < pdfViewLeft - padding ||
+               ax > pdfViewRight + padding ||
+               ay + ah < pdfViewBottom - padding ||
+               ay > pdfViewTop + padding);
+    });
+  }, [readMode, annotations, panOffset, zoomLevel, pageMetadata]);
 
   if (error) {
     return (
@@ -3018,11 +2922,6 @@ export const PageCanvas = React.memo(function PageCanvas({
         </>
       )}
       
-      {isRendering && (readMode || fitMode !== "custom") && (
-        <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10 pointer-events-none">
-          <div className="text-muted-foreground">Rendering...</div>
-        </div>
-      )}
       {isDragOverPage && (
         <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
           <div className="bg-primary/20 border-4 border-dashed border-primary rounded-lg p-8 backdrop-blur-sm">
@@ -3059,6 +2958,26 @@ export const PageCanvas = React.memo(function PageCanvas({
             position: readMode ? "relative" : undefined,
           }}
         >
+          {/* Loading placeholder — visible until the canvas is painted */}
+          {readMode && !hasRendered && (
+            <div
+              className="absolute inset-0 flex items-center justify-center"
+              style={{
+                zIndex: 0,
+                backgroundColor: "var(--color-card, #ffffff)",
+                border: "1px solid var(--color-border, #e5e7eb)",
+                borderRadius: "2px",
+              }}
+            >
+              <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                <div
+                  className="animate-spin rounded-full border-2 border-current border-t-transparent"
+                  style={{ width: 24, height: 24 }}
+                />
+                <span className="text-xs select-none">Loading page {pageNumber + 1}</span>
+              </div>
+            </div>
+          )}
           <div
             style={
               horizontalFlip
@@ -3078,6 +2997,7 @@ export const PageCanvas = React.memo(function PageCanvas({
                 verticalAlign: "top",
                 border: "none",
                 outline: "none",
+                backgroundColor: readMode && !hasRendered ? "transparent" : undefined,
                 width: readMode && pageMetadata ? pageMetadata.width : undefined,
                 height: readMode && pageMetadata ? pageMetadata.height : undefined,
                 boxSizing: "border-box",
@@ -3748,10 +3668,10 @@ export const PageCanvas = React.memo(function PageCanvas({
           );
         })()}
 
-        {/* Render annotations */}
-        {annotations.length > 0 && (
+        {/* Render annotations (viewport-culled in non-read mode when count >= threshold) */}
+        {visibleAnnotations.length > 0 && (
           <div className="absolute inset-0" style={{ zIndex: 20, pointerEvents: (activeTool === "select" || activeTool === "selectText") ? "auto" : "none" }}>
-            {annotations.map((annot) => {
+            {visibleAnnotations.map((annot) => {
               // Don't render text annotations if they're selected (RichTextEditor will show it instead)
               // This prevents double rendering. Highlights should always render even when selected.
               if (editingAnnotation?.id === annot.id && annot.type === "text") {
