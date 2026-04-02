@@ -336,6 +336,48 @@ export class PDFAnnotationLoader {
     pdfAnnotation: pdfAnnot,
   });
 
+  } else if (type === "Text") {
+  // Load comment (sticky note) annotation
+  if (!rect) continue;
+  const pageBounds = page.getBounds();
+  const textPageHeight = pageBounds[3] - pageBounds[1];
+
+  // Convert display coordinates to PDF coordinates
+  const textX = rect[0];
+  const textY = textPageHeight - rect[3]; // top of rect in PDF coords
+
+  let commentColor = "#F59E0B";
+  try {
+    const color = pdfAnnot.getColor();
+    if (color && color.length >= 3) {
+      commentColor = `#${Math.round(color[0]*255).toString(16).padStart(2,'0')}${Math.round(color[1]*255).toString(16).padStart(2,'0')}${Math.round(color[2]*255).toString(16).padStart(2,'0')}`;
+    }
+  } catch { /* default */ }
+
+  // Parse comment text from Contents — same format as StrikeOut
+  const commentText = contents || "";
+  let commentContent = commentText;
+  let textRedlineSuggestion = "";
+  const textSuggestedIdx = commentText.indexOf("Suggested: ");
+  if (textSuggestedIdx >= 0) {
+    commentContent = commentText.substring(0, textSuggestedIdx).trim();
+    textRedlineSuggestion = commentText.substring(textSuggestedIdx + 11).trim();
+  }
+
+  annotations.push({
+    id,
+    type: "comment",
+    pageNumber,
+    x: textX,
+    y: textY,
+    width: rect[2] - rect[0],
+    height: rect[3] - rect[1],
+    color: commentColor,
+    commentContent,
+    redlineSuggestion: textRedlineSuggestion || undefined,
+    pdfAnnotation: pdfAnnot,
+  });
+
   } else if (type === "Redact") {
 
   // Load redaction annotation

@@ -611,6 +611,85 @@ export class PDFAnnotationOperations {
 
   }
 
+  async addCommentAnnotation(
+    document: PDFDocument,
+    annotation: Annotation
+  ): Promise<void> {
+    const mupdfDoc = document.getMupdfDocument();
+    const pdfDoc = mupdfDoc.asPDF();
+    if (!pdfDoc) throw new Error("Document is not a PDF");
+
+    const page = pdfDoc.loadPage(annotation.pageNumber);
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+
+    // Create a PDF "Text" (sticky note) annotation
+    const annot = page.createAnnotation("Text");
+
+    // Set rect to a small icon area at the annotation position
+    const x = annotation.x || 72;
+    const y = annotation.y || 720;
+    const iconSize = 24;
+    const displayY = pageHeight - y;
+    annot.setRect([x, displayY - iconSize, x + iconSize, displayY]);
+
+    // Set color from annotation (severity-based)
+    if (annotation.color) {
+      const hex = annotation.color.replace("#", "");
+      const r = parseInt(hex.substring(0, 2), 16) / 255;
+      const g = parseInt(hex.substring(2, 4), 16) / 255;
+      const b = parseInt(hex.substring(4, 6), 16) / 255;
+      annot.setColor([r, g, b]);
+    }
+
+    // Build contents from comment fields
+    const parts: string[] = [];
+    if (annotation.commentContent) parts.push(annotation.commentContent);
+    if (annotation.redlineSuggestion) parts.push(`Suggested: ${annotation.redlineSuggestion}`);
+    const contentsText = parts.join('\n\n');
+    if (contentsText) annot.setContents(contentsText);
+
+    // Set icon name to "Comment"
+    try {
+      const annotObj = annot.getObject();
+      if (annotObj) {
+        try {
+          annotObj.put("Name", this.mupdf.newName("Comment"));
+        } catch {
+          try { annotObj.put("Name", this.mupdf.newString("Comment")); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Create a Popup annotation so PDF viewers show the comment on click
+    if (contentsText) {
+      try {
+        const popup = page.createAnnotation("Popup");
+        const popupRect = [
+          x + iconSize + 10,
+          displayY - 150,
+          x + iconSize + 250,
+          displayY,
+        ];
+        popup.setRect(popupRect);
+
+        const annotObj = annot.getObject();
+        const popupObj = popup.getObject();
+        if (annotObj && popupObj) {
+          annotObj.put("Popup", popupObj);
+          popupObj.put("Parent", annotObj);
+          try { popupObj.put("Open", false); } catch { /* ignore */ }
+        }
+        popup.update();
+      } catch (e) {
+        console.warn("Could not create popup for comment annotation:", e);
+      }
+    }
+
+    annot.update();
+    annotation.pdfAnnotation = annot;
+  }
+
   async addImageAnnotation(
 
   document: PDFDocument,
@@ -2497,9 +2576,6 @@ export class PDFAnnotationOperations {
   y + (annotation.height || 0),
 
   ];
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2472',message:'Creating stamp annotation',data:{annotationId:annotation.id,displayCoords:{x:annotation.x,y:annotation.y,width:annotation.width,height:annotation.height},pdfCoords:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},pageHeight:pageHeight,stampType:annotation.stampData?.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
-  // #endregion
 
   // Use Stamp annotation type to embed image appearance for native PDF viewers
   // This ensures stamps appear as images, not text, in external PDF viewers
@@ -2637,11 +2713,6 @@ export class PDFAnnotationOperations {
       console.warn("Could not set stamp image (will show as DRAFT in external viewers):", e);
     }
   }
-
-  // #region agent log
-  const finalRect = annot.getRect();
-  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFAnnotationOperations.ts:2605',message:'After update() - checking rect',data:{annotationId:annotation.id,rectAfterUpdate:{x:rectAfterUpdate[0],y:rectAfterUpdate[1],x2:rectAfterUpdate[2],y2:rectAfterUpdate[3]},originalRect:{x:rect[0],y:rect[1],x2:rect[2],y2:rect[3]},rectChanged:rectChanged,finalRect:{x:finalRect[0],y:finalRect[1],x2:finalRect[2],y2:finalRect[3]}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'CREATE'})}).catch(()=>{});
-  // #endregion
 
   // Store the PDF annotation object for future updates
 

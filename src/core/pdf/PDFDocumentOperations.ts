@@ -171,7 +171,11 @@ export class PDFDocumentOperations {
           if (pdfType === "StrikeOut") {
             annotationsToDelete.push(pdfAnnot);
           }
-          // Delete Popup annotations (associated with StrikeOut comments)
+          // Delete Text annotations (used by comment/sticky note annotations)
+          if (pdfType === "Text") {
+            annotationsToDelete.push(pdfAnnot);
+          }
+          // Delete Popup annotations (associated with StrikeOut/Text comments)
           if (pdfType === "Popup") {
             annotationsToDelete.push(pdfAnnot);
           }
@@ -711,6 +715,10 @@ export class PDFDocumentOperations {
 
   await this.addShapeAnnotationToPage(page, annot, 0);
 
+  } else if (annot.type === "comment") {
+
+  await this.addCommentAnnotationToPage(page, annot);
+
   }
 
   // Note: form fields and stamps are handled differently
@@ -864,6 +872,57 @@ export class PDFDocumentOperations {
         popup.update();
       } catch (e) {
         console.warn("Could not create popup for strikethrough:", e);
+      }
+    }
+
+    annot.update();
+  }
+
+
+  private async addCommentAnnotationToPage(page: any, annotation: Annotation): Promise<void> {
+    const pageBounds = page.getBounds();
+    const pageHeight = pageBounds[3] - pageBounds[1];
+
+    const annot = page.createAnnotation("Text");
+
+    const x = annotation.x || 72;
+    const y = annotation.y || 720;
+    const iconSize = 24;
+    const displayY = pageHeight - y;
+    annot.setRect([x, displayY - iconSize, x + iconSize, displayY]);
+
+    if (annotation.color) {
+      const color = parseColor(annotation.color);
+      annot.setColor(color);
+    }
+
+    const parts: string[] = [];
+    if (annotation.commentContent) parts.push(annotation.commentContent);
+    if (annotation.redlineSuggestion) parts.push(`Suggested: ${annotation.redlineSuggestion}`);
+    const contentsText = parts.join('\n\n');
+    if (contentsText) annot.setContents(contentsText);
+
+    if (contentsText) {
+      try {
+        const popup = page.createAnnotation("Popup");
+        const popupRect = [
+          x + iconSize + 10,
+          displayY - 150,
+          x + iconSize + 250,
+          displayY,
+        ];
+        popup.setRect(popupRect);
+
+        const annotObj = annot.getObject();
+        const popupObj = popup.getObject();
+        if (annotObj && popupObj) {
+          annotObj.put("Popup", popupObj);
+          popupObj.put("Parent", annotObj);
+          try { popupObj.put("Open", false); } catch { /* ignore */ }
+        }
+        popup.update();
+      } catch (e) {
+        console.warn("Could not create popup for comment:", e);
       }
     }
 
@@ -1313,7 +1372,36 @@ export class PDFDocumentOperations {
       }
     }
   }
-  
+
+  // Before syncing comment annotations, delete ALL Text (sticky note) annotations from this page
+  const hasComments = pageAnnotations.some(annot => annot.type === "comment");
+  if (hasComments) {
+    const currentPageAnnots = page.getAnnotations();
+    const commentAnnotationsToDelete: any[] = [];
+    for (const pdfAnnot of currentPageAnnots) {
+      try {
+        const pdfType = pdfAnnot.getType();
+        if (pdfType === "Text") {
+          commentAnnotationsToDelete.push(pdfAnnot);
+        }
+      } catch (e) {
+        // Skip if we can't determine type
+      }
+    }
+    for (const pdfAnnot of commentAnnotationsToDelete) {
+      try {
+        page.deleteAnnotation(pdfAnnot);
+      } catch (deleteError) {
+        console.warn(`Could not delete Text annotation:`, deleteError);
+      }
+    }
+    for (const annot of pageAnnotations) {
+      if (annot.type === "comment") {
+        annot.pdfAnnotation = undefined;
+      }
+    }
+  }
+
   // CRITICAL FIX: Before syncing form fields, delete ALL Widget annotations from this page
   // This prevents duplicates when form fields are moved and saved multiple times
   // Same approach as text and shapes - delete all, then recreate from store
@@ -1729,9 +1817,6 @@ export class PDFDocumentOperations {
     annot.x + (annot.width || 0),
     pdfY + (annot.height || 0)
   ];
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/904a5175-7f78-4608-b46a-a1e7f31debc4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PDFDocumentOperations.ts:1491',message:'Updating stamp rect during sync',data:{annotationId:annot.id,displayCoords:{x:annot.x,y:annot.y,width:annot.width,height:annot.height},pdfCoords:{x:newRect[0],y:newRect[1],x2:newRect[2],y2:newRect[3]},pageHeight:pageHeight},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'SYNC'})}).catch(()=>{});
-  // #endregion
   annot.pdfAnnotation.setRect(newRect);
 
   // CRITICAL FIX: Re-embed the image appearance during updates
@@ -2807,6 +2892,8 @@ export class PDFDocumentOperations {
   } else if (annot.type === "stamp") {
     // Do not sync stamp annotations to the PDF. We draw them as page content with pdf-lib on save
     // so the saved file has no stamp annotations (no RED DRAFT) and only our drawn content.
+  } else if (annot.type === "comment") {
+    await this.annotationOps.addCommentAnnotation(document, annot);
   }
 
   } catch (error) {
