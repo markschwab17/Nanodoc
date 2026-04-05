@@ -11,6 +11,7 @@
  * it is terminated and restarted so other pages can continue.
  */
 
+import { isTauri } from "@/shared/utils/environment";
 import type { WorkerRequest, WorkerResponse } from "./pdfRender.worker";
 
 export interface RenderOptions {
@@ -28,7 +29,7 @@ export interface RenderedPage {
 }
 
 /** How long to wait for a worker render before killing and restarting (ms) */
-const WORKER_RENDER_TIMEOUT = 15_000;
+const WORKER_RENDER_TIMEOUT = isTauri ? 120_000 : 15_000;
 
 export class PDFRenderer {
   private mupdf: any;
@@ -45,8 +46,16 @@ export class PDFRenderer {
   private workerDocId: string | null = null;
 
   private getAdaptiveCacheSize(scale: number): number {
-    // Generous cache so scrolling back to previously-viewed pages is instant.
-    // Each entry is an ImageData: at 2MP (~8MB) to 29MP (~116MB) depending on page size.
+    // Desktop: generous cache but still bounded to prevent malloc failures
+    // when switching modes with large PDFs. Each entry ~8-116 MB.
+    if (isTauri) {
+      if (scale >= 3.0) return 100;
+      if (scale >= 2.0) return 150;
+      if (scale >= 1.5) return 200;
+      return 300;
+    }
+
+    // Browser: tighter limits for tab memory.
     if (scale >= 3.0) return 50;
     if (scale >= 2.0) return 80;
     if (scale >= 1.5) return 100;

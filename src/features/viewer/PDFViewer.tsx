@@ -187,10 +187,22 @@ export function PDFViewer() {
       setFitMode("custom");
       setZoomLevel(newZoom);
     });
-    
-    // Immediately after flushSync, the layout should be recalculated
-    // Set scroll position synchronously in the same frame to prevent browser auto-adjustment
-    // Use a microtask to ensure DOM has updated but before browser can auto-adjust
+
+    // Immediately set scroll after flushSync — force reflow first so scrollHeight is current.
+    // This is critical for WKWebView (macOS Tauri) which may auto-adjust scroll position
+    // before a microtask runs, causing zoom to jump to top-left.
+    void scrollContainer.offsetHeight;
+    {
+      const maxScroll = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      scrollContainer.scrollTop = Math.max(0, Math.min(maxScroll, newScrollTop));
+      if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+        scrollContainer.scrollLeft = (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2;
+      } else {
+        scrollContainer.scrollLeft = 0;
+      }
+    }
+
+    // Backup: microtask + rAF correction for edge cases where the immediate set was overridden
     Promise.resolve().then(() => {
       if (!scrollContainer) {
         isZoomingRef.current = false;
@@ -711,7 +723,12 @@ export function PDFViewer() {
     }
   }, [currentPage, setCurrentPage]);
 
-  // Handle wheel zoom in read mode at container level
+  // Handle wheel zoom in read mode at container level.
+  // Throttles zoomToPoint calls (same path as +/- buttons) via requestAnimationFrame
+  // so each zoom step is perfectly positioned with zero drift.
+  const pendingZoomRef = useRef<number | null>(null);
+  const zoomRAFRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!readMode || !scrollContainerRef.current) return;
 
@@ -719,37 +736,40 @@ export function PDFViewer() {
 
     const handleWheelNative = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
-
       e.preventDefault();
       e.stopPropagation();
 
       const currentZoom = zoomLevelRef.current;
-      const delta = e.deltaY > 0 ? 0.988 : 1.012; // 1.2x faster than previous 0.99/1.01
+      const delta = e.deltaY > 0 ? 0.94 : 1.06;
       const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
+      if (Math.abs(newZoom - currentZoom) < 0.001) return;
 
-      if (Math.abs(newZoom - currentZoom) > 0.001) {
-        // In read mode, zoom to viewport center instead of mouse cursor position
-        // This provides a more predictable zoom experience
-        const containerRect = container.getBoundingClientRect();
-        const viewportCenterX = containerRect.left + container.clientWidth / 2;
-        const viewportCenterY = containerRect.top + container.clientHeight / 2;
-        
-        zoomToPoint(newZoom, viewportCenterX, viewportCenterY);
+      // Accumulate zoom target
+      pendingZoomRef.current = newZoom;
+
+      // Throttle via rAF — at most one zoomToPoint per frame.
+      // Each call uses the exact same code path as the +/- buttons.
+      if (zoomRAFRef.current === null) {
+        zoomRAFRef.current = requestAnimationFrame(() => {
+          zoomRAFRef.current = null;
+          const targetZoom = pendingZoomRef.current;
+          if (targetZoom === null) return;
+          pendingZoomRef.current = null;
+
+          const rect = container.getBoundingClientRect();
+          zoomToPoint(
+            targetZoom,
+            rect.left + container.clientWidth / 2,
+            rect.top + container.clientHeight / 2
+          );
+        });
       }
     };
 
-    // Track scroll events during zoom to detect unexpected changes
-    const handleScroll = () => {
-      // Track scroll position for potential future use
-      container.scrollTop;
-    };
-
     container.addEventListener("wheel", handleWheelNative, { passive: false });
-    container.addEventListener("scroll", handleScroll, { passive: true });
-
     return () => {
       container.removeEventListener("wheel", handleWheelNative);
-      container.removeEventListener("scroll", handleScroll);
+      if (zoomRAFRef.current !== null) cancelAnimationFrame(zoomRAFRef.current);
     };
   }, [readMode, zoomToPoint]);
 

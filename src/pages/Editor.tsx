@@ -34,6 +34,7 @@ import { NotificationToast } from "@/shared/components/NotificationToast";
 import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { useUndoRedo } from "@/shared/hooks/useUndoRedo";
+import { useAutoSave } from "@/shared/hooks/useAutoSave";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
 import { TourOverlay } from "@/features/tour/TourOverlay";
@@ -61,6 +62,7 @@ function Editor() {
   const { loadPDF, loading } = usePDF();
   const { showNotification } = useNotificationStore();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
+  useAutoSave();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
   const [showStampCreator, setShowStampCreator] = useState(false);
   const [stampGalleryWidth, setStampGalleryWidth] = useState(320); // Default width in pixels
@@ -77,6 +79,25 @@ function Editor() {
       useUIStore.getState().setInitialSidebarOpen(null);
     }
   }, [initialSidebarOpen]);
+
+  // WKWebView (macOS Tauri) discards rendering layers when minimized.
+  // Force a repaint when the window becomes visible again.
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        // Force layout recalculation to restore rendering
+        document.body.style.display = "none";
+        void document.body.offsetHeight;
+        document.body.style.display = "";
+
+        // Nudge React to re-render the viewer by toggling a harmless state
+        window.dispatchEvent(new Event("resize"));
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
 
   // Handle stamp gallery resize
   useEffect(() => {

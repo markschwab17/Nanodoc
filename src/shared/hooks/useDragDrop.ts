@@ -6,6 +6,7 @@
 
 import { useCallback } from "react";
 import { useDropzone } from "react-dropzone";
+import { isTauri } from "@/shared/utils/environment";
 import { usePDF } from "./usePDF";
 
 export function useDragDrop() {
@@ -23,7 +24,9 @@ export function useDragDrop() {
             // Initialize mupdf
             const mupdfModule = await import("mupdf");
             
-            await loadPDF(data, file.name, mupdfModule.default, null);
+            // On Tauri, the File object may carry the native path
+            const filePath = isTauri ? (file as any).path ?? null : null;
+            await loadPDF(data, file.name, mupdfModule.default, filePath);
           } catch (error) {
             console.error("Error loading dropped file:", error);
           }

@@ -4,6 +4,7 @@
  * Handles printing PDF documents using browser print API with advanced layout settings.
  */
 
+import { isTauri } from "@/shared/utils/environment";
 import type { PDFDocument } from "./PDFDocument";
 import type { PrintSettings, PageSizeDimensions, MarginSettings } from "@/shared/stores/printStore";
 import { PAGE_SIZES, MARGIN_PRESETS } from "@/shared/stores/printStore";
@@ -24,7 +25,8 @@ export class PDFPrinter {
   }
 
   /**
-   * Print a range of pages with advanced layout settings
+   * Print a range of pages with advanced layout settings.
+   * In Tauri, delegates to the OS native print pipeline.
    */
   async printPages(
     document: PDFDocument,
@@ -32,6 +34,31 @@ export class PDFPrinter {
     endPage: number,
     settings?: PrintSettings
   ): Promise<void> {
+    // Native desktop print path: save to temp file, invoke OS print
+    if (isTauri) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { writeFile } = await import("@tauri-apps/plugin-fs");
+        const { tempDir } = await import("@tauri-apps/api/path");
+
+        // Get the PDF bytes for the requested page range
+        const pdfBytes = document.getPdfData?.();
+        if (!pdfBytes) throw new Error("No PDF data available for printing");
+
+        // Write to a temp file
+        const tmp = await tempDir();
+        const tempPath = `${tmp}nanodoc-print-${Date.now()}.pdf`;
+        await writeFile(tempPath, pdfBytes);
+
+        // Invoke native print
+        await invoke("print_pdf", { filePath: tempPath });
+        return;
+      } catch (e) {
+        console.warn("Native print failed, falling back to browser print:", e);
+        // Fall through to browser-based print
+      }
+    }
+
     // Use default settings if none provided
     const printSettings: PrintSettings = settings || {
       orientation: "auto",

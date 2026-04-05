@@ -32,9 +32,12 @@
             "core:default",
             "dialog:allow-open",
             "dialog:allow-save",
-            "fs:allow-read-file",
-            "fs:allow-write-file",
-            "fs:scope-app",
+            "fs:read-all",
+            "fs:write-all",
+            {
+              "identifier": "fs:scope",
+              "allow": ["$HOME/**", "$DESKTOP/**", "$DOCUMENT/**", "$DOWNLOAD/**", "$APPDATA/**", "/tmp/**"]
+            },
             "updater:default",
             "process:allow-restart"
           ]

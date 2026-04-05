@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { isTauri } from "@/shared/utils/environment";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
@@ -28,8 +29,7 @@ export function UpdateChecker() {
 
   // Check for updates on component mount
   const checkForUpdates = useCallback(async () => {
-    // Only run in Tauri environment
-    if (typeof window === "undefined" || !(window as any).__TAURI__) {
+    if (!isTauri) {
       return;
     }
 

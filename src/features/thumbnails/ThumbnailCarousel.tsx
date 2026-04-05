@@ -114,12 +114,23 @@ export function ThumbnailCarousel() {
   }, [currentDocument]);
 
   useEffect(() => {
-    const initRenderer = async () => {
-      const mupdfModule = await import("mupdf");
-      setRenderer(new PDFRenderer(mupdfModule.default));
-      setEditor(new PDFEditor(mupdfModule.default));
+    let cancelled = false;
+    const initRenderer = async (attempt = 0) => {
+      try {
+        const mupdfModule = await import("mupdf");
+        if (cancelled) return;
+        setRenderer(new PDFRenderer(mupdfModule.default));
+        setEditor(new PDFEditor(mupdfModule.default));
+      } catch (err) {
+        console.error(`[ThumbnailCarousel] mupdf init failed (attempt ${attempt + 1}):`, err);
+        if (!cancelled && attempt < 5) {
+          setTimeout(() => initRenderer(attempt + 1), 500 * (attempt + 1));
+        }
+      }
     };
-    initRenderer();
+    // Small delay to avoid racing with PDFViewer's mupdf import
+    setTimeout(() => initRenderer(), 100);
+    return () => { cancelled = true; };
   }, []);
 
   const handleDeletePages = async (pageNumbers: number[]) => {
@@ -1402,8 +1413,17 @@ export function ThumbnailCarousel() {
     ([id]) => id !== currentDocument?.getId()
   );
 
-  if (!showThumbnails || !currentDocument || !renderer) {
+  if (!showThumbnails || !currentDocument) {
     return null;
+  }
+
+  // Show loading state while renderer initializes instead of returning null
+  if (!renderer) {
+    return (
+      <div className="flex flex-col h-full w-full items-center justify-center text-muted-foreground text-sm p-4">
+        Loading pages...
+      </div>
+    );
   }
 
   const pageCount = currentDocument.getPageCount();

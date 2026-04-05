@@ -4,6 +4,7 @@
  * Vertical toolbar on the right side with all tools.
  */
 
+import { isTauri } from "@/shared/utils/environment";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { Button } from "@/components/ui/button";
 import {
@@ -467,12 +468,13 @@ export function Toolbar() {
     const originalPath = usePDFStore.getState().getDocumentPath(currentDoc.getId());
     const ctx = useCiviltakeoffContextStore.getState().getContext();
 
-    // Tauri with path: save to file
+    // Tauri with path: save directly to file (no dialog)
     if (originalPath && isTauri) {
       try {
         await syncAndSavePDF(async (data) => {
           await fileSystem.saveFileToPath(data, originalPath);
         }, originalPath);
+        useNotificationStore.getState().showNotification("PDF saved", "success");
       } catch (error) {
         console.error("Error saving to path, falling back to Save As:", error);
         await handleSaveAs();
@@ -674,8 +676,7 @@ export function Toolbar() {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
-    const isTauriEnv =
-      typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+    const isTauriEnv = isTauri;
 
     try {
       let chosenPath: string | null = null;
@@ -695,6 +696,8 @@ export function Toolbar() {
       }
 
       if (chosenPath && tauriFs) {
+        // Remember path for future Save (no dialog next time)
+        usePDFStore.getState().setDocumentPath(currentDoc.getId(), chosenPath);
         await syncAndSavePDF(
           async (data) => {
             await tauriFs.saveFileToPath(data, chosenPath!);
@@ -712,8 +715,7 @@ export function Toolbar() {
     }
   };
 
-  // Check if we're in Tauri (desktop) or browser - standard Tauri v2 detection
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  // Tauri detection from shared utility (imported at top of file)
 
   const handlePrint = () => {
     const currentDoc = getCurrentDocument();

@@ -1,6 +1,12 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod file_watcher;
+mod pdf_renderer;
+mod printing;
+
+use file_watcher::WatcherState;
+use pdf_renderer::PdfState;
 use tauri::{Emitter, Manager};
 
 fn main() {
@@ -10,6 +16,18 @@ fn main() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(PdfState::new())
+        .manage(WatcherState::new())
+        .invoke_handler(tauri::generate_handler![
+            pdf_renderer::load_pdf,
+            pdf_renderer::render_page,
+            pdf_renderer::render_pages_batch,
+            pdf_renderer::get_page_info,
+            pdf_renderer::close_pdf,
+            printing::print_pdf,
+            file_watcher::watch_file,
+            file_watcher::unwatch_file,
+        ])
         .setup(|app| {
             // Handle file opening from command line arguments
             // When a file is opened via file association, Tauri passes it as a command-line argument

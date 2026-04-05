@@ -1,4 +1,5 @@
 import { createBrowserRouter } from "react-router-dom";
+import { isTauri } from "@/shared/utils/environment";
 import Home from "./pages/Home";
 import Editor from "./pages/Editor";
 import StitchView from "./pages/StitchView";
@@ -51,11 +52,6 @@ export const router = createBrowserRouter([
 
 // Component that handles routing decision at React render time
 function AppRouter() {
-  // Standard Tauri v2 detection
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-
-
-  // Return the appropriate component
   return isTauri ? <Editor /> : <Home />;
 }
 

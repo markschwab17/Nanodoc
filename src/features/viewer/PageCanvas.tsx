@@ -108,6 +108,7 @@ export const PageCanvas = React.memo(function PageCanvas({
 }: PageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const transformDivRef = useRef<HTMLDivElement>(null);
   const [hasRendered, setHasRendered] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actualScale, setActualScale] = useState<number>(1.0); // Store the actual scale used for rendering
@@ -860,59 +861,62 @@ export const PageCanvas = React.memo(function PageCanvas({
     const container = containerRef.current;
     if (!container || readMode) return; // Don't handle wheel zoom in read mode at page level
 
+    // Timer for debouncing single-page zoom commit
+    let spZoomTimer: ReturnType<typeof setTimeout> | null = null;
+
     const handleWheelNative = (e: WheelEvent) => {
       // Get current values from refs
       const currentZoomLevel = zoomLevelRef.current;
       const currentFitMode = fitModeRef.current;
       const currentPanOffset = panOffsetRef.current;
-      
+
       // Handle zoom if ctrl/meta is pressed
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         e.stopPropagation();
 
-        const delta = e.deltaY > 0 ? 0.95 : 1.05; // Reduced from 0.9/1.1 to 0.95/1.05 for slower zoom
+        const delta = e.deltaY > 0 ? 0.95 : 1.05;
         const currentScale = currentZoomLevel;
         const newZoom = Math.max(0.25, Math.min(5, currentScale * delta));
 
         if (Math.abs(newZoom - currentScale) > 0.001) {
-          // Get canvas bounds - use the actual canvas element position
           const canvas = canvasRef.current;
-          if (!canvas) return;
-          
+          const tDiv = transformDivRef.current;
+          if (!canvas || !tDiv) return;
+
           const canvasRect = canvas.getBoundingClientRect();
-          
-          // Mouse position relative to the visible canvas
           const mouseRelativeToCanvasX = e.clientX - canvasRect.left;
           const mouseRelativeToCanvasY = e.clientY - canvasRect.top;
-          
-          // The canvas is scaled by zoomLevel, so divide to get unscaled canvas coordinates
           const canvasX = mouseRelativeToCanvasX / currentScale;
           const canvasY = mouseRelativeToCanvasY / currentScale;
-          
-          // Get container bounds for calculating new pan offset
+
           const containerRect = container.getBoundingClientRect();
           const mouseX = e.clientX - containerRect.left;
           const mouseY = e.clientY - containerRect.top;
 
-          // Calculate new pan offset to place that canvas point at the mouse position
           const newCanvasRelativeX = canvasX * newZoom;
           const newCanvasRelativeY = canvasY * newZoom;
           const newPanX = mouseX - newCanvasRelativeX;
           const newPanY = mouseY - newCanvasRelativeY;
 
-          // Update refs immediately for smooth operation
+          // Update refs immediately
           panOffsetRef.current = { x: newPanX, y: newPanY };
           zoomLevelRef.current = newZoom;
           fitModeRef.current = "custom";
 
-          // Use flushSync to force all state updates in a single synchronous render
-          // This prevents the "adjustment" where some values update before others
-          flushSync(() => {
-            setFitMode("custom");
-            setZoomLevel(newZoom);
-            setPanOffset({ x: newPanX, y: newPanY });
-          });
+          // Apply CSS transform directly — instant, no React re-render
+          tDiv.style.transform = `scale(${newZoom}) translate(${newPanX / newZoom}px, ${newPanY / newZoom}px)`;
+
+          // Debounce the React state commit
+          if (spZoomTimer) clearTimeout(spZoomTimer);
+          spZoomTimer = setTimeout(() => {
+            spZoomTimer = null;
+            flushSync(() => {
+              setFitMode("custom");
+              setZoomLevel(zoomLevelRef.current);
+              setPanOffset({ ...panOffsetRef.current });
+            });
+          }, 100);
         }
         return;
       }
@@ -960,6 +964,7 @@ export const PageCanvas = React.memo(function PageCanvas({
 
     return () => {
       container.removeEventListener("wheel", handleWheelNative);
+      if (spZoomTimer) clearTimeout(spZoomTimer);
     };
   }, [setZoomLevel, setFitMode, readMode]);
 
@@ -2940,6 +2945,7 @@ export const PageCanvas = React.memo(function PageCanvas({
         scale={readModeAnnotationScale}
       >
         <div
+          ref={transformDivRef}
           className={readMode ? "block relative" : "inline-block relative"}
           style={{
             transform: readMode
@@ -2997,7 +3003,7 @@ export const PageCanvas = React.memo(function PageCanvas({
                 verticalAlign: "top",
                 border: "none",
                 outline: "none",
-                backgroundColor: readMode && !hasRendered ? "transparent" : undefined,
+                backgroundColor: readMode && !hasRendered ? "transparent" : readMode ? undefined : "white",
                 width: readMode && pageMetadata ? pageMetadata.width : undefined,
                 height: readMode && pageMetadata ? pageMetadata.height : undefined,
                 boxSizing: "border-box",

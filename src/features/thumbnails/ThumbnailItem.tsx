@@ -144,12 +144,8 @@ export function ThumbnailItem({
         e.dataTransfer.setData('DownloadURL', `application/pdf:${fileName}:${blobUrl}`);
       }
 
-      // For Tauri, we might need to use a different approach
-      // Check if we're in Tauri environment
-      if (typeof window !== "undefined" && (window as any).__TAURI__) {
-        // Tauri handles file drags differently - the file will be available via the drag event
-        // The browser API should still work, but we can enhance it if needed
-      }
+      // Tauri handles file drags via its own event system;
+      // the browser DataTransfer API above still works in the webview.
     } catch (error) {
       console.error("Error preparing page for drag-out:", error);
       // Don't prevent the drag, just log the error
