@@ -52,6 +52,21 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # macOS: force a deployment-target floor on every C/C++ compile
+      # invocation. tesseract (vendored via mupdf-sys) compiles with its own
+      # GNU Makefile that does NOT translate MACOSX_DEPLOYMENT_TARGET into
+      # -mmacosx-version-min, so libc++ marks std::filesystem as unavailable
+      # and the build fails. Setting CFLAGS / CXXFLAGS / LDFLAGS via
+      # $GITHUB_ENV propagates to every subsequent step (including the
+      # tauri-action build) without polluting the Windows job.
+      - name: Set macOS deployment target flags
+        if: matrix.platform == 'macos-latest'
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}" >> "$GITHUB_ENV"
+          echo "CFLAGS=-mmacosx-version-min=${{ matrix.macos_target }}" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=-mmacosx-version-min=${{ matrix.macos_target }} -std=c++17" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-mmacosx-version-min=${{ matrix.macos_target }}" >> "$GITHUB_ENV"
+
       # macOS: Import Apple certificate for code signing
       - name: Import Apple Certificate
         if: matrix.platform == 'macos-latest'
@@ -84,9 +99,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Required so tesseract / mupdf-sys can use C++17 std::filesystem
-          # (introduced in macOS 10.15; aarch64 requires 11.0+).
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
+          # MACOSX_DEPLOYMENT_TARGET / CFLAGS / CXXFLAGS / LDFLAGS are
+          # exported into $GITHUB_ENV by the "Set macOS deployment target
+          # flags" step above (macOS jobs only).
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Nanodoc ${{ github.ref_name }}'
