@@ -18,16 +18,19 @@ jobs:
           - platform: macos-latest
             args: --target aarch64-apple-darwin
             rust_target: aarch64-apple-darwin
-            
+            macos_target: '11.0'
+
           # macOS Intel (cross-compile from ARM)
           - platform: macos-latest
             args: --target x86_64-apple-darwin
             rust_target: x86_64-apple-darwin
-            
+            macos_target: '10.15'
+
           # Windows
           - platform: windows-latest
             args: --target x86_64-pc-windows-msvc
             rust_target: x86_64-pc-windows-msvc
+            macos_target: ''
 
     runs-on: ${{ matrix.platform }}
     
@@ -81,6 +84,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Required so tesseract / mupdf-sys can use C++17 std::filesystem
+          # (introduced in macOS 10.15; aarch64 requires 11.0+).
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Nanodoc ${{ github.ref_name }}'
