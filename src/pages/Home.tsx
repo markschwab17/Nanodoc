@@ -18,12 +18,33 @@ import {
 } from "lucide-react";
 
 
-// Download URLs configuration
-// Exact filenames from GitHub release: https://github.com/markschwab17/nanodoc/releases/tag/v0.1.0
+// Latest released desktop build. Bump this on every release — it's the only
+// line you need to touch in this file. The version is interpolated into the
+// GitHub Release asset URLs below; the asset filename pattern is fixed by
+// tauri-action and matches `Nanodoc_<version>_<arch>.<ext>`.
+//
+// Filenames Tauri produces (verified against the v0.1.0 release):
+//   macOS Apple Silicon : Nanodoc_<v>_aarch64.dmg
+//   macOS Intel         : Nanodoc_<v>_x64.dmg
+//   Windows (WiX MSI)   : Nanodoc_<v>_x64_en-US.msi
+const NANODOC_VERSION = "1.0.0";
+
+const releaseAsset = (filename: string) =>
+  `https://github.com/markschwab17/nanodoc/releases/download/v${NANODOC_VERSION}/${filename}`;
+
+// Each entry can still be overridden via a Netlify env var (e.g. for staging /
+// hotfix builds). When the env var is unset, we fall back to the versioned
+// GitHub Release URL above.
 const DOWNLOAD_URLS = {
-  macIntel: import.meta.env.VITE_DOWNLOAD_URL_MAC_INTEL || "https://github.com/markschwab17/nanodoc/releases/download/v0.1.0/Nanodoc_0.1.0_x64.dmg",
-  macAppleSilicon: import.meta.env.VITE_DOWNLOAD_URL_MAC_APPLE_SILICON || "https://github.com/markschwab17/nanodoc/releases/download/v0.1.0/Nanodoc_0.1.0_aarch64.dmg",
-  windows: import.meta.env.VITE_DOWNLOAD_URL_WINDOWS || "https://github.com/markschwab17/nanodoc/releases/download/v0.1.0/Nanodoc_0.1.0_x64_en-US.msi",
+  macIntel:
+    import.meta.env.VITE_DOWNLOAD_URL_MAC_INTEL ||
+    releaseAsset(`Nanodoc_${NANODOC_VERSION}_x64.dmg`),
+  macAppleSilicon:
+    import.meta.env.VITE_DOWNLOAD_URL_MAC_APPLE_SILICON ||
+    releaseAsset(`Nanodoc_${NANODOC_VERSION}_aarch64.dmg`),
+  windows:
+    import.meta.env.VITE_DOWNLOAD_URL_WINDOWS ||
+    releaseAsset(`Nanodoc_${NANODOC_VERSION}_x64_en-US.msi`),
 };
 
 // Mac/Apple Logo SVG Component
