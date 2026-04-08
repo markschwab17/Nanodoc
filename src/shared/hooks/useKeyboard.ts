@@ -16,7 +16,7 @@ export function useKeyboard() {
   const setCurrentPage = usePDFStore((s) => s.setCurrentPage);
   const getCurrentDocument = usePDFStore((s) => s.getCurrentDocument);
   const currentDocument = getCurrentDocument();
-  const { setZoomLevel, zoomLevel, toggleReadMode, activeTool, setActiveTool, readMode, zoomToCenter } = useUIStore();
+  const { setZoomLevel, zoomLevel, toggleReadMode, activeTool, setActiveTool, readMode, zoomToCenter, splitScreenMode } = useUIStore();
   const { closeCurrentDocument } = usePDF();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
   const { hasTextAnnotation } = useTextAnnotationClipboardStore();
@@ -58,14 +58,16 @@ export function useKeyboard() {
       }
 
       // Close tab: Cmd/Ctrl + W
-      if ((e.metaKey || e.ctrlKey) && e.key === "w") {
+      // Skip in split-screen mode — the user is in a constrained read-only embed
+      // and Cmd+W should fall through to the browser as normal.
+      if ((e.metaKey || e.ctrlKey) && e.key === "w" && !splitScreenMode) {
         e.preventDefault();
         closeCurrentDocument();
         return;
       }
 
       // Open file: Cmd/Ctrl + O
-      if ((e.metaKey || e.ctrlKey) && e.key === "o") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "o" && !splitScreenMode) {
         e.preventDefault();
         const openButton = document.querySelector(
           '[data-action="open"]'
@@ -143,30 +145,35 @@ export function useKeyboard() {
       }
 
       // Tool switching shortcuts
+      // ALL of these are skipped in split-screen mode so that the embedded
+      // viewer doesn't hijack standard browser shortcuts (Cmd+R reload,
+      // Cmd+T new tab, Cmd+H hide window, etc.). Reflexive Cmd+R presses
+      // were silently switching the active tool to "redact" in CTO split-view.
+      //
       // Select tool: Cmd/Ctrl + A (only when not in edit mode)
       // Note: When in edit mode, CTRL+A is handled by RichTextEditor to select all text
-      if ((e.metaKey || e.ctrlKey) && e.key === "a") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "a" && !splitScreenMode) {
         e.preventDefault();
         setActiveTool("select");
         return;
       }
 
       // Text tool: Cmd/Ctrl + T
-      if ((e.metaKey || e.ctrlKey) && e.key === "t") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "t" && !splitScreenMode) {
         e.preventDefault();
         setActiveTool("text");
         return;
       }
 
       // Redact tool: Cmd/Ctrl + R
-      if ((e.metaKey || e.ctrlKey) && e.key === "r") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "r" && !splitScreenMode) {
         e.preventDefault();
         setActiveTool("redact");
         return;
       }
 
       // Highlight tool: Cmd/Ctrl + H
-      if ((e.metaKey || e.ctrlKey) && e.key === "h") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "h" && !splitScreenMode) {
         e.preventDefault();
         setActiveTool("highlight");
         return;
@@ -291,6 +298,7 @@ export function useKeyboard() {
     setActiveTool,
     readMode,
     zoomToCenter,
+    splitScreenMode,
   ]);
 }
 

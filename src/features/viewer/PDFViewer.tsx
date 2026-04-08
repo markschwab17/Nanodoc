@@ -8,7 +8,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useUIStore } from "@/shared/stores/uiStore";
-import { useDocumentSettingsStore, getRenderQualityScale } from "@/shared/stores/documentSettingsStore";
+import { useDocumentSettingsStore } from "@/shared/stores/documentSettingsStore";
 import { PageCanvas } from "./PageCanvas";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { VirtualizedPageList } from "./VirtualizedPageList";
@@ -47,7 +47,7 @@ export function PDFViewer() {
   const getAnnotations = usePDFStore((s) => s.getAnnotations);
   const updateAnnotation = usePDFStore((s) => s.updateAnnotation);
   const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, splitScreenMode } = useUIStore();
-  const { showRulers, toggleRulers, renderQuality } = useDocumentSettingsStore();
+  const { showRulers, toggleRulers } = useDocumentSettingsStore();
   const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();
   const { showNotification } = useNotificationStore();
   const currentDocument = getCurrentDocument();
@@ -436,6 +436,28 @@ export function PDFViewer() {
 
       const documentId = currentDocument.getId();
 
+      // Helper: normalize text so PDF-embedded characters match AI-extracted text.
+      // PDFs commonly use smart quotes, ligatures, and en/em dashes that fail exact
+      // substring matches against the cleaned-up text the AI returns.
+      const normalizeForSearch = (s: string): string => {
+        return s
+          // Smart quotes → straight
+          .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+          .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"')
+          // Dashes → hyphen
+          .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+          // Common ligatures → ASCII
+          .replace(/\uFB00/g, "ff").replace(/\uFB01/g, "fi").replace(/\uFB02/g, "fl")
+          .replace(/\uFB03/g, "ffi").replace(/\uFB04/g, "ffl")
+          // Non-breaking and weird spaces → space
+          .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
+          // Soft hyphens (often used at line-wrap points) → drop
+          .replace(/\u00AD/g, "")
+          // Collapse whitespace
+          .replace(/\s+/g, " ")
+          .trim();
+      };
+
       // Helper: use mupdf page.search() to find quote text and return PDF-coordinate quads
       const searchQuoteOnPage = (quoteText: string, targetPage: number): number[][] | null => {
         try {
@@ -446,48 +468,277 @@ export function PDFViewer() {
           const pageMetadata = currentDocument.getPageMetadata(targetPage);
           const pageHeight = pageMetadata?.height || 792;
 
-          // Normalize whitespace (PDF text may have different line breaks than AI extraction)
-          const normalized = quoteText.replace(/\s+/g, " ").trim();
+          const normalized = normalizeForSearch(quoteText);
+          if (!normalized) return null;
 
-          // Try progressively shorter snippets: full → first 80 chars → first 40
-          const candidates = [normalized];
-          for (const len of [80, 40]) {
+          // Build a robust list of search candidates. We try multiple positions and
+          // strategies because PDF text extraction quirks (hyphenation across lines,
+          // unusual encoding, table/column flow) often break exact substring matches.
+          const candidates: string[] = [];
+          const seen = new Set<string>();
+          const pushCandidate = (c: string) => {
+            const trimmed = c.trim();
+            if (trimmed.length >= 8 && !seen.has(trimmed)) {
+              seen.add(trimmed);
+              candidates.push(trimmed);
+            }
+          };
+
+          // 1. Full normalized quote
+          pushCandidate(normalized);
+
+          // 2. Progressively shorter snippets from the START (trim to word boundary)
+          for (const len of [120, 80, 60, 40, 25]) {
             if (normalized.length > len) {
               const sub = normalized.slice(0, len);
               const lastSpace = sub.lastIndexOf(" ");
-              candidates.push(lastSpace > 10 ? sub.slice(0, lastSpace) : sub);
+              pushCandidate(lastSpace > 10 ? sub.slice(0, lastSpace) : sub);
             }
+          }
+
+          // 3. Snippets from the MIDDLE — bypasses problem characters at the start
+          if (normalized.length > 60) {
+            const mid = Math.floor(normalized.length / 2);
+            for (const halfLen of [30, 20]) {
+              const start = Math.max(0, mid - halfLen);
+              const end = Math.min(normalized.length, mid + halfLen);
+              const sub = normalized.slice(start, end);
+              // Trim to whole words
+              const firstSpace = sub.indexOf(" ");
+              const lastSpace = sub.lastIndexOf(" ");
+              if (firstSpace >= 0 && lastSpace > firstSpace) {
+                pushCandidate(sub.slice(firstSpace + 1, lastSpace));
+              }
+            }
+          }
+
+          // 4. Snippet from the END
+          if (normalized.length > 40) {
+            const sub = normalized.slice(-60);
+            const firstSpace = sub.indexOf(" ");
+            if (firstSpace >= 0) pushCandidate(sub.slice(firstSpace + 1));
+          }
+
+          // 5. Longest run of distinctive words (3+ char alphanumeric tokens).
+          // This is robust against punctuation and most encoding mismatches.
+          const words = normalized.split(/\s+/).filter((w) => /[A-Za-z0-9]{3,}/.test(w));
+          for (const runLen of [8, 6, 5, 4, 3]) {
+            if (words.length >= runLen) {
+              // Try a few starting positions, not just 0
+              for (const startIdx of [0, Math.floor(words.length / 4), Math.floor(words.length / 2)]) {
+                if (startIdx + runLen <= words.length) {
+                  pushCandidate(words.slice(startIdx, startIdx + runLen).join(" "));
+                }
+              }
+            }
+          }
+
+          // 6. Single distinctive tokens — last-resort fallback for table cells
+          // and any quote whose text spans multiple PDF text blocks (mupdf extracts
+          // tables in row- or column-major stream order; multi-word phrases that
+          // cross cells will never match as a contiguous substring).
+          // We push these to a *secondary* list so they're only tried after the
+          // multi-word candidates have been exhausted — single tokens are more
+          // likely to produce a false-positive match elsewhere on the page.
+          const singleTokenCandidates: string[] = [];
+          const seenTokens = new Set<string>();
+          const pushTokenCandidate = (t: string) => {
+            const trimmed = t.trim();
+            // Allow shorter (3+) candidates here than the 8-char minimum for phrases
+            if (trimmed.length >= 3 && !seenTokens.has(trimmed) && !seen.has(trimmed)) {
+              seenTokens.add(trimmed);
+              singleTokenCandidates.push(trimmed);
+            }
+          };
+
+          // Score every word in the original normalized string. Higher = more
+          // distinctive (less likely to collide elsewhere on the page).
+          const rawTokens = normalized.split(/\s+/);
+          const scoredTokens: { token: string; score: number }[] = [];
+          for (const raw of rawTokens) {
+            // Strip leading/trailing punctuation but keep internal (12.5%, $1,500)
+            const token = raw.replace(/^[^A-Za-z0-9$]+|[^A-Za-z0-9%]+$/g, "");
+            if (token.length < 3) continue;
+            let score = 0;
+            if (/\d/.test(token)) score += 10; // Numbers are very distinctive
+            if (/[%$]/.test(token)) score += 5; // Units make it more distinctive
+            if (/[.,]\d/.test(token)) score += 5; // Decimals like "12.5"
+            if (token.length >= 8) score += 4;
+            else if (token.length >= 6) score += 2;
+            if (/^[A-Z][a-z]/.test(token)) score += 2; // Capitalized
+            if (/^[A-Z]{2,}/.test(token)) score += 3; // Acronyms / all caps
+            // Penalize common stopwords
+            if (/^(the|and|for|with|that|this|from|have|will|been|were|are|was|but|not|all|any|can|may|one|two|see|page|table|figure)$/i.test(token)) {
+              score -= 10;
+            }
+            if (score > 0) scoredTokens.push({ token, score });
+          }
+          // Sort by score descending and try the top distinctive tokens
+          scoredTokens.sort((a, b) => b.score - a.score);
+          for (const { token } of scoredTokens.slice(0, 8)) {
+            pushTokenCandidate(token);
           }
 
           const mupdfPage = mupdfDoc.loadPage(targetPage);
           let searchMatches: any[] | null = null;
-          for (const candidate of candidates) {
-            const results = mupdfPage.search(candidate, 10);
-            if (results && results.length > 0) {
-              searchMatches = results;
-              break;
+          // Try multi-word candidates first (higher precision), then single
+          // distinctive tokens as a last-resort fallback (handles tables and
+          // other layouts where text doesn't extract in contiguous order).
+          const allCandidates = [...candidates, ...singleTokenCandidates];
+          for (const candidate of allCandidates) {
+            try {
+              const results = mupdfPage.search(candidate, 10);
+              if (results && results.length > 0) {
+                searchMatches = results;
+                break;
+              }
+            } catch {
+              // Some candidates may contain characters mupdf can't search; skip
+              continue;
             }
           }
 
-          if (!searchMatches || searchMatches.length === 0) return null;
-
-          // page.search() returns Quad[][] — outer = hits, inner = quads per hit (multi-line)
-          // Quad = [x0, y0, x1, y1, x2, y2, x3, y3] in display coords (Y=0 at top)
-          const quoteQuads: number[][] = [];
-          for (const hit of searchMatches) {
-            if (!Array.isArray(hit)) continue;
-            for (const quad of hit) {
-              if (!Array.isArray(quad) || quad.length < 8) continue;
-              // Convert from mupdf display coords (Y=0 top) to PDF coords (Y=0 bottom)
+          if (searchMatches && searchMatches.length > 0) {
+            // mupdfPage.search() returns a flat array of quads — each entry is a
+            // single quad [x0, y0, x1, y1, x2, y2, x3, y3] in display coords
+            // (Y=0 at top). This matches how SearchBar.tsx and PageCanvas.tsx
+            // consume the same API. (It is NOT a nested Quad[][].)
+            // Some bindings may also wrap quads in an outer array, so we handle
+            // both shapes defensively.
+            const quoteQuads: number[][] = [];
+            const pushQuad = (q: any) => {
+              if (!Array.isArray(q) || q.length < 8) return;
+              if (typeof q[0] !== "number") return;
               quoteQuads.push([
-                quad[0], pageHeight - quad[1],
-                quad[2], pageHeight - quad[3],
-                quad[4], pageHeight - quad[5],
-                quad[6], pageHeight - quad[7],
+                q[0], pageHeight - q[1],
+                q[2], pageHeight - q[3],
+                q[4], pageHeight - q[5],
+                q[6], pageHeight - q[7],
               ]);
+            };
+            for (const entry of searchMatches) {
+              if (!Array.isArray(entry)) continue;
+              if (typeof entry[0] === "number") {
+                // Flat: entry IS a quad
+                pushQuad(entry);
+              } else {
+                // Nested: entry is an array of quads (rare, but handle it)
+                for (const q of entry) pushQuad(q);
+              }
             }
+            if (quoteQuads.length > 0) return quoteQuads;
           }
-          return quoteQuads.length > 0 ? quoteQuads : null;
+
+          // Final fallback: walk structured text line-by-line. mupdf's page.search()
+          // requires the search string to appear as a contiguous substring in the
+          // PDF's text stream — which fails for tables, callout boxes, and any
+          // multi-column layout where cells extract as separate text blocks. By
+          // walking individual lines we can match text within each cell directly.
+          try {
+            const structuredText = mupdfPage.toStructuredText("preserve-whitespace");
+            const jsonRaw = structuredText.asJSON();
+            const jsonData = typeof jsonRaw === "string" ? JSON.parse(jsonRaw) : jsonRaw;
+            const blocks: any[] = Array.isArray(jsonData?.blocks)
+              ? jsonData.blocks
+              : Array.isArray(jsonData)
+                ? jsonData
+                : [];
+
+            // Collect all (text, bbox) pairs from every line in every block
+            type Line = { text: string; normalized: string; bbox: [number, number, number, number] };
+            const lines: Line[] = [];
+            const flipBboxY = (x0: number, y0: number, x1: number, y1: number): [number, number, number, number] => {
+              return [x0, pageHeight - y1, x1, pageHeight - y0];
+            };
+            const extractBbox = (bb: any): [number, number, number, number] | null => {
+              if (!bb) return null;
+              if (Array.isArray(bb) && bb.length >= 4) {
+                return flipBboxY(bb[0], bb[1], bb[2], bb[3]);
+              }
+              if (typeof bb === "object" && "x" in bb && "y" in bb) {
+                return flipBboxY(bb.x, bb.y, bb.x + (bb.w ?? 0), bb.y + (bb.h ?? 0));
+              }
+              return null;
+            };
+
+            const collectLine = (text: string, bb: any) => {
+              if (!text || typeof text !== "string") return;
+              const bbox = extractBbox(bb);
+              if (!bbox) return;
+              const norm = normalizeForSearch(text).toLowerCase();
+              if (norm.length < 2) return;
+              lines.push({ text, normalized: norm, bbox });
+            };
+
+            for (const block of blocks) {
+              if (block?.type !== "text" && block?.type !== "paragraph") continue;
+              if (!Array.isArray(block.lines)) continue;
+              for (const line of block.lines) {
+                if (!line) continue;
+                if (line.text) {
+                  collectLine(line.text, line.bbox);
+                }
+                // Some PDFs nest text in spans
+                if (Array.isArray(line.spans)) {
+                  for (const span of line.spans) {
+                    if (span?.text) collectLine(span.text, span.bbox ?? line.bbox);
+                  }
+                }
+              }
+            }
+
+            if (lines.length === 0) return null;
+
+            // Build search needles in priority order. Lowercase to match line normalization.
+            const normalizedLower = normalized.toLowerCase();
+            const needles: string[] = [];
+            const seenNeedles = new Set<string>();
+            const addNeedle = (n: string) => {
+              const t = n.trim().toLowerCase();
+              if (t.length >= 3 && !seenNeedles.has(t)) {
+                seenNeedles.add(t);
+                needles.push(t);
+              }
+            };
+
+            // High-precision multi-word first
+            for (const c of candidates) addNeedle(c);
+            // Then distinctive tokens
+            for (const c of singleTokenCandidates) addNeedle(c);
+            // Plus a few additional substrings of the full quote
+            for (const len of [25, 18, 12]) {
+              if (normalizedLower.length > len) {
+                addNeedle(normalizedLower.slice(0, len));
+                if (normalizedLower.length > len * 2) {
+                  addNeedle(normalizedLower.slice(Math.floor(normalizedLower.length / 2) - Math.floor(len / 2), Math.floor(normalizedLower.length / 2) + Math.ceil(len / 2)));
+                }
+              }
+            }
+
+            // Match needles against lines. For each needle, collect all lines that contain it.
+            // Stop at the first needle that produces matches (most precise hits).
+            const matchedBboxes: [number, number, number, number][] = [];
+            for (const needle of needles) {
+              for (const line of lines) {
+                if (line.normalized.includes(needle)) {
+                  matchedBboxes.push(line.bbox);
+                  if (matchedBboxes.length >= 6) break; // cap to avoid runaway highlights
+                }
+              }
+              if (matchedBboxes.length > 0) break;
+            }
+
+            if (matchedBboxes.length === 0) return null;
+
+            // Convert matched line bboxes to quads (already in PDF coords from flipBboxY)
+            const quads = matchedBboxes.map(([x0, y0, x1, y1]) => [
+              x0, y1, x1, y1, x1, y0, x0, y0, // top-left, top-right, bottom-right, bottom-left
+            ]);
+            return quads;
+          } catch (e) {
+            console.warn("Scroll-to-spec: structured-text fallback failed", e);
+            return null;
+          }
         } catch (e) {
           console.warn("Scroll-to-spec: quote text search failed", e);
           return null;
@@ -524,24 +775,25 @@ export function PDFViewer() {
         }
       }
 
-      // Pre-warm render cache for target page and neighbors so they appear instantly when we scroll
+      // Pre-warm render cache for the target page so it appears quickly when we scroll.
+      // We intentionally DO NOT pre-warm neighbors, and we render at displayScale only
+      // (no quality multiplier, no DPR multiplier) to keep WASM heap pressure low.
+      // The main PageCanvas render path will upgrade to full-quality after scroll lands.
+      // Pre-warming the full neighbor window at quality*dpr previously caused mupdf
+      // malloc failures in split-screen when hyperlinks were clicked rapidly, because
+      // each goto-page queued 5 × 30-60 MB allocations into a fixed-size WASM heap.
       if (renderer && currentDocument.isDocumentLoaded()) {
         const firstMeta = currentDocument.getPageMetadata(0);
         if (firstMeta && baseFitScale > 0 && zoomLevel > 0) {
           const zoomFactor = zoomLevel / baseFitScale;
           const viewportWidth = firstMeta.width * baseFitScale * zoomFactor;
-          const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-          const qualityScale = getRenderQualityScale(renderQuality);
           const mupdfDoc = currentDocument.getMupdfDocument();
           const pageCount = currentDocument.getPageCount();
-          for (const p of [page, page - 1, page + 1, page - 2, page + 2]) {
-            if (p >= 0 && p < pageCount) {
-              const pageMeta = currentDocument.getPageMetadata(p);
-              if (pageMeta) {
-                const displayScale = viewportWidth / pageMeta.width;
-                const renderScale = displayScale * qualityScale * dpr;
-                renderer.renderPage(mupdfDoc, p, { scale: renderScale, rotation: 0 }, currentDocument.getPdfData?.(), currentDocument.getId?.());
-              }
+          if (page >= 0 && page < pageCount) {
+            const pageMeta = currentDocument.getPageMetadata(page);
+            if (pageMeta) {
+              const displayScale = viewportWidth / pageMeta.width;
+              renderer.renderPage(mupdfDoc, page, { scale: displayScale, rotation: 0 }, currentDocument.getPdfData?.(), currentDocument.getId?.());
             }
           }
         }
@@ -704,7 +956,7 @@ export function PDFViewer() {
     return () => {
       window.removeEventListener('scroll-to-spec', handleScrollToSpec);
     };
-  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, getSpecHighlights, setTemporaryHighlight, baseFitScale, renderer, renderQuality, zoomLevel]);
+  }, [currentDocument, readMode, setCurrentPage, scrollToPage, toggleReadMode, setSelectedSpec, getSpecHighlights, setTemporaryHighlight, baseFitScale, renderer, zoomLevel]);
 
   // Handle page visibility changes from VirtualizedPageList
   // This updates the current page as the user scrolls

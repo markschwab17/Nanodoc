@@ -1253,41 +1253,46 @@ export const PageCanvas = React.memo(function PageCanvas({
     }
   }, [fitMode, readMode, document, pageNumber, zoomLevel, isDragging]);
   
-  // Get page metadata to watch for rotation and dimension changes
+  // Get page metadata to watch for rotation changes specifically.
+  // We deliberately do NOT watch width/height — those change as a side effect
+  // of either (a) rotation (already handled here) or (b) metadata loading
+  // lazily after mount. Case (b) is handled by the main render path; firing
+  // the force-re-render effect there causes duplicate full-quality renders
+  // that exhaust the mupdf WASM heap.
   const pageMetadata = document?.getPageMetadata(pageNumber);
   const pageRotation = pageMetadata?.rotation ?? 0;
-  const pageWidth = pageMetadata?.width ?? 0;
-  const pageHeight = pageMetadata?.height ?? 0;
-  
-  // State to track metadata changes and force re-render
+
+  // State to track rotation changes and force re-render
   const [metadataVersion, setMetadataVersion] = useState(0);
-  
-  // Ref to track previous metadata values for change detection
-  const previousMetadataRef = useRef({ rotation: pageRotation, width: pageWidth, height: pageHeight });
-  
-  // Listen for metadata changes via event-driven notification (replaces polling)
+
+  // Ref to track previous rotation for change detection
+  const previousRotationRef = useRef<number | null>(null);
+
+  // Listen for rotation changes via event-driven notification.
+  // Only bump the version when ROTATION actually changes — not on initial
+  // load, and not on width/height changes from lazy metadata loading.
   useEffect(() => {
-    const checkMetadata = () => {
+    const checkRotation = () => {
       const currentMetadata = document?.getPageMetadata(pageNumber);
       const currentRotation = currentMetadata?.rotation ?? 0;
-      const currentWidth = currentMetadata?.width ?? 0;
-      const currentHeight = currentMetadata?.height ?? 0;
+      const prevRotation = previousRotationRef.current;
 
-      const prevRotation = previousMetadataRef.current.rotation;
-      const prevWidth = previousMetadataRef.current.width;
-      const prevHeight = previousMetadataRef.current.height;
-
-      if (currentRotation !== prevRotation || currentWidth !== prevWidth || currentHeight !== prevHeight) {
-        previousMetadataRef.current = { rotation: currentRotation, width: currentWidth, height: currentHeight };
+      if (prevRotation === null) {
+        // First observation — record but don't trigger re-render
+        previousRotationRef.current = currentRotation;
+        return;
+      }
+      if (currentRotation !== prevRotation) {
+        previousRotationRef.current = currentRotation;
         setMetadataVersion(prev => prev + 1);
       }
     };
 
     // Check immediately on mount / dependency change
-    checkMetadata();
+    checkRotation();
 
     // Subscribe to metadata change events (fired by refreshPageMetadata)
-    const unsubscribe = document.onMetadataChange(checkMetadata);
+    const unsubscribe = document.onMetadataChange(checkRotation);
 
     return () => unsubscribe();
   }, [document, pageNumber]);
@@ -1316,11 +1321,20 @@ export const PageCanvas = React.memo(function PageCanvas({
     prevDocIdRef.current = currentDocId;
   }, [document?.getId(), renderer]);
   
-  // Effect to force re-render when rotation or dimensions change
-  // This ensures the page re-renders with updated dimensions after rotation
+  // Effect to force re-render when ROTATION changes.
+  // metadataVersion only bumps when rotation actually changes (see checkRotation
+  // above), and we additionally skip the initial mount run as a belt-and-suspenders
+  // guard. The main render effect handles first-render and width/height changes.
+  const forceReRenderInitializedRef = useRef(false);
   useEffect(() => {
 
     if (!document.isDocumentLoaded() || !renderer || !canvasRef.current) return;
+
+    // First run = component mount. Skip — the main render path handles initial render.
+    if (!forceReRenderInitializedRef.current) {
+      forceReRenderInitializedRef.current = true;
+      return;
+    }
 
     // Only clear cache for the affected page (preserve other pages' cache)
     renderer.clearCacheForPage(pageNumber);
@@ -1382,7 +1396,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     }, 50);
     
     return () => clearTimeout(timeoutId);
-  }, [document, pageNumber, renderer, pageRotation, pageWidth, pageHeight, metadataVersion]);
+  }, [document, pageNumber, renderer, pageRotation, metadataVersion]);
 
   // Helper function to convert mouse coordinates to PDF coordinates
   // PDF uses bottom-up Y coordinate system, canvas uses top-down

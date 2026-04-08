@@ -111,6 +111,19 @@ export class PDFRenderer {
             this.pendingRequests.delete(msg.id);
             pending.reject(new Error(msg.message));
           }
+          // CRITICAL: mupdf malloc failures leave the WASM heap in a degraded
+          // state where every subsequent render fails with the same error.
+          // Killing and respawning the worker is the only reliable way to
+          // reclaim the heap. Without this, one bad render poisons the entire
+          // rendering pipeline until the user reloads the page.
+          if (msg.message && /malloc|out of memory|out_of_memory/i.test(msg.message)) {
+            console.warn("PDFRenderer: malloc failure detected, restarting worker to reclaim WASM heap");
+            // Also drop the in-memory cache — those entries are likely the
+            // ones that bloated the heap and we'd rather re-render than
+            // hold onto them.
+            this.renderCache.clear();
+            this.killWorker(true);
+          }
         }
       };
 
