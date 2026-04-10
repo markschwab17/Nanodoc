@@ -7,6 +7,35 @@
 import type { PDFDocument } from "./PDFDocument";
 import type { Annotation } from "./types";
 
+/** Detect bold/italic from HTML content and map font family to PDF Base14 font name */
+function getPdfFontName(fontFamily: string, content: string): string {
+  const fam = (fontFamily || "Arial").toLowerCase();
+  // Detect bold/italic from HTML tags in content
+  const isBold = (/<(b|strong)\b/i.test(content) && /<\/(b|strong)>/i.test(content))
+    || /font-weight\s*:\s*(bold|[7-9]\d\d)/i.test(content);
+  const isItalic = (/<(i|em)\b/i.test(content) && /<\/(i|em)>/i.test(content))
+    || /font-style\s*:\s*italic/i.test(content);
+
+  // Use full Base14 font names (MuPDF's WASM layer resolves these via _wasm_new_base14_font)
+  if (fam.includes("courier") || fam === "monospace") {
+    if (isBold && isItalic) return "Courier-BoldOblique";
+    if (isBold) return "Courier-Bold";
+    if (isItalic) return "Courier-Oblique";
+    return "Courier";
+  }
+  if (fam.includes("times") || fam.includes("georgia") || fam === "serif") {
+    if (isBold && isItalic) return "Times-BoldItalic";
+    if (isBold) return "Times-Bold";
+    if (isItalic) return "Times-Italic";
+    return "Times-Roman";
+  }
+  // Default: Helvetica (matches Arial, Helvetica, Verdana, Comic Sans, sans-serif)
+  if (isBold && isItalic) return "Helvetica-BoldOblique";
+  if (isBold) return "Helvetica-Bold";
+  if (isItalic) return "Helvetica-Oblique";
+  return "Helvetica";
+}
+
 export class PDFAnnotationOperations {
   constructor(private mupdf: any) {}
 
@@ -36,9 +65,11 @@ export class PDFAnnotationOperations {
 
   const pageHeight = pageBounds[3] - pageBounds[1];
 
-  const width = annotation.width || 100;
-
-  const height = annotation.height || 50;
+  const fontSize = annotation.fontSize || 12;
+  // Ensure rect is at least large enough for the font size — the editor's stored
+  // dimensions may not have been updated when fontSize changed outside edit mode.
+  const width = Math.max(annotation.width || 100, fontSize * 4);
+  const height = Math.max(annotation.height || 50, fontSize * 1.5);
 
   // Our annotation.y is the TOP of the box in PDF coordinates (Y=0 at bottom, Y increases upward)
 
@@ -167,8 +198,6 @@ export class PDFAnnotationOperations {
 
   // Format: "/FontName FontSize Tf R G B rg" for text color
 
-  const fontSize = annotation.fontSize || 12;
-
   try {
 
   // Parse color - handle both hex and rgba formats
@@ -205,10 +234,12 @@ export class PDFAnnotationOperations {
 
   }
 
-  // Set default appearance for text rendering
+  // Map annotation font + bold/italic to PDF standard font name
+  const pdfFontName = getPdfFontName(annotation.fontFamily || "Arial", annotation.content || "");
 
+  // Set default appearance using MuPDF's 3-argument API: (fontName, size, color)
   try {
-    annot.setDefaultAppearance(`/Helv ${fontSize} Tf ${r} ${g} ${b} rg`);
+    annot.setDefaultAppearance(pdfFontName, fontSize, [r, g, b]);
   } catch (e) {
     // Ignore if setDefaultAppearance is not available
   }

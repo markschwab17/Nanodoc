@@ -399,7 +399,26 @@ export class PDFDocumentOperations {
 
   try {
 
-  pdfAnnot.update();
+  // Skip update() for custom FreeText annotations — they were already updated
+  // in addTextAnnotation with the correct DA. A second update() can resize the
+  // rect and regenerate the AP, undoing the correct font/size settings.
+  let skipUpdate = false;
+  try {
+    if (pdfAnnot.getType() === "FreeText") {
+      const obj = pdfAnnot.getObject();
+      if (obj) {
+        const flag = obj.get("CustomAnnotation");
+        if (flag) {
+          const s = flag.toString();
+          if (s === "true" || s === "/true") skipUpdate = true;
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+
+  if (!skipUpdate) {
+    pdfAnnot.update();
+  }
 
   } catch (e) {
 

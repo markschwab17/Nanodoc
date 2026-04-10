@@ -1101,6 +1101,39 @@ export class PDFAnnotationLoader {
     // Use defaults if we can't load the properties
   }
 
+  // Parse font properties from the Default Appearance (DA) string
+  // DA format: "/FontName FontSize Tf R G B rg"
+  let loadedFontSize = 12;
+  let loadedFontFamily = "Arial";
+  let loadedColor = "#000000";
+  try {
+    const da = pdfAnnot.getDefaultAppearance();
+    if (da) {
+      const daStr = typeof da === 'string' ? da : da.toString();
+      // Extract font size: number before "Tf"
+      const sizeMatch = daStr.match(/([\d.]+)\s+Tf/);
+      if (sizeMatch) loadedFontSize = parseFloat(sizeMatch[1]) || 12;
+      // Extract font name and map to CSS font family
+      const fontMatch = daStr.match(/\/(\w+)/);
+      if (fontMatch) {
+        const pdfFont = fontMatch[1];
+        if (pdfFont.startsWith("Ti")) loadedFontFamily = "Times New Roman";
+        else if (pdfFont.startsWith("Co")) loadedFontFamily = "Courier New";
+        else loadedFontFamily = "Arial";
+      }
+      // Extract color: "R G B rg" (values 0-1)
+      const colorMatch = daStr.match(/([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg/);
+      if (colorMatch) {
+        const r = Math.round(parseFloat(colorMatch[1]) * 255);
+        const g = Math.round(parseFloat(colorMatch[2]) * 255);
+        const b = Math.round(parseFloat(colorMatch[3]) * 255);
+        loadedColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+      }
+    }
+  } catch (e) {
+    // Use defaults if DA parsing fails
+  }
+
   const loadedAnnotation = {
 
   id,
@@ -1119,11 +1152,11 @@ export class PDFAnnotationLoader {
 
   content: htmlContent, // Use HTML content if available, otherwise plain text
 
-  fontSize: 12,
+  fontSize: loadedFontSize,
 
-  fontFamily: "Arial",
+  fontFamily: loadedFontFamily,
 
-  color: "#000000",
+  color: loadedColor,
 
   hasBackground: loadedHasBackground,
 

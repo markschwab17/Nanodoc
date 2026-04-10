@@ -185,6 +185,23 @@ export function RichTextEditor({
     editorRef.current.style.setProperty('background-color', currentBackgroundColor, 'important');
   }, [annotation.color, annotation.backgroundColor, annotation.hasBackground, hasBackground, backgroundColor]);
   
+  // When annotation fontSize changes, strip inline font-size styles from the content
+  // so the div-level fontSize applies uniformly. Without this, old inline spans
+  // (e.g. <span style="font-size:12px">) override the new annotation fontSize.
+  const prevFontSizeRef = useRef(fontSize);
+  useEffect(() => {
+    if (prevFontSizeRef.current !== fontSize && editorRef.current) {
+      prevFontSizeRef.current = fontSize;
+      const html = editorRef.current.innerHTML;
+      // Remove inline font-size from style attributes
+      const cleaned = html.replace(/font-size\s*:\s*[\d.]+px\s*;?\s*/gi, '');
+      if (cleaned !== html) {
+        editorRef.current.innerHTML = cleaned;
+        onChange(cleaned);
+      }
+    }
+  }, [fontSize, onChange]);
+
   // Track previous content to prevent unnecessary updates
   const previousContentRef = useRef<string>("");
   
@@ -196,12 +213,13 @@ export function RichTextEditor({
       if (editorRef.current) {
         const currentContent = editorRef.current.innerHTML;
         
-        // Only update if content actually changed
-        if (currentContent === previousContentRef.current) {
+        // Only update if content or fontSize actually changed
+        const sizeKey = `${currentContent}|${fontSize}`;
+        if (sizeKey === previousContentRef.current) {
           return;
         }
         
-        previousContentRef.current = currentContent;
+        previousContentRef.current = sizeKey;
         
         // Measure text width by creating a temporary element with same styles
         const measureTextWidth = (): number => {
@@ -967,8 +985,8 @@ export function RichTextEditor({
         }}
         className={cn(
           "outline-none rounded-lg",
-          // Use minimal padding for very small boxes so content fits; normal padding otherwise
-          (size.width * scale >= 24 && size.height * scale >= 24) ? "px-3 py-2" : "px-1 py-0.5",
+          // Zero padding for WYSIWYG: text starts at element edge, matching PDF FreeText rect edge
+          "p-0",
           // Disable transitions during resize/rotate/drag for instant feedback
           !isResizing && !isRotating && !isDragging && "transition-all duration-200",
           isSelected && "border border-primary/30 hover:border-primary/60 focus:border-primary",
