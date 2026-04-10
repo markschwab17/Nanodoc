@@ -1378,21 +1378,14 @@ export class PDFAnnotationOperations {
 
   }
 
-  // CRITICAL FIX: Based on runtime evidence, getLine() returns CANVAS coordinates (Y=0 at top)
-  // Therefore setLine() also expects CANVAS coordinates, not PDF coordinates
-  // We must convert PDF coordinates to canvas coordinates: canvasY = pageHeight - pdfY
+  // Pass PDF coordinates directly to setLine(). MuPDF stores these values
+  // as-is in the PDF's L array, and native viewers expect PDF coordinates
+  // (Y=0 at bottom). Previously this code flipped Y, causing arrows to
+  // appear on the opposite side of the page in native viewers.
 
-  // Convert PDF coordinates to canvas coordinates for setLine()
-  const canvasStart = { x: start.x, y: pageHeight - start.y };
-  const canvasEnd = { x: end.x, y: pageHeight - end.y };
+  const flatArray = [start.x, start.y, end.x, end.y];
 
-  // Test Hypothesis A: setLine() expects flat array [x1, y1, x2, y2] not nested
-
-  const flatArray = [canvasStart.x, canvasStart.y, canvasEnd.x, canvasEnd.y];
-
-  // Test Hypothesis B: setLine() expects nested array [[x1, y1], [x2, y2]]
-
-  const nestedArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+  const nestedArray = [[start.x, start.y], [end.x, end.y]];
 
   // Try flat array format first (Hypothesis A)
 
@@ -1448,13 +1441,13 @@ export class PDFAnnotationOperations {
 
   const lineArray = mupdfInstance.newArray();
 
-  lineArray.push(mupdfInstance.newNumber(canvasStart.x));
+  lineArray.push(mupdfInstance.newNumber(start.x));
 
-  lineArray.push(mupdfInstance.newNumber(canvasStart.y));
+  lineArray.push(mupdfInstance.newNumber(start.y));
 
-  lineArray.push(mupdfInstance.newNumber(canvasEnd.x));
+  lineArray.push(mupdfInstance.newNumber(end.x));
 
-  lineArray.push(mupdfInstance.newNumber(canvasEnd.y));
+  lineArray.push(mupdfInstance.newNumber(end.y));
 
   annotObj.put("L", lineArray);
 
@@ -1466,7 +1459,7 @@ export class PDFAnnotationOperations {
 
   // Fallback: Try setting with plain array directly - mupdf might accept it (in CANVAS coordinates)
 
-  const lineArray = [canvasStart.x, canvasStart.y, canvasEnd.x, canvasEnd.y];
+  const lineArray = [start.x, start.y, end.x, end.y];
 
   try {
 

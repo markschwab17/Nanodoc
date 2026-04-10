@@ -88,6 +88,15 @@ export function PDFViewer() {
   const hasUserZoomedInReadModeRef = useRef(false); // Once user zooms in read mode, don't reset zoom to baseFitScale
   const previousReadModeRef = useRef(readMode); // Track previous read mode state
   const isProgrammaticScrollRef = useRef(false); // Track if we're programmatically scrolling to prevent IntersectionObserver from overwriting currentPage
+  // Track the temporary highlight clear timer so subsequent scroll-to-spec
+  // events (which fire 2-3x per click in CTO split-view) can cancel the prior
+  // timer instead of letting overlapping clears wipe out a fresh highlight.
+  const temporaryHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Timestamp of the last scroll-to-spec event. While this is recent, the
+  // page-change effect (line ~1227) bails out instead of running its own
+  // scrollToPage(currentPage, true) without a bbox, which would override our
+  // bbox-targeted scroll back to top-of-page.
+  const lastScrollToSpecAtRef = useRef(0);
   const [isEditingPage, setIsEditingPage] = useState(false);
   const [pageInputValue, setPageInputValue] = useState("");
   const pageInputRef = useRef<HTMLInputElement>(null);
@@ -344,23 +353,32 @@ export function PDFViewer() {
     const pageScale = viewportWidth / pageMetadata.width;
     const pageHeight = pageMetadata.height * pageScale;
     
+    if (!bbox) {
+      // If a scroll-to-spec is in flight (within the last 4s), refuse to do
+      // a no-bbox scroll. This protects the bbox-targeted scroll from being
+      // overridden by side-effect re-scrolls (page-change effect, baseFitScale
+      // ripple, etc.) that would scroll to the top of the page.
+      if (Date.now() - lastScrollToSpecAtRef.current < 4000) {
+        return;
+      }
+    }
     // If bbox is provided, scroll to that specific location on the page
     if (bbox && bbox.length >= 4) {
       const [, y0, , y1] = bbox;
       const pageHeightPdf = pageMetadata.height;
-      
+
       // Convert PDF coordinates (Y=0 at bottom) to canvas coordinates (Y=0 at top)
       const bboxTopPdf = Math.min(y0, y1);
       const bboxBottomPdf = Math.max(y0, y1);
       const bboxHeightPdf = bboxBottomPdf - bboxTopPdf;
       const bboxTopCanvas = pageHeightPdf - bboxBottomPdf;
       const bboxCenterCanvas = bboxTopCanvas + (bboxHeightPdf / 2);
-      
+
       // Convert to scroll coordinates at zoom level
       const bboxScrollY = pageTop + (bboxCenterCanvas * pageScale);
       const containerHeight = container.clientHeight;
       const targetScroll = bboxScrollY - (containerHeight / 2);
-      
+
       // Set flag to prevent IntersectionObserver from overwriting currentPage during programmatic scroll
       isProgrammaticScrollRef.current = true;
       container.scrollTo({
@@ -533,21 +551,28 @@ export function PDFViewer() {
             }
           }
 
-          // 6. Single distinctive tokens — last-resort fallback for table cells
-          // and any quote whose text spans multiple PDF text blocks (mupdf extracts
-          // tables in row- or column-major stream order; multi-word phrases that
-          // cross cells will never match as a contiguous substring).
-          // We push these to a *secondary* list so they're only tried after the
-          // multi-word candidates have been exhausted — single tokens are more
-          // likely to produce a false-positive match elsewhere on the page.
-          const singleTokenCandidates: string[] = [];
+          // 6. Distinctive single tokens — split into HIGH priority (numeric values
+          // like "132.5", "8.5") and LOW priority (long words / capitalized words).
+          // High-priority tokens are tried BEFORE multi-word phrases because in
+          // tables the actual data values are what the user wants highlighted,
+          // not the column header label. Multi-word phrases tend to match the
+          // header cell ("Maximum Dry Density") instead of the data row ("132.5").
+          // Low-priority tokens are tried AFTER multi-word as a final fallback.
+          const highPriorityTokens: string[] = [];
+          const lowPriorityTokens: string[] = [];
           const seenTokens = new Set<string>();
-          const pushTokenCandidate = (t: string) => {
+          const pushHighPriorityToken = (t: string) => {
             const trimmed = t.trim();
-            // Allow shorter (3+) candidates here than the 8-char minimum for phrases
+            if (trimmed.length >= 2 && !seenTokens.has(trimmed) && !seen.has(trimmed)) {
+              seenTokens.add(trimmed);
+              highPriorityTokens.push(trimmed);
+            }
+          };
+          const pushLowPriorityToken = (t: string) => {
+            const trimmed = t.trim();
             if (trimmed.length >= 3 && !seenTokens.has(trimmed) && !seen.has(trimmed)) {
               seenTokens.add(trimmed);
-              singleTokenCandidates.push(trimmed);
+              lowPriorityTokens.push(trimmed);
             }
           };
 
@@ -573,60 +598,127 @@ export function PDFViewer() {
             }
             if (score > 0) scoredTokens.push({ token, score });
           }
-          // Sort by score descending and try the top distinctive tokens
+          // Sort by score descending and split into priority tiers.
+          // Score >= 10 means the token contains a digit (numeric value) — these
+          // are extremely distinctive and unlikely to false-match elsewhere on
+          // the page. They go in the HIGH priority list and are tried first.
           scoredTokens.sort((a, b) => b.score - a.score);
-          for (const { token } of scoredTokens.slice(0, 8)) {
-            pushTokenCandidate(token);
+          for (const { token, score } of scoredTokens.slice(0, 8)) {
+            if (score >= 10) {
+              pushHighPriorityToken(token);
+            } else {
+              pushLowPriorityToken(token);
+            }
           }
 
           const mupdfPage = mupdfDoc.loadPage(targetPage);
-          let searchMatches: any[] | null = null;
-          // Try multi-word candidates first (higher precision), then single
-          // distinctive tokens as a last-resort fallback (handles tables and
-          // other layouts where text doesn't extract in contiguous order).
-          const allCandidates = [...candidates, ...singleTokenCandidates];
+          // Priority order:
+          //   1. Highly-distinctive numeric tokens (e.g. "132.5", "8.5")
+          //   2. Multi-word phrases
+          //   3. Lower-priority single tokens
+          const allCandidates = [...highPriorityTokens, ...candidates, ...lowPriorityTokens];
+
+          // Collect ALL matches across ALL candidates, then pick the location
+          // with the densest cluster of distinct-needle matches. This avoids
+          // returning the FIRST occurrence of a generic word ("Moisture") when
+          // the AI quote includes other words/numbers that, taken together,
+          // pinpoint a specific cell. The "right" cell is wherever multiple
+          // distinct quote tokens cluster together.
+          type Match = { needle: string; rawQuad: number[]; centerX: number; centerY: number };
+          const allFoundMatches: Match[] = [];
+          const pushFlatQuad = (needle: string, q: any) => {
+            if (q == null || typeof q.length !== "number" || q.length < 8) return;
+            if (typeof q[0] !== "number") return;
+            const raw = [q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]];
+            const centerX = (raw[0] + raw[2] + raw[4] + raw[6]) / 4;
+            const centerY = (raw[1] + raw[3] + raw[5] + raw[7]) / 4;
+            allFoundMatches.push({ needle, rawQuad: raw, centerX, centerY });
+          };
+
           for (const candidate of allCandidates) {
             try {
               const results = mupdfPage.search(candidate, 10);
-              if (results && results.length > 0) {
-                searchMatches = results;
-                break;
+              if (!results) continue;
+              for (const entry of results) {
+                const isArrayLike = entry != null && typeof (entry as any).length === "number" && typeof entry !== "string";
+                if (!isArrayLike) continue;
+                if (typeof (entry as any)[0] === "number") {
+                  pushFlatQuad(candidate, entry);
+                } else {
+                  for (const q of entry as any) pushFlatQuad(candidate, q);
+                }
               }
             } catch {
-              // Some candidates may contain characters mupdf can't search; skip
               continue;
             }
           }
 
-          if (searchMatches && searchMatches.length > 0) {
-            // mupdfPage.search() returns a flat array of quads — each entry is a
-            // single quad [x0, y0, x1, y1, x2, y2, x3, y3] in display coords
-            // (Y=0 at top). This matches how SearchBar.tsx and PageCanvas.tsx
-            // consume the same API. (It is NOT a nested Quad[][].)
-            // Some bindings may also wrap quads in an outer array, so we handle
-            // both shapes defensively.
-            const quoteQuads: number[][] = [];
-            const pushQuad = (q: any) => {
-              if (!Array.isArray(q) || q.length < 8) return;
-              if (typeof q[0] !== "number") return;
-              quoteQuads.push([
-                q[0], pageHeight - q[1],
-                q[2], pageHeight - q[3],
-                q[4], pageHeight - q[5],
-                q[6], pageHeight - q[7],
-              ]);
-            };
-            for (const entry of searchMatches) {
-              if (!Array.isArray(entry)) continue;
-              if (typeof entry[0] === "number") {
-                // Flat: entry IS a quad
-                pushQuad(entry);
-              } else {
-                // Nested: entry is an array of quads (rare, but handle it)
-                for (const q of entry) pushQuad(q);
+          if (allFoundMatches.length > 0) {
+            // Convert raw display-coord quad to PDF-coord quad
+            const toPdfQuad = (raw: number[]) => [
+              raw[0], pageHeight - raw[1],
+              raw[2], pageHeight - raw[3],
+              raw[4], pageHeight - raw[5],
+              raw[6], pageHeight - raw[7],
+            ];
+
+            if (allFoundMatches.length === 1) {
+              return [toPdfQuad(allFoundMatches[0].rawQuad)];
+            }
+
+            // Score each match by proximity to OTHER matches with DIFFERENT needles.
+            // A match that's near 2+ other distinct quote tokens is almost
+            // certainly the right cell. A lone match of a generic word is not.
+            const PROXIMITY_RADIUS = 250; // PDF units (~3.5 inches)
+            let bestMatch = allFoundMatches[0];
+            let bestScore = -1;
+            // Tiebreaker: prefer high-priority tokens over low-priority ones
+            // when scores are equal. Build a priority lookup.
+            const needlePriority = new Map<string, number>();
+            for (const t of highPriorityTokens) needlePriority.set(t, 3);
+            for (const c of candidates) needlePriority.set(c, 2);
+            for (const t of lowPriorityTokens) needlePriority.set(t, 1);
+
+            for (const m of allFoundMatches) {
+              let score = 0;
+              const seenOtherNeedles = new Set<string>();
+              for (const other of allFoundMatches) {
+                if (other === m) continue;
+                if (other.needle === m.needle) continue;
+                const dx = other.centerX - m.centerX;
+                const dy = other.centerY - m.centerY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < PROXIMITY_RADIUS) {
+                  // Closer = higher score; cap one match per other-needle
+                  if (!seenOtherNeedles.has(other.needle)) {
+                    seenOtherNeedles.add(other.needle);
+                    score += 1 - (dist / PROXIMITY_RADIUS);
+                  }
+                }
+              }
+              // Add own priority as a small tiebreaker so high-priority tokens
+              // win when nothing clusters
+              const ownPriority = needlePriority.get(m.needle) ?? 0;
+              const finalScore = score * 100 + ownPriority;
+              if (finalScore > bestScore) {
+                bestScore = finalScore;
+                bestMatch = m;
               }
             }
-            if (quoteQuads.length > 0) return quoteQuads;
+
+            // Return all quads from the WINNING needle that are near the best match,
+            // so the highlight covers the cluster, not just one word.
+            const winningQuads: number[][] = [toPdfQuad(bestMatch.rawQuad)];
+            for (const m of allFoundMatches) {
+              if (m === bestMatch) continue;
+              const dx = m.centerX - bestMatch.centerX;
+              const dy = m.centerY - bestMatch.centerY;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist < PROXIMITY_RADIUS && m.needle !== bestMatch.needle) {
+                winningQuads.push(toPdfQuad(m.rawQuad));
+              }
+            }
+            return winningQuads;
           }
 
           // Final fallback: walk structured text line-by-line. mupdf's page.search()
@@ -701,10 +793,11 @@ export function PDFViewer() {
               }
             };
 
-            // High-precision multi-word first
+            // Highly-distinctive numeric tokens first (table values), then
+            // multi-word phrases, then lower-priority single tokens.
+            for (const c of highPriorityTokens) addNeedle(c);
             for (const c of candidates) addNeedle(c);
-            // Then distinctive tokens
-            for (const c of singleTokenCandidates) addNeedle(c);
+            for (const c of lowPriorityTokens) addNeedle(c);
             // Plus a few additional substrings of the full quote
             for (const len of [25, 18, 12]) {
               if (normalizedLower.length > len) {
@@ -728,7 +821,9 @@ export function PDFViewer() {
               if (matchedBboxes.length > 0) break;
             }
 
-            if (matchedBboxes.length === 0) return null;
+            if (matchedBboxes.length === 0) {
+              return null;
+            }
 
             // Convert matched line bboxes to quads (already in PDF coords from flipBboxY)
             const quads = matchedBboxes.map(([x0, y0, x1, y1]) => [
@@ -813,11 +908,32 @@ export function PDFViewer() {
       const pageHighlights = !specId && (forPage.length > 0 ? forPage : forAdjacent);
       const firstHighlight = Array.isArray(pageHighlights) && pageHighlights.length > 0 ? pageHighlights[0] : null;
 
+      // Helper: schedule a single highlight-clear timer, cancelling any previous
+      // one. This prevents multiple goto-page events from setting up overlapping
+      // clear timers that prematurely wipe out the highlight.
+      const HIGHLIGHT_DURATION_MS = 30_000;
+      const scheduleHighlightClear = () => {
+        if (temporaryHighlightTimerRef.current) {
+          clearTimeout(temporaryHighlightTimerRef.current);
+        }
+        temporaryHighlightTimerRef.current = setTimeout(() => {
+          setTemporaryHighlight(null);
+          temporaryHighlightTimerRef.current = null;
+        }, HIGHLIGHT_DURATION_MS);
+      };
+
       const applyTemporaryHighlight = () => {
         // When quote quads were precomputed (from the text search before scrolling), use them directly
         if (precomputedQuoteQuads && precomputedQuoteQuads.length > 0) {
           setTemporaryHighlight({ page, quads: precomputedQuoteQuads, color: "#fbbf24", specId: "_quote" });
-          setTimeout(() => setTemporaryHighlight(null), 5000);
+          scheduleHighlightClear();
+          return;
+        }
+        // If the citation provided a quote but we couldn't find it on the page,
+        // skip the page-strip fallback below — drawing a top-strip would clobber
+        // a successful precomputed-quad highlight set by an earlier event in the
+        // same click (CTO split-view fires 2-3 goto-page events per click).
+        if (quote) {
           return;
         }
 
@@ -870,7 +986,7 @@ export function PDFViewer() {
             quadsToUse = [bboxQuad];
           }
           setTemporaryHighlight({ page: firstHighlight.page, quads: quadsToUse, color, specId: firstHighlight.specId });
-          setTimeout(() => setTemporaryHighlight(null), 3000);
+          scheduleHighlightClear();
           return;
         }
         // Fallback only when there is no spec data or quote match for this page at all
@@ -882,15 +998,44 @@ export function PDFViewer() {
             const topStrip = Math.min(120, h * 0.2);
             const quad = [0, h - topStrip, w, h - topStrip, w, h, 0, h];
             setTemporaryHighlight({ page, quads: [quad], color: "#fbbf24", specId: "_page" });
-            setTimeout(() => setTemporaryHighlight(null), 3000);
+            scheduleHighlightClear();
           }
         } catch (e) {
           console.warn("Scroll-to-spec: could not set page fallback highlight", e);
         }
       };
       
+      // Compute a scroll-target bbox from the precomputed quote quads so the
+      // viewer scrolls to the actual highlight location instead of the top of
+      // the page. The first quad is the primary match.
+      // Quads are stored in PDF coordinates [x0, y0, x1, y1, x2, y2, x3, y3]
+      // where Y=0 is at the bottom.
+      let scrollBbox: number[] | undefined = bbox;
+      if (!scrollBbox && precomputedQuoteQuads && precomputedQuoteQuads.length > 0) {
+        const q = precomputedQuoteQuads[0];
+        if (q && q.length >= 8) {
+          const xs = [q[0], q[2], q[4], q[6]];
+          const ys = [q[1], q[3], q[5], q[7]];
+          scrollBbox = [
+            Math.min(...xs),
+            Math.min(...ys),
+            Math.max(...xs),
+            Math.max(...ys),
+          ];
+        }
+      }
+
       // Helper function to perform the scroll
       const performScroll = () => {
+        // CRITICAL: pre-set previousPageRef to the new page BEFORE setCurrentPage
+        // so the "external page change" effect (line ~1227) bails out at its
+        // `previousPageRef.current === currentPage` guard. Also stamp the
+        // scroll-to-spec timestamp so that effect (which has many deps and may
+        // re-run after baseFitScale/fitMode/zoomLevel change) bails on its
+        // secondary check too — otherwise it would call scrollToPage WITHOUT a
+        // bbox and override our bbox-targeted scroll back to top-of-page.
+        previousPageRef.current = page;
+        lastScrollToSpecAtRef.current = Date.now();
         setCurrentPage(page);
         // Wait for page state to update, viewport to be ready, and baseFitScale to be calculated
         requestAnimationFrame(() => {
@@ -909,16 +1054,16 @@ export function PDFViewer() {
                   setBaseFitScale(calculatedScale);
                   // Wait one more frame for state to update
                   requestAnimationFrame(() => {
-                    scrollToPage(page, true, bbox);
-                    if (!specId) setTimeout(applyTemporaryHighlight, 280);
+                    scrollToPage(page, true, scrollBbox);
+                    if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
                   });
                 } else {
-                  scrollToPage(page, true, bbox);
-                  if (!specId) setTimeout(applyTemporaryHighlight, 280);
+                  scrollToPage(page, true, scrollBbox);
+                  if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
                 }
               } else {
-                scrollToPage(page, true, bbox);
-                if (!specId) setTimeout(applyTemporaryHighlight, 280);
+                scrollToPage(page, true, scrollBbox);
+                if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
               }
             }
           });
@@ -1128,14 +1273,23 @@ export function PDFViewer() {
   // Only scroll if the change didn't come from user scrolling
   useEffect(() => {
     if (!readMode || !scrollContainerRef.current) return;
-    
+
     // Skip if page didn't actually change
     if (previousPageRef.current === currentPage) {
       return;
     }
-    
+
     // Don't scroll if this page change came from user scrolling
     if (isScrollingFromUserRef.current) {
+      previousPageRef.current = currentPage;
+      return;
+    }
+
+    // Don't override an in-flight scroll-to-spec scroll. The handler at
+    // handleScrollToSpec sets lastScrollToSpecAtRef before calling
+    // setCurrentPage; this effect's `scrollToPage(currentPage, true)` (no
+    // bbox) would otherwise reset the scroll back to top-of-page.
+    if (Date.now() - lastScrollToSpecAtRef.current < 4000) {
       previousPageRef.current = currentPage;
       return;
     }

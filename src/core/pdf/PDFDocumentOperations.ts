@@ -1955,14 +1955,10 @@ export class PDFDocumentOperations {
 
   } else {
 
-  // Convert PDF coordinates to canvas coordinates for setLine() (getLine() returns canvas, so setLine() expects canvas)
+  // Pass PDF coordinates directly to setLine() — no Y-flip needed.
+  // MuPDF stores these as-is in the PDF's L array.
 
-  const pageBounds = page.getBounds();
-  const pageHeight = pageBounds[3] - pageBounds[1];
-  const canvasStart = { x: start.x, y: pageHeight - start.y };
-  const canvasEnd = { x: end.x, y: pageHeight - end.y };
-
-  const lineArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+  const lineArray = [[start.x, start.y], [end.x, end.y]];
 
 
   try {
@@ -2738,13 +2734,9 @@ export class PDFDocumentOperations {
 
   const end = annot.points[1];
 
-  // Convert PDF coordinates to canvas coordinates for setLine()
+  // Pass PDF coordinates directly to setLine() — no Y-flip needed.
 
-  const canvasStart = { x: start.x, y: pageHeight - start.y };
-
-  const canvasEnd = { x: end.x, y: pageHeight - end.y };
-
-  const lineArray = [[canvasStart.x, canvasStart.y], [canvasEnd.x, canvasEnd.y]];
+  const lineArray = [[start.x, start.y], [end.x, end.y]];
 
   existingPdfAnnot.setLine(lineArray);
 
