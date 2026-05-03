@@ -393,6 +393,9 @@ function Home() {
               <Link to="/compare" className="text-sm text-muted-foreground hover:text-foreground">
                 Compare
               </Link>
+              <Link to="/partners" className="text-sm text-muted-foreground hover:text-foreground">
+                Partners
+              </Link>
             </div>
           </div>
           <div className="mt-4 text-center text-sm text-muted-foreground space-y-2">
