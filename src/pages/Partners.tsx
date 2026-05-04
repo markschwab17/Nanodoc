@@ -1,13 +1,19 @@
 import { Link } from "react-router-dom";
 import { NavBar } from "@/features/navigation/NavBar";
 import { Button } from "@/components/ui/button";
-import { ArrowUpRight, FileText } from "lucide-react";
+import { ArrowUpRight, FileText, Ruler, Calculator, ClipboardList } from "lucide-react";
 
 const VG_BASE = "https://vertigraph.com";
-const CIVIL_ICON = `${VG_BASE}/partners/civiltakeoff-icon.png`;
 const VG_LOGO = `${VG_BASE}/brand/vertigraph-logo.png`;
 const BIDSCREEN_ICON = `${VG_BASE}/products/bidscreen-xl/logo-icon.png`;
 const SITEWORX_ICON = `${VG_BASE}/products/siteworx-os/logo-icon.png`;
+
+const CivilTakeoffWordmark = () => (
+  <span className="text-2xl font-bold tracking-tight whitespace-nowrap">
+    <span className="text-foreground">civiltakeoff</span>
+    <span style={{ color: "#5070ff" }}>.ai</span>
+  </span>
+);
 
 type SubProduct = {
   name: string;
@@ -33,8 +39,8 @@ function PartnerCard({
 }: {
   eyebrow: string;
   badge?: string;
-  logo: string;
-  logoAlt: string;
+  logo: string | React.ReactNode;
+  logoAlt?: string;
   logoBg?: string;
   title: string;
   description: string;
@@ -49,11 +55,15 @@ function PartnerCard({
     <div className="rounded-2xl border bg-card p-8 shadow-sm flex flex-col">
       <div className="flex items-start justify-between gap-4 mb-6">
         <div className={`flex items-center justify-center rounded-xl border ${logoBg} h-20 px-4 min-w-[140px]`}>
-          <img
-            src={logo}
-            alt={logoAlt}
-            className="max-h-12 w-auto object-contain"
-          />
+          {typeof logo === "string" ? (
+            <img
+              src={logo}
+              alt={logoAlt ?? ""}
+              className="max-h-12 w-auto object-contain"
+            />
+          ) : (
+            logo
+          )}
         </div>
         {badge && (
           <span className="inline-flex items-center gap-1.5 rounded-full border bg-muted/60 text-muted-foreground text-xs font-medium px-3 py-1.5 whitespace-nowrap">
@@ -150,13 +160,65 @@ function Partners() {
             Nanodoc · Partners
           </p>
           <h1 className="text-5xl md:text-6xl font-bold mb-6 bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">
-            Partners in <span className="text-primary">construction</span>.
+            Software we love, from people we trust.
           </h1>
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-            Nanodoc keeps PDF editing free and out of the way. When the work
-            moves beyond a single document — into takeoff, estimating, and bid
-            management — these are the tools we point our users to.
+            A lot of Nanodoc users are in <span className="text-foreground font-medium">construction</span> —
+            estimators, contractors, and project managers who live inside PDF
+            plan sets. If that's you, the tools below pick up where Nanodoc
+            stops. If it's not you, you can safely skip the rest of this page.
           </p>
+        </div>
+      </section>
+
+      {/* Primer: What is takeoff & estimating? */}
+      <section className="container mx-auto px-4 pb-8">
+        <div className="max-w-5xl mx-auto rounded-2xl border bg-muted/40 p-8 md:p-10">
+          <p className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">
+            A quick primer
+          </p>
+          <h2 className="text-2xl md:text-3xl font-bold mb-6">
+            What is construction takeoff and estimating?
+          </h2>
+          <p className="text-muted-foreground leading-relaxed mb-8 max-w-3xl">
+            Before any building gets built, someone has to figure out how much
+            of everything it'll need — concrete, pipe, asphalt, labor hours,
+            equipment time. That whole process happens on PDFs of architectural
+            and civil drawings. Here's the rough flow, and where each tool
+            below fits in.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div className="bg-card border rounded-xl p-5">
+              <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-3">
+                <Ruler className="h-5 w-5 text-primary" />
+              </div>
+              <h3 className="font-semibold mb-1.5">1. Takeoff</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Measuring quantities directly off the drawings — lengths of
+                pipe, square footage of paving, volume of dirt to move.
+              </p>
+            </div>
+            <div className="bg-card border rounded-xl p-5">
+              <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-3">
+                <Calculator className="h-5 w-5 text-primary" />
+              </div>
+              <h3 className="font-semibold mb-1.5">2. Estimating</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Turning those quantities into a price. Material costs, labor
+                rates, equipment, overhead, and margin all roll into a bid.
+              </p>
+            </div>
+            <div className="bg-card border rounded-xl p-5">
+              <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-3">
+                <ClipboardList className="h-5 w-5 text-primary" />
+              </div>
+              <h3 className="font-semibold mb-1.5">3. Bid management</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Tracking the dozens of bids in flight, the emails, the
+                subcontractor quotes, and the deadlines so nothing slips.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -165,53 +227,50 @@ function Partners() {
         <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* CivilTakeoff.ai */}
           <PartnerCard
-            eyebrow="CivilTakeoff.ai · Cloud Takeoff"
-            logo={CIVIL_ICON}
-            logoAlt="CivilTakeoff.ai logo"
+            eyebrow="Cloud takeoff + bid management"
+            logo={<CivilTakeoffWordmark />}
+            logoBg="bg-white"
             title="CivilTakeoff.ai"
-            description="Cloud-based quantity takeoff that puts professional-grade measurement in your team's hands. One login from any browser — no license-key transfers, no file-syncing nightmares. Pair it with the Project War Room for AI-assisted RFQs, email tracking, checklists, and dashboards that capture every lesson, email, and bid in one place."
+            description="A modern, browser-based replacement for the desktop takeoff tools estimators have used for decades. Open a PDF plan set, measure quantities with your team in real time, and skip the licensing dance — anyone with a login can work from any computer. The included Project War Room then keeps every email, RFQ, and bid in one place so the next person who joins the team inherits real institutional knowledge instead of a blank inbox."
             bullets={[
-              "Lightning-fast setup — upload PDFs and start measuring",
-              "Auto-trace, multi-point arcs, and company classes to cut repetition",
-              "Real-time collaboration with your team from any browser",
-              "Project War Room: RFQs, email tracking, signatures, and dashboards",
+              "Upload a PDF plan set and start measuring in minutes",
+              "Works in any browser — no installs, no license-key transfers",
+              "Real-time collaboration so a team can split a big takeoff",
+              "AI assists with auto-trace, auto-scale, and class suggestions",
+              "Project War Room tracks bids, emails, RFQs, and deadlines",
               "Free to start — no credit card required",
             ]}
             primaryHref="https://civiltakeoff.ai"
             primaryLabel="Visit CivilTakeoff.ai"
-            secondaryHref="https://civiltakeoff.ai"
-            secondaryLabel="Project War Room"
           />
 
           {/* Vertigraph */}
           <PartnerCard
-            eyebrow="Vertigraph · Desktop Estimating"
+            eyebrow="Desktop takeoff + Excel estimating"
             badge="Coming soon"
             logo={VG_LOGO}
             logoAlt="Vertigraph logo"
             logoBg="bg-white"
             title="Vertigraph"
-            description="Vertigraph builds purpose-built construction takeoff and estimating software. Hand off CivilTakeoff measurements straight into BidScreen XL for Excel-driven estimating, or into SiteWorx/OS for site excavation volumes and 3D surface modeling."
+            description="Vertigraph builds desktop tools for estimators who already do their best work inside Microsoft Excel. If your team's pricing logic, formulas, and templates already live in spreadsheets, these tools meet you there — measure on the drawing, drop the quantities straight into Excel, and let your existing workbook do the math. SiteWorx/OS extends that same idea to earthwork, where the answer isn't a length or area but a volume of dirt."
             subProducts={[
               {
                 name: "BidScreen XL",
                 icon: BIDSCREEN_ICON,
                 href: "https://vertigraph.com/products/bidscreen-xl",
                 description:
-                  "On-screen takeoff inside Microsoft Excel. Measure from PDFs, DWGs, DXFs, and TIFs and let Excel formulas drive the estimate.",
+                  "Takeoff that lives inside Excel itself. Measure from PDFs, DWGs, DXFs, and TIFs and let your spreadsheet formulas drive the price.",
               },
               {
                 name: "SiteWorx/OS",
                 icon: SITEWORX_ICON,
                 href: "https://vertigraph.com/products/siteworx-os",
                 description:
-                  "Site excavation takeoff with 3D existing and proposed surface models, cut/fill volumes, and machine-control deliverables for earthwork contractors.",
+                  "Earthwork specialist. Builds 3D models of existing and proposed ground, calculates cut and fill volumes, and exports machine-control files for excavator GPS systems.",
               },
             ]}
             primaryHref="https://vertigraph.com"
             primaryLabel="Visit Vertigraph"
-            secondaryHref="https://vertigraph.com/products"
-            secondaryLabel="Request early access"
           />
         </div>
       </section>
