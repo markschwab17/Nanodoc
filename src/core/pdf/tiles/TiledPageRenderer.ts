@@ -368,6 +368,31 @@ export class TiledPageRenderer {
       }
     }
 
+    // Always include the LOD-0 tile as a permanent baseline beneath
+    // everything else (when cached and we're rendering at a higher LOD).
+    // findCoarserAncestor only returns LOD-0 when *nothing* finer is cached;
+    // that means as soon as an intermediate ancestor (e.g. LOD-3) becomes
+    // available, the LOD-0 leaves the fallback list and unmounts. During an
+    // LOD upshift, intermediate ancestors mid-render then unmounting can
+    // leave a 120ms window where new primaries are still fading in (opacity
+    // 0→1) and the area underneath has no tile — perceived as a flash.
+    // Pinning LOD-0 at the bottom guarantees something is always painted
+    // there. It's a single tile per page so the cost is minimal.
+    if (lod > 0) {
+      const lod0Key: TileKey = {
+        docId: this.opts.docId,
+        page,
+        lod: 0,
+        x: 0,
+        y: 0,
+      };
+      const lod0Tile = this.cache.get(lod0Key);
+      if (lod0Tile && !seenFallback.has(tileKeyString(lod0Key))) {
+        // unshift so it renders FIRST in the merged list — bottommost layer.
+        fallback.unshift(lod0Tile);
+      }
+    }
+
     return { primary, fallback, missing, lod };
   }
 
