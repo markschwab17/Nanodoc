@@ -84,7 +84,7 @@
 
 ---
 
-## Tile-Pyramid Renderer (Phases 1–2)
+## Tile-Pyramid Renderer (Phases 1–7)
 
 ### Phase 1 — primitives
 
@@ -114,19 +114,28 @@
 - [x] Tile useEffect only sets `canvas.width/height` when they differ — keeps painted pixels stable across StrictMode's double-invoke
 - [x] Pinch-to-zoom on the trackpad works in tile mode (handleWheelNative uses `pageContentRef`)
 - [x] Unhandled `Tile request cancelled` rejection fixed (`.then(cleanup, cleanup)` instead of `.finally(...)` chain)
-- [x] Cache capacity bumped to 1500 (browser) / 3000 (Tauri); LOD capped at 5 (1024 tiles per square page max); coarser-LOD ancestors prefetched so the fallback path is always populated when jumping to high zoom
-- [x] `setViewport` / `getVisibleTiles` now refire only on LOD change, not on every `displayPxPerPoint` change. Within a single LOD the parent CSS transform handles zoom
+- [x] Cache capacity bumped to 1500 (browser) / 3000 (Tauri); coarser-LOD ancestors prefetched so the fallback path is always populated when jumping to high zoom
 - [x] Debug HUD hidden by default; enable via `?tile-debug=1` URL param
+
+### Phase 4 — visual smoothness
+
+- [x] 120ms CSS opacity fade-in on every freshly-mounted tile canvas (via `@keyframes tile-fade-in` in `index.css`). Softens the snap when a new LOD's primaries arrive over a coarser-LOD fallback.
+- [x] Intra-LOD zoom is handled entirely by the parent's CSS transform — no worker re-renders for sub-LOD zoom changes. Cached tiles get CSS-scaled smoothly.
+
+### Phase 7 — viewport-restricted tile requests
+
+- [x] `PageCanvas` measures the actually-visible portion of the page on screen via `getBoundingClientRect` (intersection of `containerRef` with `pageContentRef`, mapped from CSS px back to PDF points). Updated via `useLayoutEffect` after every render with a 1pt change-threshold to avoid render loops.
+- [x] `TiledCanvas` accepts `viewportPdfRect` prop and uses it for `setViewport` / `getVisibleTiles`. The worker pool only renders tiles the user can actually see.
+- [x] LOD cap raised from 5 to 8. With viewport-restricted requests, tile counts scale with viewport size, not with `4^LOD`.
+- [x] Side-effect: cache eviction churn (which previously caused "blank tiles loading in" at high zoom) is gone — far fewer tiles are in flight at any moment.
 
 ### Known limitations (deferred)
 
-- **Phase-3 only**: Toggling on a single page works; intra-LOD zoom is now smooth (CSS transform), but **inter-LOD threshold crossings still incur a brief render burst** — phase 4 will hide that latency by holding the previous LOD's tiles on screen until the new LOD's primaries are ready.
-- LOD is capped at 5. At extreme zoom (zoom > ~3× on a large construction sheet) the bitmap is CSS-upscaled instead of rendering more tiles. Phase 7 will lift the cap once viewport-restricted tile requests land (so we only fetch the on-screen region).
+- **Direct DOM transform during pinch-zoom is invisible to React** — the wheel handler updates `transformDivRef.style.transform` synchronously and only flushes to React state via debounced `flushSync` after ~100ms. During fast pinches the visible-rect measurement (and thus tile requests) lags by that window; cached tiles render via the parent's CSS scale until the gesture settles. Acceptable today; phase-8 may add a transitionend / RAF listener.
 - **Redaction & SelectionBoxTool** call `canvas.getContext` / set `canvas.width` directly through `canvasRef`. When the tile flag is on, those operations no-op silently (canvasRef is null). Toggle the flag off after a redaction to see the result, or stay on the legacy renderer.
 - Per-worker `DisplayList` cache has no eviction (small docs only — fine for the current scope)
-- PDF bytes are structured-cloned to each worker on first request (~N× memory). SharedArrayBuffer + COOP/COEP is a phase-7 optimization.
-- No CSS-transform pan/zoom optimization (phase 4) — every zoom currently re-runs `setViewport` and may request fresh tiles
+- PDF bytes are structured-cloned to each worker on first request (~N× memory). SharedArrayBuffer + COOP/COEP is a phase-8 optimization.
 - No OPFS L2 cache (phase 5)
 - Cancellation drops queue items but doesn't abort in-flight worker renders — only worker timeout will kill an already-running tile
-- Bitmaps are leaked on eviction (rely on GC). Phase-7 will reintroduce explicit close behind a render-frame barrier.
-- Renderer instances in the registry leak past document close. Phase-7 will hook into doc close.
+- Bitmaps are leaked on eviction (rely on GC). Phase-8 will reintroduce explicit close behind a render-frame barrier.
+- Renderer instances in the registry leak past document close. Phase-8 will hook into doc close.
