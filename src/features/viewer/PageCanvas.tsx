@@ -1313,6 +1313,65 @@ export const PageCanvas = React.memo(function PageCanvas({
     return zoomLevel * dpr;
   })();
 
+  // Visible PDF-rect of this page on screen — intersection of the container's
+  // viewport with the page element's bounding rect, mapped from CSS px back
+  // to PDF points. Used by TiledCanvas so the worker pool only renders tiles
+  // the user can actually see (instead of the whole page at every LOD).
+  // Updated via useLayoutEffect after every render so scroll / pan / zoom
+  // changes flow through.
+  const [tiledViewportPdfRect, setTiledViewportPdfRect] = useState<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }>({ x: 0, y: 0, w: 0, h: 0 });
+
+  useLayoutEffect(() => {
+    if (!useTiledRenderer || !pageMetadata) return;
+    const containerEl = containerRef.current;
+    const pageEl = pageContentRef.current;
+    if (!containerEl || !pageEl) return;
+
+    const containerRect = containerEl.getBoundingClientRect();
+    const pageRect = pageEl.getBoundingClientRect();
+
+    if (pageRect.width <= 0 || pageRect.height <= 0) return;
+
+    const left = Math.max(containerRect.left, pageRect.left);
+    const top = Math.max(containerRect.top, pageRect.top);
+    const right = Math.min(containerRect.right, pageRect.right);
+    const bottom = Math.min(containerRect.bottom, pageRect.bottom);
+
+    let next: { x: number; y: number; w: number; h: number };
+    if (left >= right || top >= bottom) {
+      next = { x: 0, y: 0, w: 0, h: 0 };
+    } else {
+      // pageRect already accounts for the parent CSS transform, so px-per-pt
+      // here = pageRect.width / pageMetadata.width.
+      const pxPerPt = pageRect.width / pageMetadata.width;
+      next = {
+        x: (left - pageRect.left) / pxPerPt,
+        y: (top - pageRect.top) / pxPerPt,
+        w: (right - left) / pxPerPt,
+        h: (bottom - top) / pxPerPt,
+      };
+    }
+
+    setTiledViewportPdfRect((prev) => {
+      // Only update on meaningful change to avoid render loops. 1pt threshold
+      // is plenty — sub-pt movement won't change the visible tile set.
+      if (
+        Math.abs(prev.x - next.x) < 1 &&
+        Math.abs(prev.y - next.y) < 1 &&
+        Math.abs(prev.w - next.w) < 1 &&
+        Math.abs(prev.h - next.h) < 1
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  });
+
   // State to track rotation changes and force re-render
   const [metadataVersion, setMetadataVersion] = useState(0);
 
@@ -3069,6 +3128,7 @@ export const PageCanvas = React.memo(function PageCanvas({
                   heightPt: pageMetadata.height,
                 }}
                 displayPxPerPoint={tiledDisplayPxPerPoint}
+                viewportPdfRect={tiledViewportPdfRect}
                 renderer={tiledRenderer}
                 rootRef={pageContentRef}
                 className={cn("block", !readMode && "shadow-2xl")}

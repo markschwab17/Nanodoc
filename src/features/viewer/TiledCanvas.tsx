@@ -32,6 +32,12 @@ export interface TiledCanvasProps {
   pageDims: PageDims;
   /** Effective screen resolution: zoomLevel × dpr. Drives LOD selection. */
   displayPxPerPoint: number;
+  /**
+   * Visible portion of THIS page in PDF points (relative to page origin).
+   * If `w` or `h` is 0 the page isn't on screen and no tiles are requested.
+   * Falls back to the full page rect if not provided.
+   */
+  viewportPdfRect?: PdfRect;
   renderer: TiledPageRenderer;
   className?: string;
   style?: CSSProperties;
@@ -46,6 +52,7 @@ export function TiledCanvas({
   pageNumber,
   pageDims,
   displayPxPerPoint,
+  viewportPdfRect,
   renderer,
   className,
   style,
@@ -54,10 +61,24 @@ export function TiledCanvas({
   // Bumped on every onTileReady so getVisibleTiles is re-read after async arrivals
   const [tick, setTick] = useState(0);
 
-  const viewport: PdfRect = useMemo(
-    () => ({ x: 0, y: 0, w: pageDims.widthPt, h: pageDims.heightPt }),
-    [pageDims.widthPt, pageDims.heightPt],
-  );
+  // Use the viewport prop if provided (from PageCanvas — the part of the
+  // page actually visible on screen). Fall back to full-page if missing OR
+  // if it's been measured as 0×0 (page off-screen) but pageDims is known.
+  // Falling back to full-page on off-screen means we still render
+  // ancestor tiles for that page's prefetch, which is OK for now.
+  const viewport: PdfRect = useMemo(() => {
+    if (viewportPdfRect && viewportPdfRect.w > 0 && viewportPdfRect.h > 0) {
+      return viewportPdfRect;
+    }
+    return { x: 0, y: 0, w: pageDims.widthPt, h: pageDims.heightPt };
+  }, [
+    viewportPdfRect?.x,
+    viewportPdfRect?.y,
+    viewportPdfRect?.w,
+    viewportPdfRect?.h,
+    pageDims.widthPt,
+    pageDims.heightPt,
+  ]);
 
   useEffect(() => {
     return renderer.onTileReady(() => setTick((t) => t + 1));
