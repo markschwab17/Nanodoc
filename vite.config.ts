@@ -33,7 +33,12 @@ export default defineConfig(async () => ({
     // falls back to the per-worker copy path.
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
+      // `credentialless` (not `require-corp`) so cross-origin subresources
+      // — third-party images, scripts, etc. — load without forcing them to
+      // send CORP headers, which most public CDNs (PayPal, Google, etc.)
+      // do not. crossOriginIsolated still becomes true (SharedArrayBuffer
+      // works), but cross-origin requests are sent without credentials.
+      "Cross-Origin-Embedder-Policy": "credentialless",
     },
     watch: {
       // Tell Vite to ignore watching `src-tauri`

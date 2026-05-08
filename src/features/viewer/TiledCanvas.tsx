@@ -62,17 +62,23 @@ export function TiledCanvas({
   // Bumped on every onTileReady so getVisibleTiles is re-read after async arrivals
   const [tick, setTick] = useState(0);
 
-  // Use the viewport prop if provided (from PageCanvas — the part of the
-  // page actually visible on screen). Fall back to full-page if missing OR
-  // if it's been measured as 0×0 (page off-screen) but pageDims is known.
-  // Falling back to full-page on off-screen means we still render
-  // ancestor tiles for that page's prefetch, which is OK for now.
+  // True only when PageCanvas has measured a real viewport rect for this
+  // page. On initial mount the rect is the placeholder {0,0,0,0} until
+  // useLayoutEffect runs the getBoundingClientRect measurement; we must NOT
+  // queue tiles in that window. With many pages mounting at once on a fast
+  // scroll, falling back to "render the whole page" floods the WorkerPool
+  // with thousands of tile requests for areas the user will never see.
+  // The renderer's prefetchAllLod0 already provides a baseline LOD-0 tile
+  // for every page, so unmeasured pages still render *something*.
+  const hasViewport =
+    !!viewportPdfRect &&
+    viewportPdfRect.w > 0 &&
+    viewportPdfRect.h > 0;
   const viewport: PdfRect = useMemo(() => {
-    if (viewportPdfRect && viewportPdfRect.w > 0 && viewportPdfRect.h > 0) {
-      return viewportPdfRect;
-    }
+    if (hasViewport) return viewportPdfRect!;
     return { x: 0, y: 0, w: pageDims.widthPt, h: pageDims.heightPt };
   }, [
+    hasViewport,
     viewportPdfRect?.x,
     viewportPdfRect?.y,
     viewportPdfRect?.w,
@@ -109,13 +115,18 @@ export function TiledCanvas({
   // skip generating thousands of viewport changes for pages the user is
   // flying past. Cached fallbacks (LOD-0 from prefetchAllLod0) still paint
   // via getVisibleTiles below; we only suppress *new* tile requests until
-  // the scroll settles. `paused` is in the dep array so resume immediately
-  // re-fires setViewport.
+  // the scroll settles. `paused` and `hasViewport` are in the dep array so
+  // resume / first-measurement immediately re-fires setViewport.
   const paused = useTilesPaused();
   useEffect(() => {
     if (paused) return;
+    // Don't queue tiles before the viewport has been measured. The
+    // alternative (falling back to "render the whole page") floods the
+    // WorkerPool when many pages mount at once on a fast scroll. The
+    // baseline LOD-0 from prefetchAllLod0 keeps the page non-blank.
+    if (!hasViewport) return;
     renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
-  }, [renderer, pageNumber, viewport, displayPxPerPoint, paused]);
+  }, [renderer, pageNumber, viewport, displayPxPerPoint, paused, hasViewport]);
 
   const visible = useMemo(
     () => renderer.getVisibleTiles(pageNumber, viewport, displayPxPerPoint),

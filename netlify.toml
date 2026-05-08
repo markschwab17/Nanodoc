@@ -29,11 +29,14 @@
     # 500MB construction sheet set, ~2.5GB saved). Embedding parents (CTO)
     # set `credentialless` on their iframes so this doesn't break the embed.
     Cross-Origin-Opener-Policy = "same-origin"
-    Cross-Origin-Embedder-Policy = "require-corp"
-    # Subresources fetched cross-origin under COEP=require-corp must send
-    # CORP. Marking ALL responses as cross-origin-shareable is overkill for
-    # truly private endpoints, but Nanodoc serves only the static SPA from
-    # this domain — there's nothing private here to leak.
+    # `credentialless` (not `require-corp`) so cross-origin subresources
+    # — third-party images from PayPal, Google, etc. — load without
+    # forcing them to send CORP. crossOriginIsolated still becomes true
+    # (SharedArrayBuffer works), but cross-origin requests are sent
+    # without credentials, which is fine for public assets.
+    Cross-Origin-Embedder-Policy = "credentialless"
+    # Still mark our own responses as cross-origin-shareable — this lets
+    # Nanodoc be embedded by CTO and other authorized parents.
     Cross-Origin-Resource-Policy = "cross-origin"
 
 # Headers for WASM files
