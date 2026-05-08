@@ -38,16 +38,46 @@ export function tileGridSize(
 const MAX_LOD = 7;
 
 /**
+ * Hysteresis margin for downshifting LOD. When zooming out past a threshold,
+ * stick at the current LOD until the user is `1 + DOWNSHIFT_MARGIN` past it
+ * (i.e., screenPx must drop below TILE_SIZE * 2^(prevLod-1) / 1.25 before we
+ * downshift). Zooming in upshifts immediately for sharpness — only the
+ * coarser direction is sticky.
+ *
+ * Why only one-sided: if you're a hair past the upshift threshold, sharper
+ * tiles ARE the right answer; delaying them would feel laggy. But when
+ * zooming back out, the lower-LOD tiles you'd switch to look identical at
+ * the screen size you're at, so re-rendering them just churns the pool.
+ */
+const LOD_DOWNSHIFT_HYSTERESIS = 0.25;
+
+/**
  * Smallest LOD where one tile pixel covers >= one screen pixel.
  * `displayPxPerPoint` is the current zoom expressed as device pixels per PDF point.
  * Clamped to [0, MAX_LOD].
+ *
+ * `previousLod` (optional) enables hysteresis: when set, the current LOD is
+ * preserved across small zoom dithers around its boundary. Pass it on
+ * subsequent calls for the same (page, viewport) so users don't see
+ * repeated re-renders when nudging zoom near a threshold.
  */
-export function lodForZoom(pageDims: PageDims, displayPxPerPoint: number): number {
+export function lodForZoom(
+  pageDims: PageDims,
+  displayPxPerPoint: number,
+  previousLod?: number,
+): number {
   const pageMax = Math.max(pageDims.widthPt, pageDims.heightPt);
   const screenPx = pageMax * displayPxPerPoint;
   if (screenPx <= TILE_SIZE) return 0;
   const ideal = Math.ceil(Math.log2(screenPx / TILE_SIZE));
-  return Math.max(0, Math.min(MAX_LOD, ideal));
+  const target = Math.max(0, Math.min(MAX_LOD, ideal));
+  if (previousLod === undefined || target >= previousLod) return target;
+  // target < previousLod → user is zooming out across a threshold. Stick
+  // at previousLod unless we're firmly past it.
+  const lowerExitPx =
+    (TILE_SIZE * Math.pow(2, previousLod - 1)) / (1 + LOD_DOWNSHIFT_HYSTERESIS);
+  if (screenPx >= lowerExitPx) return previousLod;
+  return target;
 }
 
 /** PDF rectangle covered by the tile identified by `key` (clipped to page bounds). */

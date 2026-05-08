@@ -60,6 +60,28 @@ describe("lodForZoom", () => {
   it("never returns negative LODs", () => {
     expect(lodForZoom(SHEET, 0.001)).toBe(0);
   });
+
+  it("upshifts immediately when zooming in past a threshold", () => {
+    // SHEET pageMax = 3456. At 1.0, LOD 3. At 2.0, LOD 4. Hysteresis only
+    // applies on downshifts — zooming IN snaps to the higher LOD.
+    const previousLod = 3;
+    expect(lodForZoom(SHEET, 2.0, previousLod)).toBe(4);
+  });
+
+  it("sticks at the current LOD on small downward zoom dithers", () => {
+    // At zoom 2.0, SHEET hits LOD 4 (screenPx = 6912). LOD 4's lower exit
+    // boundary with 25% hysteresis is screenPx = 512 * 8 / 1.25 = 3276.8.
+    // Dropping zoom from 2.0 to 1.0 → screenPx = 3456, still above 3276.8 →
+    // stay at LOD 4 instead of falling back to 3.
+    expect(lodForZoom(SHEET, 1.0, 4)).toBe(4);
+  });
+
+  it("drops down once the user is firmly past the boundary", () => {
+    // From the same starting LOD 4, drop zoom to 0.9 → screenPx = 3110 <
+    // 3276.8 → finally downshift. Without previousLod the natural answer
+    // for screenPx=3110 is ceil(log2(3110/512)) = 3.
+    expect(lodForZoom(SHEET, 0.9, 4)).toBe(3);
+  });
 });
 
 describe("tilePdfRect", () => {

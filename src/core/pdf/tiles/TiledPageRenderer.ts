@@ -65,6 +65,12 @@ export class TiledPageRenderer {
    */
   private fetching = new Set<string>();
   /**
+   * Last LOD chosen per page. Threaded back into lodForZoom on subsequent
+   * calls so small zoom dithers around an LOD boundary don't repeatedly
+   * downshift+upshift, each cycle re-rendering a page worth of tiles.
+   */
+  private lastLodByPage = new Map<number, number>();
+  /**
    * OffscreenCanvas reused for L2 readback (drawImage(bitmap) → getImageData).
    * Shared across persists to avoid per-tile canvas allocation.
    */
@@ -91,7 +97,12 @@ export class TiledPageRenderer {
   ): void {
     if (this.destroyed) return;
     const dims = this.opts.pageDims(page);
-    const lod = lodForZoom(dims, displayPxPerPoint);
+    const lod = lodForZoom(
+      dims,
+      displayPxPerPoint,
+      this.lastLodByPage.get(page),
+    );
+    this.lastLodByPage.set(page, lod);
     const keys = visibleTileKeys(this.opts.docId, page, dims, lod, viewport);
 
     // Cancel pending requests for THIS page that are stale. The right
@@ -325,7 +336,13 @@ export class TiledPageRenderer {
     displayPxPerPoint: number,
   ): VisibleTilesResult {
     const dims = this.opts.pageDims(page);
-    const lod = lodForZoom(dims, displayPxPerPoint);
+    // Use the same hysteresis-aware LOD that setViewport just chose so the
+    // displayed primary set matches what we requested.
+    const lod = lodForZoom(
+      dims,
+      displayPxPerPoint,
+      this.lastLodByPage.get(page),
+    );
     const keys = visibleTileKeys(this.opts.docId, page, dims, lod, viewport);
 
     const primary: RenderedTile[] = [];
@@ -401,6 +418,7 @@ export class TiledPageRenderer {
     this.cache.destroy();
     this.listeners.clear();
     this.fetching.clear();
+    this.lastLodByPage.clear();
     this.readbackCanvas = null;
   }
 
