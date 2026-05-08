@@ -90,6 +90,26 @@ export function TiledCanvas({
       {visible.primary.map((t) => (
         <Tile key={"p-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
       ))}
+      {/* Dev-only debug HUD: shows LOD + tile counts so we can see whether
+          zoom is actually crossing LOD thresholds. Cheap to delete later. */}
+      <div
+        style={{
+          position: "absolute",
+          top: 4,
+          left: 4,
+          padding: "2px 6px",
+          background: "rgba(0,0,0,0.7)",
+          color: "#0f0",
+          font: "10px ui-monospace, monospace",
+          borderRadius: 3,
+          pointerEvents: "none",
+          zIndex: 100,
+        }}
+      >
+        LOD {visible.lod} · {displayPxPerPoint.toFixed(2)} px/pt · p
+        {visible.primary.length} f{visible.fallback.length} m
+        {visible.missing.length}
+      </div>
     </div>
   );
 }

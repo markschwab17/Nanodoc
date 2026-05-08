@@ -887,7 +887,9 @@ export const PageCanvas = React.memo(function PageCanvas({
         const newZoom = Math.max(0.25, Math.min(5, currentScale * delta));
 
         if (Math.abs(newZoom - currentScale) > 0.001) {
-          const canvas = canvasRef.current;
+          // Use pageContentRef so pinch-to-zoom works whether the legacy
+          // canvas or TiledCanvas wrapper is mounted.
+          const canvas = pageContentRef.current ?? canvasRef.current;
           const tDiv = transformDivRef.current;
           if (!canvas || !tDiv) return;
 
