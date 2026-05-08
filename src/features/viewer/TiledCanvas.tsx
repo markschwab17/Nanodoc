@@ -130,11 +130,18 @@ export function TiledCanvas({
         ...style,
       }}
     >
+      {/* Use tileKeyString (no f-/p- prefix) as the React key so a tile
+          that transitions between primary and fallback roles reuses the
+          same Tile component instead of unmounting + remounting. The
+          remount would re-trigger the 120ms fade-in animation from
+          opacity 0, which the user saw as flickers during LOD changes.
+          Primary and fallback never have the same tileKey since they're
+          at different LODs by definition, so there's no key collision. */}
       {visible.fallback.map((t) => (
-        <Tile key={"f-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
+        <Tile key={tileKeyString(t.key)} tile={t} pageDims={pageDims} />
       ))}
       {visible.primary.map((t) => (
-        <Tile key={"p-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
+        <Tile key={tileKeyString(t.key)} tile={t} pageDims={pageDims} />
       ))}
       {/* Dev-only debug HUD. Off by default; enable via ?tile-debug=1 in the URL. */}
       {SHOW_DEBUG_HUD && (
