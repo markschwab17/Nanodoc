@@ -102,7 +102,13 @@ export class WorkerPool {
       this.dispatch();
     });
     this.inflight.set(k, promise);
-    promise.finally(() => this.inflight.delete(k));
+    // Use .then(resolve, reject) for cleanup. .finally returns a NEW Promise
+    // that adopts rejections — without a .catch chained to it the rejection
+    // becomes "unhandled" (visible in the DevTools console). Doing the
+    // cleanup via two-arg .then keeps every rejection consumed by *some*
+    // handler in this file. Callers still get the original `promise`.
+    const cleanup = () => this.inflight.delete(k);
+    promise.then(cleanup, cleanup);
     return promise;
   }
 
