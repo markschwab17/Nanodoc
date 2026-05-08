@@ -423,6 +423,35 @@ export class TiledPageRenderer {
     }
   }
 
+  /**
+   * Synchronous cache lookup for a page's LOD-0 tile. Returns undefined if
+   * the tile hasn't been rendered yet. Used by ThumbnailItem to draw a
+   * thumbnail directly from the shared tile cache (no separate worker).
+   */
+  getLod0Tile(page: number): RenderedTile | undefined {
+    return this.cache.get({
+      docId: this.opts.docId,
+      page,
+      lod: 0,
+      x: 0,
+      y: 0,
+    });
+  }
+
+  /**
+   * Fire-and-forget request for a page's LOD-0 tile at "prefetch" priority.
+   * No-op when the tile is already cached or in flight. Use to ensure a
+   * specific page's LOD-0 lands soon (e.g., when its thumbnail mounts)
+   * without disturbing the visible-priority queue for the page the user
+   * is actually looking at.
+   */
+  ensureLod0(page: number): void {
+    if (this.destroyed) return;
+    const key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
+    if (this.cache.has(key)) return;
+    this.fetchTile(key, this.opts.pageDims(page), "prefetch");
+  }
+
   /** Diagnostics: current cache size. Used by the dev HUD. */
   cacheSize(): number {
     return this.cache.size();
@@ -435,6 +464,18 @@ export class TiledPageRenderer {
     // Also drop persisted L2 tiles — after an edit, the rendered pixels
     // for this doc are stale. Best-effort, fire-and-forget.
     this.store.invalidateDoc(this.opts.docId).catch(() => {});
+    // Reset the once-per-renderer LOD-0 prefetch guard so callers can
+    // re-trigger prefetchAllLod0 after a destructive edit (delete page,
+    // rotate, reorder) and have every thumbnail re-render.
+    this.lod0PrefetchDone = false;
+    this.lastLodByPage.clear();
+    this.fetching.clear();
+    // Notify subscribers so any UI mirroring cache state (thumbnails)
+    // re-reads. We emit a synthetic invalidation by walking listeners
+    // with a sentinel — but since onTileReady only fires for real tiles,
+    // we rely on the next genuine tile arrival to trigger re-renders.
+    // Callers that need an immediate refresh should bump a version key
+    // in their own state.
   }
 
   destroy(): void {

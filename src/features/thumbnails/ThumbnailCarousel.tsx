@@ -8,8 +8,11 @@ import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/s
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { ThumbnailItem } from "./ThumbnailItem";
-import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
+import {
+  getOrCreateTiledRenderer,
+} from "@/core/pdf/tiles/tiledRendererRegistry";
+import type { TiledPageRenderer } from "@/core/pdf/tiles/TiledPageRenderer";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,8 +45,14 @@ export function ThumbnailCarousel() {
   const currentDocument = getCurrentDocument();
   const { showThumbnails } = useUIStore();
   const esignMode = useESignStore((s) => s.mode);
-  const [renderer, setRenderer] = useState<PDFRenderer | null>(null);
+  // Thumbnails read LOD-0 tiles from the SAME renderer the main page view
+  // uses. No separate worker, no extra mupdf instance. The registry keeps
+  // one TiledPageRenderer per docId and shares it across all consumers.
+  const [renderer, setRenderer] = useState<TiledPageRenderer | null>(null);
   const [editor, setEditor] = useState<PDFEditor | null>(null);
+  // Bumped after every destructive edit (delete/rotate/reorder) so each
+  // ThumbnailItem re-reads from the cache after invalidate().
+  const [thumbnailVersion, setThumbnailVersion] = useState(0);
   const [draggedPage, setDraggedPage] = useState<number | null>(null);
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -51,6 +60,18 @@ export function ThumbnailCarousel() {
   const [pdfDragOverIndex, setPdfDragOverIndex] = useState<number | null>(null);
   const [reorderVersion, setReorderVersion] = useState(0); // Force re-render after reordering
   const [activeTab, setActiveTab] = useState<TabType>("pages");
+
+  /**
+   * Invalidate every cached tile for the current doc and trigger thumbnails
+   * to re-fetch. Call after any destructive edit (delete page, rotate,
+   * reorder, replace). The version bump cascades into every ThumbnailItem's
+   * useLayoutEffect, which calls ensureLod0() and re-paints once the new
+   * tile arrives.
+   */
+  const invalidateThumbnails = () => {
+    if (renderer) renderer.invalidate();
+    setThumbnailVersion((v) => v + 1);
+  };
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -115,23 +136,58 @@ export function ThumbnailCarousel() {
 
   useEffect(() => {
     let cancelled = false;
-    const initRenderer = async (attempt = 0) => {
+    const initEditor = async (attempt = 0) => {
       try {
         const mupdfModule = await import("mupdf");
         if (cancelled) return;
-        setRenderer(new PDFRenderer(mupdfModule.default));
         setEditor(new PDFEditor(mupdfModule.default));
       } catch (err) {
-        console.error(`[ThumbnailCarousel] mupdf init failed (attempt ${attempt + 1}):`, err);
+        console.error(
+          `[ThumbnailCarousel] mupdf init failed (attempt ${attempt + 1}):`,
+          err,
+        );
         if (!cancelled && attempt < 5) {
-          setTimeout(() => initRenderer(attempt + 1), 500 * (attempt + 1));
+          setTimeout(() => initEditor(attempt + 1), 500 * (attempt + 1));
         }
       }
     };
     // Small delay to avoid racing with PDFViewer's mupdf import
-    setTimeout(() => initRenderer(), 100);
-    return () => { cancelled = true; };
+    setTimeout(() => initEditor(), 100);
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  // Resolve the shared tile renderer for the current document. Same registry
+  // call as PageCanvas — first caller wins, others reuse the same instance.
+  // Re-runs when the document changes; the registry handles cleanup.
+  useEffect(() => {
+    if (!currentDocument) {
+      setRenderer(null);
+      return;
+    }
+    const docId = currentDocument.getId?.();
+    const pdfData = currentDocument.getPdfData?.();
+    if (!docId || !pdfData) {
+      setRenderer(null);
+      return;
+    }
+    const r = getOrCreateTiledRenderer({
+      docId,
+      pdfBytes: pdfData,
+      pageDims: (page) => {
+        const meta = currentDocument.getPageMetadata(page);
+        return meta
+          ? { widthPt: meta.width, heightPt: meta.height }
+          : { widthPt: 612, heightPt: 792 };
+      },
+    });
+    setRenderer(r);
+    // Make sure every page's LOD-0 is queued so all thumbnails eventually
+    // light up. Idempotent — the renderer dedupes via lod0PrefetchDone.
+    const pageCount = currentDocument.getMetadata?.()?.pageCount ?? 0;
+    if (pageCount > 0) r.prefetchAllLod0(pageCount);
+  }, [currentDocument]);
 
   const handleDeletePages = async (pageNumbers: number[]) => {
     if (!currentDocument || !editor || pageNumbers.length === 0) {
@@ -681,7 +737,7 @@ export function ThumbnailCarousel() {
           
           // Clear renderer cache to force fresh thumbnails
           if (renderer) {
-            renderer.clearCache();
+            invalidateThumbnails();
           }
           
           // Remap annotations to new page numbers
@@ -909,7 +965,7 @@ export function ThumbnailCarousel() {
 
             // Clear renderer cache
             if (renderer) {
-              renderer.clearCache();
+              invalidateThumbnails();
             }
 
             // Refresh document metadata
@@ -959,7 +1015,7 @@ export function ThumbnailCarousel() {
             (currentDocument as any).refreshPageMetadata();
           }
           if (renderer) {
-            renderer.clearCache();
+            invalidateThumbnails();
           }
         }, 100);
 
@@ -1102,7 +1158,7 @@ export function ThumbnailCarousel() {
 
           // Clear renderer cache to force fresh thumbnail rendering
           if (renderer) {
-            renderer.clearCache();
+            invalidateThumbnails();
           }
 
           // Refresh document metadata to update page count and page info
@@ -1158,7 +1214,7 @@ export function ThumbnailCarousel() {
         }
         // Clear renderer cache again to ensure fresh thumbnails
         if (renderer) {
-          renderer.clearCache();
+          invalidateThumbnails();
         }
       }, 100);
 
@@ -1246,7 +1302,7 @@ export function ThumbnailCarousel() {
       
       // Clear render cache so pages re-render with new rotation
       if (renderer) {
-        renderer.clearCache();
+        invalidateThumbnails();
       }
       
       // Also need to clear cache in PDFViewer's renderer
@@ -1282,7 +1338,7 @@ export function ThumbnailCarousel() {
         documentId,
         pageNumbers
       );
-      if (renderer) renderer.clearCache();
+      invalidateThumbnails();
       const tab = useTabStore.getState().getTabByDocumentId(documentId);
       if (tab) useTabStore.getState().setTabModified(tab.id, true);
       showNotification(`Flipped ${pageNumbers.length} page${pageNumbers.length > 1 ? "s" : ""} horizontally`);
@@ -1678,6 +1734,7 @@ export function ThumbnailCarousel() {
                     document={currentDocument}
                     pageNumber={i}
                     renderer={renderer}
+                    version={thumbnailVersion}
                     isActive={i === currentPage || selectedPages.has(i)}
                     onClick={(e) => handleThumbnailClick(e, i)}
                     onDelete={esignMode !== "sign" ? (e) => handleThumbnailDelete(e, i) : undefined}
