@@ -31,10 +31,11 @@ export function tileGridSize(
  * Hard cap on LOD selection. With viewport-restricted tile requests
  * (TiledCanvas now passes only the visible PDF rect into setViewport /
  * getVisibleTiles), tile counts no longer explode at high LODs — only the
- * tiles on screen are rendered. Capped at 8 (256×256 grid for a square page
- * worst-case if the viewport spans the whole page) as a soft sanity bound.
+ * tiles on screen are rendered. Capped at 7 as a sanity bound (4× more
+ * tiles per LOD step; 7 keeps the worst case manageable on construction
+ * sheets at extreme zoom while still giving plenty of detail).
  */
-const MAX_LOD = 8;
+const MAX_LOD = 7;
 
 /**
  * Smallest LOD where one tile pixel covers >= one screen pixel.

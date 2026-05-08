@@ -1349,11 +1349,28 @@ export const PageCanvas = React.memo(function PageCanvas({
       // pageRect already accounts for the parent CSS transform, so px-per-pt
       // here = pageRect.width / pageMetadata.width.
       const pxPerPt = pageRect.width / pageMetadata.width;
+      // Expand the visible rect by a margin in each direction so small pans
+      // or scrolls don't expose un-rendered edges. Clamped to page bounds.
+      const MARGIN = 0.25; // 25% of the visible region in each direction
+      const cssW = right - left;
+      const cssH = bottom - top;
+      const marginCssX = cssW * MARGIN;
+      const marginCssY = cssH * MARGIN;
+      const expandedX = Math.max(0, (left - pageRect.left - marginCssX) / pxPerPt);
+      const expandedY = Math.max(0, (top - pageRect.top - marginCssY) / pxPerPt);
+      const expandedRight = Math.min(
+        pageMetadata.width,
+        (right - pageRect.left + marginCssX) / pxPerPt,
+      );
+      const expandedBottom = Math.min(
+        pageMetadata.height,
+        (bottom - pageRect.top + marginCssY) / pxPerPt,
+      );
       next = {
-        x: (left - pageRect.left) / pxPerPt,
-        y: (top - pageRect.top) / pxPerPt,
-        w: (right - left) / pxPerPt,
-        h: (bottom - top) / pxPerPt,
+        x: expandedX,
+        y: expandedY,
+        w: expandedRight - expandedX,
+        h: expandedBottom - expandedY,
       };
     }
 
