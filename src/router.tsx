@@ -11,6 +11,7 @@ import Terms from "./pages/Terms";
 import Why from "./pages/Why";
 import Partners from "./pages/Partners";
 import TileSmokeHarness from "@/features/dev/TileSmokeHarness";
+import TiledPageSmokeHarness from "@/features/dev/TiledPageSmokeHarness";
 
 // Create router that always goes to a wrapper component first
 export const router = createBrowserRouter([
@@ -57,6 +58,10 @@ export const router = createBrowserRouter([
   {
     path: "/dev/tile-smoke",
     element: <TileSmokeHarness />,
+  },
+  {
+    path: "/dev/tiled-page-smoke",
+    element: <TiledPageSmokeHarness />,
   },
 ]);
 
