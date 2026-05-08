@@ -15,6 +15,7 @@
 
 import { lodForZoom, visibleTileKeys } from "./lod";
 import { TileCache } from "./TileCache";
+import { bumpTilesPending } from "./tileRendererStatus";
 import {
   tileKeyString,
   type PageDims,
@@ -110,6 +111,29 @@ export class TiledPageRenderer {
       this.emit(tile);
     };
 
+    // Wraps a pool.request so we maintain the global pending-tiles counter
+    // for the StatusBar "rendering…" indicator. Increment before the
+    // request, decrement once it settles (resolve OR reject — including
+    // cancellation rejections from a future setViewport call).
+    const trackedRequest = (key: TileKey, priority: "visible" | "prefetch") => {
+      bumpTilesPending(1);
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        bumpTilesPending(-1);
+      };
+      this.pool.request(key, dims, priority).then(
+        (tile) => {
+          settle();
+          handleTile(tile);
+        },
+        () => {
+          settle();
+        },
+      );
+    };
+
     // Queue LOD-0 FIRST and at "visible" priority. It's a single tile that
     // covers the whole page, renders fast, and guarantees the fallback
     // path has *something* to show (via findCoarserAncestor) the moment a
@@ -119,18 +143,14 @@ export class TiledPageRenderer {
     // doc and is what looked like "blank tiles instead of a placeholder".
     if (lod > 0) {
       const lod0Key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
-      if (!this.cache.has(lod0Key)) {
-        this.pool
-          .request(lod0Key, dims, "visible")
-          .then(handleTile, () => {});
-      }
+      if (!this.cache.has(lod0Key)) trackedRequest(lod0Key, "visible");
     }
 
     // Enqueue missing primary tiles. The pool dedupes on the same TileKey,
     // so re-requesting an in-flight key is free.
     for (const key of keys) {
       if (this.cache.has(key)) continue;
-      this.pool.request(key, dims, "visible").then(handleTile, () => {});
+      trackedRequest(key, "visible");
     }
 
     // Prefetch the next-coarser LOD as a sharper fallback than LOD-0
@@ -147,7 +167,7 @@ export class TiledPageRenderer {
       );
       for (const key of ancestorKeys) {
         if (this.cache.has(key)) continue;
-        this.pool.request(key, dims, "prefetch").then(handleTile, () => {});
+        trackedRequest(key, "prefetch");
       }
     }
   }

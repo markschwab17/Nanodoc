@@ -6,8 +6,10 @@
  */
 
 import { useMemo } from "react";
+import { Loader2 } from "lucide-react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useUIStore, type ToolType } from "@/shared/stores/uiStore";
+import { useTilesPending } from "@/core/pdf/tiles/tileRendererStatus";
 
 /** Human-readable labels for each tool type. */
 const TOOL_LABELS: Record<ToolType, string> = {
@@ -70,6 +72,7 @@ export function StatusBar({ mousePosition }: StatusBarProps) {
   const pageCount = doc?.getMetadata().pageCount ?? 0;
   const zoomPercent = Math.round(zoomLevel * 100);
   const toolLabel = TOOL_LABELS[activeTool] ?? activeTool;
+  const tilesPending = useTilesPending();
 
   return (
     <div className="h-6 flex items-center gap-3 px-3 text-xs bg-muted border-t select-none shrink-0 text-muted-foreground">
@@ -98,6 +101,21 @@ export function StatusBar({ mousePosition }: StatusBarProps) {
 
       {/* Spacer */}
       <span className="flex-1" />
+
+      {/* Tile-renderer activity indicator. Subtle: a small spinner + count
+          that appears only while higher-resolution tiles are streaming in. */}
+      {tilesPending > 0 && (
+        <>
+          <span
+            className="inline-flex items-center gap-1 opacity-60"
+            title={`${tilesPending} tile${tilesPending === 1 ? "" : "s"} rendering`}
+          >
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Rendering…</span>
+          </span>
+          <span className="text-border">|</span>
+        </>
+      )}
 
       {/* Mouse coordinates */}
       {mousePosition && (
