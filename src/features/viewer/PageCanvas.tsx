@@ -91,6 +91,9 @@ function ReadModeScaleWrapper({
           transform: `scale(${scale})`,
           transformOrigin: "0 0",
           position: "relative",
+          // GPU-promote so per-frame scale changes during zoom don't trigger
+          // full layout reflows — they animate as composited transforms instead.
+          willChange: "transform",
         }}
       >
         {children}
@@ -1396,6 +1399,32 @@ export const PageCanvas = React.memo(function PageCanvas({
       return next;
     });
   });
+
+  // Debounce propagation of tile-renderer inputs. During rapid zoom,
+  // displayPxPerPoint and viewportPdfRect change every frame; firing
+  // setViewport / getVisibleTiles per change cascades into pool churn,
+  // forced layouts, and React reconciliation across many Tile children.
+  // Holding the propagation for 100ms after the last change lets the
+  // parent's CSS transform handle the in-flight visual (cached tiles
+  // CSS-scale smoothly) while the worker pool stays idle until the user
+  // settles. Initial mount fires immediately so first paint isn't delayed.
+  const [debouncedTiledInputs, setDebouncedTiledInputs] = useState(() => ({
+    displayPxPerPoint: tiledDisplayPxPerPoint,
+    viewportRect: tiledViewportPdfRect,
+  }));
+  const debouncedFirstMountRef = useRef(true);
+
+  useEffect(() => {
+    const delay = debouncedFirstMountRef.current ? 0 : 100;
+    debouncedFirstMountRef.current = false;
+    const id = setTimeout(() => {
+      setDebouncedTiledInputs({
+        displayPxPerPoint: tiledDisplayPxPerPoint,
+        viewportRect: tiledViewportPdfRect,
+      });
+    }, delay);
+    return () => clearTimeout(id);
+  }, [tiledDisplayPxPerPoint, tiledViewportPdfRect]);
 
   // State to track rotation changes and force re-render
   const [metadataVersion, setMetadataVersion] = useState(0);
@@ -3152,8 +3181,8 @@ export const PageCanvas = React.memo(function PageCanvas({
                   widthPt: pageMetadata.width,
                   heightPt: pageMetadata.height,
                 }}
-                displayPxPerPoint={tiledDisplayPxPerPoint}
-                viewportPdfRect={tiledViewportPdfRect}
+                displayPxPerPoint={debouncedTiledInputs.displayPxPerPoint}
+                viewportPdfRect={debouncedTiledInputs.viewportRect}
                 renderer={tiledRenderer}
                 rootRef={pageContentRef}
                 className={cn("block", !readMode && "shadow-2xl")}
