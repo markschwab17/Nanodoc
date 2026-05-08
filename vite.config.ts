@@ -26,6 +26,15 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
+    // Cross-origin isolation enables `globalThis.crossOriginIsolated`, which is
+    // required for SharedArrayBuffer. The tile-render WorkerPool uses SAB to
+    // share PDF bytes across workers (one buffer instead of N structured-clone
+    // copies). Without these headers SAB is unavailable and the pool transparently
+    // falls back to the per-worker copy path.
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
     watch: {
       // Tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],

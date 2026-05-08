@@ -56,7 +56,10 @@ function evictOldestDisplayListIfNeeded() {
   } catch {}
 }
 
-function openDocument(docId: string, data?: Uint8Array) {
+function openDocument(
+  docId: string,
+  data?: Uint8Array | SharedArrayBuffer,
+) {
   if (currentDocId === docId && currentDoc) return;
   dropDisplayLists();
   if (currentDoc) {
@@ -65,7 +68,13 @@ function openDocument(docId: string, data?: Uint8Array) {
     } catch {}
     currentDoc = null;
   }
-  const pdfBytes = data ?? cachedData;
+  // Normalize to a Uint8Array view. When SAB-shared, the view aliases the
+  // shared buffer — no copy. mupdf's openDocument treats both identically.
+  let pdfBytes: Uint8Array | null = null;
+  if (data instanceof Uint8Array) pdfBytes = data;
+  else if (typeof SharedArrayBuffer !== "undefined" && data instanceof SharedArrayBuffer)
+    pdfBytes = new Uint8Array(data);
+  else pdfBytes = cachedData;
   if (!pdfBytes) {
     throw new Error("No PDF data available for document " + docId);
   }
@@ -102,7 +111,13 @@ export type TileWorkerRequest =
       id: number;
       key: TileKey;
       pageDims: PageDims;
-      data?: Uint8Array;
+      /**
+       * PDF bytes to seed the worker on first contact for this docId.
+       * `Uint8Array` is structured-cloned (each worker holds its own copy).
+       * `SharedArrayBuffer` is shared by reference across all workers when
+       * the page is cross-origin-isolated — one buffer total, no copy.
+       */
+      data?: Uint8Array | SharedArrayBuffer;
     };
 
 export type TileWorkerResponse =

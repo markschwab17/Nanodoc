@@ -23,6 +23,18 @@
     X-Content-Type-Options = "nosniff"
     X-XSS-Protection = "1; mode=block"
     Referrer-Policy = "strict-origin-when-cross-origin"
+    # Cross-origin isolation enables `globalThis.crossOriginIsolated`, which is
+    # required for SharedArrayBuffer. The tile-render WorkerPool uses SAB to
+    # share PDF bytes across workers (one buffer instead of N copies on a
+    # 500MB construction sheet set, ~2.5GB saved). Embedding parents (CTO)
+    # set `credentialless` on their iframes so this doesn't break the embed.
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"
+    # Subresources fetched cross-origin under COEP=require-corp must send
+    # CORP. Marking ALL responses as cross-origin-shareable is overkill for
+    # truly private endpoints, but Nanodoc serves only the static SPA from
+    # this domain — there's nothing private here to leak.
+    Cross-Origin-Resource-Policy = "cross-origin"
 
 # Headers for WASM files
 [[headers]]

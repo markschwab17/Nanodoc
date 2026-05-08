@@ -34,6 +34,18 @@ function defaultPoolSize(): number {
   return Math.max(2, Math.min(8, cores - 1));
 }
 
+/**
+ * SharedArrayBuffer is only allocatable when the page is cross-origin-isolated
+ * (`crossOriginIsolated === true`, requires COOP=same-origin + COEP=require-corp).
+ * When available, we share a SINGLE PDF buffer across all workers instead of
+ * structured-cloning a copy per worker. On a 500 MB construction sheet set with
+ * 6 workers, that's ~2.5 GB of memory not duplicated.
+ */
+const SAB_SUPPORTED =
+  typeof SharedArrayBuffer !== "undefined" &&
+  typeof globalThis !== "undefined" &&
+  (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true;
+
 export type Priority = "visible" | "prefetch";
 
 export interface WorkerPoolOptions {
@@ -84,6 +96,14 @@ export class WorkerPool {
   // already-busy slots (they finish their current tile and naturally idle
   // because no new work is dispatched).
   private onVisibilityChange: (() => void) | null = null;
+  /**
+   * Per-docId SharedArrayBuffer cache. Materialized on first send to any
+   * worker; subsequent workers receive a *reference* to the same SAB
+   * (postMessage shares SABs by reference automatically — no transfer list
+   * required). Empty when SAB isn't supported; the pool falls back to the
+   * structured-clone Uint8Array path.
+   */
+  private docDataShared = new Map<string, SharedArrayBuffer>();
 
   constructor(opts: WorkerPoolOptions) {
     this.opts = opts;
@@ -161,6 +181,7 @@ export class WorkerPool {
       document.removeEventListener("visibilitychange", this.onVisibilityChange);
       this.onVisibilityChange = null;
     }
+    this.docDataShared.clear();
     for (const slot of this.slots) {
       if (slot.timer) clearTimeout(slot.timer);
       slot.worker.terminate();
@@ -306,7 +327,7 @@ export class WorkerPool {
     const id = slot.nextRequestId++;
     const needsData = !slot.knownDocIds.has(item.key.docId);
     if (needsData) slot.knownDocIds.add(item.key.docId);
-    const data = needsData ? this.opts.pdfDataFor(item.key.docId) : undefined;
+    const data = needsData ? this.dataForWorker(item.key.docId) : undefined;
 
     slot.timer = setTimeout(() => {
       console.warn(
@@ -322,9 +343,30 @@ export class WorkerPool {
       pageDims: item.pageDims,
       data,
     };
-    // No transfer list: structured-clone the bytes so the main-thread copy
-    // remains usable for the next worker. SharedArrayBuffer is a phase-7
-    // optimization (requires COOP/COEP headers, currently not configured).
+    // No transfer list. With SAB, postMessage shares the buffer by
+    // reference automatically. Without SAB, the bytes are structured-cloned
+    // (one copy per worker, kept on the main-thread side too).
     slot.worker.postMessage(msg);
+  }
+
+  /**
+   * Returns the bytes to send to a worker on its first request for a docId.
+   * When SAB is supported, materializes a single SharedArrayBuffer the first
+   * time and returns the same one to every subsequent worker. Otherwise
+   * returns the original Uint8Array (which postMessage will structured-clone
+   * — the legacy path).
+   */
+  private dataForWorker(
+    docId: string,
+  ): Uint8Array | SharedArrayBuffer {
+    const bytes = this.opts.pdfDataFor(docId);
+    if (!SAB_SUPPORTED) return bytes;
+    let sab = this.docDataShared.get(docId);
+    if (!sab) {
+      sab = new SharedArrayBuffer(bytes.byteLength);
+      new Uint8Array(sab).set(bytes);
+      this.docDataShared.set(docId, sab);
+    }
+    return sab;
   }
 }
