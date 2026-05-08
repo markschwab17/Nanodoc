@@ -129,6 +129,12 @@
 - [x] LOD cap raised from 5 to 8. With viewport-restricted requests, tile counts scale with viewport size, not with `4^LOD`.
 - [x] Side-effect: cache eviction churn (which previously caused "blank tiles loading in" at high zoom) is gone — far fewer tiles are in flight at any moment.
 
+### Multi-page read-mode polish
+
+- [x] `setViewport` cancel filter is now scoped to the page being updated. Previously, page N's `setViewport` would cancel queued tiles for all other pages of the same doc — pages fought each other for the worker queue.
+- [x] `onTileReady` listener in `TiledCanvas` filters by `pageNumber`. Tile arrivals for one page no longer trigger re-renders across all mounted PageCanvas instances.
+- [x] Always prefetch each visible page's LOD-0 (one tile per page, very cheap) so newly-scrolled-to pages have an instant low-res preview while higher LODs stream in.
+
 ### Known limitations (deferred)
 
 - **Direct DOM transform during pinch-zoom is invisible to React** — the wheel handler updates `transformDivRef.style.transform` synchronously and only flushes to React state via debounced `flushSync` after ~100ms. During fast pinches the visible-rect measurement (and thus tile requests) lags by that window; cached tiles render via the parent's CSS scale until the gesture settles. Acceptable today; phase-8 may add a transitionend / RAF listener.
