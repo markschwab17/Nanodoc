@@ -7,8 +7,19 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { PageCanvas } from "./PageCanvas";
+import { setTilesPaused } from "@/core/pdf/tiles/tileRendererPause";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
+
+/**
+ * Scroll velocity (px/ms) above which we pause new tile requests. A typical
+ * line-by-line wheel scroll is < 1 px/ms; flings on a trackpad easily hit
+ * 5–10 px/ms. 2.0 keeps deliberate scrolls responsive while skipping work
+ * during obvious "I'm not stopping here" flings.
+ */
+const FAST_SCROLL_PX_PER_MS = 2.0;
+/** How long after the last scroll event we treat the scroll as ended. */
+const SCROLL_END_MS = 120;
 
 interface VirtualizedPageListProps {
   document: PDFDocument;
@@ -180,7 +191,27 @@ export function VirtualizedPageList({
 
     // Debounce scroll handler to prevent excessive updates during zoom
     let scrollTimeout: NodeJS.Timeout | null = null;
+    // Velocity tracking: if the user is flinging through pages, don't generate
+    // tile requests for every page that flashes by — pause the tile renderer
+    // until the scroll slows or ends. Cached LOD-0 prefetches still draw, so
+    // pages aren't blank during the fling; we just stop paying for new tiles
+    // the user has already passed.
+    let lastScrollTop = container.scrollTop;
+    let lastScrollAt = performance.now();
+    let scrollEndTimer: NodeJS.Timeout | null = null;
     const handleScroll = () => {
+      const now = performance.now();
+      const dt = Math.max(1, now - lastScrollAt);
+      const dy = Math.abs(container.scrollTop - lastScrollTop);
+      const velocity = dy / dt; // px / ms
+      lastScrollTop = container.scrollTop;
+      lastScrollAt = now;
+
+      if (velocity > FAST_SCROLL_PX_PER_MS) setTilesPaused(true);
+
+      if (scrollEndTimer) clearTimeout(scrollEndTimer);
+      scrollEndTimer = setTimeout(() => setTilesPaused(false), SCROLL_END_MS);
+
       if (scrollTimeout) clearTimeout(scrollTimeout);
       scrollTimeout = setTimeout(() => {
         updateVisibleRange();
@@ -200,6 +231,10 @@ export function VirtualizedPageList({
       clearTimeout(timeoutId);
       if (updateTimeout) clearTimeout(updateTimeout);
       if (scrollTimeout) clearTimeout(scrollTimeout);
+      if (scrollEndTimer) clearTimeout(scrollEndTimer);
+      // Always release the pause on unmount — leaving it stuck-on would
+      // freeze tile requests across mode switches.
+      setTilesPaused(false);
       container.removeEventListener("scroll", handleScroll);
       observer.disconnect();
     };

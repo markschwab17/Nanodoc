@@ -1308,6 +1308,17 @@ export const PageCanvas = React.memo(function PageCanvas({
     });
   }, [useTiledRenderer, document]);
 
+  // Eagerly prefetch every page's LOD-0 tile once per (doc, renderer). LOD-0
+  // is the never-blank fallback walked by findCoarserAncestor, so seeding it
+  // for all pages on doc open means a fast scroll/page-jump always has *some*
+  // ancestor cached to draw immediately. The renderer itself dedupes repeat
+  // calls via an internal `lod0PrefetchDone` flag.
+  useEffect(() => {
+    if (!tiledRenderer || !document) return;
+    const pageCount = document.getMetadata?.()?.pageCount ?? 0;
+    if (pageCount > 0) tiledRenderer.prefetchAllLod0(pageCount);
+  }, [tiledRenderer, document]);
+
   // Effective screen resolution for LOD selection inside TiledCanvas.
   // Mirrors what the legacy renderer would compute as displayScale, then
   // multiplies by devicePixelRatio so high-DPI displays pick a sharper LOD.

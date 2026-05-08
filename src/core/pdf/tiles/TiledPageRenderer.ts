@@ -13,9 +13,10 @@
  * is never wasted on tiles the user is no longer looking at.
  */
 
-import { lodForZoom, visibleTileKeys } from "./lod";
+import { lodForZoom, tilePdfRect, visibleTileKeys } from "./lod";
 import { TileCache } from "./TileCache";
 import { bumpTilesPending } from "./tileRendererStatus";
+import { getTileStore } from "./TileStore";
 import {
   tileKeyString,
   type PageDims,
@@ -53,6 +54,21 @@ export class TiledPageRenderer {
   private cache: TileCache;
   private listeners = new Set<(t: RenderedTile) => void>();
   private destroyed = false;
+  private lod0PrefetchDone = false;
+  /** OPFS-backed L2. Lazy module-level singleton; null only on init failure. */
+  private store = getTileStore();
+  /**
+   * Tracks tile keys that are mid-flight through the L1→L2→worker pipeline.
+   * `pool.inflight` only covers worker requests, but a tile waiting on an
+   * OPFS read shouldn't trigger a duplicate worker request when setViewport
+   * fires again. Cleared when the fetch settles.
+   */
+  private fetching = new Set<string>();
+  /**
+   * OffscreenCanvas reused for L2 readback (drawImage(bitmap) → getImageData).
+   * Shared across persists to avoid per-tile canvas allocation.
+   */
+  private readbackCanvas: OffscreenCanvas | null = null;
 
   constructor(opts: TiledPageRendererOptions) {
     this.opts = opts;
@@ -100,40 +116,6 @@ export class TiledPageRenderer {
       return true;
     });
 
-    const handleTile = (tile: RenderedTile) => {
-      if (this.destroyed) {
-        try {
-          tile.bitmap.close();
-        } catch {}
-        return;
-      }
-      this.cache.put(tile);
-      this.emit(tile);
-    };
-
-    // Wraps a pool.request so we maintain the global pending-tiles counter
-    // for the StatusBar "rendering…" indicator. Increment before the
-    // request, decrement once it settles (resolve OR reject — including
-    // cancellation rejections from a future setViewport call).
-    const trackedRequest = (key: TileKey, priority: "visible" | "prefetch") => {
-      bumpTilesPending(1);
-      let settled = false;
-      const settle = () => {
-        if (settled) return;
-        settled = true;
-        bumpTilesPending(-1);
-      };
-      this.pool.request(key, dims, priority).then(
-        (tile) => {
-          settle();
-          handleTile(tile);
-        },
-        () => {
-          settle();
-        },
-      );
-    };
-
     // Queue LOD-0 FIRST and at "visible" priority. It's a single tile that
     // covers the whole page, renders fast, and guarantees the fallback
     // path has *something* to show (via findCoarserAncestor) the moment a
@@ -143,14 +125,13 @@ export class TiledPageRenderer {
     // doc and is what looked like "blank tiles instead of a placeholder".
     if (lod > 0) {
       const lod0Key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
-      if (!this.cache.has(lod0Key)) trackedRequest(lod0Key, "visible");
+      this.fetchTile(lod0Key, this.opts.pageDims(page), "visible");
     }
 
-    // Enqueue missing primary tiles. The pool dedupes on the same TileKey,
-    // so re-requesting an in-flight key is free.
+    // Enqueue missing primary tiles. fetchTile dedupes via this.fetching,
+    // and pool.request dedupes within the worker pool.
     for (const key of keys) {
-      if (this.cache.has(key)) continue;
-      trackedRequest(key, "visible");
+      this.fetchTile(key, dims, "visible");
     }
 
     // Prefetch the next-coarser LOD as a sharper fallback than LOD-0
@@ -166,9 +147,174 @@ export class TiledPageRenderer {
         viewport,
       );
       for (const key of ancestorKeys) {
-        if (this.cache.has(key)) continue;
-        trackedRequest(key, "prefetch");
+        this.fetchTile(key, dims, "prefetch");
       }
+    }
+  }
+
+  /**
+   * L1 → L2 → worker fallthrough for a single tile.
+   *
+   * - L1 hit: nothing to do; the tile is already paintable.
+   * - L2 hit: hydrate pixels into an ImageBitmap on the main thread, drop
+   *   into L1, emit. Skips the worker entirely — the win for reload perf.
+   * - L2 miss: dispatch to worker as before; on success, write pixels back
+   *   to L2 in the background so the next session benefits.
+   *
+   * Increments the global pending-tiles counter for the "Rendering…"
+   * status indicator the moment we start any async work, decrements on
+   * settle. Dedupes via `this.fetching`.
+   */
+  private fetchTile(
+    key: TileKey,
+    dims: PageDims,
+    priority: "visible" | "prefetch",
+  ): void {
+    if (this.destroyed) return;
+    if (this.cache.has(key)) return;
+    const k = tileKeyString(key);
+    if (this.fetching.has(k)) return;
+    this.fetching.add(k);
+
+    bumpTilesPending(1);
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      this.fetching.delete(k);
+      bumpTilesPending(-1);
+    };
+
+    const handleTile = (tile: RenderedTile) => {
+      if (this.destroyed) {
+        try {
+          tile.bitmap.close();
+        } catch {}
+        return;
+      }
+      this.cache.put(tile);
+      this.emit(tile);
+    };
+
+    // Fast path: skip OPFS round-trip when our metadata says the key
+    // definitely isn't there. This makes the no-L2 case as fast as before.
+    const maybeInL2 = this.store.hasMeta(key);
+
+    const fallbackToWorker = () => {
+      if (this.destroyed) {
+        settle();
+        return;
+      }
+      this.pool.request(key, dims, priority).then(
+        (tile) => {
+          handleTile(tile);
+          settle();
+          // Persist to L2 in the background. Best-effort; never blocks.
+          this.persistToL2(tile).catch(() => {});
+        },
+        () => {
+          settle();
+        },
+      );
+    };
+
+    if (!maybeInL2) {
+      fallbackToWorker();
+      return;
+    }
+
+    this.store.get(key).then(
+      async (hit) => {
+        if (this.destroyed) {
+          settle();
+          return;
+        }
+        if (!hit) {
+          fallbackToWorker();
+          return;
+        }
+        // Re-check L1 — a concurrent worker arrival may have populated it
+        // while we were waiting on disk.
+        if (this.cache.has(key)) {
+          settle();
+          return;
+        }
+        try {
+          // Copy into a fresh ArrayBuffer-backed Uint8ClampedArray so the
+          // ImageData constructor's strict typing (no SharedArrayBuffer)
+          // is satisfied regardless of where hit.pixels was sourced from.
+          const fresh = new Uint8ClampedArray(
+            new ArrayBuffer(hit.pixels.byteLength),
+          );
+          fresh.set(hit.pixels);
+          const imageData = new ImageData(fresh, hit.width, hit.height);
+          const bitmap = await createImageBitmap(imageData);
+          if (this.destroyed) {
+            try {
+              bitmap.close();
+            } catch {}
+            settle();
+            return;
+          }
+          const tile: RenderedTile = {
+            key,
+            bitmap,
+            pdfRect: tilePdfRect(key, dims),
+            pixelWidth: hit.width,
+            pixelHeight: hit.height,
+          };
+          handleTile(tile);
+          settle();
+        } catch {
+          // Hydration failed (corrupt buffer? race?) — fall through to
+          // the worker so we still get a tile.
+          fallbackToWorker();
+        }
+      },
+      () => {
+        fallbackToWorker();
+      },
+    );
+  }
+
+  /**
+   * Read pixels back from a rendered tile's ImageBitmap and write them to
+   * OPFS. Runs only on worker arrivals (L2 misses); skipped for L2 hits
+   * since we already have those pixels persisted.
+   *
+   * Uses a single OffscreenCanvas reused across calls — sized to TILE_SIZE
+   * which is the only tile size the worker ever produces.
+   */
+  private async persistToL2(tile: RenderedTile): Promise<void> {
+    if (this.destroyed) return;
+    if (typeof OffscreenCanvas === "undefined") return;
+    try {
+      if (
+        !this.readbackCanvas ||
+        this.readbackCanvas.width !== tile.pixelWidth ||
+        this.readbackCanvas.height !== tile.pixelHeight
+      ) {
+        this.readbackCanvas = new OffscreenCanvas(
+          tile.pixelWidth,
+          tile.pixelHeight,
+        );
+      }
+      const ctx = this.readbackCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      if (!ctx) return;
+      ctx.clearRect(0, 0, tile.pixelWidth, tile.pixelHeight);
+      ctx.drawImage(tile.bitmap, 0, 0);
+      const data = ctx.getImageData(0, 0, tile.pixelWidth, tile.pixelHeight);
+      await this.store.set(
+        tile.key,
+        data.data,
+        tile.pixelWidth,
+        tile.pixelHeight,
+      );
+    } catch {
+      // Persistence is strictly best-effort — never let storage errors
+      // surface to the rendering path.
     }
   }
 
@@ -216,6 +362,25 @@ export class TiledPageRenderer {
     };
   }
 
+  /**
+   * Eagerly enqueue every page's single LOD-0 tile at "prefetch" priority.
+   * LOD-0 is the never-blank backstop used by findCoarserAncestor: prefetching
+   * it for all pages on doc open means a scroll/page-jump always has *some*
+   * cached ancestor to draw immediately while higher-LOD primaries stream in.
+   *
+   * Idempotent: re-calls skip pages already queued or cached. Safe to invoke
+   * multiple times; the WorkerPool dedupes in-flight identical TileKeys.
+   */
+  prefetchAllLod0(pageCount: number): void {
+    if (this.destroyed) return;
+    if (this.lod0PrefetchDone) return;
+    this.lod0PrefetchDone = true;
+    for (let page = 0; page < pageCount; page++) {
+      const key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
+      this.fetchTile(key, this.opts.pageDims(page), "prefetch");
+    }
+  }
+
   /** Diagnostics: current cache size. Used by the dev HUD. */
   cacheSize(): number {
     return this.cache.size();
@@ -225,6 +390,9 @@ export class TiledPageRenderer {
   invalidate(): void {
     this.cache.invalidateDoc(this.opts.docId);
     this.pool.cancel((k) => k.docId === this.opts.docId);
+    // Also drop persisted L2 tiles — after an edit, the rendered pixels
+    // for this doc are stale. Best-effort, fire-and-forget.
+    this.store.invalidateDoc(this.opts.docId).catch(() => {});
   }
 
   destroy(): void {
@@ -232,6 +400,8 @@ export class TiledPageRenderer {
     this.pool.destroy();
     this.cache.destroy();
     this.listeners.clear();
+    this.fetching.clear();
+    this.readbackCanvas = null;
   }
 
   private emit(tile: RenderedTile): void {

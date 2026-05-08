@@ -63,6 +63,14 @@ interface WorkerSlot {
   busy: QueueItem | null;
   timer: ReturnType<typeof setTimeout> | null;
   nextRequestId: number;
+  /**
+   * Set when a still-running tile is cancelled mid-render. The worker can't
+   * be aborted (no AbortController across structured-cloned messages), but
+   * when the result eventually arrives we throw it away rather than resolving
+   * a cancelled caller. Cheaper than killing+respawning the worker (which
+   * would force a fresh mupdf init + DisplayList rebuild for every cancel).
+   */
+  busyCancelled: boolean;
 }
 
 export class WorkerPool {
@@ -71,11 +79,22 @@ export class WorkerPool {
   private inflight = new Map<string, Promise<RenderedTile>>();
   private destroyed = false;
   private opts: WorkerPoolOptions;
+  // visibilitychange handler reference — kept so destroy() can detach it.
+  // When the tab/window is hidden, queued tiles wait. We don't pause
+  // already-busy slots (they finish their current tile and naturally idle
+  // because no new work is dispatched).
+  private onVisibilityChange: (() => void) | null = null;
 
   constructor(opts: WorkerPoolOptions) {
     this.opts = opts;
     const size = opts.size ?? defaultPoolSize();
     for (let i = 0; i < size; i++) this.spawnSlot(i);
+    if (typeof document !== "undefined") {
+      this.onVisibilityChange = () => {
+        if (document.visibilityState === "visible") this.dispatch();
+      };
+      document.addEventListener("visibilitychange", this.onVisibilityChange);
+    }
   }
 
   request(
@@ -112,7 +131,13 @@ export class WorkerPool {
     return promise;
   }
 
-  /** Drop pending (not in-flight) requests where `filter(key) === true`. */
+  /**
+   * Drop pending requests where `filter(key) === true`. Also marks any
+   * in-flight slot whose busy item matches as cancelled — its result will be
+   * dropped on arrival (and the bitmap closed) instead of resolving the
+   * caller's promise. The slot itself is NOT killed; it stays alive for the
+   * next tile so we don't pay mupdf re-init for every viewport change.
+   */
   cancel(filter: (key: TileKey) => boolean): void {
     this.queue = this.queue.filter((item) => {
       if (filter(item.key)) {
@@ -121,10 +146,21 @@ export class WorkerPool {
       }
       return true;
     });
+    for (const slot of this.slots) {
+      if (!slot || !slot.busy || slot.busyCancelled) continue;
+      if (filter(slot.busy.key)) {
+        slot.busyCancelled = true;
+        slot.busy.reject(new Error("Tile request cancelled"));
+      }
+    }
   }
 
   destroy(): void {
     this.destroyed = true;
+    if (this.onVisibilityChange && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.onVisibilityChange);
+      this.onVisibilityChange = null;
+    }
     for (const slot of this.slots) {
       if (slot.timer) clearTimeout(slot.timer);
       slot.worker.terminate();
@@ -151,6 +187,7 @@ export class WorkerPool {
       busy: null,
       timer: null,
       nextRequestId: 0,
+      busyCancelled: false,
     };
     worker.onmessage = (e: MessageEvent<TileWorkerResponse>) =>
       this.onMessage(slot, e.data);
@@ -166,8 +203,12 @@ export class WorkerPool {
     if (slot.timer) clearTimeout(slot.timer);
     slot.worker.terminate();
     if (slot.busy) {
-      slot.busy.reject(new Error("Worker terminated"));
+      // Don't double-reject — cancel() may have already settled this caller.
+      if (!slot.busyCancelled) {
+        slot.busy.reject(new Error("Worker terminated"));
+      }
       slot.busy = null;
+      slot.busyCancelled = false;
     }
     if (this.destroyed) return;
     this.spawnSlot(slot.id);
@@ -182,12 +223,21 @@ export class WorkerPool {
     }
     if (msg.type === "tileResult") {
       const item = slot.busy;
+      const cancelled = slot.busyCancelled;
       if (slot.timer) {
         clearTimeout(slot.timer);
         slot.timer = null;
       }
       slot.busy = null;
-      if (item) {
+      slot.busyCancelled = false;
+      if (cancelled) {
+        // Caller already received a "Tile request cancelled" rejection from
+        // the cancel() call. Close the now-orphaned bitmap to free its GPU
+        // memory promptly instead of waiting for GC.
+        try {
+          msg.bitmap.close();
+        } catch {}
+      } else if (item) {
         const pdfRect = tilePdfRect(msg.key, item.pageDims);
         item.resolve({
           key: msg.key,
@@ -202,12 +252,16 @@ export class WorkerPool {
     }
     if (msg.type === "error") {
       const item = slot.busy;
+      const cancelled = slot.busyCancelled;
       if (slot.timer) {
         clearTimeout(slot.timer);
         slot.timer = null;
       }
       slot.busy = null;
-      if (item) item.reject(new Error(msg.message));
+      slot.busyCancelled = false;
+      // If the caller was already cancelled they have their rejection;
+      // don't reject twice.
+      if (item && !cancelled) item.reject(new Error(msg.message));
 
       // Mirror PDFRenderer.ts:114–126 — malloc failures poison the wasm heap.
       // Restart the worker; without this, every subsequent render in this
@@ -226,6 +280,12 @@ export class WorkerPool {
 
   private dispatch(): void {
     if (this.destroyed || this.queue.length === 0) return;
+    // Pause when the tab is hidden — backgrounded tabs shouldn't burn render
+    // budget. Pending requests stay queued; visibilitychange re-dispatches.
+    // Already-busy slots are allowed to finish their current tile.
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      return;
+    }
 
     // Visible first, then by FIFO insertion order.
     this.queue.sort((a, b) => {

@@ -9,6 +9,7 @@ import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import type { Bookmark } from "@/core/pdf/PDFBookmarks";
 import { clearTextCache } from "@/core/pdf/PDFTextExtractor";
+import { destroyTiledRenderer } from "@/core/pdf/tiles/tiledRendererRegistry";
 import { useTabStore } from "./tabStore";
 
 /** Mark the tab for a document as modified (unsaved changes). */
@@ -130,6 +131,10 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
   removeDocument: (id) => {
     // Clear text extraction cache for this document (prevents memory leak)
     clearTextCache(id);
+    // Destroy the tile-renderer instance for this doc — terminates its workers,
+    // drops its mupdf wasm heap, and closes any cached tile bitmaps. Without
+    // this every closed doc leaks one renderer + N workers + its tile cache.
+    destroyTiledRenderer(id);
     set((state) => {
       const newDocuments = new Map(state.documents);
       newDocuments.delete(id);

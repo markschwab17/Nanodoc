@@ -21,6 +21,12 @@ let currentDoc: any = null;
 let currentDocId: string | null = null;
 let cachedData: Uint8Array | null = null;
 
+/** LRU cap for per-page DisplayLists. A 500-page sheet set previously kept
+ *  every visited page's display list alive forever; with N workers that's N
+ *  copies. 32 is plenty for the working set the user is actively viewing while
+ *  bounding worker heap growth. Map insertion order = LRU order; on overflow
+ *  we evict the oldest entry. */
+const DISPLAYLIST_LRU_CAP = 32;
 const displayListCache = new Map<number, any>();
 
 async function ensureMupdf() {
@@ -37,6 +43,17 @@ function dropDisplayLists() {
     } catch {}
   }
   displayListCache.clear();
+}
+
+function evictOldestDisplayListIfNeeded() {
+  if (displayListCache.size <= DISPLAYLIST_LRU_CAP) return;
+  const oldest = displayListCache.keys().next();
+  if (oldest.done) return;
+  const list = displayListCache.get(oldest.value);
+  displayListCache.delete(oldest.value);
+  try {
+    list?.destroy();
+  } catch {}
 }
 
 function openDocument(docId: string, data?: Uint8Array) {
@@ -59,12 +76,19 @@ function openDocument(docId: string, data?: Uint8Array) {
 
 function getDisplayList(pageNumber: number): any {
   const cached = displayListCache.get(pageNumber);
-  if (cached) return cached;
+  if (cached) {
+    // LRU touch: re-insert moves this entry to the end of the iteration order
+    // so a hot page stays past the eviction threshold.
+    displayListCache.delete(pageNumber);
+    displayListCache.set(pageNumber, cached);
+    return cached;
+  }
   const page = currentDoc.loadPage(pageNumber);
   // showExtras=false: the legacy renderer also uses false (annotations are
   // overlaid by React on top of the bitmap, not baked into it).
   const list = page.toDisplayList(false);
   displayListCache.set(pageNumber, list);
+  evictOldestDisplayListIfNeeded();
   try {
     page.destroy();
   } catch {}

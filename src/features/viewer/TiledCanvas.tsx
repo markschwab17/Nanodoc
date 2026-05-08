@@ -14,6 +14,7 @@
 
 import React, { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { tilePointSize } from "@/core/pdf/tiles/lod";
+import { useTilesPaused } from "@/core/pdf/tiles/tileRendererPause";
 import {
   tileKeyString,
   type PageDims,
@@ -104,9 +105,17 @@ export function TiledCanvas({
     return unsub;
   }, [renderer, pageNumber]);
 
+  // VirtualizedPageList raises this signal during fast/fling scrolls so we
+  // skip generating thousands of viewport changes for pages the user is
+  // flying past. Cached fallbacks (LOD-0 from prefetchAllLod0) still paint
+  // via getVisibleTiles below; we only suppress *new* tile requests until
+  // the scroll settles. `paused` is in the dep array so resume immediately
+  // re-fires setViewport.
+  const paused = useTilesPaused();
   useEffect(() => {
+    if (paused) return;
     renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
-  }, [renderer, pageNumber, viewport, displayPxPerPoint]);
+  }, [renderer, pageNumber, viewport, displayPxPerPoint, paused]);
 
   const visible = useMemo(
     () => renderer.getVisibleTiles(pageNumber, viewport, displayPxPerPoint),
