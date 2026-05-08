@@ -77,20 +77,26 @@ export class TiledPageRenderer {
     const lod = lodForZoom(dims, displayPxPerPoint);
     const keys = visibleTileKeys(this.opts.docId, page, dims, lod, viewport);
 
-    // Cancel pending requests for THIS page that are stale. A tile is stale
-    // if it's at the current target LOD but no longer in the visible set.
-    // Tiles at the prefetch LODs (lod-1 ancestor, lod 0) and ALL OTHER LODs
-    // we may already have in flight as fallbacks are LEFT ALONE — cancelling
-    // them would churn the queue every time setViewport refires (which
-    // happens on every displayPxPerPoint change) and starve the prefetches
-    // that the fallback path depends on.
+    // Cancel pending requests for THIS page that are stale. The right
+    // balance:
+    //   - Same target LOD but no longer in viewport → cancel (stale primary)
+    //   - One-LOD-below ancestor + LOD-0 → keep (intentional prefetches)
+    //   - Any OTHER LOD → cancel (stale visible from a prior LOD that the
+    //     user has zoomed past — leaving these queued starves the current
+    //     LOD's renders)
+    // This is the third revision of this filter:
+    //   v1 cancelled everything not in visibleSet → starved prefetches
+    //   v2 cancelled only same-LOD-stale → starved current LOD with stale
+    //      visible from prior LODs the user already left
+    //   v3 (here) cancels both same-LOD-stale AND other-LOD non-prefetches
     const visibleSet = new Set(keys.map(tileKeyString));
     this.pool.cancel((k) => {
       if (k.docId !== this.opts.docId || k.page !== page) return false;
-      // Same target LOD but no longer visible → stale, cancel.
       if (k.lod === lod) return !visibleSet.has(tileKeyString(k));
-      // Otherwise keep — it's a useful prefetch / fallback at a different LOD.
-      return false;
+      // Keep ancestor prefetches.
+      if (k.lod === lod - 1 || k.lod === 0) return false;
+      // Any other LOD → stale, cancel.
+      return true;
     });
 
     // Enqueue missing primary tiles. The pool dedupes on the same TileKey,
