@@ -81,8 +81,13 @@ export function TiledCanvas({
   ]);
 
   useEffect(() => {
-    return renderer.onTileReady(() => setTick((t) => t + 1));
-  }, [renderer]);
+    // Filter by page so that an arrival for page X doesn't trigger re-renders
+    // in TiledCanvas instances for pages Y/Z. Important in multi-page read
+    // mode where 10+ pages may be mounted at once.
+    return renderer.onTileReady((tile) => {
+      if (tile.key.page === pageNumber) setTick((t) => t + 1);
+    });
+  }, [renderer, pageNumber]);
 
   useEffect(() => {
     renderer.setViewport(pageNumber, viewport, displayPxPerPoint);

@@ -77,11 +77,13 @@ export class TiledPageRenderer {
     const lod = lodForZoom(dims, displayPxPerPoint);
     const keys = visibleTileKeys(this.opts.docId, page, dims, lod, viewport);
 
-    // Cancel pending requests for THIS doc that aren't in the new visible
-    // set — including stale requests from a prior page or LOD.
+    // Cancel pending requests for THIS page that aren't in the new visible
+    // set. Important: only cancel tiles for THIS page — other PageCanvas
+    // instances of the same doc (e.g., multi-page read mode) have their
+    // own queued tiles and would be sabotaged by a doc-wide cancel.
     const visibleSet = new Set(keys.map(tileKeyString));
     this.pool.cancel((k) => {
-      if (k.docId !== this.opts.docId) return false;
+      if (k.docId !== this.opts.docId || k.page !== page) return false;
       return !visibleSet.has(tileKeyString(k));
     });
 
@@ -121,6 +123,31 @@ export class TiledPageRenderer {
       for (const key of ancestorKeys) {
         if (this.cache.has(key)) continue;
         this.pool.request(key, dims, "prefetch").then(
+          (tile) => {
+            if (this.destroyed) {
+              try {
+                tile.bitmap.close();
+              } catch {}
+              return;
+            }
+            this.cache.put(tile);
+            this.emit(tile);
+          },
+          () => {},
+        );
+      }
+    }
+
+    // Always prefetch the page's LOD-0 (a single tile covering the whole
+    // page) when we're not already at LOD 0. It's cheap to render and
+    // guarantees the page has at least a low-res preview to show while
+    // higher LODs stream in — critical for multi-page read mode where
+    // newly-visible pages would otherwise be blank for the full duration
+    // of high-LOD rendering.
+    if (lod > 1) {
+      const lod0Key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
+      if (!this.cache.has(lod0Key)) {
+        this.pool.request(lod0Key, dims, "prefetch").then(
           (tile) => {
             if (this.destroyed) {
               try {
