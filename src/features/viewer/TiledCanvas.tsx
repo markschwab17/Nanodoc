@@ -13,7 +13,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { tilePointSize } from "@/core/pdf/tiles/lod";
+import { lodForZoom, tilePointSize } from "@/core/pdf/tiles/lod";
 import {
   tileKeyString,
   type PageDims,
@@ -21,6 +21,11 @@ import {
   type RenderedTile,
 } from "@/core/pdf/tiles/types";
 import type { TiledPageRenderer } from "@/core/pdf/tiles/TiledPageRenderer";
+
+/** Show the debug HUD when the URL contains `?tile-debug=1`. */
+const SHOW_DEBUG_HUD =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("tile-debug") === "1";
 
 export interface TiledCanvasProps {
   pageNumber: number;
@@ -54,19 +59,34 @@ export function TiledCanvas({
     [pageDims.widthPt, pageDims.heightPt],
   );
 
+  // Gate setViewport on LOD change instead of every px/pt change. Within a
+  // single LOD, the cached tiles already cover the new zoom level and the
+  // parent's CSS scale handles rendering — re-firing setViewport per zoom
+  // step churns the worker pool with already-cached requests and can cause
+  // perceived lag. Worker-pool dedupe makes a redundant setViewport cheap
+  // but not free (visibleTileKeys + per-key cache.has + queue ops).
+  const targetLod = useMemo(
+    () => lodForZoom(pageDims, displayPxPerPoint),
+    [pageDims, displayPxPerPoint],
+  );
+
   useEffect(() => {
     return renderer.onTileReady(() => setTick((t) => t + 1));
   }, [renderer]);
 
   useEffect(() => {
     renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
-  }, [renderer, pageNumber, viewport, displayPxPerPoint]);
+    // Intentionally exclude displayPxPerPoint: setViewport only refires when
+    // the chosen LOD changes (or page/viewport change). Sub-LOD zoom is
+    // handled by the parent's CSS transform.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderer, pageNumber, viewport, targetLod]);
 
   const visible = useMemo(
     () => renderer.getVisibleTiles(pageNumber, viewport, displayPxPerPoint),
     // tick included so the memo re-reads after async tile arrivals
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [renderer, pageNumber, viewport, displayPxPerPoint, tick],
+    [renderer, pageNumber, viewport, targetLod, tick],
   );
 
   return (
@@ -90,27 +110,27 @@ export function TiledCanvas({
       {visible.primary.map((t) => (
         <Tile key={"p-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
       ))}
-      {/* Dev-only debug HUD: shows LOD + tile counts + cache size so we can
-          see whether zoom is crossing LOD thresholds AND whether eviction is
-          churning. Cheap to delete later. */}
-      <div
-        style={{
-          position: "absolute",
-          top: 4,
-          left: 4,
-          padding: "2px 6px",
-          background: "rgba(0,0,0,0.7)",
-          color: "#0f0",
-          font: "10px ui-monospace, monospace",
-          borderRadius: 3,
-          pointerEvents: "none",
-          zIndex: 100,
-        }}
-      >
-        LOD {visible.lod} · {displayPxPerPoint.toFixed(2)} px/pt · p
-        {visible.primary.length} f{visible.fallback.length} m
-        {visible.missing.length} · cache {renderer.cacheSize()}
-      </div>
+      {/* Dev-only debug HUD. Off by default; enable via ?tile-debug=1 in the URL. */}
+      {SHOW_DEBUG_HUD && (
+        <div
+          style={{
+            position: "absolute",
+            top: 4,
+            left: 4,
+            padding: "2px 6px",
+            background: "rgba(0,0,0,0.7)",
+            color: "#0f0",
+            font: "10px ui-monospace, monospace",
+            borderRadius: 3,
+            pointerEvents: "none",
+            zIndex: 100,
+          }}
+        >
+          LOD {visible.lod} · {displayPxPerPoint.toFixed(2)} px/pt · p
+          {visible.primary.length} f{visible.fallback.length} m
+          {visible.missing.length} · cache {renderer.cacheSize()}
+        </div>
+      )}
     </div>
   );
 }
