@@ -139,17 +139,20 @@ export function TiledCanvas({
         ...style,
       }}
     >
-      {/* Use tileKeyString (no f-/p- prefix) as the React key so a tile
-          that transitions between primary and fallback roles reuses the
-          same Tile component instead of unmounting + remounting. The
-          remount would re-trigger the 120ms fade-in animation from
-          opacity 0, which the user saw as flickers during LOD changes.
-          Primary and fallback never have the same tileKey since they're
-          at different LODs by definition, so there's no key collision. */}
-      {visible.fallback.map((t) => (
-        <Tile key={tileKeyString(t.key)} tile={t} pageDims={pageDims} />
-      ))}
-      {visible.primary.map((t) => (
+      {/* Render fallback + primary in a SINGLE map so React's child
+          reconciliation tracks keys across the boundary. Two separate
+          `.map()` calls produce two sibling JSX slots, and a key in one
+          slot is treated as unrelated to the same key in the other —
+          which means a tile transitioning from primary to fallback (the
+          common case on LOD upshift) was unmounting and remounting,
+          re-triggering the 120ms fade-in animation from opacity 0. That
+          read as a flash. Concatenated, the same component instance is
+          reused; canvas pixels persist; no animation re-fire.
+
+          Order matters for paint stacking (later siblings paint on top
+          for absolutely-positioned children with no z-index): fallback
+          first, then primary. */}
+      {[...visible.fallback, ...visible.primary].map((t) => (
         <Tile key={tileKeyString(t.key)} tile={t} pageDims={pageDims} />
       ))}
       {/* Dev-only debug HUD. Off by default; enable via ?tile-debug=1 in the URL. */}
