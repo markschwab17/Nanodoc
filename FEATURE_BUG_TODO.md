@@ -97,17 +97,30 @@
 
 ### Phase 2 — orchestration
 
-- [x] `src/core/pdf/tiles/TileCache.ts` — L1 LRU bitmap cache, `findCoarserAncestor` for fallback, page/doc invalidation, `bitmap.close()` on eviction
+- [x] `src/core/pdf/tiles/TileCache.ts` — L1 LRU bitmap cache, `findCoarserAncestor` for fallback, page/doc invalidation
 - [x] `src/core/pdf/tiles/TiledPageRenderer.ts` — owns pool+cache, `setViewport` cancels stale and enqueues missing, `getVisibleTiles` returns `{ primary, fallback, missing, lod }`, `onTileReady` listener
 - [x] Vitest unit tests: types/lod/TileCache (35 tests passing)
 - [x] `/dev/tiled-page-smoke` harness with zoom slider; visually verified LOD crossover and "never blank" fallback behavior
 
+### Phase 3 — PageCanvas integration
+
+- [x] `useTiledRenderer` flag in `uiStore.ts` (off by default)
+- [x] **Hotkey: Cmd/Ctrl+Alt+T** (Option+Cmd+T on Mac) toggles the flag at runtime; toast confirms ON/OFF
+- [x] `src/core/pdf/tiles/tiledRendererRegistry.ts` — singleton `TiledPageRenderer` per docId
+- [x] `src/features/viewer/TiledCanvas.tsx` — drop-in replacement for the page bitmap canvas; renders primary + fallback tiles at PDF-point dimensions
+- [x] Surgical edit at `PageCanvas.tsx:3008` — conditional swap behind the flag; legacy render effect early-returns when flag is on
+- [x] `pageContentRef` in PageCanvas points at whichever page element is mounted; `getPDFCoordinates` and the image-drop / paste fallback paths use it so tools work with either renderer
+- [x] Cache policy: do NOT close `ImageBitmap` on routine eviction (avoids React-StrictMode-double-invoke detachment race); bitmaps GC naturally. `destroy()` still closes everything.
+- [x] Tile useEffect only sets `canvas.width/height` when they differ — keeps painted pixels stable across StrictMode's double-invoke
+
 ### Known limitations (deferred)
 
-- Per-worker `DisplayList` cache has no eviction (small docs only — fine for current smoke harnesses)
-- PDF bytes are structured-cloned to each worker on first request (~N× memory). SharedArrayBuffer + COOP/COEP is a phase-7 optimization
-- No `TiledCanvas` React component or `PageCanvas.tsx` integration yet (phase 3)
-- Legacy `PDFRenderer` still drives `PageCanvas.tsx`; tile renderer is NOT user-visible (only the two `/dev/*-smoke` routes)
+- **Phase-3 only**: Toggling on a single page works; the tile path's "feel" (latency on rapid zoom) is expected until phase 4 lands CSS-transform pan/zoom.
+- **Redaction & SelectionBoxTool** call `canvas.getContext` / set `canvas.width` directly through `canvasRef`. When the tile flag is on, those operations no-op silently (canvasRef is null). Toggle the flag off after a redaction to see the result, or stay on the legacy renderer.
+- Per-worker `DisplayList` cache has no eviction (small docs only — fine for the current scope)
+- PDF bytes are structured-cloned to each worker on first request (~N× memory). SharedArrayBuffer + COOP/COEP is a phase-7 optimization.
 - No CSS-transform pan/zoom optimization (phase 4) — every zoom currently re-runs `setViewport` and may request fresh tiles
-- No OPFS L2 cache; all tiles are in-memory only (phase 5)
-- Cancellation drops queue items but doesn't abort an in-flight worker render — only worker timeout will kill an already-running tile
+- No OPFS L2 cache (phase 5)
+- Cancellation drops queue items but doesn't abort in-flight worker renders — only worker timeout will kill an already-running tile
+- Bitmaps are leaked on eviction (rely on GC). Phase-7 will reintroduce explicit close behind a render-frame barrier.
+- Renderer instances in the registry leak past document close. Phase-7 will hook into doc close.
