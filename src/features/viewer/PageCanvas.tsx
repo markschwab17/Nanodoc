@@ -42,6 +42,8 @@ import { AnnotationContextMenu, type ContextMenuItem } from "./AnnotationContext
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useCtoTextSelectionStore } from "@/shared/stores/ctoTextSelectionStore";
 import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
+import { TiledCanvas } from "./TiledCanvas";
+import { getOrCreateTiledRenderer } from "@/core/pdf/tiles/tiledRendererRegistry";
 
 interface PageCanvasProps {
   document: PDFDocument;
@@ -108,6 +110,10 @@ export const PageCanvas = React.memo(function PageCanvas({
 }: PageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Stable ref to whichever element occupies the page-bitmap slot (legacy canvas
+  // OR the TiledCanvas wrapper div). Used by getPDFCoordinates and similar
+  // coord-calc paths so tools work in either rendering mode.
+  const pageContentRef = useRef<HTMLElement | null>(null);
   const transformDivRef = useRef<HTMLDivElement>(null);
   const [hasRendered, setHasRendered] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -154,7 +160,7 @@ export const PageCanvas = React.memo(function PageCanvas({
 
   const [editor, setEditor] = useState<PDFEditor | null>(null);
   
-  const { zoomLevel, fitMode, activeTool, setActiveTool, setZoomLevel, setFitMode, setZoomToCenterCallback, readMode: globalReadMode } = useUIStore();
+  const { zoomLevel, fitMode, activeTool, setActiveTool, setZoomLevel, setFitMode, setZoomToCenterCallback, readMode: globalReadMode, useTiledRenderer } = useUIStore();
   const { 
     getCurrentDocument, 
     getAnnotations, 
@@ -596,7 +602,7 @@ export const PageCanvas = React.memo(function PageCanvas({
             
             // If we don't have a tracked position, try to get it from the global mouse position
             // Convert global mouse position to PDF coordinates if mouse is over the page
-            if (!currentMouseCoords && globalMousePositionRef.current && canvasRef.current) {
+            if (!currentMouseCoords && globalMousePositionRef.current && (pageContentRef.current ?? canvasRef.current)) {
               // Always try to convert the global mouse position directly
               // getPDFCoordinates will return null if canvas isn't ready, but we should still try
               let coords = getPDFCoordinates({ 
@@ -716,9 +722,10 @@ export const PageCanvas = React.memo(function PageCanvas({
                 }
               }
               
-              // If container method failed, try using canvas element directly
-              if (!fallbackCoords && canvasRef.current) {
-                const canvasRect = canvasRef.current.getBoundingClientRect();
+              // If container method failed, try using the page-content element directly
+              const pageEl = pageContentRef.current ?? canvasRef.current;
+              if (!fallbackCoords && pageEl) {
+                const canvasRect = pageEl.getBoundingClientRect();
                 if (canvasRect.width > 0 && canvasRect.height > 0) {
                   const centerX = canvasRect.left + canvasRect.width / 2;
                   const centerY = canvasRect.top + canvasRect.height / 2;
@@ -989,6 +996,12 @@ export const PageCanvas = React.memo(function PageCanvas({
   }, [readMode, pageNumber, document, displayWidthProp, displayHeightProp, zoomLevel]);
 
   useEffect(() => {
+    // EXPERIMENTAL: when the tile-pyramid renderer is active, skip the legacy
+    // full-page render path entirely. <TiledCanvas> below handles painting via
+    // its own setViewport/onTileReady cycle.
+    if (useTiledRenderer) {
+      return;
+    }
     // Early return: if global read mode is active but this is the normal mode canvas
     // Skip rendering to prevent unnecessary work during zoom
     if (globalReadMode && !readMode) {
@@ -1213,7 +1226,7 @@ export const PageCanvas = React.memo(function PageCanvas({
         renderDebounceTimeoutRef.current = null;
       }
     };
-  }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode, displayWidthProp, displayHeightProp]);
+  }, [document, pageNumber, renderer, zoomLevel, fitMode, setZoomLevel, readMode, globalReadMode, displayWidthProp, displayHeightProp, useTiledRenderer]);
   
   // Effect to ensure centering when fitMode changes to "page" or "width"
   // Don't run while actively panning to prevent resetting the view
@@ -1261,6 +1274,42 @@ export const PageCanvas = React.memo(function PageCanvas({
   // that exhaust the mupdf WASM heap.
   const pageMetadata = document?.getPageMetadata(pageNumber);
   const pageRotation = pageMetadata?.rotation ?? 0;
+
+  // EXPERIMENTAL: tile-pyramid renderer. Memoized per-document instance shared
+  // across all PageCanvas instances of the same doc. Returns null when the
+  // feature flag is off so the legacy bitmap path stays exclusive.
+  const tiledRenderer = useMemo(() => {
+    if (!useTiledRenderer) return null;
+    const docId = document?.getId?.();
+    const pdfData = document?.getPdfData?.();
+    if (!docId || !pdfData) return null;
+    return getOrCreateTiledRenderer({
+      docId,
+      pdfBytes: pdfData,
+      pageDims: (page) => {
+        const meta = document.getPageMetadata(page);
+        return meta
+          ? { widthPt: meta.width, heightPt: meta.height }
+          : { widthPt: 612, heightPt: 792 };
+      },
+    });
+  }, [useTiledRenderer, document]);
+
+  // Effective screen resolution for LOD selection inside TiledCanvas.
+  // Mirrors what the legacy renderer would compute as displayScale, then
+  // multiplies by devicePixelRatio so high-DPI displays pick a sharper LOD.
+  const tiledDisplayPxPerPoint = (() => {
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    if (
+      readMode &&
+      displayWidthProp != null &&
+      displayHeightProp != null &&
+      pageMetadata?.width
+    ) {
+      return (displayWidthProp / pageMetadata.width) * dpr;
+    }
+    return zoomLevel * dpr;
+  })();
 
   // State to track rotation changes and force re-render
   const [metadataVersion, setMetadataVersion] = useState(0);
@@ -1401,18 +1450,23 @@ export const PageCanvas = React.memo(function PageCanvas({
   // Helper function to convert mouse coordinates to PDF coordinates
   // PDF uses bottom-up Y coordinate system, canvas uses top-down
   const getPDFCoordinates = (e: React.MouseEvent): { x: number; y: number } | null => {
-    if (!canvasRef.current) return null;
-    
-    const canvasElement = canvasRef.current;
+    // Prefer pageContentRef (works for both legacy canvas and TiledCanvas wrapper);
+    // fall back to canvasRef so existing code paths still work if the new ref
+    // hasn't been wired (defensive).
+    const canvasElement = pageContentRef.current ?? canvasRef.current;
+    if (!canvasElement) return null;
+
     const pageMetadata = document.getPageMetadata(pageNumber);
-    
+
     if (!pageMetadata) return null;
-    
-    // Step 1: Get canvas position on screen (accounts for ALL CSS transforms automatically)
+
+    // Step 1: Get element position on screen (accounts for ALL CSS transforms automatically)
     const canvasRect = canvasElement.getBoundingClientRect();
-    
-    // Check if canvas has valid dimensions
-    if (canvasRect.width === 0 || canvasRect.height === 0 || canvasElement.width === 0 || canvasElement.height === 0) {
+
+    // Reject when the page element has no display size on screen. We DO NOT
+    // check canvas-buffer width/height anymore — when the tiled renderer is on,
+    // canvasElement is a <div> and has no .width/.height pixel buffer.
+    if (canvasRect.width === 0 || canvasRect.height === 0) {
       return null;
     }
     
@@ -2454,7 +2508,7 @@ export const PageCanvas = React.memo(function PageCanvas({
           file.name.toLowerCase().endsWith(".png")
       );
 
-      if (imageFile && currentDocument && canvasRef.current) {
+      if (imageFile && currentDocument && (pageContentRef.current ?? canvasRef.current)) {
         console.log("Image file detected:", imageFile.name, imageFile.type);
         // Save the current page before async operations — something else
         // could reset currentPage during the await gap
@@ -2498,21 +2552,21 @@ export const PageCanvas = React.memo(function PageCanvas({
           const imageHeight = img.height;
 
           // Get drop coordinates in PDF space
-          const canvasElement = canvasRef.current;
+          const canvasElement = pageContentRef.current ?? canvasRef.current;
           const pageMetadata = currentDocument.getPageMetadata(pageNumber);
-          
-          if (!pageMetadata) {
+
+          if (!canvasElement || !pageMetadata) {
             console.warn("Cannot get page metadata for image drop");
             showNotification("Cannot get page metadata for image drop", "error");
             return;
           }
 
-          // Get canvas position on screen
+          // Get page-content position on screen
           const canvasRect = canvasElement.getBoundingClientRect();
-          
-          if (canvasRect.width === 0 || canvasRect.height === 0 || canvasElement.width === 0 || canvasElement.height === 0) {
-            console.warn("Canvas has invalid dimensions");
-            showNotification("Canvas has invalid dimensions", "error");
+
+          if (canvasRect.width === 0 || canvasRect.height === 0) {
+            console.warn("Page has invalid display dimensions");
+            showNotification("Page has invalid display dimensions", "error");
             return;
           }
           
@@ -3005,25 +3059,51 @@ export const PageCanvas = React.memo(function PageCanvas({
                 : { display: "block" }
             }
           >
-            <canvas
-              ref={canvasRef}
-              className={cn("block", !readMode && "shadow-2xl")}
-              style={{
-                position: "relative",
-                zIndex: 1,
-                margin: 0,
-                padding: 0,
-                display: "block",
-                verticalAlign: "top",
-                border: "none",
-                outline: "none",
-                backgroundColor: readMode && !hasRendered ? "transparent" : readMode ? undefined : "white",
-                width: readMode && pageMetadata ? pageMetadata.width : undefined,
-                height: readMode && pageMetadata ? pageMetadata.height : undefined,
-                boxSizing: "border-box",
-                flexShrink: 0,
-              }}
-            />
+            {useTiledRenderer && tiledRenderer && pageMetadata ? (
+              <TiledCanvas
+                pageNumber={pageNumber}
+                pageDims={{
+                  widthPt: pageMetadata.width,
+                  heightPt: pageMetadata.height,
+                }}
+                displayPxPerPoint={tiledDisplayPxPerPoint}
+                renderer={tiledRenderer}
+                rootRef={pageContentRef}
+                className={cn("block", !readMode && "shadow-2xl")}
+                style={{
+                  position: "relative",
+                  zIndex: 1,
+                  verticalAlign: "top",
+                  boxSizing: "border-box",
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <canvas
+                ref={(el) => {
+                  // Populate both refs: canvasRef (legacy render path uses canvas-specific APIs)
+                  // and pageContentRef (coord-calc paths use generic HTMLElement methods).
+                  (canvasRef as React.MutableRefObject<HTMLCanvasElement | null>).current = el;
+                  pageContentRef.current = el;
+                }}
+                className={cn("block", !readMode && "shadow-2xl")}
+                style={{
+                  position: "relative",
+                  zIndex: 1,
+                  margin: 0,
+                  padding: 0,
+                  display: "block",
+                  verticalAlign: "top",
+                  border: "none",
+                  outline: "none",
+                  backgroundColor: readMode && !hasRendered ? "transparent" : readMode ? undefined : "white",
+                  width: readMode && pageMetadata ? pageMetadata.width : undefined,
+                  height: readMode && pageMetadata ? pageMetadata.height : undefined,
+                  boxSizing: "border-box",
+                  flexShrink: 0,
+                }}
+              />
+            )}
           </div>
           {/* Render text box creation preview */}
         {isCreatingTextBox && textBoxStart && selectionEnd && activeTool === "text" && (
