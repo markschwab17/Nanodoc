@@ -112,10 +112,16 @@
 - [x] `pageContentRef` in PageCanvas points at whichever page element is mounted; `getPDFCoordinates` and the image-drop / paste fallback paths use it so tools work with either renderer
 - [x] Cache policy: do NOT close `ImageBitmap` on routine eviction (avoids React-StrictMode-double-invoke detachment race); bitmaps GC naturally. `destroy()` still closes everything.
 - [x] Tile useEffect only sets `canvas.width/height` when they differ — keeps painted pixels stable across StrictMode's double-invoke
+- [x] Pinch-to-zoom on the trackpad works in tile mode (handleWheelNative uses `pageContentRef`)
+- [x] Unhandled `Tile request cancelled` rejection fixed (`.then(cleanup, cleanup)` instead of `.finally(...)` chain)
+- [x] Cache capacity bumped to 1500 (browser) / 3000 (Tauri); LOD capped at 5 (1024 tiles per square page max); coarser-LOD ancestors prefetched so the fallback path is always populated when jumping to high zoom
+- [x] `setViewport` / `getVisibleTiles` now refire only on LOD change, not on every `displayPxPerPoint` change. Within a single LOD the parent CSS transform handles zoom
+- [x] Debug HUD hidden by default; enable via `?tile-debug=1` URL param
 
 ### Known limitations (deferred)
 
-- **Phase-3 only**: Toggling on a single page works; the tile path's "feel" (latency on rapid zoom) is expected until phase 4 lands CSS-transform pan/zoom.
+- **Phase-3 only**: Toggling on a single page works; intra-LOD zoom is now smooth (CSS transform), but **inter-LOD threshold crossings still incur a brief render burst** — phase 4 will hide that latency by holding the previous LOD's tiles on screen until the new LOD's primaries are ready.
+- LOD is capped at 5. At extreme zoom (zoom > ~3× on a large construction sheet) the bitmap is CSS-upscaled instead of rendering more tiles. Phase 7 will lift the cap once viewport-restricted tile requests land (so we only fetch the on-screen region).
 - **Redaction & SelectionBoxTool** call `canvas.getContext` / set `canvas.width` directly through `canvasRef`. When the tile flag is on, those operations no-op silently (canvasRef is null). Toggle the flag off after a redaction to see the result, or stay on the legacy renderer.
 - Per-worker `DisplayList` cache has no eviction (small docs only — fine for the current scope)
 - PDF bytes are structured-cloned to each worker on first request (~N× memory). SharedArrayBuffer + COOP/COEP is a phase-7 optimization.
