@@ -84,9 +84,24 @@ export function TiledCanvas({
     // Filter by page so that an arrival for page X doesn't trigger re-renders
     // in TiledCanvas instances for pages Y/Z. Important in multi-page read
     // mode where 10+ pages may be mounted at once.
-    return renderer.onTileReady((tile) => {
-      if (tile.key.page === pageNumber) setTick((t) => t + 1);
+    //
+    // Coalesce via requestAnimationFrame: many tiles can arrive within a
+    // single frame during initial page load, and firing setTick per tile
+    // would do per-tile React re-renders (each one walking visibleTileKeys
+    // and reconciling N child Tile components). Saturating the main thread
+    // makes scroll stutter. With RAF coalescing, an arbitrary burst of
+    // tile arrivals produces one re-render per frame.
+    let scheduled = false;
+    const unsub = renderer.onTileReady((tile) => {
+      if (tile.key.page !== pageNumber) return;
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        setTick((t) => t + 1);
+      });
     });
+    return unsub;
   }, [renderer, pageNumber]);
 
   useEffect(() => {
@@ -146,7 +161,7 @@ export function TiledCanvas({
   );
 }
 
-function Tile({
+const Tile = React.memo(function Tile({
   tile,
   pageDims,
 }: {
@@ -198,4 +213,4 @@ function Tile({
       }}
     />
   );
-}
+});
