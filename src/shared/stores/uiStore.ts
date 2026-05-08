@@ -63,6 +63,15 @@ export interface UIState {
   aiPanelOpen: boolean;
   setAiPanelOpen: (v: boolean) => void;
   toggleAIPanel: () => void;
+
+  /**
+   * EXPERIMENTAL: route page rasterization through the tile-pyramid renderer
+   * (src/core/pdf/tiles/) instead of the legacy PDFRenderer. Off by default.
+   * Toggle at runtime with Cmd/Ctrl+Alt+T (Option+Cmd+T on Mac).
+   */
+  useTiledRenderer: boolean;
+  setUseTiledRenderer: (v: boolean) => void;
+  toggleUseTiledRenderer: () => void;
   
   // Actions
   setZoomLevel: (level: number) => void;
@@ -158,6 +167,11 @@ export const useUIStore = create<UIState>((set, get) => ({
   aiPanelOpen: false,
   setAiPanelOpen: (v) => set({ aiPanelOpen: v }),
   toggleAIPanel: () => set((s) => ({ aiPanelOpen: !s.aiPanelOpen })),
+
+  useTiledRenderer: false,
+  setUseTiledRenderer: (v) => set({ useTiledRenderer: v }),
+  toggleUseTiledRenderer: () =>
+    set((s) => ({ useTiledRenderer: !s.useTiledRenderer })),
 
   setZoomLevel: (level) => {
     const state = get();

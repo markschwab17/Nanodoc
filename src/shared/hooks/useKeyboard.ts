@@ -10,6 +10,7 @@ import { useUIStore } from "@/shared/stores/uiStore";
 import { usePDF } from "./usePDF";
 import { useUndoRedo } from "./useUndoRedo";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 
 export function useKeyboard() {
   const currentPage = usePDFStore((s) => s.currentPage);
@@ -155,6 +156,26 @@ export function useKeyboard() {
       if ((e.metaKey || e.ctrlKey) && e.key === "a" && !splitScreenMode) {
         e.preventDefault();
         setActiveTool("select");
+        return;
+      }
+
+      // Toggle EXPERIMENTAL tile renderer: Cmd/Ctrl + Alt + T
+      // (Cmd+Shift+T conflicts with "reopen closed tab" in browsers.)
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.altKey &&
+        (e.key === "t" || e.key === "T" || e.code === "KeyT")
+      ) {
+        e.preventDefault();
+        const ui = useUIStore.getState();
+        ui.toggleUseTiledRenderer();
+        const enabled = useUIStore.getState().useTiledRenderer;
+        useNotificationStore
+          .getState()
+          .showNotification(
+            `Tile renderer ${enabled ? "ENABLED" : "disabled"} (experimental)`,
+            "info",
+          );
         return;
       }
 
