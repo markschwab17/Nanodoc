@@ -99,31 +99,44 @@ export class TiledPageRenderer {
       return true;
     });
 
+    const handleTile = (tile: RenderedTile) => {
+      if (this.destroyed) {
+        try {
+          tile.bitmap.close();
+        } catch {}
+        return;
+      }
+      this.cache.put(tile);
+      this.emit(tile);
+    };
+
+    // Queue LOD-0 FIRST and at "visible" priority. It's a single tile that
+    // covers the whole page, renders fast, and guarantees the fallback
+    // path has *something* to show (via findCoarserAncestor) the moment a
+    // page is mounted or the user jumps to a high LOD. Without this
+    // queued ahead of primary tiles, the page is blank until any of the
+    // LOD-N primaries finish — which can take many seconds on a large
+    // doc and is what looked like "blank tiles instead of a placeholder".
+    if (lod > 0) {
+      const lod0Key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
+      if (!this.cache.has(lod0Key)) {
+        this.pool
+          .request(lod0Key, dims, "visible")
+          .then(handleTile, () => {});
+      }
+    }
+
     // Enqueue missing primary tiles. The pool dedupes on the same TileKey,
     // so re-requesting an in-flight key is free.
     for (const key of keys) {
       if (this.cache.has(key)) continue;
-      this.pool.request(key, dims, "visible").then(
-        (tile) => {
-          if (this.destroyed) {
-            try {
-              tile.bitmap.close();
-            } catch {}
-            return;
-          }
-          this.cache.put(tile);
-          this.emit(tile);
-        },
-        () => {
-          // Cancellation or render error — silent. Caller's next
-          // getVisibleTiles will still return a fallback or a missing entry.
-        },
-      );
+      this.pool.request(key, dims, "visible").then(handleTile, () => {});
     }
 
-    // Prefetch the next-coarser LOD as fallback. Without this, jumping
-    // straight to a high zoom shows nothing under the loading primaries.
-    // Limited to one ancestor LOD so we don't flood the queue.
+    // Prefetch the next-coarser LOD as a sharper fallback than LOD-0
+    // (used by findCoarserAncestor preferentially since it returns the
+    // finest cached ancestor). One LOD's worth of viewport-clipped tiles
+    // — manageable.
     if (lod > 0) {
       const ancestorKeys = visibleTileKeys(
         this.opts.docId,
@@ -134,44 +147,7 @@ export class TiledPageRenderer {
       );
       for (const key of ancestorKeys) {
         if (this.cache.has(key)) continue;
-        this.pool.request(key, dims, "prefetch").then(
-          (tile) => {
-            if (this.destroyed) {
-              try {
-                tile.bitmap.close();
-              } catch {}
-              return;
-            }
-            this.cache.put(tile);
-            this.emit(tile);
-          },
-          () => {},
-        );
-      }
-    }
-
-    // Always prefetch the page's LOD-0 (a single tile covering the whole
-    // page) when we're not already at LOD 0. It's cheap to render and
-    // guarantees the page has at least a low-res preview to show while
-    // higher LODs stream in — critical for multi-page read mode where
-    // newly-visible pages would otherwise be blank for the full duration
-    // of high-LOD rendering.
-    if (lod > 1) {
-      const lod0Key = { docId: this.opts.docId, page, lod: 0, x: 0, y: 0 };
-      if (!this.cache.has(lod0Key)) {
-        this.pool.request(lod0Key, dims, "prefetch").then(
-          (tile) => {
-            if (this.destroyed) {
-              try {
-                tile.bitmap.close();
-              } catch {}
-              return;
-            }
-            this.cache.put(tile);
-            this.emit(tile);
-          },
-          () => {},
-        );
+        this.pool.request(key, dims, "prefetch").then(handleTile, () => {});
       }
     }
   }
