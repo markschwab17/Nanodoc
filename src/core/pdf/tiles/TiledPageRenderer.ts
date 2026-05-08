@@ -106,6 +106,35 @@ export class TiledPageRenderer {
         },
       );
     }
+
+    // Prefetch the next-coarser LOD as fallback. Without this, jumping
+    // straight to a high zoom shows nothing under the loading primaries.
+    // Limited to one ancestor LOD so we don't flood the queue.
+    if (lod > 0) {
+      const ancestorKeys = visibleTileKeys(
+        this.opts.docId,
+        page,
+        dims,
+        lod - 1,
+        viewport,
+      );
+      for (const key of ancestorKeys) {
+        if (this.cache.has(key)) continue;
+        this.pool.request(key, dims, "prefetch").then(
+          (tile) => {
+            if (this.destroyed) {
+              try {
+                tile.bitmap.close();
+              } catch {}
+              return;
+            }
+            this.cache.put(tile);
+            this.emit(tile);
+          },
+          () => {},
+        );
+      }
+    }
   }
 
   /** Synchronously return what's currently paintable for this viewport. */

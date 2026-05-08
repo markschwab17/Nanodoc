@@ -28,14 +28,26 @@ export function tileGridSize(
 }
 
 /**
+ * Hard cap on LOD selection. LOD 5 = up to 32×32 tile grid = 1024 tiles for a
+ * square page. Each higher LOD quadruples the tile count, which exceeds
+ * reasonable cache and worker-pool capacity. Phase-7 will lift this once
+ * viewport-restricted tile requests land (so we only ask for the visible
+ * region instead of the whole page).
+ */
+const MAX_LOD = 5;
+
+/**
  * Smallest LOD where one tile pixel covers >= one screen pixel.
  * `displayPxPerPoint` is the current zoom expressed as device pixels per PDF point.
+ * Clamped to [0, MAX_LOD]. Beyond MAX_LOD the bitmap is CSS-upscaled and
+ * looks slightly soft; phase-7 will solve this properly.
  */
 export function lodForZoom(pageDims: PageDims, displayPxPerPoint: number): number {
   const pageMax = Math.max(pageDims.widthPt, pageDims.heightPt);
   const screenPx = pageMax * displayPxPerPoint;
   if (screenPx <= TILE_SIZE) return 0;
-  return Math.max(0, Math.ceil(Math.log2(screenPx / TILE_SIZE)));
+  const ideal = Math.ceil(Math.log2(screenPx / TILE_SIZE));
+  return Math.max(0, Math.min(MAX_LOD, ideal));
 }
 
 /** PDF rectangle covered by the tile identified by `key` (clipped to page bounds). */

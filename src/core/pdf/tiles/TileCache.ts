@@ -26,12 +26,13 @@ import {
   type TileKey,
 } from "./types";
 
-// Tuned for phase-3: large enough that walking through a multi-page document
-// at multiple LODs doesn't evict coarser-LOD ancestors that the
-// "never blank" fallback path relies on. At 1MB per ImageBitmap (RGBA
-// 512×512 estimated), 800 tiles ≈ 800MB worst case in browser; Tauri gets
-// more headroom. Phase-7 perf tuning will revisit this with measurements.
-const ADAPTIVE_DEFAULT_CAPACITY = isTauri ? 1600 : 800;
+// Tuned for phase-3: needs to comfortably hold a full LOD-5 page (up to
+// ~1024 tiles for a square page) plus its ancestors at coarser LODs without
+// evicting recently-rendered primaries. At ~1MB per ImageBitmap (RGBA
+// 512×512 worst case), 1500 ≈ 1.5GB in browser, 3000 ≈ 3GB in Tauri.
+// Phase-7 perf tuning will swap this for a viewport-aware cache sized to
+// the user's actual visible region rather than the full page.
+const ADAPTIVE_DEFAULT_CAPACITY = isTauri ? 3000 : 1500;
 
 export interface TileCacheOptions {
   /** Max number of tiles before LRU eviction kicks in. */
