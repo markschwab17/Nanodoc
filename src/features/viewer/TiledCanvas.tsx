@@ -13,7 +13,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { lodForZoom, tilePointSize } from "@/core/pdf/tiles/lod";
+import { tilePointSize } from "@/core/pdf/tiles/lod";
 import {
   tileKeyString,
   type PageDims,
@@ -59,34 +59,19 @@ export function TiledCanvas({
     [pageDims.widthPt, pageDims.heightPt],
   );
 
-  // Gate setViewport on LOD change instead of every px/pt change. Within a
-  // single LOD, the cached tiles already cover the new zoom level and the
-  // parent's CSS scale handles rendering — re-firing setViewport per zoom
-  // step churns the worker pool with already-cached requests and can cause
-  // perceived lag. Worker-pool dedupe makes a redundant setViewport cheap
-  // but not free (visibleTileKeys + per-key cache.has + queue ops).
-  const targetLod = useMemo(
-    () => lodForZoom(pageDims, displayPxPerPoint),
-    [pageDims, displayPxPerPoint],
-  );
-
   useEffect(() => {
     return renderer.onTileReady(() => setTick((t) => t + 1));
   }, [renderer]);
 
   useEffect(() => {
     renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
-    // Intentionally exclude displayPxPerPoint: setViewport only refires when
-    // the chosen LOD changes (or page/viewport change). Sub-LOD zoom is
-    // handled by the parent's CSS transform.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderer, pageNumber, viewport, targetLod]);
+  }, [renderer, pageNumber, viewport, displayPxPerPoint]);
 
   const visible = useMemo(
     () => renderer.getVisibleTiles(pageNumber, viewport, displayPxPerPoint),
     // tick included so the memo re-reads after async tile arrivals
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [renderer, pageNumber, viewport, targetLod, tick],
+    [renderer, pageNumber, viewport, displayPxPerPoint, tick],
   );
 
   return (
