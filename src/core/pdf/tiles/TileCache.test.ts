@@ -61,24 +61,27 @@ describe("TileCache: LRU eviction", () => {
     expect(cache.has(makeKey({ x: 2 }))).toBe(true);
   });
 
-  it("calls bitmap.close on evicted tiles", () => {
+  it("does NOT call bitmap.close on routine eviction", () => {
+    // Policy: bitmaps stay alive for GC to collect, so we never close while
+    // a Tile component might still be mid-paint on the same bitmap.
     const cache = new TileCache({ capacity: 1 });
     const close = vi.fn();
     cache.put(makeTile(makeKey({ x: 0 }), close));
     cache.put(makeTile(makeKey({ x: 1 })));
-    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
   });
 });
 
 describe("TileCache: replacement", () => {
-  it("does not evict when replacing an existing key", () => {
+  it("does not evict when replacing an existing key, and does NOT close the old bitmap", () => {
+    // Same bitmap-leak policy as routine eviction.
     const cache = new TileCache({ capacity: 1 });
     const closeA = vi.fn();
     const closeB = vi.fn();
     cache.put(makeTile(makeKey(), closeA));
     cache.put(makeTile(makeKey(), closeB));
     expect(cache.size()).toBe(1);
-    expect(closeA).toHaveBeenCalledTimes(1);
+    expect(closeA).not.toHaveBeenCalled();
     expect(closeB).not.toHaveBeenCalled();
   });
 });
@@ -130,12 +133,12 @@ describe("TileCache: invalidatePage", () => {
     expect(cache.has(makeKey({ docId: "d2", page: 0 }))).toBe(true);
   });
 
-  it("calls bitmap.close on dropped tiles", () => {
+  it("does NOT call bitmap.close on invalidatePage (GC handles it)", () => {
     const cache = new TileCache({ capacity: 10 });
     const close = vi.fn();
     cache.put(makeTile(makeKey(), close));
     cache.invalidatePage("d", 0);
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 });
 
