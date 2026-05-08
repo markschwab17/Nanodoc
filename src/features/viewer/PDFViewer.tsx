@@ -1130,7 +1130,6 @@ export function PDFViewer() {
   // Throttles zoomToPoint calls (same path as +/- buttons) via requestAnimationFrame
   // so each zoom step is perfectly positioned with zero drift.
   const pendingZoomRef = useRef<number | null>(null);
-  const pendingZoomAnchorRef = useRef<{ x: number; y: number } | null>(null);
   const zoomRAFRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1148,9 +1147,10 @@ export function PDFViewer() {
       const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
       if (Math.abs(newZoom - currentZoom) < 0.001) return;
 
-      // Accumulate zoom target AND latest mouse position for zoom-at-cursor.
+      // Accumulate zoom target. Anchor is the viewport center, NOT the
+      // cursor — read mode zooms the page list as a whole, and a centered
+      // anchor keeps the visible content stable on both axes.
       pendingZoomRef.current = newZoom;
-      pendingZoomAnchorRef.current = { x: e.clientX, y: e.clientY };
 
       // Throttle via rAF — at most one zoomToPoint per frame.
       // Each call uses the exact same code path as the +/- buttons.
@@ -1160,19 +1160,13 @@ export function PDFViewer() {
           const targetZoom = pendingZoomRef.current;
           if (targetZoom === null) return;
           pendingZoomRef.current = null;
-          const anchor = pendingZoomAnchorRef.current;
-          pendingZoomAnchorRef.current = null;
 
-          if (anchor) {
-            zoomToPoint(targetZoom, anchor.x, anchor.y);
-          } else {
-            const rect = container.getBoundingClientRect();
-            zoomToPoint(
-              targetZoom,
-              rect.left + container.clientWidth / 2,
-              rect.top + container.clientHeight / 2,
-            );
-          }
+          const rect = container.getBoundingClientRect();
+          zoomToPoint(
+            targetZoom,
+            rect.left + container.clientWidth / 2,
+            rect.top + container.clientHeight / 2,
+          );
         });
       }
     };
