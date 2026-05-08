@@ -427,6 +427,14 @@
     }
   }
 
+/* Tile-pyramid renderer: subtle fade-in on freshly-mounted tile canvases.
+ * Smooths out the visual snap when a new LOD's primary tiles arrive over
+ * a coarser-LOD fallback. Pure CSS — runs once on mount of each <canvas>. */
+@keyframes tile-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 }
 
 

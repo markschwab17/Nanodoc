@@ -186,6 +186,10 @@ function Tile({
         width: tilePt,
         height: tilePt,
         pointerEvents: "none",
+        // Phase-4: fade newly-mounted tiles in over 120ms so LOD threshold
+        // crossings (where a fresh batch of primaries arrives over a
+        // coarser-LOD fallback) don't snap visually. Defined in index.css.
+        animation: "tile-fade-in 120ms ease-out",
       }}
     />
   );
