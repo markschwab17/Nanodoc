@@ -1,0 +1,145 @@
+/**
+ * TiledCanvas — drop-in replacement for the bare <canvas> in PageCanvas
+ * when the useTiledRenderer feature flag is on.
+ *
+ * Sized to PDF-point dimensions (so 1 CSS px = 1 PDF point), matching the
+ * existing canvas convention. Parent's CSS transform handles zoom — we
+ * don't apply scale here. `displayPxPerPoint` is the EFFECTIVE on-screen
+ * resolution (= zoomLevel × dpr) and drives LOD selection inside
+ * TiledPageRenderer.
+ *
+ * Renders fallback (coarser-LOD ancestor) tiles UNDER primary tiles so the
+ * page is never blank during LOD threshold crossings.
+ */
+
+import React, { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { tilePointSize } from "@/core/pdf/tiles/lod";
+import {
+  tileKeyString,
+  type PageDims,
+  type PdfRect,
+  type RenderedTile,
+} from "@/core/pdf/tiles/types";
+import type { TiledPageRenderer } from "@/core/pdf/tiles/TiledPageRenderer";
+
+export interface TiledCanvasProps {
+  pageNumber: number;
+  pageDims: PageDims;
+  /** Effective screen resolution: zoomLevel × dpr. Drives LOD selection. */
+  displayPxPerPoint: number;
+  renderer: TiledPageRenderer;
+  className?: string;
+  style?: CSSProperties;
+  /**
+   * PageCanvas attaches its `pageContentRef` here so getPDFCoordinates etc.
+   * can use this wrapper as the page-bitmap reference frame.
+   */
+  rootRef?: React.MutableRefObject<HTMLElement | null>;
+}
+
+export function TiledCanvas({
+  pageNumber,
+  pageDims,
+  displayPxPerPoint,
+  renderer,
+  className,
+  style,
+  rootRef,
+}: TiledCanvasProps) {
+  // Bumped on every onTileReady so getVisibleTiles is re-read after async arrivals
+  const [tick, setTick] = useState(0);
+
+  const viewport: PdfRect = useMemo(
+    () => ({ x: 0, y: 0, w: pageDims.widthPt, h: pageDims.heightPt }),
+    [pageDims.widthPt, pageDims.heightPt],
+  );
+
+  useEffect(() => {
+    return renderer.onTileReady(() => setTick((t) => t + 1));
+  }, [renderer]);
+
+  useEffect(() => {
+    renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
+  }, [renderer, pageNumber, viewport, displayPxPerPoint]);
+
+  const visible = useMemo(
+    () => renderer.getVisibleTiles(pageNumber, viewport, displayPxPerPoint),
+    // tick included so the memo re-reads after async tile arrivals
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [renderer, pageNumber, viewport, displayPxPerPoint, tick],
+  );
+
+  return (
+    <div
+      ref={(el) => {
+        if (rootRef) rootRef.current = el;
+      }}
+      className={className}
+      style={{
+        position: "relative",
+        width: pageDims.widthPt,
+        height: pageDims.heightPt,
+        overflow: "hidden",
+        background: "white",
+        ...style,
+      }}
+    >
+      {visible.fallback.map((t) => (
+        <Tile key={"f-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
+      ))}
+      {visible.primary.map((t) => (
+        <Tile key={"p-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
+      ))}
+    </div>
+  );
+}
+
+function Tile({
+  tile,
+  pageDims,
+}: {
+  tile: RenderedTile;
+  pageDims: PageDims;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // CRITICAL: setting canvas.width/height clears the pixel buffer. Only
+    // assign when the dimensions actually changed — otherwise StrictMode's
+    // double-invoke clears the canvas, and if the second drawImage throws
+    // (e.g., the bitmap is in a detached state), the tile is left blank.
+    if (canvas.width !== tile.pixelWidth) canvas.width = tile.pixelWidth;
+    if (canvas.height !== tile.pixelHeight) canvas.height = tile.pixelHeight;
+
+    try {
+      ctx.drawImage(tile.bitmap, 0, 0);
+    } catch (err) {
+      // ImageBitmap can be in a "detached" state if it was closed by an
+      // aggressive cache eviction or worker termination. Don't crash —
+      // skip; the next render with a valid bitmap will paint it.
+      if (err instanceof DOMException && err.name === "InvalidStateError") {
+        return;
+      }
+      throw err;
+    }
+  }, [tile]);
+
+  const tilePt = tilePointSize(pageDims, tile.key.lod);
+  return (
+    <canvas
+      ref={ref}
+      style={{
+        position: "absolute",
+        left: tile.key.x * tilePt,
+        top: tile.key.y * tilePt,
+        width: tilePt,
+        height: tilePt,
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
