@@ -90,8 +90,9 @@ export function TiledCanvas({
       {visible.primary.map((t) => (
         <Tile key={"p-" + tileKeyString(t.key)} tile={t} pageDims={pageDims} />
       ))}
-      {/* Dev-only debug HUD: shows LOD + tile counts so we can see whether
-          zoom is actually crossing LOD thresholds. Cheap to delete later. */}
+      {/* Dev-only debug HUD: shows LOD + tile counts + cache size so we can
+          see whether zoom is crossing LOD thresholds AND whether eviction is
+          churning. Cheap to delete later. */}
       <div
         style={{
           position: "absolute",
@@ -108,7 +109,7 @@ export function TiledCanvas({
       >
         LOD {visible.lod} · {displayPxPerPoint.toFixed(2)} px/pt · p
         {visible.primary.length} f{visible.fallback.length} m
-        {visible.missing.length}
+        {visible.missing.length} · cache {renderer.cacheSize()}
       </div>
     </div>
   );

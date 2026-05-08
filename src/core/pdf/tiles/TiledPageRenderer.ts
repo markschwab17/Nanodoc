@@ -152,6 +152,11 @@ export class TiledPageRenderer {
     };
   }
 
+  /** Diagnostics: current cache size. Used by the dev HUD. */
+  cacheSize(): number {
+    return this.cache.size();
+  }
+
   /** Drop all cached tiles for the document (e.g., after edit). */
   invalidate(): void {
     this.cache.invalidateDoc(this.opts.docId);
