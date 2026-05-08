@@ -998,12 +998,13 @@ export const PageCanvas = React.memo(function PageCanvas({
   }, [readMode, pageNumber, document, displayWidthProp, displayHeightProp, zoomLevel]);
 
   useEffect(() => {
-    // EXPERIMENTAL: when the tile-pyramid renderer is active, skip the legacy
-    // full-page render path entirely. <TiledCanvas> below handles painting via
-    // its own setViewport/onTileReady cycle.
-    if (useTiledRenderer) {
-      return;
-    }
+    // NOTE: when useTiledRenderer is on we still let computeScaleParams run
+    // (further down inside runQueuedRender) because its fit-mode side
+    // effects — setZoomLevel for fit-width and setPanOffset for centering —
+    // are needed for the parent's CSS transform regardless of which
+    // bitmap renderer is active. The actual renderer.renderPage call is
+    // skipped via a check inside runQueuedRender after computeScaleParams.
+    //
     // Early return: if global read mode is active but this is the normal mode canvas
     // Skip rendering to prevent unnecessary work during zoom
     if (globalReadMode && !readMode) {
@@ -1098,7 +1099,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     };
 
     const runQueuedRender = async () => {
-      if (!canvasRef.current || !document.isDocumentLoaded()) return;
+      if (!document.isDocumentLoaded()) return;
 
       const thisRenderId = ++highResRenderIdRef.current;
 
@@ -1111,8 +1112,15 @@ export const PageCanvas = React.memo(function PageCanvas({
       }
 
       const dpr = window.devicePixelRatio || 1;
+      // Always compute scale params: it has fit-mode centering / fit-width
+      // zoom side effects that the parent's CSS transform relies on, in BOTH
+      // tile mode and legacy mode.
       const params = await computeScaleParams();
-      if (!params || !canvasRef.current) return;
+      if (!params) return;
+      // From here on we paint to the legacy <canvas>. In tile mode the
+      // canvas isn't mounted (canvasRef is null) and TiledCanvas handles
+      // painting via its own setViewport/onTileReady cycle, so bail.
+      if (useTiledRenderer || !canvasRef.current) return;
       if (thisRenderId !== highResRenderIdRef.current) return;
 
       const { displayScale, canvasDisplayWidth, canvasDisplayHeight } = params;
