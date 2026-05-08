@@ -12,7 +12,7 @@
  * page is never blank during LOD threshold crossings.
  */
 
-import React, { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { tilePointSize } from "@/core/pdf/tiles/lod";
 import { useTilesPaused } from "@/core/pdf/tiles/tileRendererPause";
 import {
@@ -188,7 +188,14 @@ const Tile = React.memo(function Tile({
   pageDims: PageDims;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
+  // useLayoutEffect (not useEffect) so drawImage runs synchronously between
+  // DOM commit and the browser's first paint. With useEffect the canvas
+  // mounts blank, the 120ms opacity fade animation begins on a blank canvas,
+  // and drawImage paints the bitmap mid-animation — the user perceives that
+  // as a flash (animation runs on nothing, then content snaps in). With
+  // useLayoutEffect the bitmap is on the canvas before opacity-0 is even
+  // painted, so the fade actually fades the *content* in.
+  useLayoutEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
