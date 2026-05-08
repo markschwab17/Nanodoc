@@ -159,8 +159,10 @@ export function useKeyboard() {
         return;
       }
 
-      // Toggle EXPERIMENTAL tile renderer: Cmd/Ctrl + Alt + T
+      // Toggle tile renderer: Cmd/Ctrl + Alt + T
       // (Cmd+Shift+T conflicts with "reopen closed tab" in browsers.)
+      // Tile mode is the default; this lets the user fall back to the
+      // legacy PDFRenderer if needed (e.g., for redaction).
       if (
         (e.metaKey || e.ctrlKey) &&
         e.altKey &&
@@ -173,7 +175,7 @@ export function useKeyboard() {
         useNotificationStore
           .getState()
           .showNotification(
-            `Tile renderer ${enabled ? "ENABLED" : "disabled"} (experimental)`,
+            `Tile renderer ${enabled ? "ON" : "OFF (legacy renderer)"}`,
             "info",
           );
         return;

@@ -65,9 +65,12 @@ export interface UIState {
   toggleAIPanel: () => void;
 
   /**
-   * EXPERIMENTAL: route page rasterization through the tile-pyramid renderer
-   * (src/core/pdf/tiles/) instead of the legacy PDFRenderer. Off by default.
-   * Toggle at runtime with Cmd/Ctrl+Alt+T (Option+Cmd+T on Mac).
+   * Route page rasterization through the tile-pyramid renderer
+   * (src/core/pdf/tiles/) instead of the legacy PDFRenderer. ON by default.
+   * Toggle at runtime with Cmd/Ctrl+Alt+T (Option+Cmd+T on Mac) — primarily
+   * useful for falling back to the legacy renderer if a doc misbehaves
+   * (e.g., for a redaction operation, since RedactTool currently writes
+   * directly to the legacy <canvas>).
    */
   useTiledRenderer: boolean;
   setUseTiledRenderer: (v: boolean) => void;
@@ -168,7 +171,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   setAiPanelOpen: (v) => set({ aiPanelOpen: v }),
   toggleAIPanel: () => set((s) => ({ aiPanelOpen: !s.aiPanelOpen })),
 
-  useTiledRenderer: false,
+  useTiledRenderer: true,
   setUseTiledRenderer: (v) => set({ useTiledRenderer: v }),
   toggleUseTiledRenderer: () =>
     set((s) => ({ useTiledRenderer: !s.useTiledRenderer })),
