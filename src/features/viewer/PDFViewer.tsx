@@ -143,43 +143,45 @@ export function PDFViewer() {
   // Zoom function for read mode - zooms to anchor point (mouse cursor or viewport center)
   const zoomToPoint = useCallback((
     newZoom: number,
-    _anchorX?: number,  // Mouse X in screen coordinates, or undefined for center (not used in read mode)
+    anchorX?: number,  // Mouse X in screen coordinates, or undefined for center
     anchorY?: number   // Mouse Y in screen coordinates, or undefined for center
   ) => {
     if (!readMode || !scrollContainerRef.current || !currentDocument) return;
 
     const scrollContainer = scrollContainerRef.current;
     const currentZoom = zoomLevelRef.current;
-    
+
     // Get container dimensions and position
     const scrollRect = scrollContainer.getBoundingClientRect();
+    const viewportWidth = scrollContainer.clientWidth;
     const viewportHeight = scrollContainer.clientHeight;
-    
+
     // Determine anchor point in viewport coordinates (relative to scroll container)
+    const anchorPointX = anchorX !== undefined
+      ? anchorX - scrollRect.left
+      : viewportWidth / 2;
     const anchorPointY = anchorY !== undefined
       ? anchorY - scrollRect.top
       : viewportHeight / 2;
-    
+
     // Get current scroll position (in actual rendered coordinates)
+    const scrollLeft = scrollContainer.scrollLeft;
     const scrollTop = scrollContainer.scrollTop;
-    
+
     // Calculate zoom factors relative to baseFitScale
     const currentBaseFitScale = baseFitScaleRef.current;
     if (currentBaseFitScale <= 0) return;
-    
+
     const currentZoomFactor = currentZoom / currentBaseFitScale;
     const newZoomFactor = newZoom / currentBaseFitScale;
-    
-    // Calculate the document position that is currently at the anchor point
-    // scrollTop is the scroll position in rendered coordinates at currentZoom
-    // anchorPointY is the viewport position where we want to maintain focus
-    // Total document position at anchor in current coordinates: scrollTop + anchorPointY
-    // Convert to base scale: (scrollTop + anchorPointY) / currentZoomFactor
+
+    // Document position currently at the anchor (in base-scale coords)
+    // = (scroll + anchor-within-viewport) / current zoom factor
+    const documentXAtAnchorBase = (scrollLeft + anchorPointX) / currentZoomFactor;
     const documentYAtAnchorBase = (scrollTop + anchorPointY) / currentZoomFactor;
-    
-    // Calculate new scroll position to keep the same document point at the anchor
-    // After zooming, convert back to new rendered coordinates
-    // newScrollTop = (documentYAtAnchorBase * newZoomFactor) - anchorPointY
+
+    // New scroll positions to keep that same document point at the anchor
+    const newScrollLeft = (documentXAtAnchorBase * newZoomFactor) - anchorPointX;
     const newScrollTop = (documentYAtAnchorBase * newZoomFactor) - anchorPointY;
     
     // Set zooming flag to prevent interference from other effects
@@ -202,10 +204,14 @@ export function PDFViewer() {
     // before a microtask runs, causing zoom to jump to top-left.
     void scrollContainer.offsetHeight;
     {
-      const maxScroll = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
-      scrollContainer.scrollTop = Math.max(0, Math.min(maxScroll, newScrollTop));
-      if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
-        scrollContainer.scrollLeft = (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2;
+      const maxScrollY = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      const maxScrollX = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+      scrollContainer.scrollTop = Math.max(0, Math.min(maxScrollY, newScrollTop));
+      // Honor horizontal anchor when there's horizontal overflow; otherwise
+      // there's no scroll room and 0 is correct (keeps content centered by
+      // VirtualizedPageList's flex layout).
+      if (maxScrollX > 0) {
+        scrollContainer.scrollLeft = Math.max(0, Math.min(maxScrollX, newScrollLeft));
       } else {
         scrollContainer.scrollLeft = 0;
       }
@@ -1124,6 +1130,7 @@ export function PDFViewer() {
   // Throttles zoomToPoint calls (same path as +/- buttons) via requestAnimationFrame
   // so each zoom step is perfectly positioned with zero drift.
   const pendingZoomRef = useRef<number | null>(null);
+  const pendingZoomAnchorRef = useRef<{ x: number; y: number } | null>(null);
   const zoomRAFRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1141,8 +1148,9 @@ export function PDFViewer() {
       const newZoom = Math.max(0.25, Math.min(5, currentZoom * delta));
       if (Math.abs(newZoom - currentZoom) < 0.001) return;
 
-      // Accumulate zoom target
+      // Accumulate zoom target AND latest mouse position for zoom-at-cursor.
       pendingZoomRef.current = newZoom;
+      pendingZoomAnchorRef.current = { x: e.clientX, y: e.clientY };
 
       // Throttle via rAF — at most one zoomToPoint per frame.
       // Each call uses the exact same code path as the +/- buttons.
@@ -1152,13 +1160,19 @@ export function PDFViewer() {
           const targetZoom = pendingZoomRef.current;
           if (targetZoom === null) return;
           pendingZoomRef.current = null;
+          const anchor = pendingZoomAnchorRef.current;
+          pendingZoomAnchorRef.current = null;
 
-          const rect = container.getBoundingClientRect();
-          zoomToPoint(
-            targetZoom,
-            rect.left + container.clientWidth / 2,
-            rect.top + container.clientHeight / 2
-          );
+          if (anchor) {
+            zoomToPoint(targetZoom, anchor.x, anchor.y);
+          } else {
+            const rect = container.getBoundingClientRect();
+            zoomToPoint(
+              targetZoom,
+              rect.left + container.clientWidth / 2,
+              rect.top + container.clientHeight / 2,
+            );
+          }
         });
       }
     };
