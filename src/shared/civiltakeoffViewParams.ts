@@ -3,7 +3,7 @@
  * Parsed from query string when Nanodoc is opened by Civiltakeoff (e.g. /view?project=...&doc=...&token=...).
  */
 
-const DEFAULT_API_ORIGIN = "https://civiltakeoff.ai";
+const DEFAULT_API_ORIGIN = "https://app.vertigraph.com";
 
 export interface CiviltakeoffViewParams {
   project: string | null;
