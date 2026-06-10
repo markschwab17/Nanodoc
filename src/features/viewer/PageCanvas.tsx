@@ -1801,6 +1801,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     currentDocument,
     annotations,
     activeTool,
+    readMode,
     getPDFCoordinates,
     pdfToCanvas,
     pdfToContainer,
@@ -1827,7 +1828,7 @@ export const PageCanvas = React.memo(function PageCanvas({
     selectionStart,
     setSelectedTextSpans,
     setIsHighlightTextMode,
-  }), [document, pageNumber, currentDocument, annotations, activeTool,
+  }), [document, pageNumber, currentDocument, annotations, activeTool, readMode,
        editor, renderer, fitMode, panOffset, isSelecting, selectionStart]);
 
   const handleMouseDown = async (e: React.MouseEvent) => {
@@ -2107,6 +2108,14 @@ export const PageCanvas = React.memo(function PageCanvas({
     };
   }, [draggingShapeId, currentDocument, zoomLevel, editingAnnotation, updateAnnotation, getAnnotations, zoomLevelRef]);
 
+  // RAF coalescing for per-mousemove store writes. mousemove can fire at
+  // 120+ events/sec; updateAnnotation/setPanOffset each re-render every
+  // subscriber, so we batch to at most one store write per frame. The refs
+  // hold the LATEST values; the RAF callback applies them.
+  const dupDragRafRef = useRef<number | null>(null);
+  const pendingDupUpdateRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const panRafRef = useRef<number | null>(null);
+
   const handleMouseMove = (e: React.MouseEvent) => {
     // Track shift key state
     setIsShiftPressed(e.shiftKey);
@@ -2146,22 +2155,26 @@ export const PageCanvas = React.memo(function PageCanvas({
         const pdfDeltaX = screenDeltaX / currentZoomLevel;
         const pdfDeltaY = -screenDeltaY / currentZoomLevel; // Negate Y
         
-        // Update duplicate position
+        // Update duplicate position — coalesced to one store write per frame
         const newX = dupInfo.startX + pdfDeltaX;
         const newY = dupInfo.startY + pdfDeltaY;
-        
-        updateAnnotation(
-          currentDocument.getId(),
-          dupInfo.duplicateId,
-          { x: newX, y: newY }
-        );
-        
-        // Update editing annotation if it's the duplicate
-        if (editingAnnotation && editingAnnotation.id === dupInfo.duplicateId) {
-          setEditingAnnotation({
-            ...editingAnnotation,
-            x: newX,
-            y: newY,
+
+        pendingDupUpdateRef.current = { id: dupInfo.duplicateId, x: newX, y: newY };
+        if (dupDragRafRef.current === null) {
+          dupDragRafRef.current = requestAnimationFrame(() => {
+            dupDragRafRef.current = null;
+            const pending = pendingDupUpdateRef.current;
+            if (!pending || !currentDocument) return;
+            updateAnnotation(currentDocument.getId(), pending.id, { x: pending.x, y: pending.y });
+
+            // Update editing annotation if it's the duplicate
+            if (editingAnnotation && editingAnnotation.id === pending.id) {
+              setEditingAnnotation({
+                ...editingAnnotation,
+                x: pending.x,
+                y: pending.y,
+              });
+            }
           });
         }
       }
@@ -2173,15 +2186,21 @@ export const PageCanvas = React.memo(function PageCanvas({
       
       // Update ref immediately for smooth operation
       panOffsetRef.current = { x: newPanX, y: newPanY };
-      
+
       // Switch to custom mode if needed (only once, not on every move)
       if (fitMode !== "custom") {
         fitModeRef.current = "custom";
         setFitMode("custom");
       }
-      
-      // Update pan offset state
-      setPanOffset({ x: newPanX, y: newPanY });
+
+      // Update pan offset state — coalesced to one write per frame; the ref
+      // above always carries the freshest value for the RAF to flush.
+      if (panRafRef.current === null) {
+        panRafRef.current = requestAnimationFrame(() => {
+          panRafRef.current = null;
+          setPanOffset({ ...panOffsetRef.current });
+        });
+      }
     } else if (isCreatingTextBox && textBoxStart) {
       // User is dragging to create a text box - update preview
       const coords = getPDFCoordinates(e);

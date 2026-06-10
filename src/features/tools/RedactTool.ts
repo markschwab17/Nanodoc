@@ -7,8 +7,9 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
-import { normalizeSelectionToRect, validatePDFRect } from "./coordinateHelpers";
+import { normalizeSelectionToRect, validatePDFRect, capCaptureScale } from "./coordinateHelpers";
 import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
+import { invalidateTiledRendererForDoc } from "@/core/pdf/tiles/tiledRendererRegistry";
 
 export const RedactTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -126,6 +127,12 @@ export const RedactTool: ToolHandler = {
           // CRITICAL: Clear all caches to force fresh render
           // 1. Clear renderer cache (image data cache)
           renderer.clearCache();
+
+          // 1b. Invalidate the tile-pyramid caches too — when the tile
+          // renderer is active (default), the legacy canvas below is not
+          // mounted and the user would otherwise keep seeing stale,
+          // un-redacted tiles until the cache happened to evict them.
+          invalidateTiledRendererForDoc(currentDocument.getId());
           
           // 2. Force document to refresh its page metadata cache
           // This ensures the PDFDocument object has the latest page information
@@ -150,9 +157,12 @@ export const RedactTool: ToolHandler = {
                 const freshMupdfDoc = currentDocument.getMupdfDocument();
                 const freshPageMetadata = currentDocument.getPageMetadata(pageNumber);
                 
-                // High-DPI rendering for crisp text
+                // High-DPI rendering for crisp text, capped by the page's
+                // pixel budget so huge sheets can't freeze this refresh.
                 const dpr = window.devicePixelRatio || 1;
-                const renderScale = BASE_SCALE * dpr;
+                const pw = freshPageMetadata?.width ?? 612;
+                const ph = freshPageMetadata?.height ?? 792;
+                const renderScale = capCaptureScale(pw, ph, pw, ph, BASE_SCALE * dpr);
                 
                 // Render the page with updated content
                 const rendered = await renderer.renderPage(freshMupdfDoc, pageNumber, {

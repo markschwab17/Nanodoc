@@ -8,7 +8,9 @@ import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useStampStore } from "@/shared/stores/stampStore";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { getStampPlacementDimensions } from "@/features/stamps/stampUtils";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 let selectedStampId: string | null = null;
 let stampPreviewPosition: { x: number; y: number } | null = null;
@@ -29,15 +31,31 @@ export const setPreviewUpdateCallback = (callback: (() => void) | null) => {
 export const StampTool: ToolHandler = {
   handleMouseDown: async (e: React.MouseEvent, context: ToolContext) => {
     const coords = context.getPDFCoordinates(e);
-    if (!coords || !selectedStampId) return;
-    
+    if (!coords) return;
+
+    // Every early-return below used to be SILENT — a click that places
+    // nothing with no explanation reads as "the tool is broken". Tell the
+    // user what's missing instead.
+    if (!selectedStampId) {
+      useNotificationStore
+        .getState()
+        .showNotification("Select a stamp from the gallery first", "info");
+      return;
+    }
+
     const { pageNumber, currentDocument, addAnnotation } = context;
-    
+
     if (!currentDocument) return;
-    
+
     // Get stamp from store
     const stamp = useStampStore.getState().getStamp(selectedStampId);
-    if (!stamp) return;
+    if (!stamp) {
+      useNotificationStore
+        .getState()
+        .showNotification("That stamp no longer exists — pick another from the gallery", "error");
+      setSelectedStamp(null);
+      return;
+    }
     
     // Mark stamp as used
     useStampStore.getState().markAsUsed(selectedStampId);
@@ -61,8 +79,16 @@ export const StampTool: ToolHandler = {
       rotation: 0,
     };
     
-    addAnnotation(currentDocument.getId(), annotation);
-    
+    wrapAnnotationOperation(
+      () => {
+        addAnnotation(currentDocument.getId(), annotation);
+      },
+      "addAnnotation",
+      currentDocument.getId(),
+      annotation.id,
+      annotation
+    );
+
     // Switch to select tool and select the newly created annotation
     useUIStore.getState().setActiveTool("select");
     context.setEditingAnnotation(annotation);

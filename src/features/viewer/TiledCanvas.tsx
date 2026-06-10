@@ -128,6 +128,21 @@ export function TiledCanvas({
     renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
   }, [renderer, pageNumber, viewport, displayPxPerPoint, paused, hasViewport]);
 
+  // After a content edit (redaction etc.) the registry invalidates the doc's
+  // tile caches and fires this event; re-request the current viewport so
+  // fresh tiles replace the stale ones, and bump tick so already-empty
+  // getVisibleTiles results are re-read immediately.
+  useEffect(() => {
+    const onInvalidated = () => {
+      if (hasViewport && !paused) {
+        renderer.setViewport(pageNumber, viewport, displayPxPerPoint);
+      }
+      setTick((t) => t + 1);
+    };
+    window.addEventListener("nanodoc:tiles-invalidated", onInvalidated);
+    return () => window.removeEventListener("nanodoc:tiles-invalidated", onInvalidated);
+  }, [renderer, pageNumber, viewport, displayPxPerPoint, paused, hasViewport]);
+
   const visible = useMemo(
     () => renderer.getVisibleTiles(pageNumber, viewport, displayPxPerPoint),
     // tick included so the memo re-reads after async tile arrivals

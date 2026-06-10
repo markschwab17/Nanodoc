@@ -235,15 +235,21 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
     return state.annotations.get(documentId) || [];
   },
 
-  addBookmark: (documentId, bookmark) =>
+  addBookmark: (documentId, bookmark) => {
     set((state) => {
       const newBookmarks = new Map(state.bookmarks);
       const docBookmarks = newBookmarks.get(documentId) || [];
       newBookmarks.set(documentId, [...docBookmarks, bookmark]);
       return { bookmarks: newBookmarks };
-    }),
+    });
+    // Bookmarks are persisted into the PDF on save, so they count as
+    // unsaved changes. (Document load also calls this while restoring
+    // saved bookmarks — the tab is created after restore, so the lookup
+    // inside markDocumentModified finds no tab and stays a no-op there.)
+    markDocumentModified(documentId);
+  },
 
-  removeBookmark: (documentId, bookmarkId) =>
+  removeBookmark: (documentId, bookmarkId) => {
     set((state) => {
       const newBookmarks = new Map(state.bookmarks);
       const docBookmarks = newBookmarks.get(documentId) || [];
@@ -252,7 +258,9 @@ export const usePDFStore = create<PDFStoreState>((set, get) => ({
         docBookmarks.filter((b) => b.id !== bookmarkId)
       );
       return { bookmarks: newBookmarks };
-    }),
+    });
+    markDocumentModified(documentId);
+  },
 
   getBookmarks: (documentId) => {
     const state = get();

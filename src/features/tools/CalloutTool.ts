@@ -6,6 +6,7 @@
 
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 export const CalloutTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -47,8 +48,16 @@ export const CalloutTool: ToolHandler = {
         color: "#FFFF00",
       };
 
-      // Add to app state first (so it renders immediately)
-      addAnnotation(currentDocument.getId(), annotation);
+      // Add to app state first (so it renders immediately), with undo support
+      wrapAnnotationOperation(
+        () => {
+          addAnnotation(currentDocument.getId(), annotation);
+        },
+        "addAnnotation",
+        currentDocument.getId(),
+        annotation.id,
+        annotation
+      );
 
       // Set as editing so user can type immediately
       setEditingAnnotation(annotation);

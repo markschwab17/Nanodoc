@@ -37,7 +37,8 @@ export function UpdateChecker() {
     setError(null);
 
     try {
-      const updateResult = await check();
+      // Timeout so a slow/unreachable update server can never hang startup.
+      const updateResult = await check({ timeout: 10_000 });
       if (updateResult) {
         setUpdate(updateResult);
         setShowDialog(true);
@@ -51,6 +52,7 @@ export function UpdateChecker() {
   }, []);
 
   useEffect(() => {
+    if (!isTauri) return;
     // Only check once per day to avoid unnecessary network requests on every startup
     const LAST_CHECK_KEY = "nanodoc_last_update_check";
     const ONE_DAY_MS = 24 * 60 * 60 * 1000;

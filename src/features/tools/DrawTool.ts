@@ -7,6 +7,7 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 // Catmull-Rom spline smoothing for path points
 function smoothPath(points: Array<{ x: number; y: number }>): Array<{ x: number; y: number }> {
@@ -215,8 +216,16 @@ export const DrawTool: ToolHandler = {
       smoothed: true,
     };
     
-    addAnnotation(currentDocument.getId(), annotation);
-    
+    wrapAnnotationOperation(
+      () => {
+        addAnnotation(currentDocument.getId(), annotation);
+      },
+      "addAnnotation",
+      currentDocument.getId(),
+      annotation.id,
+      annotation
+    );
+
     // Reset state (stay in draw mode)
     isDrawing = false;
     currentPath = [];

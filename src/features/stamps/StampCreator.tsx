@@ -31,6 +31,9 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
   const { setActiveTool } = useUIStore();
   const [activeTab, setActiveTab] = useState<TabType>("text");
   const [stampName, setStampName] = useState("");
+  // Inline validation message — alert() is a silent no-op in Tauri's webview,
+  // which made a failed validation look like a dead Create button.
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // Text stamp state
   const [text, setText] = useState("");
@@ -59,31 +62,48 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
   const previewRef = useRef<HTMLDivElement>(null);
   const previewContainerRef = useRef<HTMLDivElement>(null);
 
-  // Reset form when tab changes
+  // Reset the full form when the dialog OPENS. Do NOT reset on tab change —
+  // the previous version wiped everything (including the stamp name the user
+  // had already typed) whenever they clicked Text/Image/Signature, and the
+  // only feedback at Create time was an alert() that Tauri's webview doesn't
+  // even display. The user saw a dead "Create Stamp" button.
   useEffect(() => {
     if (open) {
       setStampName("");
-      setText("");
-      setImageData("");
-      setOriginalFile(null);
-      setImageScale(100);
-      setIsDragOver(false);
-      setSignaturePath([]);
-      setBorderEnabled(false);
-      setBorderStyle("rounded");
-      setBorderThickness(2);
-      setBorderColor("#000000");
-      setBorderOffset(8);
-      setBackgroundOpacity(100);
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
+      setValidationError(null);
+      resetTabContent();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Tab change resets only that tab's CONTENT (text vs image vs signature
+  // don't share fields) — the name and any error message survive.
+  function resetTabContent() {
+    setText("");
+    setImageData("");
+    setOriginalFile(null);
+    setImageScale(100);
+    setIsDragOver(false);
+    setSignaturePath([]);
+    setBorderEnabled(false);
+    setBorderStyle("rounded");
+    setBorderThickness(2);
+    setBorderColor("#000000");
+    setBorderOffset(8);
+    setBackgroundOpacity(100);
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
     }
-  }, [open, activeTab]);
+  }
+
+  useEffect(() => {
+    if (open) resetTabContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // Scale preview to fit container
   useEffect(() => {
@@ -503,24 +523,26 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
 
   const handleSave = async () => {
     if (!stampName.trim()) {
-      alert("Please enter a stamp name");
+      setValidationError("Please enter a stamp name");
       return;
     }
 
     if (activeTab === "text" && !text.trim()) {
-      alert("Please enter text for the stamp");
+      setValidationError("Please enter text for the stamp");
       return;
     }
 
     if (activeTab === "image" && !imageData) {
-      alert("Please upload an image");
+      setValidationError("Please upload an image");
       return;
     }
 
     if (activeTab === "signature" && signaturePath.length === 0) {
-      alert("Please draw a signature");
+      setValidationError("Please draw a signature");
       return;
     }
+
+    setValidationError(null);
 
     const thumb = generateThumbnail();
     const stamp: StampData = {
@@ -563,12 +585,17 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
     }
 
     addStamp(stamp);
-    
-    // Auto-select the newly created stamp for placement
-    setSelectedStamp(stamp.id);
-    setActiveTool("stamp");
-    
-    onClose();
+
+    // Auto-select the newly created stamp for placement. Whatever happens
+    // here, the modal MUST close once the stamp exists — a throw between
+    // addStamp and onClose left users with a created stamp and a stuck
+    // dialog (which they then re-submitted, creating duplicates).
+    try {
+      setSelectedStamp(stamp.id);
+      setActiveTool("stamp");
+    } finally {
+      onClose();
+    }
   };
 
   return (
@@ -945,6 +972,13 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
                 Clear
               </Button>
             </div>
+          )}
+
+          {/* Validation feedback — inline, since alert() is invisible in Tauri */}
+          {validationError && (
+            <p className="text-sm text-destructive" role="alert">
+              {validationError}
+            </p>
           )}
 
           {/* Action buttons */}

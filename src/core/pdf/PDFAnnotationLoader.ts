@@ -35,7 +35,14 @@ export class PDFAnnotationLoader {
 
   const page = pdfDoc.loadPage(pageNumber);
 
-  const pdfAnnotations = page.getAnnotations();
+  // CRITICAL: mupdf does NOT return AcroForm Widget annotations from
+  // getAnnotations() — they are only exposed via getWidgets(). Without the
+  // second list, externally-created form fields (Adobe, Word) are invisible
+  // to the editor and were destroyed on save.
+  const pdfAnnotations = [
+    ...page.getAnnotations(),
+    ...(typeof page.getWidgets === "function" ? page.getWidgets() : []),
+  ];
   const annotations: Annotation[] = [];
 
 
@@ -64,8 +71,132 @@ export class PDFAnnotationLoader {
 
   }
 
-  // Ink/PolyLine/Polygon annotations use vertex lists, not rect; we don't load them into the editor yet
-  if (type === "Ink" || type === "PolyLine" || type === "Polygon") continue;
+  // Ink annotations (freehand drawings — ours and other tools') load as
+  // draw annotations. CRITICAL: the save pipeline deletes ALL Ink
+  // annotations (delete-then-recreate); before this branch existed they were
+  // skipped here too, so the user's own drawings were silently destroyed by
+  // an open→save round-trip.
+  if (type === "Ink") {
+    try {
+      const pageBounds = page.getBounds();
+      const pageHeight = pageBounds[3] - pageBounds[1];
+      const strokes: Array<Array<[number, number]>> =
+        typeof (pdfAnnot as any).getInkList === "function" ? (pdfAnnot as any).getInkList() : [];
+      let inkColor = "#cc0000";
+      try {
+        const c = pdfAnnot.getColor?.();
+        if (Array.isArray(c) && c.length >= 3) {
+          inkColor =
+            "#" +
+            c
+              .slice(0, 3)
+              .map((v: number) => Math.round(v * 255).toString(16).padStart(2, "0"))
+              .join("");
+        }
+      } catch {}
+      let inkWidth = 2;
+      try {
+        const bw = pdfAnnot.getBorderWidth?.();
+        if (typeof bw === "number" && bw > 0) inkWidth = bw;
+      } catch {}
+      let inkOpacity = 1;
+      try {
+        const op = pdfAnnot.getOpacity?.();
+        if (typeof op === "number" && op > 0 && op <= 1) inkOpacity = op;
+      } catch {}
+
+      for (let s = 0; s < strokes.length; s++) {
+        const stroke = strokes[s];
+        if (!Array.isArray(stroke) || stroke.length < 2) continue;
+        // Ink list is in y-down page space; the store path is PDF y-up.
+        const path = stroke.map(([px, py]) => ({ x: px, y: pageHeight - py }));
+        const xs = path.map((p) => p.x);
+        const ys = path.map((p) => p.y);
+        annotations.push({
+          id: `pdf_${pageNumber}_ink_${s}_${Math.random().toString(36).substr(2, 9)}`,
+          type: "draw",
+          pageNumber,
+          x: Math.min(...xs),
+          y: Math.min(...ys),
+          width: Math.max(...xs) - Math.min(...xs),
+          height: Math.max(...ys) - Math.min(...ys),
+          path,
+          drawingStyle: "pencil",
+          color: inkColor,
+          strokeWidth: inkWidth,
+          strokeOpacity: inkOpacity,
+          pdfAnnotation: pdfAnnot,
+        } as Annotation);
+      }
+    } catch (e) {
+      console.warn("Could not load Ink annotation:", e);
+    }
+    continue;
+  }
+
+  // Polygons WE wrote for rotated rectangles round-trip back into editable
+  // rotated rectangles via the Nanodoc* metadata keys. Foreign PolyLine/
+  // Polygon annotations stay untouched in the file (the save pipeline does
+  // not delete them) but aren't editable in nanodoc yet.
+  if (type === "Polygon") {
+    try {
+      const annotObj = pdfAnnot.getObject?.();
+      const shapeKey = annotObj?.get?.("NanodocShape");
+      const isOurs = shapeKey && !(shapeKey.isNull?.() ?? false);
+      if (isOurs) {
+        const num = (key: string, fallback = 0) => {
+          try {
+            const v = annotObj.get(key);
+            if (v && !(v.isNull?.() ?? false)) {
+              const n = typeof v.valueOf === "function" ? Number(v.valueOf()) : Number(v.toString());
+              if (!Number.isNaN(n)) return n;
+            }
+          } catch {}
+          return fallback;
+        };
+        let polyColor = "#ff0000";
+        try {
+          const c = pdfAnnot.getColor?.();
+          if (Array.isArray(c) && c.length >= 3) {
+            polyColor =
+              "#" +
+              c
+                .slice(0, 3)
+                .map((v: number) => Math.round(v * 255).toString(16).padStart(2, "0"))
+                .join("");
+          }
+        } catch {}
+        annotations.push({
+          id: `pdf_${pageNumber}_rotrect_${Math.random().toString(36).substr(2, 9)}`,
+          type: "shape",
+          shapeType: "rectangle",
+          pageNumber,
+          x: num("NanodocX"),
+          y: num("NanodocY"),
+          width: num("NanodocW", 10),
+          height: num("NanodocH", 10),
+          rotation: num("NanodocRotation"),
+          strokeColor: polyColor,
+          strokeWidth: (() => {
+            try {
+              const bw = pdfAnnot.getBorderWidth?.();
+              return typeof bw === "number" && bw > 0 ? bw : 2;
+            } catch {
+              return 2;
+            }
+          })(),
+          pdfAnnotation: pdfAnnot,
+        } as Annotation);
+      }
+    } catch (e) {
+      console.warn("Could not inspect Polygon annotation:", e);
+    }
+    continue;
+  }
+
+  // PolyLine annotations use vertex lists; not editable in nanodoc yet.
+  // They are PRESERVED in the file (never deleted by the save pipeline).
+  if (type === "PolyLine") continue;
 
   // Skip Popup annotations — they're visual containers for comments on markup annotations (StrikeOut, Highlight)
   // The comment text is read from the parent annotation's Contents field instead
@@ -419,13 +550,17 @@ export class PDFAnnotationLoader {
   const pageBounds = page.getBounds();
   const pageHeight = pageBounds[3] - pageBounds[1];
 
-  // Helper: walk up Parent chain for inherited PDF properties
+  // Helper: walk up Parent chain for inherited PDF properties.
+  // CRITICAL: mupdf returns a TRUTHY null-PDFObject for missing keys —
+  // without the isNull() check the walk stopped at the widget dict and never
+  // reached the parent field where /T, /FT, /V actually live (pdf-lib and
+  // Adobe both structure single-widget fields that way).
   function getInheritedField(obj: any, key: string): any {
     let cur = obj;
-    while (cur) {
+    while (cur && !(cur.isNull?.() ?? false)) {
       try {
         const val = cur.get(key);
-        if (val) return val;
+        if (val && !(val.isNull?.() ?? false)) return val;
         cur = cur.get("Parent");
       } catch { break; }
     }
@@ -532,8 +667,8 @@ export class PDFAnnotationLoader {
     }
   }
 
-  // Value (V)
-  const vObj = annotObj.get("V");
+  // Value (V) — inherited: single-widget fields keep /V on the parent field dict
+  const vObj = getInheritedField(annotObj, "V");
   if (vObj) {
     if (fieldType === "checkbox" || fieldType === "radio") {
       const normalizedName = normName(vObj);
@@ -552,6 +687,24 @@ export class PDFAnnotationLoader {
     } else {
       fieldValue = false;
     }
+  }
+
+  // Prefer mupdf's widget API when present — it resolves inheritance and
+  // string decoding internally and returns clean JS values (raw dict
+  // toString() can yield PDF-syntax strings).
+  try {
+    const apiName = typeof (pdfAnnot as any).getLabel === "function" ? (pdfAnnot as any).getLabel() : null;
+    if (apiName && typeof apiName === "string") fieldName = apiName;
+    const apiValue = typeof (pdfAnnot as any).getValue === "function" ? (pdfAnnot as any).getValue() : null;
+    if (apiValue != null && apiValue !== "") {
+      if (fieldType === "checkbox" || fieldType === "radio") {
+        fieldValue = apiValue === "Yes" || apiValue === "On" || apiValue === true;
+      } else {
+        fieldValue = String(apiValue);
+      }
+    }
+  } catch {
+    // widget API unavailable — dict-parsed values above stand
   }
 
   // Radio group name

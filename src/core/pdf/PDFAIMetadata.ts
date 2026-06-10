@@ -24,22 +24,51 @@ export const AI_EMBEDDED_FILE_NAME = ".nanodoc-ai.json";
 const METADATA_VERSION = 1;
 
 /**
- * Encode payload for storage in PDF Keywords (same format as writeAIMetadata).
- * Used by ImageStampEmbedder to restore AI metadata after pdf-lib rewrite.
+ * PDF strings are limited to 65,535 bytes; large conversation histories can
+ * push the base64 payload past that, which truncates or corrupts the
+ * Keywords/Info entries in other viewers. When over budget, the Info-dict
+ * copies drop conversationHistory (the embedded .nanodoc-ai.json file and the
+ * sidecar always carry the full payload).
  */
-export function encodeAIMetadataForKeywords(payload: PDFAIMetadataPayload): string {
+const MAX_INFO_STRING_BYTES = 60_000;
+
+function encodeWithinBudget(payload: PDFAIMetadataPayload): string {
   const normalized: PDFAIMetadataPayload = {
     ...payload,
     version: payload.version ?? METADATA_VERSION,
   };
-  const json = JSON.stringify(normalized);
-  const encoded = btoa(unescape(encodeURIComponent(json)));
-  return KEYWORDS_PREFIX + encoded;
+  let encoded = btoa(unescape(encodeURIComponent(JSON.stringify(normalized))));
+  if (encoded.length > MAX_INFO_STRING_BYTES && normalized.conversationHistory) {
+    const { conversationHistory: _dropped, ...rest } = normalized;
+    console.warn(
+      "[PDFAIMetadata] Payload exceeds PDF string budget — omitting conversation history from Info/Keywords (embedded file keeps the full copy)"
+    );
+    encoded = btoa(unescape(encodeURIComponent(JSON.stringify(rest))));
+  }
+  return encoded;
+}
+
+/**
+ * Encode payload for storage in PDF Keywords (same format as writeAIMetadata).
+ * Used by ImageStampEmbedder to restore AI metadata after pdf-lib rewrite.
+ */
+export function encodeAIMetadataForKeywords(payload: PDFAIMetadataPayload): string {
+  return KEYWORDS_PREFIX + encodeWithinBudget(payload);
 }
 
 export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
+}
+
+/** App-created bookmark, JSON-safe (`created` is an ISO string, not a Date). */
+export interface SerializedBookmark {
+  id: string;
+  pageNumber: number;
+  title: string;
+  text?: string;
+  position?: { x: number; y: number };
+  created: string;
 }
 
 export interface PDFAIMetadataPayload {
@@ -52,6 +81,8 @@ export interface PDFAIMetadataPayload {
   conversationHistory?: {
     messages: ConversationMessage[];
   };
+  /** User-created bookmarks; restored into app state when the PDF is reopened */
+  bookmarks?: SerializedBookmark[];
 }
 
 const AI_METADATA_KEYS = [PDF_AI_METADATA_KEY, PDF_AI_METADATA_KEY_ALT, "info:nanodocai"] as const;
@@ -135,8 +166,7 @@ export function writeAIMetadata(mupdfDoc: any, payload: PDFAIMetadataPayload): v
       ...payload,
       version: payload.version ?? METADATA_VERSION,
     };
-    const json = JSON.stringify(normalized);
-    const encoded = btoa(unescape(encodeURIComponent(json)));
+    const encoded = encodeWithinBudget(normalized);
     mupdfDoc.setMetaData(PDF_AI_METADATA_KEY, encoded);
     mupdfDoc.setMetaData(KEYWORDS_KEY, KEYWORDS_PREFIX + encoded);
   } catch (e) {

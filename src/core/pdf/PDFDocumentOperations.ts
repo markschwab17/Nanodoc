@@ -20,6 +20,35 @@ export class PDFDocumentOperations {
     private _pageOps: PDFPageOperations
   ) {}
 
+  /** Annotations that failed to sync in the current batch (flushed as one toast). */
+  private syncFailures: string[] = [];
+  private syncFailureFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Surface annotation-sync failures to the user instead of swallowing them.
+   * Batched: many annotations sync per save, so failures within a short
+   * window produce a single notification.
+   */
+  private reportSyncFailure(annot: Annotation, _error: unknown): void {
+    this.syncFailures.push(`${annot.type} (page ${annot.pageNumber + 1})`);
+    if (this.syncFailureFlushTimer) return;
+    this.syncFailureFlushTimer = setTimeout(() => {
+      this.syncFailureFlushTimer = null;
+      const failures = this.syncFailures.splice(0);
+      if (failures.length === 0) return;
+      import("@/shared/stores/notificationStore")
+        .then(({ useNotificationStore }) => {
+          useNotificationStore
+            .getState()
+            .showNotification(
+              `${failures.length} annotation${failures.length > 1 ? "s" : ""} could not be written to the PDF (${failures.slice(0, 3).join(", ")}${failures.length > 3 ? ", …" : ""})`,
+              "error"
+            );
+        })
+        .catch(() => {});
+    }, 300);
+  }
+
   async syncAllAnnotations(
 
   document: PDFDocument,
@@ -183,6 +212,19 @@ export class PDFDocumentOperations {
           if (pdfType === "Line" || pdfType === "Square" || pdfType === "Circle") {
             annotationsToDelete.push(pdfAnnot);
           }
+          // Delete OUR rotated-rectangle Polygons (flagged with NanodocShape);
+          // foreign Polygon/PolyLine annotations are preserved untouched.
+          if (pdfType === "Polygon") {
+            try {
+              const annotObj = pdfAnnot.getObject();
+              const shapeKey = annotObj?.get?.("NanodocShape");
+              if (shapeKey && !(shapeKey.isNull?.() ?? false)) {
+                annotationsToDelete.push(pdfAnnot);
+              }
+            } catch (e) {
+              // Can't inspect — leave it alone (preservation is the safe default)
+            }
+          }
           // Delete custom text annotations (FreeText with CustomAnnotation flag)
           // Also delete stamp annotations (FreeText with StampAnnotation flag, or Stamp type)
           // Also delete image annotations (FreeText with ImageAnnotation/ImageType flag)
@@ -249,7 +291,13 @@ export class PDFDocumentOperations {
       }
       
       // Also delete Widget annotations (form fields) - they don't appear in getAnnotations()
-      // so we need to iterate the Annots array directly
+      // so we need to iterate the Annots array directly.
+      // ONLY when this save will rewrite form fields from the store
+      // (delete-then-recreate). Unconditional deletion here used to destroy
+      // externally-created AcroForms on every save, even when the editor had
+      // no form fields loaded at all.
+      const willRewriteFormFields = !!annotations?.some((a) => a.type === "formField");
+      if (willRewriteFormFields) {
       try {
         const pageObj = page.getObject();
         if (pageObj) {
@@ -316,7 +364,8 @@ export class PDFDocumentOperations {
       } catch (e) {
         // Skip if we can't update AcroForm
       }
-      
+      } // end willRewriteFormFields guard
+
       if (annotationsToDelete.length > 0) {
         // Delete all matching annotations
         for (const pdfAnnot of annotationsToDelete) {
@@ -601,7 +650,13 @@ export class PDFDocumentOperations {
     }
   }
 
-  const buffer = pdfDoc.saveToBuffer();
+  // Encrypted sources: save explicitly decrypted so output is CONSISTENT
+  // across all save paths (the pdf-lib post-passes below cannot write
+  // encrypted files). The UI warns the user before this happens (owner
+  // decision: detect + warn + save unencrypted).
+  const buffer = document.isEncrypted()
+    ? pdfDoc.saveToBuffer("decrypt")
+    : pdfDoc.saveToBuffer();
   let savedData = buffer.asUint8Array();
 
   for (let i = 0; i < annotsToHide.length; i++) {
@@ -632,6 +687,23 @@ export class PDFDocumentOperations {
       savedData = await embedder.embedStamps(savedData, allToEmbed, aiMetadata ?? undefined);
     } catch (embedError) {
       console.error('[PDFDocumentOperations] Failed to embed stamps/images:', embedError);
+    }
+  }
+
+  // Form fields: written as REAL AcroForm fields via pdf-lib in a post-pass.
+  // mupdf WASM cannot create functional Widgets ("cannot create appearance
+  // stream for widgets") — fields written through it never appeared in any
+  // viewer. The mupdf-side widget deletion above already cleared old copies.
+  const formFieldsToEmbed = annotations
+    ? annotations.filter((annot) => annot.type === "formField" && !!annot.fieldType)
+    : [];
+  if (formFieldsToEmbed.length > 0) {
+    try {
+      const { FormFieldEmbedder } = await import('./FormFieldEmbedder');
+      savedData = await new FormFieldEmbedder().embedFields(savedData, formFieldsToEmbed);
+    } catch (formError) {
+      console.error('[PDFDocumentOperations] Failed to embed form fields:', formError);
+      for (const f of formFieldsToEmbed) this.reportSyncFailure(f, formError);
     }
   }
 
@@ -1591,54 +1663,16 @@ export class PDFDocumentOperations {
 
   try {
 
-  // For form fields, update existing ones or create new ones
+  // Form fields are NOT written through mupdf — its WASM build cannot
+  // create functional Widget annotations ("cannot create appearance stream
+  // for widgets") and they never register under /AcroForm. The widgets for
+  // this page were deleted above (delete-then-recreate) and the save's
+  // pdf-lib post-pass (FormFieldEmbedder) writes real AcroForm fields from
+  // these store annotations. Clear stale references and skip here.
 
   if (annot.type === "formField") {
 
-  if (annot.pdfAnnotation) {
-
-  // Update existing form field value and properties
-
-  await this.annotationOps.updateFormFieldValue(document, annot);
-
-  // Also update position/size if changed
-
-  if (annot.x !== undefined && annot.y !== undefined && annot.width !== undefined && annot.height !== undefined) {
-
-  const page = pdfDoc.loadPage(pageNumber);
-
-  const pageBounds = page.getBounds();
-
-  const pageHeight = pageBounds[3] - pageBounds[1];
-
-  const y = pageHeight - annot.y - annot.height;
-
-  const rect: [number, number, number, number] = [
-
-  annot.x,
-
-  y,
-
-  annot.x + annot.width,
-
-  y + annot.height,
-
-  ];
-
-  annot.pdfAnnotation.setRect(rect);
-
-  annot.pdfAnnotation.update();
-
-  }
-
-  } else {
-
-  // Create new form field
-
-  // Pass the page object to ensure we're working with the same page instance
-  await this.annotationOps.addFormFieldAnnotation(document, annot, page);
-
-  }
+  annot.pdfAnnotation = undefined;
 
   continue;
 
@@ -2910,6 +2944,9 @@ export class PDFDocumentOperations {
   } catch (error) {
 
   console.error(`Error syncing annotation ${annot.id}:`, error);
+  // Surface the failure — a swallowed error here means the user's markup
+  // silently never reaches the saved PDF.
+  this.reportSyncFailure(annot, error);
 
   }
 

@@ -91,10 +91,6 @@ export function ExportDialog({
         convertedPages = await converter.convertToJPEG(document, options);
       } else if (format === "webp") {
         convertedPages = await converter.convertToWebP(document, options);
-      } else if (format === "tiff") {
-        convertedPages = await converter.convertToTIFF(document, options);
-      } else if (format === "bmp") {
-        convertedPages = await converter.convertToBMP(document, options);
       } else if (format === "svg") {
         convertedPages = await converter.convertToSVG(document, options);
       } else if (format === "html") {
@@ -183,8 +179,6 @@ export function ExportDialog({
                 <SelectItem value="png">PNG (High Quality)</SelectItem>
                 <SelectItem value="jpeg">JPEG (Compressed)</SelectItem>
                 <SelectItem value="webp">WebP (Modern Format)</SelectItem>
-                <SelectItem value="tiff">TIFF (Archival)</SelectItem>
-                <SelectItem value="bmp">BMP (Bitmap)</SelectItem>
                 <SelectItem value="svg">SVG (Vector)</SelectItem>
                 <SelectItem value="html">HTML (Web Page)</SelectItem>
                 <SelectItem value="txt">TXT (Plain Text)</SelectItem>
@@ -193,7 +187,7 @@ export function ExportDialog({
           </div>
 
           {/* DPI Setting (for images) */}
-          {(format === "png" || format === "jpeg" || format === "webp" || format === "tiff" || format === "bmp" || format === "svg") && (
+          {(format === "png" || format === "jpeg" || format === "webp" || format === "svg") && (
             <div className="space-y-2">
               <Label htmlFor="dpi">Resolution (DPI)</Label>
               <Select

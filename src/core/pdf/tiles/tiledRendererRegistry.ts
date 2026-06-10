@@ -32,6 +32,28 @@ export function getOrCreateTiledRenderer(
   return renderer;
 }
 
+/** Lookup-only access; returns undefined when no renderer exists for the doc. */
+export function getTiledRenderer(docId: string): TiledPageRenderer | undefined {
+  return cache.get(docId);
+}
+
+/**
+ * Drop every cached tile for a document after its content changed (e.g. a
+ * redaction baked into the page), and notify mounted TiledCanvas instances
+ * to re-request their viewports. No-op when the tile renderer isn't active
+ * for the doc.
+ */
+export function invalidateTiledRendererForDoc(docId: string): void {
+  const renderer = cache.get(docId);
+  if (!renderer) return;
+  renderer.invalidate();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("nanodoc:tiles-invalidated", { detail: { docId } }),
+    );
+  }
+}
+
 export function destroyTiledRenderer(docId: string): void {
   const renderer = cache.get(docId);
   if (renderer) {

@@ -13,8 +13,9 @@ import { useUIStore } from "@/shared/stores/uiStore";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
-import { PDFDocument } from "@/core/pdf/PDFDocument";
+import { PDFDocument, PasswordRequiredError } from "@/core/pdf/PDFDocument";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
+import { usePasswordPromptStore } from "@/shared/stores/passwordPromptStore";
 import { readAIMetadata, readAIMetadataFromEmbeddedFile, type PDFAIMetadataPayload } from "@/core/pdf/PDFAIMetadata";
 import {
   isBrowserAiStorageAvailable,
@@ -51,8 +52,25 @@ export function usePDF() {
 
         const documentId = `pdf_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const document = new PDFDocument(documentId, name, data.length);
-        
-        await document.loadFromData(data, mupdf);
+
+        // Password-protected PDFs: prompt and retry until correct or cancelled.
+        let password: string | undefined;
+        for (;;) {
+          try {
+            await document.loadFromData(data, mupdf, password);
+            break;
+          } catch (e) {
+            if (e instanceof PasswordRequiredError) {
+              const entered = await usePasswordPromptStore.getState().ask(name, e.wrongPassword);
+              if (entered == null) {
+                throw new Error("This PDF is password-protected. Password required to open it.");
+              }
+              password = entered;
+              continue;
+            }
+            throw e;
+          }
+        }
         
         const normalizedFilePath = filePath
           ? filePath.trim().replace(/^file:\/\//i, "").replace(/\\/g, "/").replace(/\/+$/, "")
@@ -72,7 +90,8 @@ export function usePDF() {
             const hasSpecs = Array.isArray(parsed?.extractedSpecs) && parsed.extractedSpecs.length > 0;
             const hasGeo = Array.isArray(parsed?.geotechnicalSummary) && parsed.geotechnicalSummary.length > 0 && parsed.geotechnicalScope;
             const hasConv = Array.isArray(parsed?.conversationHistory?.messages) && parsed.conversationHistory.messages.length > 0;
-            if (parsed?.version != null && (hasSpecs || hasGeo || hasConv)) {
+            const hasBookmarks = Array.isArray(parsed?.bookmarks) && parsed.bookmarks.length > 0;
+            if (parsed?.version != null && (hasSpecs || hasGeo || hasConv || hasBookmarks)) {
               aiPayload = parsed;
             }
           } catch {
@@ -87,7 +106,8 @@ export function usePDF() {
               const hasSpecs = Array.isArray(stored?.extractedSpecs) && stored.extractedSpecs.length > 0;
               const hasGeo = Array.isArray(stored?.geotechnicalSummary) && stored.geotechnicalSummary.length > 0 && stored.geotechnicalScope;
               const hasConv = Array.isArray(stored?.conversationHistory?.messages) && stored.conversationHistory.messages.length > 0;
-              if (stored?.version != null && (hasSpecs || hasGeo || hasConv)) {
+              const hasBookmarks = Array.isArray(stored?.bookmarks) && stored.bookmarks.length > 0;
+              if (stored?.version != null && (hasSpecs || hasGeo || hasConv || hasBookmarks)) {
                 aiPayload = stored;
               }
             }
@@ -120,6 +140,18 @@ export function usePDF() {
         }
         if (aiPayload?.conversationHistory?.messages?.length) {
           useConversationStore.getState().setMessages(documentId, aiPayload.conversationHistory.messages);
+        }
+        if (aiPayload?.bookmarks?.length) {
+          for (const b of aiPayload.bookmarks) {
+            pdfStore.addBookmark(documentId, {
+              id: b.id,
+              pageNumber: b.pageNumber,
+              title: b.title,
+              text: b.text,
+              position: b.position,
+              created: new Date(b.created),
+            });
+          }
         }
 
         // Add to recent files if we have a file path (use normalized path for consistency with sidecar)

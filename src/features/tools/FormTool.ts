@@ -7,6 +7,7 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 let isCreatingField = false;
 let fieldStart: { x: number; y: number } | null = null;
@@ -99,7 +100,15 @@ export const FormTool: ToolHandler = {
         ...getTypeDefaults(currentFieldType, size),
       };
 
-      addAnnotation(currentDocument.getId(), annotation);
+      wrapAnnotationOperation(
+        () => {
+          addAnnotation(currentDocument.getId(), annotation);
+        },
+        "addAnnotation",
+        currentDocument.getId(),
+        annotation.id,
+        annotation
+      );
       useUIStore.getState().setActiveTool("select");
       context.setEditingAnnotation(annotation);
 
@@ -184,7 +193,15 @@ export const FormTool: ToolHandler = {
       ...getTypeDefaults(currentFieldType, finalHeight),
     };
 
-    addAnnotation(currentDocument.getId(), annotation);
+    wrapAnnotationOperation(
+      () => {
+        addAnnotation(currentDocument.getId(), annotation);
+      },
+      "addAnnotation",
+      currentDocument.getId(),
+      annotation.id,
+      annotation
+    );
     useUIStore.getState().setActiveTool("select");
     context.setEditingAnnotation(annotation);
 

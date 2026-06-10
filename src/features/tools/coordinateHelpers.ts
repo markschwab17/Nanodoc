@@ -90,3 +90,41 @@ export function validatePDFRect(
 
 
 
+
+/**
+ * Cap a one-shot capture/refresh render scale so the rendered pixmap stays
+ * within a safe pixel budget. Mirrors PageCanvas's capRenderScale policy:
+ * huge sheets (site plans) get a hard low budget, normal pages scale with
+ * sqrt(area). Additionally bounds the CROP region's pixels so the synchronous
+ * main-thread steps (putImageData, toDataURL) stay fast.
+ *
+ * Without this, capturing a selection on an Arch-D construction sheet
+ * rendered the FULL page at up to 4x — a 70+ megapixel (~280 MB) pixmap that
+ * times out the render worker and freezes the tab.
+ */
+export function capCaptureScale(
+  pageWidth: number,
+  pageHeight: number,
+  cropWidth: number,
+  cropHeight: number,
+  idealScale: number
+): number {
+  const LETTER_AREA = 612 * 792;
+  const HUGE_PAGE_AREA = LETTER_AREA * 18; // ~36x48" and above
+  const pageArea = Math.max(1, pageWidth * pageHeight);
+
+  // Full-page render budget (the capture renders the whole page, then crops)
+  const pageBudget =
+    pageArea >= HUGE_PAGE_AREA
+      ? 8_000_000
+      : Math.min(32_000_000, Math.max(8_000_000, 8_000_000 * Math.sqrt(pageArea / LETTER_AREA)));
+
+  // Crop budget: the cropped region is PNG-encoded synchronously on the main
+  // thread, so keep it bounded regardless of page size.
+  const CROP_BUDGET = 8_000_000;
+  const cropArea = Math.max(1, cropWidth * cropHeight);
+
+  const byPage = Math.sqrt(pageBudget / pageArea);
+  const byCrop = Math.sqrt(CROP_BUDGET / cropArea);
+  return Math.min(idealScale, byPage, byCrop);
+}

@@ -14,6 +14,12 @@ export interface ToolContext {
   currentDocument: PDFDocument | null;
   annotations: Annotation[];
   activeTool: string;
+  /**
+   * True when this PageCanvas is in read mode (continuous multi-page view).
+   * Tools are expected to work in read mode too (FEATURE_BUG_TODO.md);
+   * handlers can use this to adjust coordinate/scale assumptions.
+   */
+  readMode: boolean;
   getPDFCoordinates: (e: React.MouseEvent) => { x: number; y: number } | null;
   pdfToCanvas: (pdfX: number, pdfY: number) => { x: number; y: number };
   pdfToContainer: (pdfX: number, pdfY: number) => { x: number; y: number };

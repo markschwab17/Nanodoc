@@ -9,9 +9,10 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
-import { normalizeSelectionToRect, validatePDFRect } from "./coordinateHelpers";
+import { normalizeSelectionToRect, validatePDFRect, capCaptureScale } from "./coordinateHelpers";
 import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { invalidateTiledRendererForDoc } from "@/core/pdf/tiles/tiledRendererRegistry";
 
 export const SelectionBoxTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -91,10 +92,24 @@ export const SelectionBoxTool: ToolHandler = {
 
     try {
       // ── Step 1: Capture the selected region as PNG ──────────────────────
-      const captureScale = Math.min(
-        2 * (window.devicePixelRatio || 1),
-        4
+      // The capture renders the FULL page and crops the selection out of it.
+      // Cap the scale by page + crop pixel budgets: an Arch-D sheet at the
+      // uncapped 4x was a 70+ MP (~280 MB) render that timed out the worker
+      // and froze the tab on putImageData/toDataURL.
+      const idealScale = Math.min(2 * (window.devicePixelRatio || 1), 4);
+      const captureScale = capCaptureScale(
+        pageMetadata.width,
+        pageMetadata.height,
+        rect.width,
+        rect.height,
+        idealScale
       );
+
+      // Surface progress before the heavy work; yield once so it paints.
+      useNotificationStore
+        .getState()
+        .showNotification("Capturing selection…", "info");
+      await new Promise((resolve) => setTimeout(resolve, 0));
 
       const rendered = await renderer.renderPage(
         currentDocument.getMupdfDocument(),
@@ -172,8 +187,11 @@ export const SelectionBoxTool: ToolHandler = {
 
       await editor.addRedactionAnnotation(currentDocument, redactAnnotation);
 
-      // Clear caches and force re-render
+      // Clear caches and force re-render (legacy renderer + tile pyramid —
+      // with tiles active the legacy canvas isn't mounted, so without the
+      // tile invalidation the user keeps seeing the un-redacted content).
       renderer.clearCache();
+      invalidateTiledRendererForDoc(currentDocument.getId());
       currentDocument.refreshPageMetadata();
 
       const mupdfDoc = currentDocument.getMupdfDocument();

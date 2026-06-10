@@ -1,5 +1,4 @@
 import type { FileSystemInterface } from "./FileSystemInterface";
-import JSZip from "jszip";
 
 /**
  * Browser File System Implementation
@@ -127,6 +126,9 @@ export class BrowserFileSystem implements FileSystemInterface {
     files: Array<{ data: Uint8Array; name: string }>,
     zipFileName: string
   ): Promise<void> {
+    // jszip is only needed for ZIP export — load it on demand instead of
+    // shipping it in the startup bundle.
+    const JSZip = (await import("jszip")).default;
     const zip = new JSZip();
     
     // Add all files to the ZIP

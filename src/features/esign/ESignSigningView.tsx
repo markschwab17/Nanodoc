@@ -72,7 +72,7 @@ export default function ESignSigningView({ documentSubject }: Props) {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.message || "Failed to submit signature");
+        throw new Error(data.message || `Failed to submit signature (HTTP ${res.status})`);
       }
 
       setSubmitted(true);

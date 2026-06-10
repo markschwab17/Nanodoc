@@ -22,6 +22,15 @@ export interface PDFDocumentMetadata {
   hasCoverPage?: boolean; // True if page 0 is a cover/title page that users don't count
 }
 
+/** Thrown by loadFromData when the PDF requires a password (none given or wrong). */
+export class PasswordRequiredError extends Error {
+  readonly code = "PASSWORD_REQUIRED";
+  constructor(public readonly wrongPassword: boolean) {
+    super(wrongPassword ? "Wrong password" : "Password required");
+    this.name = "PasswordRequiredError";
+  }
+}
+
 export class PDFDocument {
   private mupdfDoc: any = null;
   private metadata: PDFDocumentMetadata;
@@ -29,6 +38,8 @@ export class PDFDocument {
   private originalFilePath: string | null = null;
   private metadataListeners: Set<() => void> = new Set();
   private pdfData: Uint8Array | null = null;
+  /** True when the source file had an /Encrypt dictionary (password OR owner-restrictions). */
+  private encrypted: boolean = false;
 
   constructor(id: string, name: string, fileSize: number) {
     this.metadata = {
@@ -62,54 +73,85 @@ export class PDFDocument {
     return this.pdfData;
   }
 
-  async loadFromData(data: Uint8Array, mupdf: any): Promise<void> {
+  /**
+   * Read one page's display dimensions + rotation. mupdf's getBounds()
+   * already returns rotated dimensions (it applies the PDF's Rotate field
+   * automatically) — do NOT manually swap, that would double-swap.
+   */
+  private readPageMetadata(i: number): PDFPageMetadata {
+    const page = this.mupdfDoc.loadPage(i);
+    const bounds = page.getBounds(); // [x0, y0, x1, y1] with rotation applied
+
+    // Read actual rotation from page dictionary
+    let rotation = 0;
+    try {
+      const pageObj = page.getObject();
+      if (pageObj) {
+        const rotateValue = pageObj.get("Rotate");
+        if (rotateValue !== null && rotateValue !== undefined) {
+          if (typeof rotateValue === 'number') {
+            rotation = rotateValue;
+          } else if (rotateValue.valueOf && typeof rotateValue.valueOf === 'function') {
+            rotation = rotateValue.valueOf();
+          } else if (typeof rotateValue === 'object' && 'value' in rotateValue) {
+            rotation = rotateValue.value;
+          }
+        }
+      }
+    } catch (e) {
+      // Rotation might not be available, default to 0
+      rotation = 0;
+    }
+
+    // Normalize rotation to 0-360 range
+    rotation = ((rotation % 360) + 360) % 360;
+
+    return {
+      pageNumber: i,
+      width: bounds[2] - bounds[0],
+      height: bounds[3] - bounds[1],
+      rotation,
+    };
+  }
+
+  async loadFromData(data: Uint8Array, mupdf: any, password?: string): Promise<void> {
     try {
       this.pdfData = data;
       this.mupdfDoc = mupdf.Document.openDocument(data, "application/pdf");
-      
+
+      // Password-protected files: authenticate or fail loudly so the UI can
+      // prompt. Without this, page loads below would fail in confusing ways.
+      if (typeof this.mupdfDoc.needsPassword === "function" && this.mupdfDoc.needsPassword()) {
+        const ok = password ? this.mupdfDoc.authenticatePassword(password) !== 0 : false;
+        if (!ok) throw new PasswordRequiredError(!!password);
+      }
+
+      // Record encryption (incl. owner-restriction-only files that open
+      // without a password) — save uses this to decrypt explicitly and the
+      // UI uses it to warn that protection is removed on save.
+      try {
+        const pdf = this.mupdfDoc.asPDF?.();
+        const encDict = pdf?.getTrailer?.()?.get?.("Encrypt");
+        this.encrypted = !!encDict && !(encDict.isNull?.() ?? true);
+      } catch {
+        this.encrypted = false;
+      }
+
       this.metadata.pageCount = this.mupdfDoc.countPages();
       this.metadata.pages = [];
 
-      // Load page metadata
+      // Load page metadata in chunks, yielding to the event loop between
+      // chunks so a 100+ page plan set doesn't block the main thread (and
+      // freeze the loading indicator) for the whole loop.
+      const CHUNK = 25;
       for (let i = 0; i < this.metadata.pageCount; i++) {
-        const page = this.mupdfDoc.loadPage(i);
-        // IMPORTANT: mupdf's getBounds() already returns rotated dimensions
-        // (it applies the PDF's Rotate field automatically)
-        const bounds = page.getBounds(); // Returns [x0, y0, x1, y1] with rotation applied
-        
-        // Read actual rotation from page dictionary
-        let rotation = 0;
-        try {
-          const pageObj = page.getObject();
-          if (pageObj) {
-            const rotateValue = pageObj.get("Rotate");
-            if (rotateValue !== null && rotateValue !== undefined) {
-              if (typeof rotateValue === 'number') {
-                rotation = rotateValue;
-              } else if (rotateValue.valueOf && typeof rotateValue.valueOf === 'function') {
-                rotation = rotateValue.valueOf();
-              } else if (typeof rotateValue === 'object' && 'value' in rotateValue) {
-                rotation = rotateValue.value;
-              }
-            }
-          }
-        } catch (e) {
-          // Rotation might not be available, default to 0
-          rotation = 0;
+        this.metadata.pages.push(this.readPageMetadata(i));
+        if ((i + 1) % CHUNK === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
         }
-        
-        // Normalize rotation to 0-360 range
-        rotation = ((rotation % 360) + 360) % 360;
-        
-      this.metadata.pages.push({
-        pageNumber: i,
-        width: bounds[2] - bounds[0], // x1 - x0 (already rotated by mupdf)
-        height: bounds[3] - bounds[1], // y1 - y0 (already rotated by mupdf)
-        rotation: rotation,
-      });
-    }
+      }
 
-    this.isLoaded = true;
+      this.isLoaded = true;
     
     // Detect cover page: check if page 0 has significantly less text than page 1
     // This is done asynchronously after loading to avoid blocking
@@ -117,6 +159,7 @@ export class PDFDocument {
       console.warn("Error detecting cover page:", err);
     });
     } catch (error) {
+      if (error instanceof PasswordRequiredError) throw error;
       console.error("Error loading PDF document:", error);
       throw new Error(`Failed to load PDF: ${error}`);
     }
@@ -175,47 +218,7 @@ export class PDFDocument {
       this.metadata.pages = [];
       for (let i = 0; i < actualCount; i++) {
         try {
-          const page = this.mupdfDoc.loadPage(i);
-          // IMPORTANT: mupdf's getBounds() already returns rotated dimensions
-          // (it applies the PDF's Rotate field automatically)
-          // Do NOT manually swap dimensions - that would double-swap!
-          const bounds = page.getBounds();
-          
-          // Get rotation from page dictionary
-          let rotation = 0;
-          try {
-            const pageObj = page.getObject();
-            if (pageObj) {
-              const rotateValue = pageObj.get("Rotate");
-              if (rotateValue !== null && rotateValue !== undefined) {
-                if (typeof rotateValue === 'number') {
-                  rotation = rotateValue;
-                } else if (rotateValue.valueOf && typeof rotateValue.valueOf === 'function') {
-                  rotation = rotateValue.valueOf();
-                } else if (typeof rotateValue === 'object' && 'value' in rotateValue) {
-                  rotation = rotateValue.value;
-                }
-              }
-            }
-          } catch (e) {
-            // Rotation might not be available
-            rotation = 0;
-          }
-          
-          // Normalize rotation to 0-360 range
-          rotation = ((rotation % 360) + 360) % 360;
-          
-          // Use bounds directly - mupdf already applies rotation to getBounds()
-          const displayWidth = bounds[2] - bounds[0];
-          const displayHeight = bounds[3] - bounds[1];
-          
-          this.metadata.pages.push({
-            pageNumber: i,
-            width: displayWidth,
-            height: displayHeight,
-            rotation: rotation,
-          });
-          
+          this.metadata.pages.push(this.readPageMetadata(i));
         } catch (error) {
           console.error(`Error loading metadata for page ${i}:`, error);
         }
@@ -246,6 +249,11 @@ export class PDFDocument {
    */
   isDocumentLoaded(): boolean {
     return this.isLoaded;
+  }
+
+  /** True when the source file was encrypted (password or owner restrictions). */
+  isEncrypted(): boolean {
+    return this.encrypted;
   }
 
   /**

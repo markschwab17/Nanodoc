@@ -497,12 +497,15 @@ export class PDFAnnotationOperations {
 
   }
 
-  // For text highlights, use Highlight annotation with QuadPoints
-
+  // For text highlights, use Highlight annotation with QuadPoints.
+  // Missing quads is recoverable: fall back to a single quad derived from the
+  // annotation's bounding box rather than throwing. Throwing here used to be
+  // swallowed upstream, which silently DROPPED the highlight from the saved
+  // PDF — a worse outcome than a slightly coarser highlight rectangle.
   if (annotation.highlightMode === "text" && (!annotation.quads || annotation.quads.length === 0)) {
-
-  throw new Error("Text highlight annotation requires quads");
-
+    console.warn(
+      `Text highlight ${annotation.id} has no quads — falling back to bounding-box quad so it isn't lost on save`
+    );
   }
 
   // Fallback: generate quads from bounds if needed
@@ -911,6 +914,45 @@ export class PDFAnnotationOperations {
 
   }
 
+  /**
+   * Return any text whose line sits inside `rect` (fitz space, y-down) on the
+   * given page. Used to VERIFY redactions actually removed content. The rect
+   * is inset slightly and lines are tested by center-point so characters that
+   * legitimately survive at the very edges of a partially-overlapping line
+   * don't trigger false positives. Best-effort: returns "" if structured text
+   * is unavailable (never blocks a redaction on extraction failure alone).
+   */
+  private textRemainingInRect(page: any, rect: [number, number, number, number]): string {
+    try {
+      const json = JSON.parse(page.toStructuredText().asJSON());
+      const [rx0, ry0, rx1, ry1] = rect;
+      const insetX = Math.min(4, Math.max(0, (rx1 - rx0) * 0.2));
+      const insetY = Math.min(4, Math.max(0, (ry1 - ry0) * 0.2));
+      const x0 = rx0 + insetX;
+      const y0 = ry0 + insetY;
+      const x1 = rx1 - insetX;
+      const y1 = ry1 - insetY;
+      const found: string[] = [];
+      for (const block of json.blocks ?? []) {
+        if (block.type !== "text") continue;
+        for (const line of block.lines ?? []) {
+          const b = line.bbox;
+          if (!b) continue;
+          const cx = b.x + b.w / 2;
+          const cy = b.y + b.h / 2;
+          if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) {
+            const text = String(line.text ?? "").trim();
+            if (text) found.push(text);
+          }
+        }
+      }
+      return found.join(" ");
+    } catch (e) {
+      console.warn("Redaction content verification unavailable:", e);
+      return "";
+    }
+  }
+
   async addRedactionAnnotation(
 
   document: PDFDocument,
@@ -1137,6 +1179,20 @@ export class PDFAnnotationOperations {
 
   console.warn("This may indicate the content was not fully removed");
 
+  }
+
+  // CONTENT verification: applyRedactions() can report success while the
+  // text under the box survives (odd content streams, mupdf edge cases).
+  // Reporting success then would be a confidentiality failure — the user
+  // believes content is gone, sends the file, and Acrobat's search finds it.
+  // Extract text from the freshly reloaded page and fail loudly if any line
+  // still sits inside the redacted region.
+  const leftover = this.textRemainingInRect(page, rect);
+  if (leftover.length > 0) {
+    throw new Error(
+      `Redaction verification failed — text is still present in the redacted area ("${leftover.slice(0, 60)}"). ` +
+        `The content was NOT safely removed. Please try again; if it persists, this PDF's structure defeats redaction.`
+    );
   }
 
   // Force document metadata refresh to update cached page info
@@ -1561,6 +1617,58 @@ export class PDFAnnotationOperations {
 
   } else if (annotation.shapeType === "rectangle") {
 
+  // Rotated rectangles: Square annotations are axis-aligned in every viewer,
+  // so a rotation would silently disappear in Adobe/Preview/Chrome. Write a
+  // Polygon with the 4 rotated corners instead (renders correctly
+  // everywhere) and carry the original rect + angle in custom keys so OUR
+  // loader restores an editable rotated rectangle.
+  if (annotation.rotation && Math.abs(annotation.rotation) > 0.001) {
+
+  annot = page.createAnnotation("Polygon");
+
+  const w = annotation.width || 0;
+  const h = annotation.height || 0;
+  // Center in y-down page space (same space setRect uses)
+  const cx = annotation.x + w / 2;
+  const cy = pageHeight - (annotation.y + h / 2);
+  // CSS rotate() is clockwise-positive in y-down screen space; page space
+  // here is also y-down, so the same rotation matrix applies directly.
+  const cos = Math.cos(annotation.rotation);
+  const sin = Math.sin(annotation.rotation);
+  const corners: Array<[number, number]> = (
+    [
+      [-w / 2, -h / 2],
+      [w / 2, -h / 2],
+      [w / 2, h / 2],
+      [-w / 2, h / 2],
+    ] as Array<[number, number]>
+  ).map(([dx, dy]) => [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]);
+
+  // NOTE: no setRect here — mupdf derives a Polygon's /Rect from its
+  // vertices on update(), and calling setRect on a Polygon throws.
+  try {
+    annot.setVertices(corners);
+  } catch (e) {
+    console.warn("Could not set Polygon vertices for rotated rectangle:", e);
+  }
+
+  // Round-trip metadata for our own loader
+  try {
+    const annotObj = annot.getObject();
+    if (annotObj) {
+      annotObj.put("NanodocShape", "rectangle");
+      annotObj.put("NanodocRotation", annotation.rotation);
+      annotObj.put("NanodocX", annotation.x);
+      annotObj.put("NanodocY", annotation.y);
+      annotObj.put("NanodocW", w);
+      annotObj.put("NanodocH", h);
+    }
+  } catch (e) {
+    console.warn("Could not store rotation metadata on Polygon:", e);
+  }
+
+  } else {
+
   // Create Square annotation
 
   annot = page.createAnnotation("Square");
@@ -1580,6 +1688,8 @@ export class PDFAnnotationOperations {
   ];
 
   annot.setRect(rect);
+
+  }
 
   } else if (annotation.shapeType === "circle") {
 

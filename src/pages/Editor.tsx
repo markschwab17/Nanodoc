@@ -35,6 +35,11 @@ import { LoadingIndicator } from "@/shared/components/LoadingIndicator";
 import { wrapAnnotationUpdate } from "@/shared/stores/undoHelpers";
 import { useUndoRedo } from "@/shared/hooks/useUndoRedo";
 import { useAutoSave } from "@/shared/hooks/useAutoSave";
+import { useCloseGuard } from "@/shared/hooks/useCloseGuard";
+import { useSessionRestore } from "@/shared/hooks/useSessionRestore";
+import { DraftRecoveryModal } from "@/shared/components/DraftRecoveryModal";
+import { PasswordPromptModal } from "@/shared/components/PasswordPromptModal";
+import { UpdateChecker } from "@/features/updater/UpdateChecker";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUndoRedoStore } from "@/shared/stores/undoRedoStore";
 import { TourOverlay } from "@/features/tour/TourOverlay";
@@ -63,6 +68,8 @@ function Editor() {
   const { showNotification } = useNotificationStore();
   const { undo, redo, canUndo, canRedo } = useUndoRedo();
   useAutoSave();
+  useCloseGuard();
+  useSessionRestore();
   const [showRecentFilesOnStartup, setShowRecentFilesOnStartup] = useState(false);
   const [showStampCreator, setShowStampCreator] = useState(false);
   const [stampGalleryWidth, setStampGalleryWidth] = useState(320); // Default width in pixels
@@ -536,15 +543,27 @@ function Editor() {
   }, [tabs, setCurrentDocument]);
 
   // Show recent files modal on startup if no PDF is loaded and recent files exist
+  // (skipped when crash-recovery drafts exist — DraftRecoveryModal takes priority)
   useEffect(() => {
     if (!currentDocument) {
       const recentFiles = getRecentFiles();
       if (recentFiles.length > 0) {
+        let cancelled = false;
         // Small delay to ensure UI is ready
         const timer = setTimeout(() => {
-          setShowRecentFilesOnStartup(true);
+          import("@/shared/browserDraftStorage")
+            .then(({ listDrafts }) => listDrafts())
+            .then((drafts) => {
+              if (!cancelled && drafts.length === 0) setShowRecentFilesOnStartup(true);
+            })
+            .catch(() => {
+              if (!cancelled) setShowRecentFilesOnStartup(true);
+            });
         }, 500);
-        return () => clearTimeout(timer);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
       }
     } else {
       setShowRecentFilesOnStartup(false);
@@ -619,7 +638,16 @@ function Editor() {
       
       {/* Notification Toast */}
       <NotificationToast />
-      
+
+      {/* Auto-update check (Tauri only; no-ops in browser) */}
+      <UpdateChecker />
+
+      {/* Crash-recovery drafts found on startup */}
+      <DraftRecoveryModal />
+
+      {/* Password prompt for protected PDFs */}
+      <PasswordPromptModal />
+
       {/* Loading Indicator */}
       <LoadingIndicator isLoading={loading} />
       

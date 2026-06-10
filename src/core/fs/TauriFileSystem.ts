@@ -1,8 +1,27 @@
 import type { FileSystemInterface } from "./FileSystemInterface";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { readFile as tauriReadFile, writeFile as tauriWriteFile } from "@tauri-apps/plugin-fs";
-import { platform } from "@tauri-apps/plugin-os";
-import JSZip from "jszip";
+import { readFile as tauriReadFile, writeFile as tauriWriteFile, rename as tauriRename, remove as tauriRemove } from "@tauri-apps/plugin-fs";
+
+/**
+ * Atomic file write: write to a temp file in the same directory, then rename
+ * over the target. If the process dies mid-write the original file is intact
+ * (only the .tmp file is partial). rename() on the same filesystem is atomic.
+ */
+export async function atomicWriteFile(filePath: string, data: Uint8Array): Promise<void> {
+  const tmpPath = `${filePath}.nanodoc-tmp`;
+  try {
+    await tauriWriteFile(tmpPath, data);
+    await tauriRename(tmpPath, filePath);
+  } catch (error) {
+    // Best-effort cleanup of the temp file; the original is untouched.
+    try {
+      await tauriRemove(tmpPath);
+    } catch {
+      // temp file may not exist
+    }
+    throw error;
+  }
+}
 
 /**
  * Tauri File System Implementation
@@ -53,18 +72,22 @@ export class TauriFileSystem implements FileSystemInterface {
   /**
    * Opens the save dialog and returns the chosen path without writing.
    * Use for Save As when the path is needed for sidecar files before the main file is written.
+   * `defaultDir` (e.g. the source file's folder) takes precedence over Desktop.
    */
-  async getSavePath(name: string): Promise<string | null> {
+  async getSavePath(name: string, defaultDir?: string | null): Promise<string | null> {
     try {
-      const desktopPath = await this.getDesktopPath();
+      const dir = defaultDir || (await this.getDesktopPath());
       const filePath = await save({
-        defaultPath: `${desktopPath}/${name}`,
+        defaultPath: `${dir}/${name}`,
         filters: [
           { name: "PDF", extensions: ["pdf"] },
           { name: "All Files", extensions: ["*"] },
         ],
       });
-      return filePath ?? null;
+      if (!filePath) return null;
+      // Enforce .pdf so a typed name without extension still produces a
+      // file other applications recognize.
+      return /\.pdf$/i.test(filePath) ? filePath : `${filePath}.pdf`;
     } catch (error) {
       console.error("Error getting save path:", error);
       return null;
@@ -97,8 +120,9 @@ export class TauriFileSystem implements FileSystemInterface {
         throw new Error("No file path selected");
       }
 
-      await tauriWriteFile(filePath, data);
-      return filePath;
+      const finalPath = /\.pdf$/i.test(filePath) ? filePath : `${filePath}.pdf`;
+      await atomicWriteFile(finalPath, data);
+      return finalPath;
     } catch (error) {
       console.error("Error saving file:", error);
       throw error;
@@ -118,40 +142,36 @@ export class TauriFileSystem implements FileSystemInterface {
   }
 
   /**
-   * Gets the desktop directory path.
-   * Falls back to home directory if desktop cannot be determined.
+   * Gets the desktop directory path via Tauri's path API.
+   *
+   * The previous implementation read process.env.HOME/USERPROFILE, which do
+   * NOT exist in the Tauri webview — every save dialog defaulted to a literal
+   * "~/Desktop" string that nothing expands. Falls back to the home directory
+   * if the desktop dir cannot be determined.
    */
   async getDesktopPath(): Promise<string> {
     try {
-      // For Tauri 2.0, we'll construct the path based on platform
-      const osPlatform = await platform();
-      
-      // Platform can be: "macos", "ios", "windows", "linux", "android", etc.
-      if (osPlatform === "macos" || osPlatform === "linux") {
-        // Use environment variable or default
-        const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
-        return `${homeDir}/Desktop`;
-      } else if (osPlatform === "windows") {
-        const homeDir = process.env.USERPROFILE || process.env.HOMEPATH || "~";
-        return `${homeDir}\\Desktop`;
-      }
-      
-      // Fallback to home directory
-      const homeDir = process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || "~";
-      return homeDir;
+      const { desktopDir } = await import("@tauri-apps/api/path");
+      return await desktopDir();
+    } catch {
+      // e.g. headless or sandboxed environments without a desktop dir
+    }
+    try {
+      const { homeDir } = await import("@tauri-apps/api/path");
+      return await homeDir();
     } catch (error) {
       console.error("Error getting desktop path:", error);
-      // Fallback to current directory or home
-      return process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || ".";
+      return ".";
     }
   }
 
   /**
-   * Saves a file to a specific path.
+   * Saves a file to a specific path (atomic: temp file + rename, so a crash
+   * mid-write never corrupts the existing file).
    */
   async saveFileToPath(data: Uint8Array, filePath: string): Promise<void> {
     try {
-      await tauriWriteFile(filePath, data);
+      await atomicWriteFile(filePath, data);
     } catch (error) {
       console.error("Error saving file to path:", error);
       throw error;
@@ -197,7 +217,8 @@ export class TauriFileSystem implements FileSystemInterface {
         throw new Error("No file path selected");
       }
 
-      await tauriWriteFile(filePath, data);
+      const finalPath = /\.pdf$/i.test(filePath) ? filePath : `${filePath}.pdf`;
+      await atomicWriteFile(finalPath, data);
     } catch (error) {
       console.error("Error saving file:", error);
       throw error;
@@ -212,7 +233,8 @@ export class TauriFileSystem implements FileSystemInterface {
     zipFileName: string
   ): Promise<void> {
     try {
-      // Create ZIP file using JSZip
+      // Create ZIP file using JSZip (loaded on demand — only needed for ZIP export)
+      const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
       
       // Add all files to the ZIP

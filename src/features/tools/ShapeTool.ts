@@ -7,6 +7,7 @@
 import type { ToolHandler, ToolContext } from "./types";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useUIStore } from "@/shared/stores/uiStore";
+import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 
 let isDrawingShape = false;
 let shapeStart: { x: number; y: number } | null = null;
@@ -22,7 +23,6 @@ export const ShapeTool: ToolHandler = {
       return;
     }
     
-    console.log("🟣 [ARROW CREATE] Mouse down, getPDFCoordinates returned:", coords);
     
     const { currentShapeType } = useUIStore.getState();
     
@@ -269,7 +269,6 @@ export const ShapeTool: ToolHandler = {
         // Ensure points are valid numbers
         const start = shapeStart;
         const end = selectionEnd || shapeStart;
-        console.log("🟣 [ARROW CREATE] Creating arrow with points:", { start, end, shapeStart, selectionEnd });
         if (!start || !end || 
             typeof start.x !== 'number' || typeof start.y !== 'number' ||
             typeof end.x !== 'number' || typeof end.y !== 'number' ||
@@ -277,13 +276,20 @@ export const ShapeTool: ToolHandler = {
           console.error("[ARROW CREATE] Invalid arrow points:", { start, end });
           return undefined;
         }
-        console.log("🟣 [ARROW CREATE] Valid points, returning:", [start, end]);
         return [start, end];
       })() : undefined,
     };
     
-    addAnnotation(currentDocument.getId(), annotation);
-    
+    wrapAnnotationOperation(
+      () => {
+        addAnnotation(currentDocument.getId(), annotation);
+      },
+      "addAnnotation",
+      currentDocument.getId(),
+      annotation.id,
+      annotation
+    );
+
     // Switch to select tool and select the newly created annotation
     useUIStore.getState().setActiveTool("select");
     context.setEditingAnnotation(annotation);

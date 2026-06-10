@@ -302,6 +302,11 @@ export function Toolbar() {
     const currentDoc = getCurrentDocument();
     if (!currentDoc) return;
 
+    // Encrypted sources are saved unprotected — get explicit user consent
+    // (once per document) before the first save.
+    const { confirmDecryptSave } = await import("@/shared/utils/decryptConsent");
+    if (!(await confirmDecryptSave(currentDoc))) return;
+
     try {
       // Get all annotations for this document
       const annotations = usePDFStore.getState().getAnnotations(currentDoc.getId());
@@ -315,8 +320,18 @@ export function Toolbar() {
         conversationMessages.length > 0 ? { messages: conversationMessages } : undefined;
       const hasConversation = conversationHistory != null && conversationHistory.messages.length > 0;
       const hasGeotechnical = Boolean(geotechnicalSummary?.length && geotechnicalScope);
+      // Serialize app-created bookmarks into the metadata so they survive save/reopen
+      const docBookmarks = usePDFStore.getState().getBookmarks(currentDoc.getId());
+      const serializedBookmarks = docBookmarks.map((b) => ({
+        id: b.id,
+        pageNumber: b.pageNumber,
+        title: b.title,
+        ...(b.text !== undefined && { text: b.text }),
+        ...(b.position !== undefined && { position: b.position }),
+        created: b.created instanceof Date ? b.created.toISOString() : String(b.created),
+      }));
       const aiMetadata =
-        extractedSpecs.length > 0 || hasConversation || hasGeotechnical
+        extractedSpecs.length > 0 || hasConversation || hasGeotechnical || serializedBookmarks.length > 0
           ? {
               version: 1,
               ...(extractedSpecs.length > 0 && { extractedSpecs }),
@@ -325,6 +340,7 @@ export function Toolbar() {
                 geotechnicalScope,
               }),
               ...(hasConversation && conversationHistory ? { conversationHistory } : {}),
+              ...(serializedBookmarks.length > 0 && { bookmarks: serializedBookmarks }),
             }
           : undefined;
 
@@ -688,7 +704,10 @@ export function Toolbar() {
         try {
           const { TauriFileSystem } = await import("@/core/fs/TauriFileSystem");
           const fs = new TauriFileSystem();
-          chosenPath = await fs.getSavePath(currentDoc.getName());
+          // Default the dialog to the source file's folder when known.
+          const originalPath = usePDFStore.getState().getDocumentPath(currentDoc.getId());
+          const sourceDir = originalPath ? originalPath.replace(/[/\\][^/\\]*$/, "") : null;
+          chosenPath = await fs.getSavePath(currentDoc.getName(), sourceDir);
           tauriFs = fs;
         } catch (e) {
           console.warn("[Toolbar] Tauri getSavePath failed, falling back to saveFile:", e);

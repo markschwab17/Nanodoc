@@ -93,52 +93,50 @@ export function wrapAnnotationOperation(
   annotation?: Annotation,
   previousAnnotation?: Annotation
 ) {
-  const pdfStore = usePDFStore.getState();
   const undoStore = useUndoRedoStore.getState();
 
-  // Capture before state
+  // Capture before state (for the action record)
+  const before = usePDFStore.getState();
   const beforeState = {
-    annotations: new Map(pdfStore.annotations),
-    currentPage: pdfStore.currentPage,
-    currentDocumentId: pdfStore.currentDocumentId,
+    annotations: new Map(before.annotations),
+    currentPage: before.currentPage,
+    currentDocumentId: before.currentDocumentId,
   };
 
   // Execute operation
   operation();
 
-  // Capture after state
+  // Capture after state — must RE-READ the store: zustand replaces the state
+  // object on set(), so the pre-operation reference above is stale.
+  const after = usePDFStore.getState();
   const afterState = {
-    annotations: new Map(pdfStore.annotations),
-    currentPage: pdfStore.currentPage,
-    currentDocumentId: pdfStore.currentDocumentId,
+    annotations: new Map(after.annotations),
+    currentPage: after.currentPage,
+    currentDocumentId: after.currentDocumentId,
   };
 
-  // Create undo/redo functions
+  // Undo applies the surgical INVERSE of the operation (and redo re-runs the
+  // operation) through the normal store actions. Earlier versions restored a
+  // whole-map snapshot AND re-applied the annotation, which both duplicated
+  // the annotation on undo-of-delete and clobbered unrelated changes made
+  // after the snapshot. Going through the store actions also keeps the tab's
+  // modified flag accurate.
   const undo = () => {
-    // Restore annotations
-    usePDFStore.setState({ annotations: new Map(beforeState.annotations) });
-    // If annotation was removed, add it back
-    if (type === "removeAnnotation" && previousAnnotation) {
-      usePDFStore.getState().addAnnotation(documentId, previousAnnotation);
-    }
-    // If annotation was updated, restore previous version
-    if (type === "updateAnnotation" && previousAnnotation) {
+    if (type === "addAnnotation" && annotation) {
+      usePDFStore.getState().removeAnnotation(documentId, annotation.id);
+    } else if (type === "removeAnnotation") {
+      const restored = previousAnnotation ?? annotation;
+      if (restored) usePDFStore.getState().addAnnotation(documentId, restored);
+    } else if (type === "updateAnnotation" && previousAnnotation) {
       usePDFStore.getState().updateAnnotation(
         documentId,
         annotationId!,
         previousAnnotation
       );
     }
-    // If annotation was added, remove it
-    if (type === "addAnnotation" && annotation) {
-      usePDFStore.getState().removeAnnotation(documentId, annotation.id);
-    }
   };
 
   const redo = () => {
-    // Restore annotations
-    usePDFStore.setState({ annotations: new Map(afterState.annotations) });
-    // Re-execute operation
     operation();
   };
 

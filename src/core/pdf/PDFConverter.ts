@@ -272,100 +272,9 @@ export class PDFConverter {
   /**
    * Convert all pages to TIFF images
    */
-  async convertToTIFF(
-    document: PDFDocument,
-    options: ConvertOptions = {}
-  ): Promise<ConvertedPage[]> {
-    const dpi = options.dpi || 150;
-    const scale = dpi / 72;
-    const pageCount = document.getPageCount();
-    const { start = 0, end = pageCount - 1 } = options.pageRange || {};
-    
-    const convertedPages: ConvertedPage[] = [];
-    const baseName = this.getBaseFileName(document.getName());
-
-    for (let i = start; i <= end && i < pageCount; i++) {
-      try {
-        const pageData = await this.convertPageToTIFF(document, i, scale);
-        convertedPages.push({
-          pageNumber: i,
-          data: pageData,
-          fileName: `${baseName}_tiff_${i + 1}.tiff`,
-        });
-      } catch (error) {
-        console.error(`Error converting page ${i + 1} to TIFF:`, error);
-        throw error;
-      }
-    }
-
-    return convertedPages;
-  }
-
-  /**
-   * Convert a single page to TIFF
-   */
-  private async convertPageToTIFF(
-    document: PDFDocument,
-    pageNumber: number,
-    scale: number
-  ): Promise<Uint8Array> {
-    // TIFF is not directly supported by canvas, so we'll use PNG as base and convert
-    // For now, we'll use PNG data and let the browser handle it, or use a library
-    // As a fallback, we can use PNG format with .tiff extension
-    // Note: True TIFF would require a library like tiff.js
-    const pngData = await this.convertPageToPNG(document, pageNumber, scale);
-    // For now, return PNG data with TIFF extension (browsers may not support true TIFF)
-    // In a production app, you'd want to use a proper TIFF encoder
-    return pngData;
-  }
-
-  /**
-   * Convert all pages to BMP images
-   */
-  async convertToBMP(
-    document: PDFDocument,
-    options: ConvertOptions = {}
-  ): Promise<ConvertedPage[]> {
-    const dpi = options.dpi || 150;
-    const scale = dpi / 72;
-    const pageCount = document.getPageCount();
-    const { start = 0, end = pageCount - 1 } = options.pageRange || {};
-    
-    const convertedPages: ConvertedPage[] = [];
-    const baseName = this.getBaseFileName(document.getName());
-
-    for (let i = start; i <= end && i < pageCount; i++) {
-      try {
-        const pageData = await this.convertPageToBMP(document, i, scale);
-        convertedPages.push({
-          pageNumber: i,
-          data: pageData,
-          fileName: `${baseName}_bmp_${i + 1}.bmp`,
-        });
-      } catch (error) {
-        console.error(`Error converting page ${i + 1} to BMP:`, error);
-        throw error;
-      }
-    }
-
-    return convertedPages;
-  }
-
-  /**
-   * Convert a single page to BMP
-   */
-  private async convertPageToBMP(
-    document: PDFDocument,
-    pageNumber: number,
-    scale: number
-  ): Promise<Uint8Array> {
-    // BMP is not directly supported by canvas, so we'll convert via PNG first
-    // For true BMP, we'd need to implement BMP encoding
-    // As a workaround, we can use PNG data
-    const pngData = await this.convertPageToPNG(document, pageNumber, scale);
-    // Note: This returns PNG data. True BMP encoding would require additional work
-    return pngData;
-  }
+  // NOTE: TIFF and BMP export were removed — the old implementations
+  // returned PNG bytes under .tiff/.bmp extensions, producing files that
+  // other software rejects or misreads. Re-add only with real encoders.
 
   /**
    * Convert all pages to SVG
@@ -405,26 +314,29 @@ export class PDFConverter {
   private async convertPageToSVG(
     document: PDFDocument,
     pageNumber: number,
-    scale: number
+    _scale: number
   ): Promise<string> {
-    // Convert page to image first, then embed in SVG
+    // TRUE vector SVG via mupdf's DocumentWriter — paths/text are preserved
+    // as scalable vector content. (The previous implementation rasterized to
+    // PNG and wrapped it in an <svg> tag, which defeated the point of SVG
+    // export for CAD/line-work drawings.)
     const mupdfDoc = document.getMupdfDocument();
     const page = mupdfDoc.loadPage(pageNumber);
-    const bounds = page.getBounds();
-    const width = (bounds[2] - bounds[0]) * scale;
-    const height = (bounds[3] - bounds[1]) * scale;
-    
-    // Render to PNG and convert to base64
-    const pngData = await this.convertPageToPNG(document, pageNumber, scale);
-    const base64 = this.uint8ArrayToBase64(pngData);
-    
-    // Create SVG with embedded PNG
-    const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <image x="0" y="0" width="${width}" height="${height}" xlink:href="data:image/png;base64,${base64}"/>
-</svg>`;
-    
-    return svg;
+    const buffer = new this.mupdf.Buffer();
+    const writer = new this.mupdf.DocumentWriter(buffer, "svg", "");
+    try {
+      const device = writer.beginPage(page.getBounds());
+      page.run(device, this.mupdf.Matrix.identity);
+      writer.endPage();
+      writer.close();
+      return buffer.asString();
+    } finally {
+      try {
+        buffer.destroy?.();
+      } catch {
+        // best-effort cleanup
+      }
+    }
   }
 
   /**

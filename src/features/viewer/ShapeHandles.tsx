@@ -4,7 +4,7 @@
  * Provides resize and move handles for shape annotations
  */
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type { Annotation } from "@/core/pdf/PDFEditor";
 
 interface ShapeHandlesProps {
@@ -32,6 +32,9 @@ export function ShapeHandles({
     rotation?: number;
     centerX?: number;
     centerY?: number;
+    /** Shape center in CLIENT coordinates — the rotation pivot. Set on rotate-handle mousedown. */
+    rotateCenterClientX?: number;
+    rotateCenterClientY?: number;
     points?: Array<{ x: number; y: number }>;
   } | null>(null);
 
@@ -138,7 +141,7 @@ export function ShapeHandles({
     });
   };
 
-  const handleMouseMove = useCallback(
+  const processMouseMove = useCallback(
     (e: MouseEvent) => {
       if (!isDragging || !dragStart || !dragType) return;
 
@@ -155,15 +158,27 @@ export function ShapeHandles({
       // For move operations, we need to flip Y because PDF Y increases upward
       const pdfDyForMove = -screenDy / zoomLevel;
 
-      if (dragType === "rotate" && dragStart.centerX !== undefined && dragStart.centerY !== undefined && dragStart.rotation !== undefined) {
-        // Rotation for rectangles
-        const centerCanvas = pdfToCanvas(dragStart.centerX, dragStart.centerY);
-        const currentAngle = Math.atan2(e.clientY - centerCanvas.y, e.clientX - centerCanvas.x);
-        const startAngle = Math.atan2(dragStart.y - centerCanvas.y, dragStart.x - centerCanvas.x);
-        // Calculate delta angle - positive when moving clockwise
+      if (
+        dragType === "rotate" &&
+        dragStart.rotateCenterClientX !== undefined &&
+        dragStart.rotateCenterClientY !== undefined &&
+        dragStart.rotation !== undefined
+      ) {
+        // Rotation for rectangles. The pivot was captured in CLIENT
+        // coordinates at mousedown (the previous code mixed page-local
+        // pdfToCanvas coordinates with e.clientX/Y, which put the pivot in
+        // the wrong place and made rotation track the mouse erratically /
+        // in the wrong direction). In client coords (y down) atan2 grows
+        // clockwise — the same convention as the CSS rotate() applied to
+        // the shape — so adding deltaAngle makes the shape follow the
+        // mouse exactly.
+        const cx = dragStart.rotateCenterClientX;
+        const cy = dragStart.rotateCenterClientY;
+        const currentAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
+        const startAngle = Math.atan2(dragStart.y - cy, dragStart.x - cx);
         const deltaAngle = currentAngle - startAngle;
         const newRotation = (dragStart.rotation + deltaAngle) % (2 * Math.PI);
-        
+
         onUpdate({
           rotation: newRotation,
         });
@@ -390,11 +405,35 @@ export function ShapeHandles({
     [isDragging, dragStart, dragType, annotation, onUpdate, zoomLevel, pdfToCanvas]
   );
 
+  // Coalesce mousemove processing (and the onUpdate store write it triggers)
+  // to one run per animation frame. mousemove fires 120+/sec on fast mice;
+  // un-throttled, every event re-rendered all annotation subscribers.
+  const moveRafRef = useRef<number | null>(null);
+  const lastMoveEventRef = useRef<MouseEvent | null>(null);
+  const handleMouseMove = useCallback(
+    (e: MouseEvent) => {
+      lastMoveEventRef.current = e;
+      if (moveRafRef.current !== null) return;
+      moveRafRef.current = requestAnimationFrame(() => {
+        moveRafRef.current = null;
+        if (lastMoveEventRef.current) processMouseMove(lastMoveEventRef.current);
+      });
+    },
+    [processMouseMove]
+  );
+
   const handleMouseUp = useCallback(() => {
+    // Flush any pending frame so the final mouse position is applied, then stop.
+    if (moveRafRef.current !== null) {
+      cancelAnimationFrame(moveRafRef.current);
+      moveRafRef.current = null;
+      if (lastMoveEventRef.current) processMouseMove(lastMoveEventRef.current);
+    }
+    lastMoveEventRef.current = null;
     setIsDragging(false);
     setDragType(null);
     setDragStart(null);
-  }, []);
+  }, [processMouseMove]);
 
   // Attach global mouse listeners when dragging
   useEffect(() => {
@@ -465,6 +504,33 @@ export function ShapeHandles({
   };
 
   const rotatedRotHandle = rotatePoint(rotHandle.x, rotHandle.y, centerX, centerY, rotation);
+
+  // Rotation needs its pivot in CLIENT coordinates (mousemove deltas are
+  // client-based). Derive it from the rotate handle's own DOM rect: the
+  // handle's client center is known, and the vector from handle to shape
+  // center in local coordinates scales by the wrapper's uniform zoom
+  // transform (measured as renderedHandleSize / localHandleSize).
+  const handleRotateMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const scale = handleSize > 0 ? rect.width / handleSize : 1;
+    const handleClientX = rect.left + rect.width / 2;
+    const handleClientY = rect.top + rect.height / 2;
+    setIsDragging(true);
+    setDragType("rotate");
+    setDragStart({
+      x: e.clientX,
+      y: e.clientY,
+      annotX: annotation.x,
+      annotY: annotation.y,
+      annotW: annotation.width || 0,
+      annotH: annotation.height || 0,
+      rotation: annotation.rotation || 0,
+      rotateCenterClientX: handleClientX + (centerX - rotatedRotHandle.x) * scale,
+      rotateCenterClientY: handleClientY + (centerY - rotatedRotHandle.y) * scale,
+    });
+  };
 
   return (
     <>
@@ -547,10 +613,7 @@ export function ShapeHandles({
             cursor: "grab",
             background: "#10b981",
           }}
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            handleMouseDown(e, "rotate");
-          }}
+          onMouseDown={handleRotateMouseDown}
         />
       )}
 
