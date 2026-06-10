@@ -34,7 +34,12 @@ import { TourOverlay } from "@/features/tour/TourOverlay";
 import { useTourStore } from "@/shared/stores/tourStore";
 
 export default function StitchView() {
-  const { tiles, setCropRect, setCropToContent, setSelectedTileIds } = useStitchStore();
+  // Subscribe to the count only — tile content changes every drag frame and
+  // would re-render the whole page (toolbars included) per frame.
+  const tileCount = useStitchStore((s) => s.tiles.length);
+  const setCropRect = useStitchStore((s) => s.setCropRect);
+  const setCropToContent = useStitchStore((s) => s.setCropToContent);
+  const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
   const prevTileCountRef = useRef(0);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
 
@@ -99,13 +104,13 @@ export default function StitchView() {
   // Auto-launch the guided tour the first time a user imports a PDF into stitch mode
   useEffect(() => {
     const hadNoTiles = prevTileCountRef.current === 0;
-    prevTileCountRef.current = tiles.length;
-    if (hadNoTiles && tiles.length > 0 && !useTourStore.getState().hasCompletedTour("stitch")) {
+    prevTileCountRef.current = tileCount;
+    if (hadNoTiles && tileCount > 0 && !useTourStore.getState().hasCompletedTour("stitch")) {
       // Small delay so the canvas renders before the tour spotlight targets elements
       const timer = setTimeout(() => useTourStore.getState().startTour("stitch"), 500);
       return () => clearTimeout(timer);
     }
-  }, [tiles.length]);
+  }, [tileCount]);
 
   const pointAlign = usePointAlignMode();
   const scaleAlign = useScaleAlignMode();
@@ -175,8 +180,8 @@ export default function StitchView() {
     setDeleteElementMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
-    setSelectedTileIds(tiles.map((t) => t.id));
-  }, [tiles, setSelectedTileIds]);
+    setSelectedTileIds(useStitchStore.getState().tiles.map((t) => t.id));
+  }, [setSelectedTileIds]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -197,7 +202,7 @@ export default function StitchView() {
   }, [handleSelectToolActivate]);
 
   const handleSaveAndFlatten = (openInEditor: boolean) => {
-    if (tiles.length === 0) {
+    if (tileCount === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
     }
@@ -248,7 +253,7 @@ export default function StitchView() {
   );
 
   const handleSaveToCto = useCallback(() => {
-    if (tiles.length === 0) {
+    if (tileCount === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
     }
@@ -258,7 +263,7 @@ export default function StitchView() {
       : "Stitched";
     setSaveToCtoNewFileName(defaultName);
     setShowSaveToCtoDialog(true);
-  }, [tiles.length, showNotification]);
+  }, [tileCount, showNotification]);
 
   const doSaveToCto = useCallback(
     async (
@@ -318,7 +323,7 @@ export default function StitchView() {
   );
 
   const handleDownloadForTraining = async () => {
-    if (tiles.length === 0) {
+    if (tileCount === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
     }
@@ -348,7 +353,7 @@ export default function StitchView() {
     <div className="flex flex-col h-screen bg-background">
       <StitchToolbar
         onAddPdf={() => setShowAddPdf(true)}
-        hasTiles={tiles.length > 0}
+        hasTiles={tileCount > 0}
         contentDeleteMode={contentDeleteMode}
         setContentDeleteMode={setContentDeleteMode}
         deleteElementMode={deleteElementMode}
@@ -378,7 +383,7 @@ export default function StitchView() {
         onClearSession={handleClearSession}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
-        {tiles.length === 0 && (
+        {tileCount === 0 && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50">
             <FilePlus className="h-16 w-16 text-muted-foreground mb-4" />
             <h2 className="text-2xl font-bold mb-2 text-foreground">Stitch PDFs Together</h2>

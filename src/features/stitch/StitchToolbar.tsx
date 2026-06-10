@@ -37,6 +37,7 @@ import {
 import { startTour } from "@/features/tour/useTourLauncher";
 import { useTourStore } from "@/shared/stores/tourStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useShallow } from "zustand/react/shallow";
 import { MIN_SCALE, MAX_SCALE, SCALE_STEP } from "./stitchConstants";
 import { generateScaleStampDataUrl, getScaleStampDimensions } from "./scaleStamp";
 
@@ -147,6 +148,9 @@ export function StitchToolbar({
   onSelectToolActivate,
   onClearSession,
 }: StitchToolbarProps) {
+  // Shallow-picked subscription: avoids re-rendering the whole toolbar on
+  // store changes it doesn't use (e.g. panOffset during panning). Tile
+  // CONTENT is deliberately not selected — only the count.
   const {
     canvasWidth,
     canvasHeight,
@@ -162,12 +166,31 @@ export function StitchToolbar({
     removeTiles,
     undo,
     redo,
-    undoStack,
-    redoStack,
     selectedTileIds,
     setSelectedTileIds,
-    tiles,
-  } = useStitchStore();
+  } = useStitchStore(
+    useShallow((s) => ({
+      canvasWidth: s.canvasWidth,
+      canvasHeight: s.canvasHeight,
+      setResizeLocked: s.setResizeLocked,
+      resizeLocked: s.resizeLocked,
+      referenceScaleFeetPerInch: s.referenceScaleFeetPerInch,
+      setReferenceScaleFeetPerInch: s.setReferenceScaleFeetPerInch,
+      compositionScaleFactor: s.compositionScaleFactor,
+      scaleComposition: s.scaleComposition,
+      addTiles: s.addTiles,
+      sendTilesToBack: s.sendTilesToBack,
+      bringTilesToFront: s.bringTilesToFront,
+      removeTiles: s.removeTiles,
+      undo: s.undo,
+      redo: s.redo,
+      selectedTileIds: s.selectedTileIds,
+      setSelectedTileIds: s.setSelectedTileIds,
+    }))
+  );
+  const tileCount = useStitchStore((s) => s.tiles.length);
+  const canUndoFlag = useStitchStore((s) => s.undoStack.length > 0);
+  const canRedoFlag = useStitchStore((s) => s.redoStack.length > 0);
 
   const effectiveScaleFeetPerInch =
     referenceScaleFeetPerInch != null ? referenceScaleFeetPerInch / compositionScaleFactor : null;
@@ -288,8 +311,8 @@ export function StitchToolbar({
   };
 
   const hasSelection = selectedTileIds.length > 0;
-  const canUndo = undoStack.length > 0;
-  const canRedo = redoStack.length > 0;
+  const canUndo = canUndoFlag;
+  const canRedo = canRedoFlag;
   const activeTourId = useTourStore((s) => s.activeTourId);
 
   // Show a nudge pointing at the Help button if the user has tiles loaded
@@ -553,7 +576,7 @@ export function StitchToolbar({
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-0.5" role="group" aria-label="Selection" data-tour="stitch-selection-actions">
-          <IconButtonWithTooltip variant="outline" disabled={tiles.length === 0} title={tiles.length === 0 ? "No pages on canvas" : "Select all pages (Ctrl+A)"} label="Select all" onClick={() => tiles.length > 0 && setSelectedTileIds(tiles.map((t) => t.id))}>
+          <IconButtonWithTooltip variant="outline" disabled={tileCount === 0} title={tileCount === 0 ? "No pages on canvas" : "Select all pages (Ctrl+A)"} label="Select all" onClick={() => setSelectedTileIds(useStitchStore.getState().tiles.map((t) => t.id))}>
             <CheckSquare className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
         </div>
@@ -570,21 +593,21 @@ export function StitchToolbar({
         </div>
         <div className="flex-1 min-w-2" />
         <div className="flex items-center gap-0.5" role="group" aria-label="Export" data-tour="stitch-export">
-          <IconButtonWithTooltip variant="outline" disabled={isSaving || tiles.length === 0} title="Download stitched PDF" label={isSaving ? "Saving…" : "Download"} onClick={() => onSaveAndFlatten(false)}>
+          <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Download stitched PDF" label={isSaving ? "Saving…" : "Download"} onClick={() => onSaveAndFlatten(false)}>
             <Download className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
-          <IconButtonWithTooltip disabled={isSaving || tiles.length === 0} title="Save PDF and open in editor" label={isSaving ? "Saving…" : "Save & open"} onClick={() => onSaveAndFlatten(true)}>
+          <IconButtonWithTooltip disabled={isSaving || tileCount === 0} title="Save PDF and open in editor" label={isSaving ? "Saving…" : "Save & open"} onClick={() => onSaveAndFlatten(true)}>
             <Save className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
           {showSaveToCto && onSaveToCto && (
-            <IconButtonWithTooltip variant="outline" disabled={isSaving || tiles.length === 0} title="Save stitched PDF to Civiltakeoff" label="Save to Civiltakeoff" onClick={onSaveToCto}>
+            <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Save stitched PDF to Civiltakeoff" label="Save to Civiltakeoff" onClick={onSaveToCto}>
               <Upload className="h-3.5 w-3.5 shrink-0" />
             </IconButtonWithTooltip>
           )}
           {onDownloadForTraining && (
             <IconButtonWithTooltip
               variant="outline"
-              disabled={isExportingTraining || tiles.length === 0}
+              disabled={isExportingTraining || tileCount === 0}
               title="Download training bundle (ZIP: controls JSON, tile PNGs, stitched PDF and PNG)"
               label={isExportingTraining ? "Exporting…" : "For training"}
               onClick={onDownloadForTraining}

@@ -21,6 +21,7 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
+import { getTileAABB } from "@/features/stitch/stitchGeometry";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -57,7 +58,8 @@ export function AddPdfModal({
   onInitialConsumed?: () => void;
 }) {
   const fileSystem = useFileSystem();
-  const { addTiles, setReferenceScaleFeetPerInch } = useStitchStore();
+  const addTiles = useStitchStore((s) => s.addTiles);
+  const setReferenceScaleFeetPerInch = useStitchStore((s) => s.setReferenceScaleFeetPerInch);
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
   const [sourceTab, setSourceTab] = useState<SourceTab>("device");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -385,7 +387,14 @@ export function AddPdfModal({
         imageDataUrl?: string;
       };
       const newTiles: Array<TileData & { x: number; y: number }> = [];
+      // Start below any existing content so a second add doesn't stack
+      // perfectly on top of the first batch.
+      const existingTiles = useStitchStore.getState().tiles;
       let rowY = MARGIN;
+      for (const t of existingTiles) {
+        const aabb = getTileAABB(t);
+        rowY = Math.max(rowY, aabb.y + aabb.height + GAP);
+      }
       const rowBuffer: Array<{ tile: TileData; w: number; h: number }> = [];
 
       const flushRow = () => {

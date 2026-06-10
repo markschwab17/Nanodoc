@@ -7,7 +7,10 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { MIN_ZOOM, MAX_ZOOM, ZOOM_DELTA, SCROLL_SENSITIVITY } from "./stitchConstants";
 
 export function useStitchPanZoom(containerRef: React.RefObject<HTMLDivElement | null>) {
-  const { panOffset, zoomLevel, setPanOffset, setZoomLevel } = useStitchStore();
+  const panOffset = useStitchStore((s) => s.panOffset);
+  const zoomLevel = useStitchStore((s) => s.zoomLevel);
+  const setPanOffset = useStitchStore((s) => s.setPanOffset);
+  const setZoomLevel = useStitchStore((s) => s.setZoomLevel);
   const panOffsetRef = useRef(panOffset);
   const zoomLevelRef = useRef(zoomLevel);
 
@@ -22,6 +25,17 @@ export function useStitchPanZoom(containerRef: React.RefObject<HTMLDivElement | 
     (e: WheelEvent) => {
       const container = containerRef.current;
       if (!container) return;
+
+      // Handle wheel over the canvas itself OR over the fullscreen mode
+      // overlays (align/erase portals into document.body) — those cover the
+      // viewport and would otherwise make zooming dead exactly when precise
+      // point placement needs it.
+      const target = e.target as Element | null;
+      const inScope =
+        target != null &&
+        (container.contains(target) ||
+          (typeof target.closest === "function" && target.closest("[data-stitch-overlay]") != null));
+      if (!inScope) return;
 
       const currentZoom = zoomLevelRef.current;
       const currentPan = panOffsetRef.current;
@@ -60,11 +74,11 @@ export function useStitchPanZoom(containerRef: React.RefObject<HTMLDivElement | 
   );
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    container.addEventListener("wheel", handleWheel, { passive: false, capture: true });
-    return () => container.removeEventListener("wheel", handleWheel, true);
-  }, [containerRef, handleWheel]);
+    // Window-level so wheel events over the body-portaled mode overlays are
+    // seen too; handleWheel scopes to the canvas/overlays itself.
+    window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => window.removeEventListener("wheel", handleWheel, true);
+  }, [handleWheel]);
 
   return { panOffsetRef, zoomLevelRef };
 }

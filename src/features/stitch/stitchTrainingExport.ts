@@ -6,9 +6,20 @@ import JSZip from "jszip";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import type { StitchTile } from "@/features/stitch/stitchTypes";
 import { exportStitchToPdf } from "@/features/stitch/stitchExport";
+import { getTileAABB } from "@/features/stitch/stitchGeometry";
+import { pickRasterScale } from "@/features/stitch/imageUtils";
 
-/** Scale from canvas pt to pixels: 4 ≈ 288 DPI (72 * 4), gives sharp stitched PNG. */
+/** Max scale from canvas pt to pixels: 4 ≈ 288 DPI (72 * 4), gives sharp stitched PNG. */
 const TRAINING_STITCHED_SCALE = 4;
+
+/**
+ * Actual stitched.png scale for a crop: 4x when it fits the canvas pixel
+ * budget, lower for large-format crops (a 36x24" crop at 4x would be 143 MP
+ * and exceed browser canvas limits).
+ */
+export function getTrainingPngScale(cropW: number, cropH: number): number {
+  return pickRasterScale(cropW, cropH, { minScale: 0.5, maxScale: TRAINING_STITCHED_SCALE });
+}
 
 export interface TrainingControlsJson {
   version: number;
@@ -56,11 +67,14 @@ function getTilesInCrop(
   cropH: number
 ): StitchTile[] {
   return tiles.filter((t) => {
-    const tx0 = t.x;
-    const ty0 = t.y;
-    const tx1 = t.x + t.width;
-    const ty1 = t.y + t.height;
-    return tx1 > cropX && tx0 < cropX + cropW && ty1 > cropY && ty0 < cropY + cropH;
+    // Rotation-aware: use the on-screen footprint, matching the PDF export
+    const aabb = getTileAABB(t);
+    return (
+      aabb.x + aabb.width > cropX &&
+      aabb.x < cropX + cropW &&
+      aabb.y + aabb.height > cropY &&
+      aabb.y < cropY + cropH
+    );
   });
 }
 
@@ -131,7 +145,7 @@ export function buildControlsJson(): TrainingControlsJson {
     tiles: tileEntries,
     notes:
       "Coordinates in canvas pt. normalized is 0-1 relative to crop. Y axis: down. Layer order = array order (index 0 = back). scale.original = user 1\"=X'; scale.adjusted = effective after shrink.",
-    stitchedPngScale: TRAINING_STITCHED_SCALE,
+    stitchedPngScale: getTrainingPngScale(cropW, cropH),
   };
 }
 
@@ -164,17 +178,23 @@ function dataUrlToPngBlob(dataUrl: string): Promise<Blob> {
     });
 }
 
-export async function getTilePngBlobs(): Promise<Blob[]> {
+/**
+ * Tile PNGs keyed by the SAME index as controls.json (position in the
+ * filtered tile list) — a tile without an image is skipped without shifting
+ * the indices of the tiles after it.
+ */
+export async function getTilePngBlobs(): Promise<Array<{ index: number; blob: Blob }>> {
   const { tiles, cropRect, canvasWidth, canvasHeight } = useStitchStore.getState();
   const cropX = cropRect?.x ?? 0;
   const cropY = cropRect?.y ?? 0;
   const cropW = cropRect?.w ?? canvasWidth;
   const cropH = cropRect?.h ?? canvasHeight;
   const tilesInCrop = onlyPdfTiles(getTilesInCrop(tiles, cropX, cropY, cropW, cropH));
-  const blobs: Blob[] = [];
-  for (const t of tilesInCrop) {
+  const blobs: Array<{ index: number; blob: Blob }> = [];
+  for (let index = 0; index < tilesInCrop.length; index++) {
+    const t = tilesInCrop[index];
     if (!t.imageDataUrl) continue;
-    blobs.push(await dataUrlToPngBlob(t.imageDataUrl));
+    blobs.push({ index, blob: await dataUrlToPngBlob(t.imageDataUrl) });
   }
   return blobs;
 }
@@ -188,12 +208,13 @@ function loadImage(dataUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-export async function renderStitchedPng(scale: number = TRAINING_STITCHED_SCALE): Promise<Blob> {
+export async function renderStitchedPng(scale?: number): Promise<Blob> {
   const { tiles, cropRect, canvasWidth, canvasHeight } = useStitchStore.getState();
   const cropX = cropRect?.x ?? 0;
   const cropY = cropRect?.y ?? 0;
   const cropW = cropRect?.w ?? canvasWidth;
   const cropH = cropRect?.h ?? canvasHeight;
+  if (scale == null) scale = getTrainingPngScale(cropW, cropH);
   const tilesInCrop = getTilesInCrop(tiles, cropX, cropY, cropW, cropH);
   if (tilesInCrop.length === 0) {
     throw new Error("No tiles in crop");
@@ -253,9 +274,12 @@ export async function exportTrainingBundle(): Promise<Blob> {
   zip.file("controls.json", JSON.stringify(controls, null, 2));
 
   const pdfBytes = await exportStitchToPdf();
-  if (pdfBytes) {
-    zip.file("stitched.pdf", pdfBytes);
+  if (!pdfBytes) {
+    // Fail loudly — a bundle without its primary artifact must not download
+    // with a success notification.
+    throw new Error("Stitched PDF could not be generated for the current crop.");
   }
+  zip.file("stitched.pdf", pdfBytes);
 
   const stitchedPng = await renderStitchedPng();
   zip.file("stitched.png", stitchedPng);
@@ -263,9 +287,9 @@ export async function exportTrainingBundle(): Promise<Blob> {
   const tileBlobs = await getTilePngBlobs();
   const tilesFolder = zip.folder("tiles");
   if (tilesFolder) {
-    tileBlobs.forEach((blob, index) => {
+    for (const { index, blob } of tileBlobs) {
       tilesFolder.file(`tile_${index}.png`, blob);
-    });
+    }
   }
 
   return zip.generateAsync({ type: "blob" });

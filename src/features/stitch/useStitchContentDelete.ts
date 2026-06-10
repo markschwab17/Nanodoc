@@ -44,7 +44,8 @@ function interpolatePath(
 }
 
 export function useStitchContentDelete(showNotification: (msg: string, type: "success" | "error" | "info") => void) {
-  const { tiles, updateTiles } = useStitchStore();
+  const tiles = useStitchStore((s) => s.tiles);
+  const updateTiles = useStitchStore((s) => s.updateTiles);
   const [erasedRegionFeedback, setErasedRegionFeedback] = useState<
     Array<{ x: number; y: number; w: number; h: number }>
   >([]);

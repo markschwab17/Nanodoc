@@ -16,7 +16,11 @@ function angleDeg(clientX: number, clientY: number, centerX: number, centerY: nu
 }
 
 export function GroupSelectionOverlay() {
-  const { tiles, selectedTileIds, updateTilesNoUndo, zoomLevel, resizeLocked } = useStitchStore();
+  const tiles = useStitchStore((s) => s.tiles);
+  const selectedTileIds = useStitchStore((s) => s.selectedTileIds);
+  const updateTilesNoUndo = useStitchStore((s) => s.updateTilesNoUndo);
+  const zoomLevel = useStitchStore((s) => s.zoomLevel);
+  const resizeLocked = useStitchStore((s) => s.resizeLocked);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [rotationDragStart, setRotationDragStart] = useState<{
     startAngleDeg: number;

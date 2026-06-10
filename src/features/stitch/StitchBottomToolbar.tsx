@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Eye, EyeOff, Focus, Lock, Magnet, Unlock, ZoomIn, ZoomOut } from "lucide-react";
 import { useStitchStore, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
+import { useShallow } from "zustand/react/shallow";
 import { MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "./stitchConstants";
 
 export interface StitchBottomToolbarProps {
@@ -118,6 +119,9 @@ export function StitchBottomToolbar({
   canvasVisible,
   onCanvasVisibleChange,
 }: StitchBottomToolbarProps) {
+  // Shallow-picked subscription — skips re-renders from store fields this
+  // toolbar doesn't use (e.g. panOffset during panning). `tiles` stays
+  // selected: the coordinate inputs live-track the selected tile during drags.
   const {
     canvasWidth,
     canvasHeight,
@@ -131,7 +135,22 @@ export function StitchBottomToolbar({
     tiles,
     updateTile,
     updateTiles,
-  } = useStitchStore();
+  } = useStitchStore(
+    useShallow((s) => ({
+      canvasWidth: s.canvasWidth,
+      canvasHeight: s.canvasHeight,
+      setCanvasSize: s.setCanvasSize,
+      setZoomLevel: s.setZoomLevel,
+      zoomLevel: s.zoomLevel,
+      snapToEdges: s.snapToEdges,
+      setSnapToEdges: s.setSnapToEdges,
+      resizeLocked: s.resizeLocked,
+      selectedTileIds: s.selectedTileIds,
+      tiles: s.tiles,
+      updateTile: s.updateTile,
+      updateTiles: s.updateTiles,
+    }))
+  );
 
   const hasSelection = selectedTileIds.length > 0;
   const allSelectedLocked =

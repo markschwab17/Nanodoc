@@ -3,7 +3,7 @@
  * Optional content-delete mode: draw a box to erase content in that region.
  */
 
-import { useRef, useEffect, useCallback, useState } from "react";
+import { memo, useRef, useEffect, useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
@@ -11,7 +11,7 @@ import { StitchTile } from "./StitchTile";
 import { GroupSelectionOverlay } from "./GroupSelectionOverlay";
 import type { CanvasRect } from "./imageUtils";
 import { useStitchPanZoom } from "./useStitchPanZoom";
-import { MIN_ERASE_SIZE, PT_PER_INCH, STROKE_POINT_MIN_DIST } from "./stitchConstants";
+import { MIN_ERASE_SIZE, MIN_ZOOM, PT_PER_INCH, STROKE_POINT_MIN_DIST } from "./stitchConstants";
 
 const RULER_SIZE = 24;
 const PT_PER_HALF_INCH = PT_PER_INCH / 2;
@@ -20,6 +20,126 @@ function rulerLabel(inches: number): string {
   return inches % 1 === 0 ? String(inches) : inches.toFixed(1);
 }
 import { hitTestTileAtPoint, type CanvasPoint } from "./stitchGeometry";
+
+/**
+ * Rulers and inch grid only depend on the canvas dimensions — memoized so
+ * drag/pan frames (which re-render StitchCanvas) don't re-diff hundreds of
+ * SVG nodes.
+ */
+const VerticalRuler = memo(function VerticalRuler({ canvasHeight }: { canvasHeight: number }) {
+  return (
+    <svg
+      className="absolute pointer-events-none z-[2]"
+      style={{ left: 0, top: RULER_SIZE, width: RULER_SIZE, height: canvasHeight }}
+      viewBox={`0 0 ${RULER_SIZE} ${canvasHeight}`}
+      preserveAspectRatio="none"
+      aria-label="Vertical ruler"
+    >
+      <rect width={RULER_SIZE} height={canvasHeight} fill="hsl(var(--muted))" fillOpacity={0.5} stroke="hsl(var(--border))" strokeWidth={1} />
+      {Array.from({ length: Math.floor(canvasHeight / PT_PER_HALF_INCH) + 1 }, (_, i) => {
+        const y = i * PT_PER_HALF_INCH;
+        if (y > canvasHeight) return null;
+        const inches = y / PT_PER_INCH;
+        const textY = y === 0 ? 6 : y - 6;
+        return (
+          <g key={y}>
+            <line x1={18} y1={y} x2={24} y2={y} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+            <text x={10} y={textY} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+              {rulerLabel(inches)}
+            </text>
+          </g>
+        );
+      })}
+      {canvasHeight % PT_PER_HALF_INCH !== 0 && (
+        <g key={`v-end-${canvasHeight}`}>
+          <line x1={18} y1={canvasHeight} x2={24} y2={canvasHeight} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+          <text x={10} y={canvasHeight - 6} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+            {(canvasHeight / PT_PER_INCH).toFixed(1)}
+          </text>
+        </g>
+      )}
+    </svg>
+  );
+});
+
+const HorizontalRuler = memo(function HorizontalRuler({ canvasWidth }: { canvasWidth: number }) {
+  return (
+    <svg
+      className="absolute pointer-events-none z-[2]"
+      style={{ left: RULER_SIZE, top: 0, width: canvasWidth, height: RULER_SIZE }}
+      viewBox={`0 0 ${canvasWidth} ${RULER_SIZE}`}
+      preserveAspectRatio="none"
+      aria-label="Horizontal ruler"
+    >
+      <rect width={canvasWidth} height={RULER_SIZE} fill="hsl(var(--muted))" fillOpacity={0.5} stroke="hsl(var(--border))" strokeWidth={1} />
+      {Array.from({ length: Math.floor(canvasWidth / PT_PER_HALF_INCH) + 1 }, (_, i) => {
+        const x = i * PT_PER_HALF_INCH;
+        if (x > canvasWidth) return null;
+        const inches = x / PT_PER_INCH;
+        return (
+          <g key={x}>
+            <line x1={x} y1={10} x2={x} y2={24} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+            <text x={i === 0 ? Math.max(6, x) : x} y={5} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+              {rulerLabel(inches)}
+            </text>
+          </g>
+        );
+      })}
+      {canvasWidth % PT_PER_HALF_INCH !== 0 && (
+        <g key={`h-end-${canvasWidth}`}>
+          <line x1={canvasWidth} y1={10} x2={canvasWidth} y2={24} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
+          <text x={canvasWidth} y={5} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
+            {(canvasWidth / PT_PER_INCH).toFixed(1)}
+          </text>
+        </g>
+      )}
+    </svg>
+  );
+});
+
+const InchGrid = memo(function InchGrid({ canvasWidth, canvasHeight }: { canvasWidth: number; canvasHeight: number }) {
+  return (
+    <svg
+      className="absolute left-0 top-0 pointer-events-none z-[1]"
+      width={canvasWidth}
+      height={canvasHeight}
+      viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
+      preserveAspectRatio="none"
+      aria-hidden
+    >
+      {Array.from({ length: Math.floor(canvasWidth / PT_PER_INCH) + 1 }, (_, i) => {
+        const x = i * PT_PER_INCH;
+        return (
+          <line
+            key={`v-${x}`}
+            x1={x}
+            y1={0}
+            x2={x}
+            y2={canvasHeight}
+            stroke="hsl(var(--muted-foreground))"
+            strokeOpacity={0.22}
+            strokeWidth={1}
+          />
+        );
+      })}
+      {Array.from({ length: Math.floor(canvasHeight / PT_PER_INCH) + 1 }, (_, i) => {
+        const y = i * PT_PER_INCH;
+        return (
+          <line
+            key={`h-${y}`}
+            x1={0}
+            y1={y}
+            x2={canvasWidth}
+            y2={y}
+            stroke="hsl(var(--muted-foreground))"
+            strokeOpacity={0.22}
+            strokeWidth={1}
+          />
+        );
+      })}
+    </svg>
+  );
+});
 
 export interface StitchCanvasProps {
   /** When true, user can draw a selection box to delete content in that area. */
@@ -86,16 +206,16 @@ export function StitchCanvas({
     [forwardedContainerRef]
   );
   const innerRef = useRef<HTMLDivElement>(null);
-  const {
-    canvasWidth,
-    canvasHeight,
-    tiles,
-    panOffset,
-    zoomLevel,
-    cropRect,
-    setPanOffset,
-    setSelectedTileIds,
-  } = useStitchStore();
+  // Granular selectors — a whole-store subscription would re-render this
+  // (heavy) component on every store change, including ones it doesn't use.
+  const canvasWidth = useStitchStore((s) => s.canvasWidth);
+  const canvasHeight = useStitchStore((s) => s.canvasHeight);
+  const tiles = useStitchStore((s) => s.tiles);
+  const panOffset = useStitchStore((s) => s.panOffset);
+  const zoomLevel = useStitchStore((s) => s.zoomLevel);
+  const cropRect = useStitchStore((s) => s.cropRect);
+  const setPanOffset = useStitchStore((s) => s.setPanOffset);
+  const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
 
   const { panOffsetRef, zoomLevelRef } = useStitchPanZoom(containerRef);
 
@@ -257,6 +377,9 @@ export function StitchCanvas({
       className="w-full h-full overflow-hidden bg-muted relative"
       style={{
         cursor: contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode ? "crosshair" : panMode || isSpacePan ? "grab" : "default",
+        // Pointer-event drags (tile move, pan, erase) on touchscreens get
+        // pointercancel'd when the browser claims the gesture — opt out.
+        touchAction: "none",
       }}
       onPointerDownCapture={handlePointerDownCapture}
       onPointerDown={handlePointerDown}
@@ -280,69 +403,9 @@ export function StitchCanvas({
       >
         {canvasVisible && (
           <>
-            {/* Left ruler: 0.5" increments; numbers sit above tick lines */}
-            <svg
-              className="absolute pointer-events-none z-[2]"
-              style={{ left: 0, top: RULER_SIZE, width: RULER_SIZE, height: canvasHeight }}
-              viewBox={`0 0 ${RULER_SIZE} ${canvasHeight}`}
-              preserveAspectRatio="none"
-              aria-label="Vertical ruler"
-            >
-              <rect width={RULER_SIZE} height={canvasHeight} fill="hsl(var(--muted))" fillOpacity={0.5} stroke="hsl(var(--border))" strokeWidth={1} />
-              {Array.from({ length: Math.floor(canvasHeight / PT_PER_HALF_INCH) + 1 }, (_, i) => {
-                const y = i * PT_PER_HALF_INCH;
-                if (y > canvasHeight) return null;
-                const inches = y / PT_PER_INCH;
-                const textY = y === 0 ? 6 : y - 6;
-                return (
-                  <g key={y}>
-                    <line x1={18} y1={y} x2={24} y2={y} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
-                    <text x={10} y={textY} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
-                      {rulerLabel(inches)}
-                    </text>
-                  </g>
-                );
-              })}
-              {canvasHeight % PT_PER_HALF_INCH !== 0 && (
-                <g key={`v-end-${canvasHeight}`}>
-                  <line x1={18} y1={canvasHeight} x2={24} y2={canvasHeight} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
-                  <text x={10} y={canvasHeight - 6} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
-                    {(canvasHeight / PT_PER_INCH).toFixed(1)}
-                  </text>
-                </g>
-              )}
-            </svg>
-            {/* Top ruler: 0.5" increments; numbers sit above tick lines */}
-            <svg
-              className="absolute pointer-events-none z-[2]"
-              style={{ left: RULER_SIZE, top: 0, width: canvasWidth, height: RULER_SIZE }}
-              viewBox={`0 0 ${canvasWidth} ${RULER_SIZE}`}
-              preserveAspectRatio="none"
-              aria-label="Horizontal ruler"
-            >
-              <rect width={canvasWidth} height={RULER_SIZE} fill="hsl(var(--muted))" fillOpacity={0.5} stroke="hsl(var(--border))" strokeWidth={1} />
-              {Array.from({ length: Math.floor(canvasWidth / PT_PER_HALF_INCH) + 1 }, (_, i) => {
-                const x = i * PT_PER_HALF_INCH;
-                if (x > canvasWidth) return null;
-                const inches = x / PT_PER_INCH;
-                return (
-                  <g key={x}>
-                    <line x1={x} y1={10} x2={x} y2={24} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
-                    <text x={i === 0 ? Math.max(6, x) : x} y={5} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
-                      {rulerLabel(inches)}
-                    </text>
-                  </g>
-                );
-              })}
-              {canvasWidth % PT_PER_HALF_INCH !== 0 && (
-                <g key={`h-end-${canvasWidth}`}>
-                  <line x1={canvasWidth} y1={10} x2={canvasWidth} y2={24} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.85} strokeWidth={1} />
-                  <text x={canvasWidth} y={5} textAnchor="middle" dominantBaseline="middle" fill="hsl(var(--muted-foreground))" fontSize={9} fontWeight={500}>
-                    {(canvasWidth / PT_PER_INCH).toFixed(1)}
-                  </text>
-                </g>
-              )}
-            </svg>
+            {/* Rulers: 0.5" increments; numbers sit above tick lines */}
+            <VerticalRuler canvasHeight={canvasHeight} />
+            <HorizontalRuler canvasWidth={canvasWidth} />
           </>
         )}
             {/* Canvas area: background, guidelines, tiles (inset by RULER_SIZE so rulers sit outside) — always rendered */}
@@ -352,47 +415,9 @@ export function StitchCanvas({
             >
         {canvasVisible && (
           <>
-              <div className="absolute inset-0 border border-border bg-background" />
-              {/* Inch guidelines (1" = 72 pt) — true 1" boundaries; scale stamp and rulers align to these */}
-              <svg
-              className="absolute left-0 top-0 pointer-events-none z-[1]"
-              width={canvasWidth}
-              height={canvasHeight}
-              viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
-              preserveAspectRatio="none"
-              aria-hidden
-            >
-              {Array.from({ length: Math.floor(canvasWidth / PT_PER_INCH) + 1 }, (_, i) => {
-                const x = i * PT_PER_INCH;
-                return (
-                  <line
-                    key={`v-${x}`}
-                    x1={x}
-                    y1={0}
-                    x2={x}
-                    y2={canvasHeight}
-                    stroke="hsl(var(--muted-foreground))"
-                    strokeOpacity={0.22}
-                    strokeWidth={1}
-                  />
-                );
-              })}
-              {Array.from({ length: Math.floor(canvasHeight / PT_PER_INCH) + 1 }, (_, i) => {
-                const y = i * PT_PER_INCH;
-                return (
-                  <line
-                    key={`h-${y}`}
-                    x1={0}
-                    y1={y}
-                    x2={canvasWidth}
-                    y2={y}
-                    stroke="hsl(var(--muted-foreground))"
-                    strokeOpacity={0.22}
-                    strokeWidth={1}
-                  />
-                );
-              })}
-            </svg>
+            <div className="absolute inset-0 border border-border bg-background" />
+            {/* Inch guidelines (1" = 72 pt) — true 1" boundaries; scale stamp and rulers align to these */}
+            <InchGrid canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
           </>
         )}
         {cropRect && (
@@ -483,6 +508,7 @@ export function StitchCanvas({
         containerRect &&
         createPortal(
           <div
+            data-stitch-overlay
             className="fixed z-[100] cursor-crosshair"
             style={{
               left: containerRect.left,
@@ -490,6 +516,7 @@ export function StitchCanvas({
               width: containerRect.width,
               height: containerRect.height,
               pointerEvents: "auto",
+              touchAction: "none",
             }}
             onPointerDown={(e) => {
               if (e.button === 0 && onContentDeleteRect) {
@@ -542,6 +569,7 @@ export function StitchCanvas({
         containerRect &&
         createPortal(
           <div
+            data-stitch-overlay
             className="fixed z-[100] cursor-crosshair"
             style={{
               left: containerRect.left,
@@ -549,6 +577,7 @@ export function StitchCanvas({
               width: containerRect.width,
               height: containerRect.height,
               pointerEvents: "auto",
+              touchAction: "none",
             }}
             onPointerDown={(e) => {
               e.preventDefault();
@@ -611,6 +640,7 @@ export function StitchCanvas({
         containerRect &&
         createPortal(
           <div
+            data-stitch-overlay
             className="fixed z-[100] cursor-crosshair"
             style={{
               left: containerRect.left,
@@ -618,6 +648,7 @@ export function StitchCanvas({
               width: containerRect.width,
               height: containerRect.height,
               pointerEvents: "auto",
+              touchAction: "none",
             }}
             onPointerMove={(e) => {
               if (!pointAlignMode || (pointAlignStep !== 1 && pointAlignStep !== 3)) return;
@@ -640,7 +671,7 @@ export function StitchCanvas({
           >
             {/* Markers and lines in overlay (screen) space so they stay visible outside the canvas clip */}
             {(pointAlignPoints.some((p) => p != null) || scaleAlignPoints.some((p) => p != null)) && (() => {
-              const zoom = Math.max(0.25, zoomLevel);
+              const zoom = Math.max(MIN_ZOOM, zoomLevel);
               const toOverlay = (p: { x: number; y: number }) => ({
                 x: panOffset.x + (p.x + RULER_SIZE) * zoom,
                 y: panOffset.y + (p.y + RULER_SIZE) * zoom,
