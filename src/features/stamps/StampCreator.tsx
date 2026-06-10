@@ -584,15 +584,18 @@ export function StampCreator({ open, onClose }: StampCreatorProps) {
       stamp.signaturePath = signaturePath;
     }
 
-    addStamp(stamp);
-
-    // Auto-select the newly created stamp for placement. Whatever happens
-    // here, the modal MUST close once the stamp exists — a throw between
-    // addStamp and onClose left users with a created stamp and a stuck
-    // dialog (which they then re-submitted, creating duplicates).
+    // The modal MUST close once we attempt to save — addStamp itself can
+    // throw (e.g. localStorage QuotaExceededError surfacing synchronously out
+    // of zustand persist), and leaving the dialog open both confused users
+    // and let them re-submit duplicates. The stamp's in-memory state still
+    // updates before any persist error, so selection/placement work either
+    // way. onClose in finally guarantees the dialog always closes.
     try {
+      addStamp(stamp);
       setSelectedStamp(stamp.id);
       setActiveTool("stamp");
+    } catch (e) {
+      console.error("Error saving stamp:", e);
     } finally {
       onClose();
     }

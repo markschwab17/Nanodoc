@@ -6,8 +6,26 @@
  */
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
 import type { StampData } from "@/core/pdf/PDFEditor";
+import { createStampStorage } from "@/shared/stores/stampIdbStorage";
+
+let quotaWarned = false;
+function notifyStorageErrorOnce() {
+  if (quotaWarned) return;
+  quotaWarned = true;
+  // Lazy import to avoid a store→store import cycle at module load.
+  import("@/shared/stores/notificationStore")
+    .then(({ useNotificationStore }) => {
+      useNotificationStore
+        .getState()
+        .showNotification(
+          "Couldn't save stamps to local storage — new stamps work now but may not persist next session.",
+          "info",
+        );
+    })
+    .catch(() => {});
+}
 
 interface StampState {
   stamps: StampData[];
@@ -89,6 +107,16 @@ export const useStampStore = create<StampState>()(
     }),
     {
       name: "pdf-stamp-storage",
+      // IndexedDB-backed: image/signature stamps carry large data-URLs that
+      // blow past localStorage's ~5MB origin cap. localStorage previously
+      // re-threw QuotaExceededError synchronously out of set()/addStamp(),
+      // leaving the StampCreator modal stuck and blocking placement. This
+      // adapter persists to IndexedDB (huge quota), migrates any legacy
+      // localStorage stamps in on first load (freeing the old cap), and is
+      // async so write failures can never re-throw synchronously.
+      storage: createJSONStorage(() =>
+        createStampStorage({ onWriteError: notifyStorageErrorOnce }),
+      ),
       partialize: (state) => ({
         stamps: state.stamps,
         recentlyUsed: state.recentlyUsed,
