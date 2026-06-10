@@ -11,50 +11,63 @@
 
 import { useEffect } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
+import { MIN_ZOOM } from "./stitchConstants";
+
+/** Gap (ms) between nudges that starts a new undo step. */
+const NUDGE_BURST_MS = 800;
+
+function isTypingTarget(): boolean {
+  const target = document.activeElement as HTMLElement | null;
+  return (
+    target?.tagName === "INPUT" ||
+    target?.tagName === "TEXTAREA" ||
+    target?.isContentEditable === true
+  );
+}
 
 export function useStitchKeyboard() {
-  const { selectedTileIds, removeTile, undo, redo, tiles, setSelectedTileIds } = useStitchStore();
-
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const target = document.activeElement as HTMLElement | null;
-      const inInput =
-        target?.tagName === "INPUT" ||
-        target?.tagName === "TEXTAREA" ||
-        target?.isContentEditable === true;
+    // One undo snapshot per burst of arrow nudges, not one per keypress.
+    let lastNudgeAt = 0;
 
-      if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Never hijack shortcuts while the user is typing in a field —
+      // native select-all / text undo must keep working.
+      if (isTypingTarget()) return;
+
+      const store = useStitchStore.getState();
+      const key = e.key.toLowerCase();
+
+      if ((e.ctrlKey || e.metaKey) && key === "a") {
         e.preventDefault();
         e.stopPropagation();
-        if (!inInput && tiles.length > 0) {
-          setSelectedTileIds(tiles.map((t) => t.id));
+        if (store.tiles.length > 0) {
+          store.setSelectedTileIds(store.tiles.map((t) => t.id));
         }
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+      if ((e.ctrlKey || e.metaKey) && key === "z") {
         e.preventDefault();
         e.stopPropagation();
-        if (e.shiftKey) redo();
-        else undo();
+        if (e.shiftKey) store.redo();
+        else store.undo();
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "y") {
+      if ((e.ctrlKey || e.metaKey) && key === "y") {
         e.preventDefault();
         e.stopPropagation();
-        redo();
+        store.redo();
         return;
       }
 
       // Arrow-key nudge: 1 screen pixel per press (zoom-aware)
       if (
         (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") &&
-        !inInput &&
-        selectedTileIds.length > 0
+        store.selectedTileIds.length > 0
       ) {
         e.preventDefault();
         e.stopPropagation();
-        const store = useStitchStore.getState();
-        const zoom = Math.max(0.25, store.zoomLevel);
+        const zoom = Math.max(MIN_ZOOM, store.zoomLevel);
         const step = e.shiftKey ? 10 / zoom : 1 / zoom;
 
         let dx = 0;
@@ -64,28 +77,33 @@ export function useStitchKeyboard() {
         if (e.key === "ArrowLeft") dx = -step;
         if (e.key === "ArrowRight") dx = step;
 
-        const unlockedIds = selectedTileIds.filter(
+        const unlockedIds = store.selectedTileIds.filter(
           (id) => !store.tiles.find((t) => t.id === id)?.locked
         );
         if (unlockedIds.length === 0) return;
+
+        const now = Date.now();
+        if (now - lastNudgeAt > NUDGE_BURST_MS) {
+          store.pushUndoSnapshot();
+        }
+        lastNudgeAt = now;
 
         const updates = unlockedIds.map((id) => {
           const t = store.tiles.find((x) => x.id === id)!;
           return { id, patch: { x: t.x + dx, y: t.y + dy } as const };
         });
-        store.updateTiles(updates);
+        store.updateTilesNoUndo(updates);
         return;
       }
 
       if (e.key !== "Delete" && e.key !== "Backspace") return;
-      if (inInput) return;
-      if (selectedTileIds.length > 0) {
+      if (store.selectedTileIds.length > 0) {
         e.preventDefault();
         e.stopPropagation();
-        selectedTileIds.forEach((id) => removeTile(id));
+        store.removeTiles(store.selectedTileIds);
       }
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [selectedTileIds, removeTile, undo, redo, tiles, setSelectedTileIds]);
+  }, []);
 }

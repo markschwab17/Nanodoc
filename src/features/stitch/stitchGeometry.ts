@@ -11,13 +11,16 @@ export interface CanvasPoint {
   y: number;
 }
 
+/** Minimal tile pose required by the geometry helpers. */
+export type TilePose = Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation">;
+
 /**
  * Map a canvas-space point to a tile's local coordinates (origin top-left, same as tile width/height).
  * Uses rotation around tile center to match DOM transformOrigin: center center.
  */
 export function canvasToTileLocal(
   canvasPoint: CanvasPoint,
-  tile: StitchTile
+  tile: TilePose
 ): { u: number; v: number } | null {
   const w = tile.width;
   const h = tile.height;
@@ -42,7 +45,7 @@ export function canvasToTileLocal(
 export function tileLocalToCanvas(
   u: number,
   v: number,
-  tile: StitchTile
+  tile: TilePose
 ): CanvasPoint {
   const w = tile.width;
   const h = tile.height;
@@ -165,6 +168,112 @@ export function computeScaleAlignment(
   };
 }
 
+/**
+ * Axis-aligned bounding box of a tile in canvas space, accounting for
+ * center-based rotation (matches DOM transformOrigin: center center).
+ */
+export function getTileAABB(
+  tile: TilePose
+): { x: number; y: number; width: number; height: number } {
+  const corners = [
+    tileLocalToCanvas(0, 0, tile),
+    tileLocalToCanvas(tile.width, 0, tile),
+    tileLocalToCanvas(tile.width, tile.height, tile),
+    tileLocalToCanvas(0, tile.height, tile),
+  ];
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, c.x);
+    minY = Math.min(minY, c.y);
+    maxX = Math.max(maxX, c.x);
+    maxY = Math.max(maxY, c.y);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+export interface ResizeStart {
+  /** Handle direction: n, e, s, w, ne, nw, se, sw. */
+  dir: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  aspectRatio: number;
+}
+
+/**
+ * Compute the new tile pose for a resize drag, rotation-aware.
+ *
+ * Pointer deltas are mapped into tile-local axes (so the "e" handle always
+ * responds to motion along the direction it points), and the corner opposite
+ * the handle stays fixed in CANVAS space. At rotation 0 this matches the
+ * historical axis-aligned behavior exactly.
+ */
+export function computeResizedPose(
+  start: ResizeStart,
+  dxCanvas: number,
+  dyCanvas: number,
+  minSize = 20
+): { x: number; y: number; width: number; height: number } {
+  const { dir, width: w0, height: h0, aspectRatio: ar } = start;
+  const rotation = start.rotation ?? 0;
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  // Pointer delta in tile-local axes (inverse rotation)
+  const localDx = dxCanvas * cos + dyCanvas * sin;
+  const localDy = -dxCanvas * sin + dyCanvas * cos;
+
+  let width: number;
+  let height: number;
+  if (dir === "e" || dir === "w") {
+    width = dir === "e" ? Math.max(minSize, w0 + localDx) : Math.max(minSize, w0 - localDx);
+    height = width / ar;
+    if (height < minSize) {
+      height = minSize;
+      width = height * ar;
+    }
+  } else if (dir === "n" || dir === "s") {
+    height = dir === "s" ? Math.max(minSize, h0 + localDy) : Math.max(minSize, h0 - localDy);
+    width = height * ar;
+    if (width < minSize) {
+      width = minSize;
+      height = width / ar;
+    }
+  } else {
+    const scaleX = dir.includes("e") ? (w0 + localDx) / w0 : (w0 - localDx) / w0;
+    const scaleY = dir.includes("s") ? (h0 + localDy) / h0 : (h0 - localDy) / h0;
+    const minScale = Math.max(minSize / w0, minSize / h0);
+    const s = Math.max(minScale, Math.min(scaleX, scaleY));
+    width = w0 * s;
+    height = h0 * s;
+  }
+
+  // The corner opposite the handle is the anchor; it must not move on canvas.
+  const anchorU0 = dir.includes("w") ? w0 : 0;
+  const anchorV0 = dir.includes("n") ? h0 : 0;
+  const anchorCanvas = tileLocalToCanvas(anchorU0, anchorV0, start);
+
+  const anchorU1 = dir.includes("w") ? width : 0;
+  const anchorV1 = dir.includes("n") ? height : 0;
+  const relU = anchorU1 - width / 2;
+  const relV = anchorV1 - height / 2;
+  const centerX = anchorCanvas.x - (relU * cos - relV * sin);
+  const centerY = anchorCanvas.y - (relU * sin + relV * cos);
+
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+  };
+}
+
 export function getGroupBounds(
   tiles: StitchTile[]
 ): { x: number; y: number; width: number; height: number } {
@@ -174,23 +283,11 @@ export function getGroupBounds(
     maxX = -Infinity,
     maxY = -Infinity;
   for (const t of tiles) {
-    const r = (t.rotation ?? 0) * (Math.PI / 180);
-    const c = Math.cos(r),
-      s = Math.sin(r);
-    const w = t.width,
-      h = t.height;
-    const corners = [
-      [t.x, t.y],
-      [t.x + w * c, t.y + w * s],
-      [t.x + w * c - h * s, t.y + w * s + h * c],
-      [t.x - h * s, t.y + h * c],
-    ];
-    for (const [px, py] of corners) {
-      minX = Math.min(minX, px);
-      minY = Math.min(minY, py);
-      maxX = Math.max(maxX, px);
-      maxY = Math.max(maxY, py);
-    }
+    const aabb = getTileAABB(t);
+    minX = Math.min(minX, aabb.x);
+    minY = Math.min(minY, aabb.y);
+    maxX = Math.max(maxX, aabb.x + aabb.width);
+    maxY = Math.max(maxY, aabb.y + aabb.height);
   }
   return {
     x: minX,

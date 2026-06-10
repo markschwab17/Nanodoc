@@ -53,12 +53,47 @@ export function makeWhiteTransparent(
   return out;
 }
 
+import { canvasToTileLocal, getTileAABB, tileLocalToCanvas, type TilePose } from "./stitchGeometry";
+
 /** Canvas-space rectangle (same units as tile x, y, width, height). */
 export interface CanvasRect {
   x: number;
   y: number;
   w: number;
   h: number;
+}
+
+/** Canvas-space AABB of a tile-local pixel-space bbox (rotation-aware). */
+function localBboxToCanvasRect(
+  tile: TilePose,
+  imgWidth: number,
+  imgHeight: number,
+  minPx: number,
+  minPy: number,
+  maxPx: number,
+  maxPy: number
+): CanvasRect {
+  const lx0 = (minPx / imgWidth) * tile.width;
+  const ly0 = (minPy / imgHeight) * tile.height;
+  const lx1 = ((maxPx + 1) / imgWidth) * tile.width;
+  const ly1 = ((maxPy + 1) / imgHeight) * tile.height;
+  const corners = [
+    tileLocalToCanvas(lx0, ly0, tile),
+    tileLocalToCanvas(lx1, ly0, tile),
+    tileLocalToCanvas(lx1, ly1, tile),
+    tileLocalToCanvas(lx0, ly1, tile),
+  ];
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, c.x);
+    minY = Math.min(minY, c.y);
+    maxX = Math.max(maxX, c.x);
+    maxY = Math.max(maxY, c.y);
+  }
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
 /**
@@ -98,46 +133,95 @@ function imageDataToDataUrl(imageData: ImageData): string {
 }
 
 /**
+ * Erase (make transparent) the pixels whose CANVAS position falls inside the
+ * given canvas-space rectangle. Rotation-aware: pixels are mapped through the
+ * tile's center-based rotation, matching what's on screen.
+ * Mutates `imageData` in place. Returns the canvas-space AABB of the erased
+ * region, or null if nothing intersects.
+ */
+export function eraseCanvasRectInImage(
+  imageData: ImageData,
+  imgWidth: number,
+  imgHeight: number,
+  tile: TilePose,
+  rect: CanvasRect
+): CanvasRect | null {
+  const rectRight = rect.x + rect.w;
+  const rectBottom = rect.y + rect.h;
+
+  // Pixel-space search window: the rect's corners mapped into tile-local space.
+  const corners = [
+    canvasToTileLocal({ x: rect.x, y: rect.y }, tile),
+    canvasToTileLocal({ x: rectRight, y: rect.y }, tile),
+    canvasToTileLocal({ x: rectRight, y: rectBottom }, tile),
+    canvasToTileLocal({ x: rect.x, y: rectBottom }, tile),
+  ];
+  let lu0 = Infinity,
+    lv0 = Infinity,
+    lu1 = -Infinity,
+    lv1 = -Infinity;
+  for (const c of corners) {
+    if (!c) return null;
+    lu0 = Math.min(lu0, c.u);
+    lv0 = Math.min(lv0, c.v);
+    lu1 = Math.max(lu1, c.u);
+    lv1 = Math.max(lv1, c.v);
+  }
+
+  const px0 = Math.max(0, Math.floor((lu0 / tile.width) * imgWidth));
+  const py0 = Math.max(0, Math.floor((lv0 / tile.height) * imgHeight));
+  const px1 = Math.min(imgWidth, Math.ceil((lu1 / tile.width) * imgWidth));
+  const py1 = Math.min(imgHeight, Math.ceil((lv1 / tile.height) * imgHeight));
+  if (px0 >= px1 || py0 >= py1) return null;
+
+  const data = imageData.data;
+  let minPx = Infinity,
+    minPy = Infinity,
+    maxPx = -Infinity,
+    maxPy = -Infinity;
+  for (let py = py0; py < py1; py++) {
+    for (let px = px0; px < px1; px++) {
+      // Pixel center in canvas space must be inside the erase rect.
+      const lu = ((px + 0.5) / imgWidth) * tile.width;
+      const lv = ((py + 0.5) / imgHeight) * tile.height;
+      const c = tileLocalToCanvas(lu, lv, tile);
+      if (c.x < rect.x || c.x >= rectRight || c.y < rect.y || c.y >= rectBottom) continue;
+      data[(py * imgWidth + px) * 4 + 3] = 0;
+      if (px < minPx) minPx = px;
+      if (px > maxPx) maxPx = px;
+      if (py < minPy) minPy = py;
+      if (py > maxPy) maxPy = py;
+    }
+  }
+  if (minPx === Infinity) return null;
+  return localBboxToCanvasRect(tile, imgWidth, imgHeight, minPx, minPy, maxPx, maxPy);
+}
+
+/**
  * Erase (make transparent) the pixels inside the given canvas-space rectangle
  * on the tile's image. Returns the new image data URL, or null if the rect
  * doesn't intersect the tile or the tile has no image.
  */
 export async function eraseRectFromTile(
-  tile: { x: number; y: number; width: number; height: number; imageDataUrl?: string },
+  tile: { x: number; y: number; width: number; height: number; rotation?: number; imageDataUrl?: string },
   rect: CanvasRect
 ): Promise<string | null> {
   if (!tile.imageDataUrl) return null;
 
-  const tileRight = tile.x + tile.width;
-  const tileBottom = tile.y + tile.height;
-  const rectRight = rect.x + rect.w;
-  const rectBottom = rect.y + rect.h;
-
-  const ix0 = Math.max(tile.x, rect.x);
-  const iy0 = Math.max(tile.y, rect.y);
-  const ix1 = Math.min(tileRight, rectRight);
-  const iy1 = Math.min(tileBottom, rectBottom);
-  if (ix0 >= ix1 || iy0 >= iy1) return null;
+  // Cheap rotation-aware cull before the expensive decode.
+  const aabb = getTileAABB(tile);
+  if (
+    rect.x + rect.w <= aabb.x ||
+    rect.x >= aabb.x + aabb.width ||
+    rect.y + rect.h <= aabb.y ||
+    rect.y >= aabb.y + aabb.height
+  ) {
+    return null;
+  }
 
   const { imageData, width: imgWidth, height: imgHeight } = await imageDataUrlToImageData(tile.imageDataUrl);
-
-  const relX0 = (ix0 - tile.x) / tile.width;
-  const relY0 = (iy0 - tile.y) / tile.height;
-  const relX1 = (ix1 - tile.x) / tile.width;
-  const relY1 = (iy1 - tile.y) / tile.height;
-
-  const px0 = Math.max(0, Math.floor(relX0 * imgWidth));
-  const py0 = Math.max(0, Math.floor(relY0 * imgHeight));
-  const px1 = Math.min(imgWidth, Math.ceil(relX1 * imgWidth));
-  const py1 = Math.min(imgHeight, Math.ceil(relY1 * imgHeight));
-
-  const data = imageData.data;
-  for (let py = py0; py < py1; py++) {
-    for (let px = px0; px < px1; px++) {
-      const i = (py * imgWidth + px) * 4;
-      data[i + 3] = 0;
-    }
-  }
+  const erased = eraseCanvasRectInImage(imageData, imgWidth, imgHeight, tile, rect);
+  if (!erased) return null;
 
   return imageDataToDataUrl(imageData);
 }
@@ -168,7 +252,7 @@ export interface EraseConnectedResult {
  * Returns the new image data URL and the bounding box of the erased region (for feedback), or null.
  */
 export async function eraseConnectedAt(
-  tile: { x: number; y: number; width: number; height: number; imageDataUrl?: string },
+  tile: { x: number; y: number; width: number; height: number; rotation?: number; imageDataUrl?: string },
   canvasX: number,
   canvasY: number,
   options: EraseConnectedOptions = {}
@@ -178,12 +262,9 @@ export async function eraseConnectedAt(
 
   const { colorTolerance = 45, skipBackground = true, whiteThreshold = 248 } = options;
 
-  if (
-    canvasX < tile.x ||
-    canvasY < tile.y ||
-    canvasX >= tile.x + tile.width ||
-    canvasY >= tile.y + tile.height
-  ) {
+  // Rotation-aware containment check (cheap, avoids the decode).
+  const local = canvasToTileLocal({ x: canvasX, y: canvasY }, tile);
+  if (!local || local.u < 0 || local.u >= tile.width || local.v < 0 || local.v >= tile.height) {
     return null;
   }
 
@@ -196,6 +277,53 @@ export async function eraseConnectedAt(
     dataUrl: imageDataToDataUrl(imageData),
     canvasRect: rect,
   };
+}
+
+// ─── High-DPI raster export helpers ──────────────────────────────────────────
+
+/** Default pixel budget for export rasters — stays under browser canvas area limits. */
+const DEFAULT_MAX_RASTER_PIXELS = 16_000_000;
+
+/**
+ * Pick a render scale for a page so the resulting raster fits a pixel budget.
+ * Clamped to [minScale, maxScale].
+ */
+export function pickRasterScale(
+  widthPt: number,
+  heightPt: number,
+  opts: { maxPixels?: number; minScale?: number; maxScale?: number } = {}
+): number {
+  const { maxPixels = DEFAULT_MAX_RASTER_PIXELS, minScale = 1, maxScale = 4 } = opts;
+  const budgetScale = Math.sqrt(maxPixels / Math.max(1, widthPt * heightPt));
+  return Math.min(maxScale, Math.max(minScale, budgetScale));
+}
+
+/**
+ * Transfer erased regions (alpha === 0) from a low-res mask onto a target
+ * render of the same page at a different resolution, using nearest-neighbor
+ * sampling. Mutates `target` in place.
+ */
+export function applyAlphaMaskNearest(
+  target: ImageData,
+  targetW: number,
+  targetH: number,
+  mask: ImageData,
+  maskW: number,
+  maskH: number
+): void {
+  const t = target.data;
+  const m = mask.data;
+  for (let y = 0; y < targetH; y++) {
+    const my = Math.min(maskH - 1, Math.floor((y / targetH) * maskH));
+    const mRow = my * maskW;
+    const tRow = y * targetW;
+    for (let x = 0; x < targetW; x++) {
+      const mx = Math.min(maskW - 1, Math.floor((x / targetW) * maskW));
+      if (m[(mRow + mx) * 4 + 3] === 0) {
+        t[(tRow + x) * 4 + 3] = 0;
+      }
+    }
+  }
 }
 
 // ─── Direct ImageData API (no data-URL round-trips) ─────────────────────────
@@ -233,7 +361,7 @@ export function floodFillErase(
   imageData: ImageData,
   imgWidth: number,
   imgHeight: number,
-  tile: { x: number; y: number; width: number; height: number },
+  tile: TilePose,
   canvasX: number,
   canvasY: number,
   colorTolerance: number = 45,
@@ -242,11 +370,11 @@ export function floodFillErase(
 ): CanvasRect | null {
   const data = imageData.data;
 
-  // Convert canvas coords → pixel coords
-  const relX = (canvasX - tile.x) / tile.width;
-  const relY = (canvasY - tile.y) / tile.height;
-  const px = Math.floor(relX * imgWidth);
-  const py = Math.floor(relY * imgHeight);
+  // Convert canvas coords → pixel coords through the tile's center rotation
+  const local = canvasToTileLocal({ x: canvasX, y: canvasY }, tile);
+  if (!local) return null;
+  const px = Math.floor((local.u / tile.width) * imgWidth);
+  const py = Math.floor((local.v / tile.height) * imgHeight);
   if (px < 0 || px >= imgWidth || py < 0 || py >= imgHeight) return null;
 
   const idx = (py * imgWidth + px) * 4;
@@ -317,15 +445,6 @@ export function floodFillErase(
     }
   }
 
-  // Convert pixel bbox → canvas-space rect
-  const relMinX = minPx / imgWidth;
-  const relMinY = minPy / imgHeight;
-  const relMaxX = (maxPx + 1) / imgWidth;
-  const relMaxY = (maxPy + 1) / imgHeight;
-  return {
-    x: tile.x + relMinX * tile.width,
-    y: tile.y + relMinY * tile.height,
-    w: (relMaxX - relMinX) * tile.width,
-    h: (relMaxY - relMinY) * tile.height,
-  };
+  // Convert pixel bbox → canvas-space rect (rotation-aware)
+  return localBboxToCanvasRect(tile, imgWidth, imgHeight, minPx, minPy, maxPx, maxPy);
 }

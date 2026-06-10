@@ -140,8 +140,16 @@ export function StitchCanvas({
   }, [pointAlignMode, scaleAlignMode, contentDeleteMode, deleteElementMode]);
 
   useEffect(() => {
+    const isTypingTarget = () => {
+      const target = document.activeElement as HTMLElement | null;
+      return (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable === true
+      );
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === "Space") {
+      if (e.code === "Space" && !isTypingTarget()) {
         e.preventDefault();
         e.stopPropagation();
         isSpacePanRef.current = true;
@@ -150,8 +158,12 @@ export function StitchCanvas({
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.code === "Space") {
-        e.preventDefault();
-        e.stopPropagation();
+        // Always clear pan state so it can't get stuck when focus moved into
+        // an input mid-press; only swallow the event if we were panning.
+        if (isSpacePanRef.current) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
         isSpacePanRef.current = false;
         setIsSpacePan(false);
         panStartRef.current = null;

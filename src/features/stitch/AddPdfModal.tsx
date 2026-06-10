@@ -57,7 +57,7 @@ export function AddPdfModal({
   onInitialConsumed?: () => void;
 }) {
   const fileSystem = useFileSystem();
-  const { addTiles, canvasWidth, canvasHeight, setReferenceScaleFeetPerInch } = useStitchStore();
+  const { addTiles, setReferenceScaleFeetPerInch } = useStitchStore();
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
   const [sourceTab, setSourceTab] = useState<SourceTab>("device");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -76,6 +76,8 @@ export function AddPdfModal({
   /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
   const [_ctoListening, setCtoListening] = useState(false);
+  /** User-visible error for failed loads/adds (corrupt file, password, etc). */
+  const [loadError, setLoadError] = useState<string | null>(null);
   type CtoDoc = { type: string; displayName: string; token: string; fileId?: string; doc?: string };
   const [ctoDocuments, setCtoDocuments] = useState<CtoDoc[]>([]);
   const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
@@ -84,8 +86,34 @@ export function AddPdfModal({
   /** Prevents the file-picker / initial-PDF effect from re-triggering after
    *  the first run within a single modal session (open→close cycle). */
   const hasTriggeredFileOpenRef = useRef(false);
-  /** Cancellation token for thumbnail generation — abort when modal closes or PDF changes. */
-  const thumbCancelRef = useRef(false);
+  /** Generation counter for thumbnail streaming. A stale loop sees a newer
+   *  generation and stops — unlike a shared boolean, this can't race when an
+   *  old loop is parked inside an await while a new one starts. */
+  const thumbGenRef = useRef(0);
+  /** One renderer per modal session (no worker — main-thread renders only). */
+  const rendererRef = useRef<PDFRenderer | null>(null);
+  /** Mirror of mupdfDoc for cleanup — destroy frees its WASM memory. */
+  const mupdfDocRef = useRef<any>(null);
+
+  const releaseDoc = useCallback(() => {
+    try {
+      mupdfDocRef.current?.destroy?.();
+    } catch {
+      // already freed
+    }
+    mupdfDocRef.current = null;
+  }, []);
+
+  // Free WASM resources if the component unmounts while open
+  useEffect(
+    () => () => {
+      thumbGenRef.current++;
+      releaseDoc();
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+    },
+    [releaseDoc]
+  );
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -108,18 +136,29 @@ export function AddPdfModal({
    *  Shows the page grid immediately, then streams thumbnails progressively. */
   const loadPdfFromResult = useCallback(
     async (data: Uint8Array, name: string) => {
-      // Cancel any in-flight thumbnail generation
-      thumbCancelRef.current = true;
-      await yieldToMain();
-      thumbCancelRef.current = false;
+      // New generation — any in-flight thumbnail loop stops at its next check
+      const gen = ++thumbGenRef.current;
 
       setLoading(true);
+      setLoadError(null);
       setThumbnails({});
       setThumbProgress(0);
       try {
         const mupdf = await import("mupdf").then((m) => m.default);
         const doc = mupdf.Document.openDocument(data, "application/pdf");
+        if (doc.needsPassword?.()) {
+          doc.destroy?.();
+          setLoadError(
+            "This PDF is password-protected and can't be added here. Remove the password and try again."
+          );
+          setLoading(false);
+          return;
+        }
         const count = doc.countPages();
+        // Replace the previous document and drop renders cached for it
+        releaseDoc();
+        mupdfDocRef.current = doc;
+        rendererRef.current?.clearCache();
         setPdfBytes(data);
         setPdfFileName(name);
         setMupdfDoc(doc);
@@ -129,13 +168,15 @@ export function AddPdfModal({
         setLoading(false);
 
         // Stream thumbnails progressively
-        const renderer = new PDFRenderer(mupdf);
+        if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
+        const renderer = rendererRef.current;
         for (let i = 0; i < count; i++) {
-          if (thumbCancelRef.current) return;
+          if (thumbGenRef.current !== gen) return;
           await yieldToMain();
-          if (thumbCancelRef.current) return;
+          if (thumbGenRef.current !== gen) return;
           try {
             const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE });
+            if (thumbGenRef.current !== gen) return;
             const id = rendered.imageData as ImageData;
             if (id?.data) {
               const url = imageDataToDataUrl(id);
@@ -148,10 +189,11 @@ export function AddPdfModal({
         }
       } catch (e) {
         console.error(e);
+        setLoadError("Could not open this PDF. The file may be corrupt or unsupported.");
         setLoading(false);
       }
     },
-    []
+    [releaseDoc]
   );
 
   const handleChooseFile = useCallback(async () => {
@@ -161,7 +203,10 @@ export function AddPdfModal({
 
   useEffect(() => {
     if (!open) {
-      thumbCancelRef.current = true;
+      thumbGenRef.current++;
+      releaseDoc();
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
       setPdfBytes(null);
       setPdfFileName("");
       setMupdfDoc(null);
@@ -170,6 +215,7 @@ export function AddPdfModal({
       setThumbnails({});
       setThumbProgress(0);
       setCtoListening(false);
+      setLoadError(null);
       // Reset the guard so the next open triggers the file picker
       hasTriggeredFileOpenRef.current = false;
       return;
@@ -190,7 +236,7 @@ export function AddPdfModal({
     }
     // Don't auto-open file picker — let the user see the modal first
     // and click "Choose file" themselves for a clearer flow.
-  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed]);
+  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed, releaseDoc]);
 
   // From Civiltakeoff: request document list from opener and listen for nanodoc-cto-documents
   useEffect(() => {
@@ -223,7 +269,11 @@ export function AddPdfModal({
       }
     }, 12000);
 
+    // Only accept document lists from the CTO origin we asked — any window
+    // can post to this one otherwise.
+    const allowedOrigin = ctoContext.api_origin?.replace(/\/+$/, "") ?? "";
     const handleMessage = (event: MessageEvent) => {
+      if (allowedOrigin && event.origin !== allowedOrigin) return;
       if (event.data?.type !== "nanodoc-cto-documents") return;
       ctoDocumentsRespondedRef.current = true;
       const list = Array.isArray(event.data?.documents) ? event.data.documents : [];
@@ -319,11 +369,13 @@ export function AddPdfModal({
   const handleAddToCanvas = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
     setAdding(true);
+    setLoadError(null);
     const selected = Array.from(selectedPages).sort((a, b) => a - b);
     setAddingProgress({ done: 0, total: selected.length });
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
-      const renderer = new PDFRenderer(mupdf);
+      if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
+      const renderer = rendererRef.current;
       type TileData = {
         sourcePdfBytes: Uint8Array;
         sourcePageIndex: number;
@@ -353,6 +405,7 @@ export function AddPdfModal({
         await yieldToMain();
         const page = mupdfDoc.loadPage(pageIndex);
         const bounds = page.getBounds();
+        page.destroy?.();
         const widthPt = bounds[2] - bounds[0];
         const heightPt = bounds[3] - bounds[1];
         // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt) so scale is correct.
@@ -386,10 +439,11 @@ export function AddPdfModal({
       onClose();
     } catch (e) {
       console.error(e);
+      setLoadError("Could not add the selected pages to the canvas. Please try again.");
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, canvasWidth, canvasHeight, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch]);
 
   const thumbsStillLoading = pageCount > 0 && thumbProgress < pageCount;
 
@@ -406,13 +460,15 @@ export function AddPdfModal({
               size="sm"
               onClick={() => {
                 setSourceTab("device");
-                thumbCancelRef.current = true;
+                thumbGenRef.current++;
+                releaseDoc();
                 setPdfBytes(null);
                 setPdfFileName("");
                 setMupdfDoc(null);
                 setPageCount(0);
                 setSelectedPages(new Set());
                 setThumbnails({});
+                setLoadError(null);
               }}
             >
               From device
@@ -422,18 +478,25 @@ export function AddPdfModal({
               size="sm"
               onClick={() => {
                 setSourceTab("cto");
-                thumbCancelRef.current = true;
+                thumbGenRef.current++;
+                releaseDoc();
                 setPdfBytes(null);
                 setPdfFileName("");
                 setMupdfDoc(null);
                 setPageCount(0);
                 setSelectedPages(new Set());
                 setThumbnails({});
+                setLoadError(null);
               }}
             >
               From Civiltakeoff
             </Button>
           </div>
+        )}
+        {loadError && (
+          <p className="text-sm text-destructive border border-destructive/30 bg-destructive/5 rounded px-3 py-2">
+            {loadError}
+          </p>
         )}
         {adding ? (
           <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">

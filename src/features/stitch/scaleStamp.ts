@@ -18,11 +18,7 @@ const PADDING_V_PT = 6;
 /** Horizontal padding each side so "0" and end labels aren't cropped; bar stays exactly 1" (72 pt). */
 const BAR_PADDING_H_PT = 8;
 /** 4 px per pt for sharp stamp. */
-const PX_PER_PT = 4;
-/** Stroke is centered on the path; inner measurable span is 1px less. We add this so bar measures exactly 1". */
-const STROKE_INSET_PX = 1;
-/** Extra px so first-to-last tick spans barW + this; closes sub-pixel gap vs 1" guideline. */
-const RENDER_OVERSHOOT_PX = 11;
+export const PX_PER_PT = 4;
 
 export interface ScaleStampDimensions {
   widthPt: number;
@@ -50,6 +46,42 @@ export function getScaleStampDimensions(_feetPerInch: number): ScaleStampDimensi
   return { widthPt, heightPt };
 }
 
+/** Bar geometry in image pixels. Exported for tests. */
+export interface ScaleBarGeometry {
+  imageWidthPx: number;
+  imageHeightPx: number;
+  /** X of the first tick (the "0" mark). */
+  spanLeftPx: number;
+  /** First tick to last tick. Must equal PT_PER_INCH * PX_PER_PT (1 inch). */
+  spanPx: number;
+  barTopPx: number;
+  barHeightPx: number;
+  tickHeightPx: number;
+}
+
+/**
+ * Compute the bar geometry for a stamp image. The measurable span (first to
+ * last tick) is exactly 1" in tile points; the image is PX_PER_PT px per pt.
+ */
+export function getScaleBarGeometry(feetPerInch: number): ScaleBarGeometry {
+  const safe = Math.max(1, Math.round(Number(feetPerInch)));
+  const { widthPt, heightPt } = getScaleStampDimensions(safe);
+  const imageWidthPx = Math.max(1, Math.round(widthPt * PX_PER_PT));
+  const imageHeightPx = Math.max(1, Math.round(heightPt * PX_PER_PT));
+  // Measurable span = exactly 1" in tile points. Ticks and the outline are
+  // centered on the span edges, so center-to-center measures exactly 1".
+  const spanPx = BAR_LENGTH_PT * PX_PER_PT;
+  return {
+    imageWidthPx,
+    imageHeightPx,
+    spanLeftPx: Math.round((imageWidthPx - spanPx) / 2),
+    spanPx,
+    barTopPx: PADDING_V_PT * PX_PER_PT,
+    barHeightPx: BAR_HEIGHT_PT * PX_PER_PT,
+    tickHeightPx: TICK_HEIGHT_PT * PX_PER_PT,
+  };
+}
+
 /**
  * Generate scale bar PNG data URL. Bar from 0 to feetPerInch is exactly 1" (72 pt).
  */
@@ -57,10 +89,9 @@ export function generateScaleStampDataUrl(feetPerInch: number): string {
   const safe = Math.max(1, Math.round(Number(feetPerInch)));
   if (!Number.isFinite(safe)) return "";
 
-  const { widthPt, heightPt } = getScaleStampDimensions(safe);
-  // Image width = widthPt * PX_PER_PT; bar is BAR_LENGTH_PT * PX_PER_PT px centered so it displays as exactly 1".
-  const w = Math.max(1, Math.round(widthPt * PX_PER_PT));
-  const h = Math.max(1, Math.round(heightPt * PX_PER_PT));
+  const geom = getScaleBarGeometry(safe);
+  const w = geom.imageWidthPx;
+  const h = geom.imageHeightPx;
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
@@ -68,17 +99,11 @@ export function generateScaleStampDataUrl(feetPerInch: number): string {
   if (!ctx) return "";
 
   const scale = PX_PER_PT;
-  // 1" in px; stroke is centered on the path so inner span is 1px less — draw bar 1px wider so measure = barW
-  const barW = BAR_LENGTH_PT * scale;
-  // Span from first to last tick: barW + overshoot so it reaches the 1" guideline (avoids sub-pixel gap)
-  const spanW = barW + RENDER_OVERSHOOT_PX;
-  const barWTotal = spanW + STROKE_INSET_PX;
-  const barLeft = (w - barWTotal) / 2;
-  const barH = BAR_HEIGHT_PT * scale;
-  const tickH = TICK_HEIGHT_PT * scale;
-  const barY = PADDING_V_PT * scale;
-  // Start of the 1" span: half a stroke in from the rect left
-  const spanLeft = barLeft + 0.5;
+  const spanW = geom.spanPx;
+  const barH = geom.barHeightPx;
+  const tickH = geom.tickHeightPx;
+  const barY = geom.barTopPx;
+  const spanLeft = geom.spanLeftPx;
 
   // No background — stamp is transparent
 
@@ -101,7 +126,9 @@ export function generateScaleStampDataUrl(feetPerInch: number): string {
 
   ctx.strokeStyle = "#000";
   ctx.lineWidth = 1;
-  ctx.strokeRect(barLeft, barY, barWTotal, barH);
+  // Outline centered on the span edges: line centers sit exactly on the 0 and
+  // feetPerInch tick positions, so measuring center-to-center reads 1".
+  ctx.strokeRect(spanLeft, barY, spanW, barH);
 
   // Tick marks at spanLeft and spanLeft+spanW
   ctx.lineWidth = 1;

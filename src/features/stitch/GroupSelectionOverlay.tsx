@@ -9,7 +9,7 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getGroupBounds } from "./stitchGeometry";
-import { HANDLE_SIZE, RESIZE_CURSORS } from "./stitchConstants";
+import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "./stitchConstants";
 
 function angleDeg(clientX: number, clientY: number, centerX: number, centerY: number): number {
   return Math.atan2(clientY - centerY, clientX - centerX) * (180 / Math.PI);
@@ -54,7 +54,7 @@ export function GroupSelectionOverlay() {
     centerY: number;
   } | null>(null);
 
-  const scale = Math.max(0.25, zoomLevel);
+  const scale = Math.max(MIN_ZOOM, zoomLevel);
 
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
@@ -100,7 +100,15 @@ export function GroupSelectionOverlay() {
 
         const scaleX = newW / resize.boundsW;
         const scaleY = newH / resize.boundsH;
-        const s = Math.min(scaleX, scaleY);
+        // Edge handles change only one axis — the other stays 1, so min()
+        // would clamp growth to a no-op. Use the dragged axis for edges,
+        // min() only for corners (uniform, conservative).
+        const isEdgeHandle = resize.dir.length === 1;
+        const s = isEdgeHandle
+          ? resize.dir === "e" || resize.dir === "w"
+            ? scaleX
+            : scaleY
+          : Math.min(scaleX, scaleY);
 
         const updates = resize.tiles.map((t) => {
           const tcx = t.x + t.width / 2;
@@ -211,15 +219,21 @@ export function GroupSelectionOverlay() {
 
   if (selectedTileIds.length < 2) return null;
 
+  // Controls live inside the zoom-scaled canvas — divide by zoom so they stay
+  // a constant size on screen.
+  const invZoom = 1 / scale;
+  const hs = HANDLE_SIZE * invZoom;
+  const buttonPx = 32 * 0.9 * invZoom;
+  const buttonTop = -48 * invZoom;
   const pos: Record<string, CSSProperties> = {
-    nw: { left: -HANDLE_SIZE / 2, top: -HANDLE_SIZE / 2 },
-    n: { left: "50%", top: -HANDLE_SIZE / 2, marginLeft: -HANDLE_SIZE / 2 },
-    ne: { left: "100%", top: -HANDLE_SIZE / 2, marginLeft: -HANDLE_SIZE / 2 },
-    e: { left: "100%", top: "50%", marginLeft: -HANDLE_SIZE / 2, marginTop: -HANDLE_SIZE / 2 },
-    se: { left: "100%", top: "100%", marginLeft: -HANDLE_SIZE / 2, marginTop: -HANDLE_SIZE / 2 },
-    s: { left: "50%", top: "100%", marginLeft: -HANDLE_SIZE / 2, marginTop: -HANDLE_SIZE / 2 },
-    sw: { left: -HANDLE_SIZE / 2, top: "100%", marginTop: -HANDLE_SIZE / 2 },
-    w: { left: -HANDLE_SIZE / 2, top: "50%", marginTop: -HANDLE_SIZE / 2 },
+    nw: { left: -hs / 2, top: -hs / 2 },
+    n: { left: "50%", top: -hs / 2, marginLeft: -hs / 2 },
+    ne: { left: "100%", top: -hs / 2, marginLeft: -hs / 2 },
+    e: { left: "100%", top: "50%", marginLeft: -hs / 2, marginTop: -hs / 2 },
+    se: { left: "100%", top: "100%", marginLeft: -hs / 2, marginTop: -hs / 2 },
+    s: { left: "50%", top: "100%", marginLeft: -hs / 2, marginTop: -hs / 2 },
+    sw: { left: -hs / 2, top: "100%", marginTop: -hs / 2 },
+    w: { left: -hs / 2, top: "50%", marginTop: -hs / 2 },
   };
 
   return (
@@ -232,17 +246,18 @@ export function GroupSelectionOverlay() {
         top: bounds.y,
         width: bounds.width,
         height: bounds.height,
-        border: "2px solid hsl(var(--primary))",
-        boxShadow: "0 0 0 1px hsl(var(--primary) / 0.3)",
+        border: `${2 * invZoom}px solid hsl(var(--primary))`,
+        boxShadow: `0 0 0 ${invZoom}px hsl(var(--primary) / 0.3)`,
       }}
     >
       {!resizeLocked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
         <div
           key={dir}
-          className="absolute bg-primary rounded-md border-2 border-white shadow-md pointer-events-auto"
+          className="absolute bg-primary rounded-md border-white shadow-md pointer-events-auto"
           style={{
-            width: HANDLE_SIZE,
-            height: HANDLE_SIZE,
+            width: hs,
+            height: hs,
+            borderWidth: 2 * invZoom,
             cursor: RESIZE_CURSORS[dir] ?? "se-resize",
             ...pos[dir],
           }}
@@ -260,14 +275,15 @@ export function GroupSelectionOverlay() {
           type="button"
           variant="secondary"
           size="icon"
-          className="absolute -top-12 left-1/2 -translate-x-1/2 h-10 w-10 z-10 border-2 border-border shadow-md pointer-events-auto cursor-grab active:cursor-grabbing"
+          className="absolute left-1/2 -translate-x-1/2 z-10 border-2 border-border shadow-md pointer-events-auto cursor-grab active:cursor-grabbing"
+          style={{ width: buttonPx, height: buttonPx, top: buttonTop }}
           title="Drag to rotate group"
           onPointerDown={handleRotatePointerDown}
           onPointerMove={handleRotatePointerMove}
           onPointerUp={handleRotatePointerUp}
           onPointerLeave={handleRotatePointerUp}
         >
-          <RotateCw className="h-5 w-5" />
+          <RotateCw className="h-full w-full shrink-0" />
         </Button>
       )}
     </div>

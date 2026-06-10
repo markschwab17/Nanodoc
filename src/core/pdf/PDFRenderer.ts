@@ -64,10 +64,32 @@ export class PDFRenderer {
 
   constructor(mupdf: any) {
     this.mupdf = mupdf;
-    this.spawnWorker();
   }
 
   // ─── Worker lifecycle ───────────────────────────────────────────────
+
+  /**
+   * Spawn the worker on first use of the worker render path. Callers that
+   * only ever render on the main thread (no pdfData/docId) never pay for a
+   * worker + its mupdf WASM heap.
+   */
+  private ensureWorker() {
+    if (this.worker || this.workerSpawnAttempted) return;
+    this.workerSpawnAttempted = true;
+    this.spawnWorker();
+  }
+
+  private workerSpawnAttempted = false;
+
+  /**
+   * Release the worker and caches. Call when the renderer is no longer
+   * needed — each worker holds a full mupdf WASM heap until terminated.
+   */
+  dispose(): void {
+    this.killWorker(false);
+    this.workerSpawnAttempted = false;
+    this.renderCache.clear();
+  }
 
   private spawnWorker() {
     try {
@@ -211,8 +233,11 @@ export class PDFRenderer {
     }
 
     // Try worker path
-    if (this.worker && this.workerReady && pdfData && docId) {
-      return this.renderPageInWorker(docId, pdfData, pageNumber, scale, rotation);
+    if (pdfData && docId) {
+      this.ensureWorker();
+      if (this.worker && this.workerReady) {
+        return this.renderPageInWorker(docId, pdfData, pageNumber, scale, rotation);
+      }
     }
 
     // Fallback: main-thread rendering
@@ -304,6 +329,10 @@ export class PDFRenderer {
         throw new Error(`Unsupported color components: ${components}`);
       }
 
+      // Pixels were copied into imageData above — free the WASM-side objects
+      pixmap.destroy?.();
+      page.destroy?.();
+
       const rendered: RenderedPage = { pageNumber, imageData, width, height, scale };
       this.cacheRender(this.getCacheKey(pageNumber, scale, rotation), rendered);
       return rendered;
@@ -333,6 +362,8 @@ export class PDFRenderer {
       );
 
       const pngData = pixmap.asPNG();
+      pixmap.destroy?.();
+      page.destroy?.();
       const blob = new Blob([pngData], { type: 'image/png' });
       return URL.createObjectURL(blob);
     } catch (error) {

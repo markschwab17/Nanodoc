@@ -52,11 +52,13 @@ function CoordInput({
   value,
   onChange,
   title,
+  disabled,
 }: {
   label: string;
   value: number;
   onChange: (v: number) => void;
   title?: string;
+  disabled?: boolean;
 }) {
   const [text, setText] = useState(formatPt(value));
   const [focused, setFocused] = useState(false);
@@ -82,6 +84,7 @@ function CoordInput({
         type="text"
         inputMode="decimal"
         value={text}
+        disabled={disabled}
         onChange={(e) => setText(e.target.value)}
         onFocus={() => setFocused(true)}
         onBlur={() => { setFocused(false); commit(); }}
@@ -96,7 +99,7 @@ function CoordInput({
             onChange(next);
           }
         }}
-        className="h-6 w-[52px] rounded border border-input bg-background px-1 text-[11px] tabular-nums text-center focus:outline-none focus:ring-1 focus:ring-ring"
+        className="h-6 w-[52px] rounded border border-input bg-background px-1 text-[11px] tabular-nums text-center focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
       />
     </label>
   );
@@ -123,6 +126,7 @@ export function StitchBottomToolbar({
     zoomLevel,
     snapToEdges,
     setSnapToEdges,
+    resizeLocked,
     selectedTileIds,
     tiles,
     updateTile,
@@ -152,10 +156,16 @@ export function StitchBottomToolbar({
   const handleCoordChange = useCallback(
     (field: "x" | "y" | "width" | "height", value: number) => {
       if (!singleSelectedTile) return;
-      // Clamp width/height to a minimum
+      // Respect the same locks the drag/resize handles honor: locked tiles
+      // don't move, and W/H is off while resize is locked.
+      if (singleSelectedTile.locked) return;
       if (field === "width" || field === "height") {
+        if (useStitchStore.getState().resizeLocked) return;
+        // Clamp width/height to a minimum
         value = Math.max(1, value);
       }
+      // No-op edits (focus/blur without change) must not pollute the undo stack
+      if (singleSelectedTile[field] === value) return;
       updateTile(singleSelectedTile.id, { [field]: value });
     },
     [singleSelectedTile, updateTile]
@@ -284,10 +294,10 @@ export function StitchBottomToolbar({
           <>
             <div className="h-5 w-px bg-border" aria-hidden />
             <div className="flex items-center gap-1.5" role="group" aria-label="Tile position and size">
-              <CoordInput label="X" value={singleSelectedTile.x} onChange={(v) => handleCoordChange("x", v)} title="X position (pt). Up/Down arrow: ±0.1pt, Shift: ±1pt" />
-              <CoordInput label="Y" value={singleSelectedTile.y} onChange={(v) => handleCoordChange("y", v)} title="Y position (pt). Up/Down arrow: ±0.1pt, Shift: ±1pt" />
-              <CoordInput label="W" value={singleSelectedTile.width} onChange={(v) => handleCoordChange("width", v)} title="Width (pt)" />
-              <CoordInput label="H" value={singleSelectedTile.height} onChange={(v) => handleCoordChange("height", v)} title="Height (pt)" />
+              <CoordInput label="X" value={singleSelectedTile.x} disabled={Boolean(singleSelectedTile.locked)} onChange={(v) => handleCoordChange("x", v)} title={singleSelectedTile.locked ? "Tile is locked" : "X position (pt). Up/Down arrow: ±0.1pt, Shift: ±1pt"} />
+              <CoordInput label="Y" value={singleSelectedTile.y} disabled={Boolean(singleSelectedTile.locked)} onChange={(v) => handleCoordChange("y", v)} title={singleSelectedTile.locked ? "Tile is locked" : "Y position (pt). Up/Down arrow: ±0.1pt, Shift: ±1pt"} />
+              <CoordInput label="W" value={singleSelectedTile.width} disabled={Boolean(singleSelectedTile.locked) || resizeLocked} onChange={(v) => handleCoordChange("width", v)} title={resizeLocked ? "Resize locked" : "Width (pt)"} />
+              <CoordInput label="H" value={singleSelectedTile.height} disabled={Boolean(singleSelectedTile.locked) || resizeLocked} onChange={(v) => handleCoordChange("height", v)} title={resizeLocked ? "Resize locked" : "Height (pt)"} />
             </div>
           </>
         )}

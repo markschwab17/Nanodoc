@@ -159,7 +159,7 @@ export function StitchToolbar({
     addTiles,
     sendTilesToBack,
     bringTilesToFront,
-    removeTile,
+    removeTiles,
     undo,
     redo,
     undoStack,
@@ -317,7 +317,7 @@ export function StitchToolbar({
   }, [anyToolActive, activeTourId]);
 
   const handleDeleteSelected = () => {
-    selectedTileIds.forEach((id) => removeTile(id));
+    removeTiles(selectedTileIds);
   };
 
   const deleteContentTip =

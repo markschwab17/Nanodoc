@@ -6,6 +6,7 @@
 import { create } from "zustand";
 import type { StitchTile, CropRect, StitchUndoSnapshot } from "@/features/stitch/stitchTypes";
 import { CANVAS_PRESETS, UNDO_MAX_SIZE } from "@/features/stitch/stitchConstants";
+import { getTileAABB } from "@/features/stitch/stitchGeometry";
 
 export type { StitchTile, CropRect, StitchUndoSnapshot };
 export { CANVAS_PRESETS };
@@ -51,6 +52,8 @@ interface StitchState {
   /** Apply patches to multiple tiles in one update (one undo step). */
   updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl" | "imageModified">> }>) => void;
   removeTile: (id: string) => void;
+  /** Remove multiple tiles in one update (one undo step). */
+  removeTiles: (ids: string[]) => void;
   /** Move tile(s) to the back (lowest layer). Pass one id or multiple. */
   sendTileToBack: (id: string) => void;
   sendTilesToBack: (ids: string[]) => void;
@@ -198,6 +201,19 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       };
     }),
 
+  removeTiles: (ids) =>
+    set((state) => {
+      if (ids.length === 0) return state;
+      const snap = snapshotState(state);
+      const remove = new Set(ids);
+      return {
+        tiles: state.tiles.filter((t) => !remove.has(t.id)),
+        selectedTileIds: state.selectedTileIds.filter((i) => !remove.has(i)),
+        undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
+        redoStack: [],
+      };
+    }),
+
   sendTileToBack: (id) =>
     set((state) => {
       const idx = state.tiles.findIndex((t) => t.id === id);
@@ -320,17 +336,22 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       const snap = snapshotState(state);
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (const t of state.tiles) {
-        x0 = Math.min(x0, t.x);
-        y0 = Math.min(y0, t.y);
-        x1 = Math.max(x1, t.x + t.width);
-        y1 = Math.max(y1, t.y + t.height);
+        const aabb = getTileAABB(t);
+        x0 = Math.min(x0, aabb.x);
+        y0 = Math.min(y0, aabb.y);
+        x1 = Math.max(x1, aabb.x + aabb.width);
+        y1 = Math.max(y1, aabb.y + aabb.height);
       }
+      const cx0 = Math.max(0, x0 - margin);
+      const cy0 = Math.max(0, y0 - margin);
+      const cx1 = Math.min(state.canvasWidth, x1 + margin);
+      const cy1 = Math.min(state.canvasHeight, y1 + margin);
       return {
         cropRect: {
-          x: Math.max(0, x0 - margin),
-          y: Math.max(0, y0 - margin),
-          w: Math.min(state.canvasWidth, x1 - x0 + 2 * margin),
-          h: Math.min(state.canvasHeight, y1 - y0 + 2 * margin),
+          x: cx0,
+          y: cy0,
+          w: Math.max(0, cx1 - cx0),
+          h: Math.max(0, cy1 - cy0),
         },
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],

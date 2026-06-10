@@ -12,8 +12,8 @@ import type { CSSProperties } from "react";
 import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
-import { getScaleStampDimensions } from "@/features/stitch/scaleStamp";
-import { HANDLE_SIZE, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
+import { computeResizedPose } from "@/features/stitch/stitchGeometry";
+import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
 import { Lock, RotateCw, Unlock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -40,6 +40,9 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   const isLocked = Boolean(tile.locked);
   const dragStartRef = useRef<DragStart | null>(null);
+  // Snapshot is deferred to the first actual move: plain clicks must not
+  // pollute the undo stack or wipe the redo stack.
+  const pendingUndoSnapshotRef = useRef(false);
   const tileContainerRef = useRef<HTMLDivElement | null>(null);
   const [rotationDragStart, setRotationDragStart] = useState<{
     initialRotationDeg: number;
@@ -56,6 +59,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     height: number;
     tileX: number;
     tileY: number;
+    rotation: number;
     aspectRatio: number;
   } | null>(null);
 
@@ -66,8 +70,8 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
       const store = useStitchStore.getState();
       const currentIds = store.selectedTileIds;
 
-      // Push undo snapshot BEFORE the drag starts so we can undo back to this state
-      store.pushUndoSnapshot();
+      // Snapshot only once the pointer actually moves (see handlePointerMove)
+      pendingUndoSnapshotRef.current = true;
 
       if (e.shiftKey) {
         const newIds = currentIds.includes(tile.id)
@@ -134,7 +138,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
       // Read all needed values from store to avoid stale closures and extra subscriptions
       const store = useStitchStore.getState();
-      const scale = Math.max(0.25, store.zoomLevel);
+      const scale = Math.max(MIN_ZOOM, store.zoomLevel);
 
       const dragOrResizeX = drag?.type === "single" ? drag.x : drag?.type === "group" ? drag.x : resize?.x ?? 0;
       const dragOrResizeY = drag?.type === "single" ? drag.y : drag?.type === "group" ? drag.y : resize?.y ?? 0;
@@ -147,46 +151,33 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
           resizeStartRef.current = null;
           return;
         }
-        const MIN = 20;
-        const { width: w0, height: h0, tileX: x0, tileY: y0, aspectRatio: ar } = resize;
-        let width: number;
-        let height: number;
-        let tileX = x0;
-        let tileY = y0;
+        const pose = computeResizedPose(
+          {
+            dir: resize.dir,
+            x: resize.tileX,
+            y: resize.tileY,
+            width: resize.width,
+            height: resize.height,
+            rotation: resize.rotation,
+            aspectRatio: resize.aspectRatio,
+          },
+          dxCanvas,
+          dyCanvas
+        );
 
-        if (resize.dir === "e" || resize.dir === "w") {
-          width = resize.dir === "e" ? Math.max(MIN, w0 + dxCanvas) : Math.max(MIN, w0 - dxCanvas);
-          height = width / ar;
-          if (height < MIN) { height = MIN; width = height * ar; }
-          if (resize.dir === "w") tileX = x0 + w0 - width;
-        } else if (resize.dir === "n" || resize.dir === "s") {
-          height = resize.dir === "s" ? Math.max(MIN, h0 + dyCanvas) : Math.max(MIN, h0 - dyCanvas);
-          width = height * ar;
-          if (width < MIN) { width = MIN; height = width / ar; }
-          if (resize.dir === "n") tileY = y0 + h0 - height;
-        } else {
-          const scaleX = resize.dir.includes("e") ? (w0 + dxCanvas) / w0 : (w0 - dxCanvas) / w0;
-          const scaleY = resize.dir.includes("s") ? (h0 + dyCanvas) / h0 : (h0 - dyCanvas) / h0;
-          const minScale = Math.max(MIN / w0, MIN / h0);
-          const s = Math.max(minScale, Math.min(scaleX, scaleY));
-          width = w0 * s;
-          height = h0 * s;
-          if (resize.dir.includes("w")) tileX = x0 + w0 - width;
-          if (resize.dir.includes("n")) tileY = y0 + h0 - height;
-        }
-
-        let finalX = tileX;
-        let finalY = tileY;
-        if (store.snapToEdges) {
+        let finalX = pose.x;
+        let finalY = pose.y;
+        // Edge snapping assumes an axis-aligned tile — skip it while rotated
+        if (store.snapToEdges && resize.rotation === 0) {
           const snapped = snapTilePosition(
-            tile.id, tileX, tileY, width, height,
+            tile.id, pose.x, pose.y, pose.width, pose.height,
             store.tiles, store.canvasWidth, store.canvasHeight
           );
           finalX = snapped.x;
           finalY = snapped.y;
         }
         // No undo during continuous resize — snapshot was pushed on pointerDown
-        store.updateTileNoUndo(tile.id, { width, height, x: finalX, y: finalY });
+        store.updateTileNoUndo(tile.id, { width: pose.width, height: pose.height, x: finalX, y: finalY });
         return;
       }
 
@@ -200,7 +191,13 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
             id,
             patch: { x: x + dxCanvas, y: y + dyCanvas } as const,
           }));
-        if (updates.length > 0) store.updateTilesNoUndo(updates);
+        if (updates.length > 0) {
+          if (pendingUndoSnapshotRef.current) {
+            store.pushUndoSnapshot();
+            pendingUndoSnapshotRef.current = false;
+          }
+          store.updateTilesNoUndo(updates);
+        }
         return;
       }
 
@@ -222,7 +219,11 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
           newX = snapped.x;
           newY = snapped.y;
         }
-        // No undo during continuous drag — snapshot was pushed on pointerDown
+        // Snapshot once at the start of the actual drag, then no-undo updates
+        if (pendingUndoSnapshotRef.current) {
+          store.pushUndoSnapshot();
+          pendingUndoSnapshotRef.current = false;
+        }
         store.updateTileNoUndo(tile.id, { x: newX, y: newY });
       }
     },
@@ -232,6 +233,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
     dragStartRef.current = null;
     resizeStartRef.current = null;
+    pendingUndoSnapshotRef.current = false;
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
   }, []);
 
@@ -251,6 +253,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         height,
         tileX,
         tileY,
+        rotation: (tile.rotation ?? 0) % 360,
         aspectRatio: width / height,
       };
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -325,14 +328,10 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   if (!tile.imageDataUrl) return null;
 
-  // Scale stamps: always render at canonical size so far-left and far-right scale lines are exactly 1"
-  const isScaleStampWithScale = Boolean(tile.isScaleStamp && tile.scaleStampFeetPerInch != null);
-  const displayWidth = isScaleStampWithScale
-    ? getScaleStampDimensions(tile.scaleStampFeetPerInch!).widthPt
-    : tile.width;
-  const displayHeight = isScaleStampWithScale
-    ? getScaleStampDimensions(tile.scaleStampFeetPerInch!).heightPt
-    : tile.height;
+  // Display always honors tile.width/height — the export draws at tile size,
+  // so the canvas must show the same thing (scale stamps included).
+  const displayWidth = tile.width;
+  const displayHeight = tile.height;
 
   return (
     <div
@@ -362,69 +361,74 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         className="w-full h-full pointer-events-none select-none object-fill"
         draggable={false}
       />
-      {isSingleSelected && (
-        <>
-          {!resizeLocked && !isLocked &&
-            (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
-              const pos: Record<string, CSSProperties> = {
-                nw: { left: -HANDLE_SIZE / 2, top: -HANDLE_SIZE / 2 },
-                n: { left: "50%", top: -HANDLE_SIZE / 2, marginLeft: -HANDLE_SIZE / 2 },
-                ne: { left: "100%", top: -HANDLE_SIZE / 2, marginLeft: -HANDLE_SIZE / 2 },
-                e: { left: "100%", top: "50%", marginLeft: -HANDLE_SIZE / 2, marginTop: -HANDLE_SIZE / 2 },
-                se: { left: "100%", top: "100%", marginLeft: -HANDLE_SIZE / 2, marginTop: -HANDLE_SIZE / 2 },
-                s: { left: "50%", top: "100%", marginLeft: -HANDLE_SIZE / 2, marginTop: -HANDLE_SIZE / 2 },
-                sw: { left: -HANDLE_SIZE / 2, top: "100%", marginTop: -HANDLE_SIZE / 2 },
-                w: { left: -HANDLE_SIZE / 2, top: "50%", marginTop: -HANDLE_SIZE / 2 },
-              };
-              return (
+      {isSingleSelected && (() => {
+        // Controls live inside the zoom-scaled canvas — divide by zoom so they
+        // stay a constant size on screen (like the lock button always did).
+        const invZoom = 1 / Math.max(MIN_ZOOM, zoomLevel);
+        const hs = HANDLE_SIZE * invZoom;
+        const buttonPx = 32 * 0.9 * invZoom;
+        const buttonTop = -48 * invZoom;
+        const pos: Record<string, CSSProperties> = {
+          nw: { left: -hs / 2, top: -hs / 2 },
+          n: { left: "50%", top: -hs / 2, marginLeft: -hs / 2 },
+          ne: { left: "100%", top: -hs / 2, marginLeft: -hs / 2 },
+          e: { left: "100%", top: "50%", marginLeft: -hs / 2, marginTop: -hs / 2 },
+          se: { left: "100%", top: "100%", marginLeft: -hs / 2, marginTop: -hs / 2 },
+          s: { left: "50%", top: "100%", marginLeft: -hs / 2, marginTop: -hs / 2 },
+          sw: { left: -hs / 2, top: "100%", marginTop: -hs / 2 },
+          w: { left: -hs / 2, top: "50%", marginTop: -hs / 2 },
+        };
+        return (
+          <>
+            {!resizeLocked && !isLocked &&
+              (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
                 <div
                   key={dir}
-                  className="absolute bg-primary rounded-md border-2 border-white shadow-md z-10"
+                  className="absolute bg-primary rounded-md border-white shadow-md z-10"
                   style={{
-                    width: HANDLE_SIZE,
-                    height: HANDLE_SIZE,
+                    width: hs,
+                    height: hs,
+                    borderWidth: 2 * invZoom,
                     cursor: RESIZE_CURSORS[dir] ?? "se-resize",
                     ...pos[dir],
                   }}
                   onPointerDown={(e) => handleResizeStart(e, dir)}
                 />
-              );
-            })}
-          {!resizeLocked && !isLocked && (
+              ))}
+            {!resizeLocked && !isLocked && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                className="absolute left-1/2 -translate-x-1/2 z-10 border-2 border-border shadow-md cursor-grab active:cursor-grabbing"
+                style={{ width: buttonPx, height: buttonPx, top: buttonTop }}
+                title="Drag to rotate"
+                onPointerDown={handleRotatePointerDown}
+                onPointerMove={handleRotatePointerMove}
+                onPointerUp={handleRotatePointerUp}
+                onPointerLeave={handleRotatePointerUp}
+              >
+                <RotateCw className="h-full w-full shrink-0" />
+              </Button>
+            )}
             <Button
               type="button"
               variant="secondary"
               size="icon"
-              className="absolute -top-12 left-1/2 -translate-x-1/2 h-10 w-10 z-10 border-2 border-border shadow-md cursor-grab active:cursor-grabbing"
-              title="Drag to rotate"
-              onPointerDown={handleRotatePointerDown}
-              onPointerMove={handleRotatePointerMove}
-              onPointerUp={handleRotatePointerUp}
-              onPointerLeave={handleRotatePointerUp}
+              className={`absolute z-10 border-2 border-border shadow-md ${isLocked ? "left-1/2 -translate-x-1/2" : "right-0 translate-x-1/2"}`}
+              style={{ width: buttonPx, height: buttonPx, top: buttonTop }}
+              title={isLocked ? "Unlock position" : "Lock position"}
+              onClick={handleToggleLock}
             >
-              <RotateCw className="h-5 w-5" />
+              {isLocked ? (
+                <Lock className="h-full w-full shrink-0" />
+              ) : (
+                <Unlock className="h-full w-full shrink-0" />
+              )}
             </Button>
-          )}
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon"
-            className={`absolute -top-12 z-10 border-2 border-border shadow-md ${isLocked ? "left-1/2 -translate-x-1/2" : "right-0 translate-x-1/2"}`}
-            style={{
-              width: `${(32 * 0.9) / zoomLevel}px`,
-              height: `${(32 * 0.9) / zoomLevel}px`,
-            }}
-            title={isLocked ? "Unlock position" : "Lock position"}
-            onClick={handleToggleLock}
-          >
-            {isLocked ? (
-              <Lock className="h-full w-full shrink-0" />
-            ) : (
-              <Unlock className="h-full w-full shrink-0" />
-            )}
-          </Button>
-        </>
-      )}
+          </>
+        );
+      })()}
     </div>
   );
 });

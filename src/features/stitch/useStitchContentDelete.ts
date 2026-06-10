@@ -7,7 +7,7 @@
  * at the end.  This eliminates ~1000 PNG round-trips per stroke.
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import {
   eraseRectFromTile,
@@ -16,6 +16,7 @@ import {
   encodeTileImage,
   floodFillErase,
 } from "./imageUtils";
+import { getTileAABB } from "./stitchGeometry";
 import {
   DELETE_ELEMENT_COLOR_TOLERANCE,
   STROKE_BRUSH_OFFSETS,
@@ -48,19 +49,40 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
     Array<{ x: number; y: number; w: number; h: number }>
   >([]);
   const [isDeletingAlongPath, setIsDeletingAlongPath] = useState(false);
+  // Concurrent erases decode the same source image and the last write wins —
+  // guard so a second erase can't start while one is in flight.
+  const eraseInFlightRef = useRef(false);
+  const feedbackTimerRef = useRef<number | null>(null);
+
+  const showErasedFeedback = useCallback((rects: Array<{ x: number; y: number; w: number; h: number }>) => {
+    if (feedbackTimerRef.current != null) window.clearTimeout(feedbackTimerRef.current);
+    setErasedRegionFeedback(rects);
+    feedbackTimerRef.current = window.setTimeout(() => setErasedRegionFeedback([]), 1500);
+  }, []);
 
   const handleContentDeleteRect = useCallback(
     async (rect: { x: number; y: number; w: number; h: number }) => {
-      const updates: Array<{ id: string; patch: { imageDataUrl: string; imageModified: true } }> = [];
-      for (const tile of tiles) {
-        const newDataUrl = await eraseRectFromTile(tile, rect);
-        if (newDataUrl) {
-          updates.push({ id: tile.id, patch: { imageDataUrl: newDataUrl, imageModified: true } });
+      if (eraseInFlightRef.current) return;
+      eraseInFlightRef.current = true;
+      setIsDeletingAlongPath(true);
+      try {
+        const updates: Array<{ id: string; patch: { imageDataUrl: string; imageModified: true } }> = [];
+        for (const tile of tiles) {
+          const newDataUrl = await eraseRectFromTile(tile, rect);
+          if (newDataUrl) {
+            updates.push({ id: tile.id, patch: { imageDataUrl: newDataUrl, imageModified: true } });
+          }
         }
-      }
-      if (updates.length > 0) {
-        updateTiles(updates);
-        showNotification(`Content removed from ${updates.length} tile(s).`, "success");
+        if (updates.length > 0) {
+          updateTiles(updates);
+          showNotification(`Content removed from ${updates.length} tile(s).`, "success");
+        }
+      } catch (e) {
+        console.error(e);
+        showNotification("Could not remove content.", "error");
+      } finally {
+        eraseInFlightRef.current = false;
+        setIsDeletingAlongPath(false);
       }
     },
     [tiles, updateTiles, showNotification]
@@ -69,6 +91,8 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
   const handleDeleteElementAlongPath = useCallback(
     async (path: Array<{ x: number; y: number }>) => {
       if (path.length === 0) return;
+      if (eraseInFlightRef.current) return;
+      eraseInFlightRef.current = true;
       const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
       const updates: Array<{ id: string; patch: { imageDataUrl: string; imageModified: true } }> = [];
       setIsDeletingAlongPath(true);
@@ -89,18 +113,24 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
         } else {
           // Stroke: decode each tile ONCE, flood-fill all points on raw pixels, encode ONCE.
           const densePath = interpolatePath(path, 1);
-          const pathMinX = Math.min(...densePath.map((p) => p.x));
-          const pathMaxX = Math.max(...densePath.map((p) => p.x));
-          const pathMinY = Math.min(...densePath.map((p) => p.y));
-          const pathMaxY = Math.max(...densePath.map((p) => p.y));
+          // Loop (not spread) — dense paths can exceed engine argument limits
+          let pathMinX = Infinity, pathMaxX = -Infinity, pathMinY = Infinity, pathMaxY = -Infinity;
+          for (const p of densePath) {
+            if (p.x < pathMinX) pathMinX = p.x;
+            if (p.x > pathMaxX) pathMaxX = p.x;
+            if (p.y < pathMinY) pathMinY = p.y;
+            if (p.y > pathMaxY) pathMaxY = p.y;
+          }
 
           for (const tile of tiles) {
-            const tileRight = tile.x + tile.width;
-            const tileBottom = tile.y + tile.height;
+            // Rotation-aware footprint for culling
+            const aabb = getTileAABB(tile);
+            const tileRight = aabb.x + aabb.width;
+            const tileBottom = aabb.y + aabb.height;
             if (
-              pathMaxX < tile.x ||
+              pathMaxX < aabb.x ||
               pathMinX >= tileRight ||
-              pathMaxY < tile.y ||
+              pathMaxY < aabb.y ||
               pathMinY >= tileBottom
             )
               continue;
@@ -118,7 +148,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
               for (const [dx, dy] of STROKE_BRUSH_OFFSETS) {
                 const x = pt.x + dx;
                 const y = pt.y + dy;
-                if (x < tile.x || x >= tileRight || y < tile.y || y >= tileBottom) continue;
+                if (x < aabb.x || x >= tileRight || y < aabb.y || y >= tileBottom) continue;
 
                 const rect = floodFillErase(
                   imageData, imgW, imgH,
@@ -144,8 +174,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
           updateTiles(updates);
         }
         if (rects.length > 0) {
-          setErasedRegionFeedback(rects);
-          window.setTimeout(() => setErasedRegionFeedback([]), 1500);
+          showErasedFeedback(rects);
           showNotification(
             path.length === 1
               ? "Element removed."
@@ -162,10 +191,11 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
         console.error(e);
         showNotification("Could not remove elements.", "error");
       } finally {
+        eraseInFlightRef.current = false;
         setIsDeletingAlongPath(false);
       }
     },
-    [tiles, updateTiles, showNotification]
+    [tiles, updateTiles, showNotification, showErasedFeedback]
   );
 
   return {
