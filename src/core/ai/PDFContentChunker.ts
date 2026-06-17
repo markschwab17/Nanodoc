@@ -7,7 +7,7 @@
  */
 
 import type { PDFDocument } from "../pdf/PDFDocument";
-import { extractStructuredText, type TextSpan } from "../pdf/PDFTextExtractor";
+import { extractStructuredText, extractPlainPageText, type TextSpan } from "../pdf/PDFTextExtractor";
 import { calculateSpecDensity, detectSpecCandidates, type SpecCandidate } from "./SpecCandidateDetector";
 import { estimateTokenCount } from "./EmbeddingService";
 
@@ -138,9 +138,26 @@ async function chunkPage(
   headings: Array<{ text: string; level: number; page: number }>;
 }> {
   const spans = await extractStructuredText(document, pageNumber);
-  
+
   if (spans.length === 0) {
-    return { chunks: [], headings: [] };
+    // Positioned-span extraction returns [] when a page's text isn't in a
+    // standard positioned-block layout (text-as-paths/curves on CAD & plan
+    // sheets). For Q&A we only need the words, not positions — fall back to
+    // plain asText() so the AI still sees the page's real text.
+    const plain = (await extractPlainPageText(document, pageNumber)).trim();
+    if (plain.length === 0) {
+      return { chunks: [], headings: [] };
+    }
+    // Split on blank lines so the downstream sizer has reasonable units; spans
+    // are empty (no bboxes) which is fine for Q&A — citations just won't carry
+    // a highlight box.
+    const paragraphs = plain
+      .split(/\n{2,}/)
+      .map((p) => p.replace(/[ \t]+/g, " ").trim())
+      .filter((p) => p.length > 0);
+    const sourceText = paragraphs.length > 0 ? paragraphs : [plain.replace(/\s+/g, " ").trim()];
+    const chunks = sourceText.map((text) => ({ text, spans: [] as TextSpan[], page: pageNumber }));
+    return { chunks, headings: [] };
   }
   
   // Extract headings

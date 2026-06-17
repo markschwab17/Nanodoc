@@ -260,6 +260,37 @@ export async function extractStructuredText(
 }
 
 /**
+ * Extract the plain text of a page (no positions).
+ *
+ * `extractStructuredText` is position-oriented (for text selection) and returns
+ * an empty array when a page's text isn't in a standard positioned-block layout
+ * — common on CAD/plan sheets where text comes through as paths/curves. For use
+ * cases that only need the words (e.g. AI question-answering), this falls back
+ * to mupdf's `asText()`, which still returns the real text in those cases.
+ */
+export async function extractPlainPageText(
+  document: PDFDocument,
+  pageNumber: number
+): Promise<string> {
+  try {
+    const mupdfDoc = document.getMupdfDocument();
+    const page = mupdfDoc.loadPage(pageNumber);
+    try {
+      return page.toStructuredText("preserve-whitespace").asText() || "";
+    } catch {
+      try {
+        return page.toStructuredText().asText() || "";
+      } catch {
+        return "";
+      }
+    }
+  } catch (error) {
+    console.error(`Error extracting plain text from page ${pageNumber}:`, error);
+    return "";
+  }
+}
+
+/**
  * Select text by flow - handles paragraph/multi-line selection like a word processor
  * This selects all text between two points in reading order (not just a rectangular area)
  */

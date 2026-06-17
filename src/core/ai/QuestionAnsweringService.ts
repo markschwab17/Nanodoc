@@ -57,6 +57,16 @@ export async function answerQuestion(
     overlapPercent: 15,
   });
 
+  const totalChars = chunks.reduce((n, c) => n + c.text.length, 0);
+  console.log(`[Ask] Extracted ${chunks.length} chunk(s), ${totalChars} chars from the document.`);
+  if (totalChars === 0) {
+    return {
+      answer:
+        "I couldn't read any text from this document — it looks like the page has no selectable text layer (for example, a scanned or fully graphical sheet). Text-based questions need an underlying text layer to work.",
+      citations: [],
+    };
+  }
+
   const hasCoverPage = document.hasCoverPage();
   const embeddingService = getEmbeddingService();
   const questionEmbedding = await embeddingService.embed(question);
