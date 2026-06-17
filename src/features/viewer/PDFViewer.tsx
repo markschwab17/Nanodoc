@@ -306,8 +306,11 @@ export function PDFViewer() {
 
   // Scroll to current page in read mode
   // Pages are positioned at zoomLevel scale, so scroll coordinates are at zoom level
-  const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[]) => {
-    if (!readMode || !scrollContainerRef.current || !currentDocument) return;
+  const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[], force: boolean = false) => {
+    if (!readMode || !scrollContainerRef.current || !currentDocument) {
+      console.log('[scroll-dbg] scrollToPage bail:', { readMode, hasContainer: !!scrollContainerRef.current, hasDoc: !!currentDocument, pageNumber });
+      return;
+    }
     
     // Validate page number is within bounds
     const pageCount = currentDocument.getPageCount();
@@ -359,12 +362,16 @@ export function PDFViewer() {
     const pageScale = viewportWidth / pageMetadata.width;
     const pageHeight = pageMetadata.height * pageScale;
     
-    if (!bbox) {
+    if (!bbox && !force) {
       // If a scroll-to-spec is in flight (within the last 4s), refuse to do
       // a no-bbox scroll. This protects the bbox-targeted scroll from being
       // overridden by side-effect re-scrolls (page-change effect, baseFitScale
       // ripple, etc.) that would scroll to the top of the page.
+      // NOTE: performScroll passes force=true so its OWN intentional no-bbox
+      // scroll (e.g. image-based pages where the quote can't be located, so
+      // there are no quads/bbox) isn't blocked by the timestamp it just set.
       if (Date.now() - lastScrollToSpecAtRef.current < 4000) {
+        console.log('[scroll-dbg] scrollToPage blocked by in-flight no-bbox guard', { pageNumber });
         return;
       }
     }
@@ -1060,15 +1067,15 @@ export function PDFViewer() {
                   setBaseFitScale(calculatedScale);
                   // Wait one more frame for state to update
                   requestAnimationFrame(() => {
-                    scrollToPage(page, true, scrollBbox);
+                    scrollToPage(page, true, scrollBbox, true);
                     if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
                   });
                 } else {
-                  scrollToPage(page, true, scrollBbox);
+                  scrollToPage(page, true, scrollBbox, true);
                   if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
                 }
               } else {
-                scrollToPage(page, true, scrollBbox);
+                scrollToPage(page, true, scrollBbox, true);
                 if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
               }
             }

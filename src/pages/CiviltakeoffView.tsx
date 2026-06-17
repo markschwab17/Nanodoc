@@ -51,7 +51,12 @@ export default function CiviltakeoffView() {
 
       if (data?.type === "nanodoc-goto-page" && typeof data.page === "number") {
         const raw = Math.floor(data.page);
-        const page = raw >= 1 ? raw - 1 : Math.max(0, raw);
+        // CTO sends a 0-based physical page index (same value it puts in the `?page=` URL
+        // deep-link, which the param path below treats as 0-based). The previous `raw - 1`
+        // double-decremented it, landing one page early. This was masked on text-layer pages
+        // by searchQuoteNearby's neighbor auto-correction, but broke on image-based pages
+        // (boring logs / lab sheets) where the quote can't be found. Keep it 0-based.
+        const page = Math.max(0, raw);
         const specId = typeof data.specId === "string" && data.specId.trim() ? data.specId.trim() : undefined;
         const quote = typeof data.quote === "string" && data.quote.trim() ? data.quote.trim() : undefined;
         console.log("[nanodoc] goto-page received:", { rawPage: data.page, resolvedPage: page, specId, quote: quote?.slice(0, 80) });
