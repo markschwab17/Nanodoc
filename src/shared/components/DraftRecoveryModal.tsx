@@ -79,8 +79,8 @@ export function DraftRecoveryModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
-      <div className="w-[26rem] max-w-[90vw] bg-background border rounded-lg shadow-xl flex flex-col max-h-[70vh]">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-[26rem] bg-background border rounded-lg shadow-xl flex flex-col max-h-[calc(100vh-2rem)]">
         <div className="flex items-center justify-between p-4 border-b">
           <div>
             <h2 className="text-sm font-semibold">Recover unsaved work?</h2>
@@ -110,13 +110,13 @@ export function DraftRecoveryModal() {
                     <p className="text-xs text-muted-foreground">{formatDate(draft.updatedAt)}</p>
                   </div>
                 </div>
-                <Button size="sm" className="h-7 px-2 text-xs" onClick={() => handleRecover(draft)}>
+                <Button size="sm" className="h-7 px-2 text-xs flex-shrink-0" onClick={() => handleRecover(draft)}>
                   Recover
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="h-7 px-2 text-xs text-muted-foreground"
+                  className="h-7 px-2 text-xs text-muted-foreground flex-shrink-0"
                   onClick={() => handleDiscard(draft)}
                 >
                   Discard

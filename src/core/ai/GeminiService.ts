@@ -868,14 +868,14 @@ export async function callGeminiAPI(
   const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
 
-  // Start with hardcoded model list, then try to discover available models
+  // Start with hardcoded model list, then try to discover available models.
+  // Lead with current models; gemini-1.5-* and gemini-pro are removed from
+  // v1beta and 404 ("model not found"), which previously made the "ask" Q&A
+  // fail outright. gemini-2.5-flash is also the CTO proxy's default.
   let modelVariants = [
-    'gemini-2.0-flash',      // Best current model
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-2.0-flash-exp',
-    'gemini-1.5-pro',
-    'gemini-pro',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
   ];
 
   // Try to discover available models from API (skip when using proxy)
@@ -987,13 +987,11 @@ export async function callGeminiAPIWithHistory(
 ): Promise<string> {
   const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
+  // Current models only — gemini-1.5-* and gemini-pro are gone from v1beta.
   let modelVariants = [
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
     'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-2.0-flash-exp',
-    'gemini-1.5-pro',
-    'gemini-pro',
   ];
   if (!useCtoProxy) {
     try {

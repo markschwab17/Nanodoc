@@ -85,7 +85,11 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     if (!Number.isNaN(n) && n >= 0) page = n;
   }
 
-  let api_origin = params.get("api_origin") ?? DEFAULT_API_ORIGIN;
+  // Use a truthiness check, not ??, so an empty/blank api_origin param falls
+  // back to the default instead of becoming "" — an empty origin makes the CTO
+  // Gemini proxy fetch root-relative (hits nanodoc.app → 404).
+  const rawApiOrigin = params.get("api_origin");
+  let api_origin = rawApiOrigin && rawApiOrigin.trim() ? rawApiOrigin : DEFAULT_API_ORIGIN;
   api_origin = api_origin.replace(/\/+$/, ""); // strip trailing slashes
 
   return {
