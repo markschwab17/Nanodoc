@@ -448,7 +448,7 @@ export default function CiviltakeoffView() {
                     selectedText: ann.selectedText,
                     quads: [],
                     color: ann.color || "#FCD34D",
-                    opacity: 0.4,
+                    opacity: 0.2,
                     highlightMode: "text",
                     commentContent: ann.commentContent,
                     commentAuthor: ann.commentAuthor || "",

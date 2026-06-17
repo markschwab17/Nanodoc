@@ -307,10 +307,7 @@ export function PDFViewer() {
   // Scroll to current page in read mode
   // Pages are positioned at zoomLevel scale, so scroll coordinates are at zoom level
   const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[], force: boolean = false) => {
-    if (!readMode || !scrollContainerRef.current || !currentDocument) {
-      console.log('[scroll-dbg] scrollToPage bail:', { readMode, hasContainer: !!scrollContainerRef.current, hasDoc: !!currentDocument, pageNumber });
-      return;
-    }
+    if (!readMode || !scrollContainerRef.current || !currentDocument) return;
     
     // Validate page number is within bounds
     const pageCount = currentDocument.getPageCount();
@@ -371,7 +368,6 @@ export function PDFViewer() {
       // scroll (e.g. image-based pages where the quote can't be located, so
       // there are no quads/bbox) isn't blocked by the timestamp it just set.
       if (Date.now() - lastScrollToSpecAtRef.current < 4000) {
-        console.log('[scroll-dbg] scrollToPage blocked by in-flight no-bbox guard', { pageNumber });
         return;
       }
     }

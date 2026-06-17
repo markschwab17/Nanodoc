@@ -339,10 +339,15 @@ export function ShapeHandles({
             newWidth = pinnedRightX - newX;
             newHeight = dragStart.annotH;
           } else if (dragType === "s") {
-            // Bottom edge - pin top edge
+            // Bottom edge - pin top edge.
+            // Dragging down on screen (positive pdfDyForResize) must move the
+            // bottom edge DOWN, i.e. to a SMALLER PDF Y — the same convention
+            // the se/sw corners use (annotY - pdfDyForResize). The previous `+`
+            // inverted this, so dragging the bottom handle down shrank the box
+            // and the user had to drag up (opposite direction) to grow it.
             const pinnedTopY = dragStart.annotY + dragStart.annotH;
             newX = dragStart.annotX;
-            newY = dragStart.annotY + pdfDyForResize;
+            newY = dragStart.annotY - pdfDyForResize;
             newWidth = dragStart.annotW;
             newHeight = pinnedTopY - newY;
           } else if (dragType === "n") {
