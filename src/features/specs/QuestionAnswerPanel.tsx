@@ -14,7 +14,6 @@ import { answerQuestion, type QuestionAnswer } from "@/core/ai/QuestionAnswering
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
-import { parseCiviltakeoffViewParams } from "@/shared/civiltakeoffViewParams";
 import { AnswerContent } from "./AnswerContent";
 import type { CiteRef } from "./citationMarkup";
 import { buildAskAboutSelectionContext } from "./askActions";
@@ -79,13 +78,6 @@ export function QuestionAnswerPanel() {
   const recognitionRef = useRef<any>(null);
   const dictationBaseRef = useRef<string>("");
   const isEmbedded = typeof window !== "undefined" && window.parent !== window;
-  const dictationApiOrigin = (() => {
-    try {
-      return parseCiviltakeoffViewParams(typeof window !== "undefined" ? window.location.search : "").api_origin || "*";
-    } catch {
-      return "*";
-    }
-  })();
   const speechSupported =
     isEmbedded ||
     (typeof window !== "undefined" && ("SpeechRecognition" in window || "webkitSpeechRecognition" in window));
@@ -104,6 +96,9 @@ export function QuestionAnswerPanel() {
       if (e.source !== window.parent) return;
       const d = e.data;
       if (!d || typeof d !== "object") return;
+      if (typeof d.type === "string" && d.type.startsWith("nanodoc-dictation")) {
+        console.log("[dictation] received from parent:", d.type);
+      }
       if (d.type === "nanodoc-dictation-result") {
         setFollowUpInput((dictationBaseRef.current + (d.transcript || "")).replace(/\s+/g, " ").trimStart());
       } else if (d.type === "nanodoc-dictation-end") {
@@ -128,12 +123,13 @@ export function QuestionAnswerPanel() {
     // Embedded: delegate to the parent-frame bridge.
     if (isEmbedded) {
       if (isListening) {
-        window.parent.postMessage({ type: "nanodoc-dictation-stop" }, dictationApiOrigin);
+        window.parent.postMessage({ type: "nanodoc-dictation-stop" }, "*");
         setIsListening(false);
         return;
       }
       dictationBaseRef.current = followUpInput ? followUpInput.trim() + " " : "";
-      window.parent.postMessage({ type: "nanodoc-dictation-start" }, dictationApiOrigin);
+      console.log("[dictation] embedded → posting nanodoc-dictation-start to parent");
+      window.parent.postMessage({ type: "nanodoc-dictation-start" }, "*");
       setIsListening(true);
       setTimeout(() => inputRef.current?.focus(), 0);
       return;
@@ -265,7 +261,7 @@ export function QuestionAnswerPanel() {
     if (!text || !currentDocument || !documentId || isProcessing) return;
 
     if (isListening) {
-      if (isEmbedded) window.parent.postMessage({ type: "nanodoc-dictation-stop" }, dictationApiOrigin);
+      if (isEmbedded) window.parent.postMessage({ type: "nanodoc-dictation-stop" }, "*");
       else { try { recognitionRef.current?.stop(); } catch { /* ignore */ } }
       setIsListening(false);
     }
