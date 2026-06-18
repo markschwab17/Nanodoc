@@ -6,7 +6,7 @@
 
 import type { PDFDocument } from "../pdf/PDFDocument";
 import { createChunks } from "./PDFContentChunker";
-import { getEmbeddingService, findTopKChunks } from "./EmbeddingService";
+import { getEmbeddingService, getLocalEmbeddingService, findTopKChunks } from "./EmbeddingService";
 import { generateText, generateTextWithHistory, hasConfiguredAPIKey, type ChatMessage } from "./AIService";
 import { buildDocContext } from "./answerPrompt";
 import { QA_MODEL } from "./modelSelection";
@@ -66,10 +66,21 @@ export async function answerQuestion(
     // Document order preserved (createChunks emits chunks in reading order).
     selectedChunks = chunks;
   } else {
-    const embeddingService = getEmbeddingService();
-    const questionEmbedding = await embeddingService.embed(question);
     const chunkTexts = chunks.map(c => c.text);
-    const chunkEmbeddings = await embeddingService.embedBatch(chunkTexts);
+    let questionEmbedding: number[];
+    let chunkEmbeddings: number[][];
+    try {
+      const svc = getEmbeddingService();
+      questionEmbedding = await svc.embed(question);
+      chunkEmbeddings = await svc.embedBatch(chunkTexts);
+    } catch (e) {
+      // Proxy embeddings can fail (network/quota); fall back to local TF-IDF for the whole
+      // run so query + chunk vectors share dimensions.
+      console.warn('[Ask] Semantic embeddings failed; falling back to local TF-IDF retrieval:', e);
+      const svc = getLocalEmbeddingService();
+      questionEmbedding = await svc.embed(question);
+      chunkEmbeddings = await svc.embedBatch(chunkTexts);
+    }
     const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
     // Use more chunks so the AI sees more of the document (info can be missed with too few)
     const topChunks = findTopKChunks(questionEmbedding, embeddingMap, 35);

@@ -7,6 +7,8 @@
  * Uses browser-based embedding model for privacy and offline capability.
  */
 
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
+
 /**
  * Simple tokenizer for estimating token count
  * Approximate: 1 token ≈ 4 characters for English text
@@ -162,6 +164,55 @@ export class BrowserEmbeddingService implements EmbeddingService {
 }
 
 /**
+ * Gemini-backed embedding service (via the CTO proxy). Produces real semantic
+ * embeddings for the huge-document RAG fallback. Caches per text so a document is
+ * embedded once per session, not per question.
+ */
+export class GeminiProxyEmbeddingService implements EmbeddingService {
+  private cache = new Map<string, number[]>();
+  constructor(private token: string, private apiOrigin: string) {}
+
+  async embed(text: string): Promise<number[]> {
+    const [v] = await this.embedBatch([text]);
+    return v ?? [];
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    const out: number[][] = new Array(texts.length);
+    const missing: Array<{ idx: number; text: string }> = [];
+    texts.forEach((t, i) => {
+      const cached = this.cache.get(t);
+      if (cached) out[i] = cached;
+      else missing.push({ idx: i, text: t });
+    });
+
+    if (missing.length > 0) {
+      const fetched = await this.fetchEmbeddings(missing.map((m) => m.text));
+      missing.forEach((m, j) => {
+        const v = fetched[j] ?? [];
+        this.cache.set(m.text, v);
+        out[m.idx] = v;
+      });
+    }
+    return out;
+  }
+
+  private async fetchEmbeddings(texts: string[]): Promise<number[][]> {
+    const origin = this.apiOrigin.replace(/\/+$/, "");
+    const res = await fetch(`${origin}/api/nanodoc/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: this.token, texts }),
+    });
+    if (!res.ok) {
+      throw new Error(`Embeddings request failed: ${res.status}`);
+    }
+    const data = await res.json();
+    return Array.isArray(data?.embeddings) ? data.embeddings : [];
+  }
+}
+
+/**
  * Find top-K most similar chunks using cosine similarity
  */
 export function findTopKChunks(
@@ -181,16 +232,37 @@ export function findTopKChunks(
 }
 
 /**
- * Global embedding service instance
+ * Global embedding service instances
  */
 let embeddingServiceInstance: EmbeddingService | null = null;
+let ctoEmbeddingServiceInstance: GeminiProxyEmbeddingService | null = null;
+let ctoEmbeddingServiceToken: string | null = null;
 
-/**
- * Get or create embedding service instance
- */
-export function getEmbeddingService(): EmbeddingService {
+/** Always the local TF-IDF service — used as a fallback when the proxy fails. */
+export function getLocalEmbeddingService(): EmbeddingService {
   if (!embeddingServiceInstance) {
     embeddingServiceInstance = new BrowserEmbeddingService();
   }
   return embeddingServiceInstance;
+}
+
+/**
+ * Get the embedding service: Gemini-via-CTO-proxy when embedded in CTO (real semantic
+ * retrieval), otherwise the local TF-IDF fallback. The proxy instance is reused per
+ * token so its per-document cache persists across questions.
+ */
+export function getEmbeddingService(): EmbeddingService {
+  const ctx = typeof window !== "undefined"
+    ? useCiviltakeoffContextStore.getState().getContext()
+    : null;
+
+  if (ctx?.token && ctx?.api_origin) {
+    if (!ctoEmbeddingServiceInstance || ctoEmbeddingServiceToken !== ctx.token) {
+      ctoEmbeddingServiceInstance = new GeminiProxyEmbeddingService(ctx.token, ctx.api_origin);
+      ctoEmbeddingServiceToken = ctx.token;
+    }
+    return ctoEmbeddingServiceInstance;
+  }
+
+  return getLocalEmbeddingService();
 }
