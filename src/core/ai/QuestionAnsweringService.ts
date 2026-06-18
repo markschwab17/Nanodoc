@@ -137,7 +137,7 @@ Now answer the question with proper citations.`;
 /**
  * Parse answer and extract citations from response
  */
-function parseAnswerWithCitations(
+export function parseAnswerWithCitations(
   response: string,
   chunks: Array<{ text: string; pageRange: [number, number]; sectionPath: string[]; boundingBoxes: Array<{ page: number; bbox: [number, number, number, number] }> }>,
   hasCoverPage: boolean = false
@@ -235,7 +235,7 @@ function parseAnswerWithCitations(
     
     // Get bbox from chunk if available - use the parsed pageNum, not chunk's page
     let bbox: [number, number, number, number] | undefined;
-    if (chunk && chunk.boundingBoxes.length > 0) {
+    if (chunk && chunk.boundingBoxes && chunk.boundingBoxes.length > 0) {
       const pageBbox = chunk.boundingBoxes.find(b => b.page === pageNum);
       if (pageBbox) {
         bbox = pageBbox.bbox;
