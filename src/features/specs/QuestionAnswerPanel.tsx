@@ -16,6 +16,7 @@ import { useConversationStore } from "@/shared/stores/conversationStore";
 import { AnswerContent } from "./AnswerContent";
 import type { CiteRef } from "./citationMarkup";
 import { buildAskAboutSelectionContext } from "./askActions";
+import type { AgentStep } from "@/core/ai/documentAgent";
 
 export function QuestionAnswerPanel() {
   const { getCurrentDocument } = usePDFStore();
@@ -31,6 +32,16 @@ export function QuestionAnswerPanel() {
   /** Text the user selected in the PDF and pinned as context for their next question. */
   const [pinnedSelection, setPinnedSelection] = useState<{ page: number; quote: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  /** Live trace of the agent's search/read steps while it works (large docs). */
+  const [agentSteps, setAgentSteps] = useState<{ label: string; done: boolean }[]>([]);
+
+  const stepLabel = (s: AgentStep): string => {
+    if (s.kind === "search") return s.tool === "keyword_search" ? `Searching for “${s.query}”` : `Searching for related passages`;
+    if (s.kind === "read") return `Reading page${s.pages.length > 1 ? "s" : ""} ${s.pages.join(", ")}`;
+    return "Writing answer…";
+  };
+  const pushStep = (s: AgentStep) =>
+    setAgentSteps((prev) => [...prev.map((p) => ({ ...p, done: true })), { label: stepLabel(s), done: false }]);
 
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() ?? null;
@@ -63,6 +74,7 @@ export function QuestionAnswerPanel() {
       setIsProcessing(true);
       setLastAnswer(null);
       setExtractionError(null);
+      setAgentSteps([]);
 
       const previousMessages = getMessages(requestedDocId);
       // Show the user's message immediately (animates in), then the typing indicator.
@@ -74,7 +86,7 @@ export function QuestionAnswerPanel() {
           questionText,
           customPrompt,
           previousMessages,
-          { model }
+          { model, onStep: pushStep }
         );
         appendMessage(requestedDocId, { role: "assistant", content: result.answer, citations: result.citations });
         setLastAnswer(result);
@@ -113,6 +125,7 @@ export function QuestionAnswerPanel() {
     setIsProcessing(true);
     setLastAnswer(null);
     setExtractionError(null);
+    setAgentSteps([]);
 
     const previousMessages = getMessages(documentId);
     const customPrompt = pinnedSelection ? buildAskAboutSelectionContext(pinnedSelection) : undefined;
@@ -124,7 +137,8 @@ export function QuestionAnswerPanel() {
         currentDocument,
         text,
         customPrompt,
-        previousMessages
+        previousMessages,
+        { onStep: pushStep }
       );
       appendMessage(documentId, { role: "assistant", content: result.answer, citations: result.citations });
       setLastAnswer(result);
@@ -237,10 +251,31 @@ export function QuestionAnswerPanel() {
           {isProcessing && (
             <div className="flex flex-col items-start animate-message-in" style={{ transformOrigin: "bottom left" }}>
               <span className="text-xs font-medium text-muted-foreground ml-1 mb-1">Assistant</span>
-              <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md bg-muted px-4 py-3.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "0ms" }} />
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "150ms" }} />
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "300ms" }} />
+              <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-muted px-4 py-3">
+                {agentSteps.length > 0 ? (
+                  <ul className="space-y-1.5">
+                    {agentSteps.map((s, i) => (
+                      <li key={i} className="flex items-center gap-2 text-sm">
+                        {s.done ? (
+                          <span className="text-primary shrink-0">✓</span>
+                        ) : (
+                          <span className="inline-flex gap-0.5 shrink-0">
+                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "0ms" }} />
+                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "150ms" }} />
+                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "300ms" }} />
+                          </span>
+                        )}
+                        <span className={s.done ? "text-muted-foreground" : "text-foreground"}>{s.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "0ms" }} />
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "150ms" }} />
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "300ms" }} />
+                  </div>
+                )}
               </div>
             </div>
           )}
