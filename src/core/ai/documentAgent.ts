@@ -52,6 +52,13 @@ export async function runDocumentAgent(opts: {
     contents.push({ role: "model", parts: resp.parts.length ? resp.parts : [{ text: resp.text }] });
 
     if (!resp.functionCalls.length) {
+      if (round === 0) {
+        // Answered on the first turn without searching — it only has the outline,
+        // not the document content (this is also the signature of the proxy not
+        // forwarding `tools`). Bail so the caller falls back to fixed retrieval,
+        // which puts real chunks in context.
+        throw new Error("Agent did not use any tools on the first turn (tools unavailable?)");
+      }
       onStep?.({ kind: "answer" });
       return parseAnswerWithCitations(resp.text, chunks as any, hasCoverPage);
     }

@@ -29,6 +29,15 @@ describe('runDocumentAgent', () => {
     expect(steps.find(s => s.kind === 'answer')).toBeTruthy()
   })
 
+  it('throws if it answers on the first turn without using any tool (proxy/tools unavailable)', async () => {
+    const generate = scriptedGenerate([
+      { parts: [{ text: 'Direct answer with no search.' }], functionCalls: [], text: 'Direct answer with no search.' },
+    ])
+    await expect(runDocumentAgent({
+      document: doc, question: 'q', chunks, hasCoverPage: false, generate: generate as any,
+    })).rejects.toThrow()
+  })
+
   it('forces a final answer after the tool-round cap', async () => {
     // Always returns a tool call until the forced (tool-free) final turn.
     let calls = 0
