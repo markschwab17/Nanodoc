@@ -931,11 +931,26 @@ export function PDFViewer() {
         }, HIGHLIGHT_DURATION_MS);
       };
 
+      // Center the viewport on the actual rendered highlight element. Uses real DOM
+      // layout (scrollIntoView) so it's immune to scale-math drift and self-corrects
+      // after any competing page-center re-scroll. Retries briefly until it paints.
+      const centerOnTempHighlight = (attempt = 0) => {
+        requestAnimationFrame(() => {
+          const el = document.getElementById("nanodoc-temp-highlight");
+          if (el) {
+            el.scrollIntoView({ block: "center", behavior: "smooth" });
+          } else if (attempt < 6) {
+            setTimeout(() => centerOnTempHighlight(attempt + 1), 120);
+          }
+        });
+      };
+
       const applyTemporaryHighlight = () => {
         // When quote quads were precomputed (from the text search before scrolling), use them directly
         if (precomputedQuoteQuads && precomputedQuoteQuads.length > 0) {
           setTemporaryHighlight({ page, quads: precomputedQuoteQuads, color: "#fbbf24", specId: "_quote" });
           scheduleHighlightClear();
+          centerOnTempHighlight();
           return;
         }
         // If the citation provided a quote but we couldn't find it on the page,
@@ -996,6 +1011,7 @@ export function PDFViewer() {
           }
           setTemporaryHighlight({ page: firstHighlight.page, quads: quadsToUse, color, specId: firstHighlight.specId });
           scheduleHighlightClear();
+          centerOnTempHighlight();
           return;
         }
         // Fallback only when there is no spec data or quote match for this page at all
@@ -1008,6 +1024,7 @@ export function PDFViewer() {
             const quad = [0, h - topStrip, w, h - topStrip, w, h, 0, h];
             setTemporaryHighlight({ page, quads: [quad], color: "#fbbf24", specId: "_page" });
             scheduleHighlightClear();
+            centerOnTempHighlight();
           }
         } catch (e) {
           console.warn("Scroll-to-spec: could not set page fallback highlight", e);

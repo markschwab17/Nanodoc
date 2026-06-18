@@ -3966,6 +3966,8 @@ export const PageCanvas = React.memo(function PageCanvas({
                     return (
                       <div
                         key={`temp_quad_${idx}`}
+                        // Marker on the first quad so the viewer can center it via scrollIntoView.
+                        id={idx === 0 ? "nanodoc-temp-highlight" : undefined}
                         className="absolute pointer-events-none"
                         style={{
                           left: `${quadX}px`,
