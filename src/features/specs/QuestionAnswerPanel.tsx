@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useRef } from "react";
-import { X, Send, Trash2 } from "lucide-react";
+import { X, Send, Trash2, Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -42,6 +42,49 @@ export function QuestionAnswerPanel() {
   };
   const pushStep = (s: AgentStep) =>
     setAgentSteps((prev) => [...prev.map((p) => ({ ...p, done: true })), { label: stepLabel(s), done: false }]);
+
+  // --- Speech-to-text dictation (Web Speech API; graceful no-op where unsupported) ---
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const dictationBaseRef = useRef<string>("");
+  const speechSupported =
+    typeof window !== "undefined" && ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
+
+  useEffect(() => {
+    // Stop any in-flight recognition when the panel unmounts.
+    return () => {
+      try { recognitionRef.current?.stop(); } catch { /* ignore */ }
+    };
+  }, []);
+
+  const toggleDictation = () => {
+    if (isListening) {
+      try { recognitionRef.current?.stop(); } catch { /* ignore */ }
+      return;
+    }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = true;
+    dictationBaseRef.current = followUpInput ? followUpInput.trim() + " " : "";
+    let finals = "";
+    rec.onresult = (e: any) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finals += transcript;
+        else interim += transcript;
+      }
+      setFollowUpInput((dictationBaseRef.current + finals + interim).replace(/\s+/g, " ").trimStart());
+    };
+    rec.onend = () => { setIsListening(false); recognitionRef.current = null; };
+    rec.onerror = () => { setIsListening(false); recognitionRef.current = null; };
+    recognitionRef.current = rec;
+    try { rec.start(); setIsListening(true); } catch { /* already started */ }
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
 
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() ?? null;
@@ -121,6 +164,7 @@ export function QuestionAnswerPanel() {
     const text = followUpInput.trim();
     if (!text || !currentDocument || !documentId || isProcessing) return;
 
+    if (isListening) { try { recognitionRef.current?.stop(); } catch { /* ignore */ } }
     setFollowUpInput("");
     setIsProcessing(true);
     setLastAnswer(null);
@@ -323,6 +367,19 @@ export function QuestionAnswerPanel() {
             }}
             disabled={!currentDocument || isProcessing}
           />
+          {speechSupported && (
+            <Button
+              size="icon"
+              variant={isListening ? "default" : "ghost"}
+              onClick={toggleDictation}
+              disabled={!currentDocument || isProcessing}
+              title={isListening ? "Stop dictation" : "Dictate your question"}
+              aria-label={isListening ? "Stop dictation" : "Dictate your question"}
+              className={isListening ? "bg-red-500 hover:bg-red-600 text-white animate-pulse" : ""}
+            >
+              <Mic className="h-4 w-4" />
+            </Button>
+          )}
           <Button
             size="icon"
             onClick={handleSendFollowUp}
