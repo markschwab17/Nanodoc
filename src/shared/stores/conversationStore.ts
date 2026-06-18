@@ -6,7 +6,7 @@
  */
 
 import { create } from "zustand";
-import type { ConversationMessage } from "@/core/pdf/PDFAIMetadata";
+import type { ConversationMessage, ConversationCitation } from "@/core/pdf/PDFAIMetadata";
 
 export interface ConversationState {
   /** documentId -> list of messages (user + assistant) */
@@ -15,7 +15,12 @@ export interface ConversationState {
   getMessages: (documentId: string) => ConversationMessage[];
   setMessages: (documentId: string, messages: ConversationMessage[]) => void;
   appendMessage: (documentId: string, message: ConversationMessage) => void;
-  appendMessages: (documentId: string, userContent: string, assistantContent: string) => void;
+  appendMessages: (
+    documentId: string,
+    userContent: string,
+    assistantContent: string,
+    citations?: ConversationCitation[],
+  ) => void;
   clearConversation: (documentId: string) => void;
 }
 
@@ -41,14 +46,19 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       return { messagesByDocument: next };
     }),
 
-  appendMessages: (documentId: string, userContent: string, assistantContent: string) =>
+  appendMessages: (
+    documentId: string,
+    userContent: string,
+    assistantContent: string,
+    citations?: ConversationCitation[],
+  ) =>
     set((state) => {
       const next = new Map(state.messagesByDocument);
       const list = next.get(documentId) ?? [];
       next.set(documentId, [
         ...list,
         { role: "user", content: userContent },
-        { role: "assistant", content: assistantContent },
+        { role: "assistant", content: assistantContent, citations },
       ]);
       return { messagesByDocument: next };
     }),

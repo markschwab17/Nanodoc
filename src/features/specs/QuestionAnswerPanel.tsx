@@ -6,13 +6,15 @@
  */
 
 import { useState, useEffect, useRef } from "react";
-import { X, ExternalLink, Loader2, Send, Trash2 } from "lucide-react";
+import { X, Loader2, Send, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { answerQuestion, type QuestionAnswer } from "@/core/ai/QuestionAnsweringService";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
+import { AnswerContent } from "./AnswerContent";
+import type { CiteRef } from "./citationMarkup";
 
 export function QuestionAnswerPanel() {
   const { getCurrentDocument } = usePDFStore();
@@ -61,7 +63,7 @@ export function QuestionAnswerPanel() {
           customPrompt,
           previousMessages
         );
-        appendMessages(requestedDocId, questionText, result.answer);
+        appendMessages(requestedDocId, questionText, result.answer, result.citations);
         setLastAnswer(result);
       } catch (error) {
         console.error("Question answering error:", error);
@@ -108,7 +110,7 @@ export function QuestionAnswerPanel() {
         undefined,
         previousMessages
       );
-      appendMessages(documentId, text, result.answer);
+      appendMessages(documentId, text, result.answer, result.citations);
       setLastAnswer(result);
     } catch (error) {
       console.error("Question answering error:", error);
@@ -127,69 +129,15 @@ export function QuestionAnswerPanel() {
     }
   };
 
-  const handleCitationClick = async (
-    page: number,
-    bbox?: [number, number, number, number],
-    citationIdx?: number
-  ) => {
+  const handleCiteClick = (ref: CiteRef) => {
     if (!currentDocument) return;
-
-    if (citationHighlightRef.current) {
-      setTemporaryHighlight(null);
-      citationHighlightRef.current = null;
-    }
-
-    if (bbox && bbox.length >= 4) {
-      try {
-        const mupdfDoc = currentDocument.getMupdfDocument();
-        const pageObj = mupdfDoc.loadPage(page);
-        const pageMetadata = currentDocument.getPageMetadata(page);
-        const pageHeight = pageMetadata?.height || 792;
-        const [x0, y0, x1, y1] = bbox;
-        const displayMinY = pageHeight - y1;
-        const displayMaxY = pageHeight - y0;
-        const p = [x0, displayMinY];
-        const q = [x1, displayMaxY];
-        const structuredText = pageObj.toStructuredText("preserve-whitespace");
-        let quads = structuredText.highlight(p, q);
-        if (!quads || quads.length === 0) {
-          quads = structuredText.highlight(
-            [x0 - 2, displayMinY - 2],
-            [x1 + 2, displayMaxY + 2]
-          );
-        }
-        if (quads && quads.length > 0) {
-          const quadArray = quads.map((quad: any) => {
-            const rawQuad =
-              Array.isArray(quad) && quad.length >= 8
-                ? quad
-                : [
-                    quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0,
-                    quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0,
-                  ];
-            return [
-              rawQuad[0], pageHeight - rawQuad[1],
-              rawQuad[2], pageHeight - rawQuad[3],
-              rawQuad[4], pageHeight - rawQuad[5],
-              rawQuad[6], pageHeight - rawQuad[7],
-            ];
-          });
-          const citationId = `citation_${citationIdx ?? Date.now()}`;
-          citationHighlightRef.current = citationId;
-          setTemporaryHighlight({
-            page,
-            quads: quadArray,
-            color: "#3b82f6",
-            specId: citationId,
-          });
-        }
-      } catch (e) {
-        console.warn("Error getting text quads for citation:", e);
-      }
-    }
-
+    // The PDFViewer scroll-to-spec handler resolves quads from `quote` and boxes
+    // the matched text on the page (bbox is a fallback when present).
+    citationHighlightRef.current = null;
     window.dispatchEvent(
-      new CustomEvent("scroll-to-spec", { detail: { page, bbox } })
+      new CustomEvent("scroll-to-spec", {
+        detail: { page: ref.page, quote: ref.quote, bbox: ref.bbox },
+      })
     );
   };
 
@@ -241,59 +189,32 @@ export function QuestionAnswerPanel() {
                   {isUser ? "You" : "Assistant"}
                 </span>
                 <div
-                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
+                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${
                     isUser
-                      ? "bg-primary text-primary-foreground rounded-br-md"
+                      ? "bg-primary text-primary-foreground rounded-br-md whitespace-pre-wrap"
                       : "bg-muted rounded-bl-md"
                   }`}
                 >
-                  {isLastAssistant && lastAnswer ? lastAnswer.answer : msg.content}
+                  {isUser ? (
+                    msg.content
+                  ) : (
+                    <AnswerContent
+                      answer={isLastAssistant && lastAnswer ? lastAnswer.answer : msg.content}
+                      citations={
+                        isLastAssistant && lastAnswer
+                          ? (lastAnswer.citations as CiteRef[])
+                          : (msg.citations as CiteRef[] | undefined)
+                      }
+                      displayPage={(p) =>
+                        currentDocument ? currentDocument.getDisplayPageNumber(p) : p + 1
+                      }
+                      onCiteClick={handleCiteClick}
+                    />
+                  )}
                 </div>
               </div>
             );
           })}
-
-          {showLastWithCitations && lastAnswer && lastAnswer.citations.length > 0 && (
-            <div className="flex flex-col items-start space-y-2">
-              <h3 className="text-sm font-medium ml-1">Citations</h3>
-              <div className="space-y-2 w-full max-w-[85%]">
-                {lastAnswer.citations.map((citation, idx) => (
-                      <div
-                        key={idx}
-                        className="border rounded-md p-3 hover:bg-muted/50 transition-colors cursor-pointer"
-                        onClick={() =>
-                          handleCitationClick(citation.page, citation.bbox, idx)
-                        }
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-xs font-medium text-muted-foreground">
-                                Page{" "}
-                                {currentDocument
-                                  ? currentDocument.getDisplayPageNumber(citation.page)
-                                  : citation.page + 1}
-                              </span>
-                              {citation.section && (
-                                <>
-                                  <span className="text-xs text-muted-foreground">•</span>
-                                  <span className="text-xs text-muted-foreground">
-                                    {citation.section}
-                                  </span>
-                                </>
-                              )}
-                            </div>
-                            <p className="text-xs italic text-muted-foreground">
-                              &quot;{citation.quote}&quot;
-                            </p>
-                          </div>
-                          <ExternalLink className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-                        </div>
-                      </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {isProcessing && (
             <div className="flex flex-col items-start">

@@ -56,9 +56,19 @@ export function encodeAIMetadataForKeywords(payload: PDFAIMetadataPayload): stri
   return KEYWORDS_PREFIX + encodeWithinBudget(payload);
 }
 
+/** A single source citation attached to an assistant message (structurally a CiteRef). */
+export interface ConversationCitation {
+  page: number; // 0-based
+  quote: string;
+  bbox?: [number, number, number, number];
+  section?: string;
+}
+
 export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
+  /** Source citations for an assistant message; restored to drive inline citation pills. */
+  citations?: ConversationCitation[];
 }
 
 /** App-created bookmark, JSON-safe (`created` is an ISO string, not a Date). */
