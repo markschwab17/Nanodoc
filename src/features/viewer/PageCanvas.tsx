@@ -3914,7 +3914,9 @@ export const PageCanvas = React.memo(function PageCanvas({
               
               {/* Temporary text highlight (exact text quads) — natural highlighter style */}
               {hasTemporaryHighlight && temporaryHighlight && (
-                <div className="absolute inset-0">
+                // Group opacity so overlapping quads (multi-line quotes) composite as ONE
+                // translucent layer instead of stacking into an unreadable dark band.
+                <div className="absolute inset-0" style={{ opacity: 0.5 }}>
                   {temporaryHighlight.quads.map((quad, idx) => {
                     if (!Array.isArray(quad) || quad.length < 8) return null;
                     
@@ -3956,8 +3958,10 @@ export const PageCanvas = React.memo(function PageCanvas({
                     const r = parseInt(hex.slice(0, 2), 16);
                     const g = parseInt(hex.slice(2, 4), 16);
                     const b = parseInt(hex.slice(4, 6), 16);
-                    const fillColor = `rgba(${r}, ${g}, ${b}, 0.5)`;
-                    const strokeColor = `rgba(${r}, ${g}, ${b}, 0.9)`;
+                    // Opaque fill/stroke; the parent group applies the 50% transparency once
+                    // so overlapping quads don't stack into a darker band.
+                    const fillColor = `rgba(${r}, ${g}, ${b}, 1)`;
+                    const strokeColor = `rgba(${r}, ${g}, ${b}, 1)`;
                     
                     return (
                       <div
