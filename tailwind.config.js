@@ -87,6 +87,14 @@ export default {
           "0%, 100%": { opacity: "0.35", transform: "scale(0.95)" },
           "50%": { opacity: "1", transform: "scale(1.05)" },
         },
+        "message-in": {
+          from: { opacity: "0", transform: "translateY(8px) scale(0.985)" },
+          to: { opacity: "1", transform: "translateY(0) scale(1)" },
+        },
+        "typing-dot": {
+          "0%, 60%, 100%": { opacity: "0.3", transform: "translateY(0)" },
+          "30%": { opacity: "1", transform: "translateY(-3px)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -96,6 +104,8 @@ export default {
         "icon-bounce": "icon-bounce 2s ease-in-out infinite",
         "gradient-shift": "gradient-shift 3s ease infinite",
         "loading-pulse": "loading-pulse 1.4s ease-in-out infinite",
+        "message-in": "message-in 0.32s cubic-bezier(0.22, 1, 0.36, 1)",
+        "typing-dot": "typing-dot 1.2s ease-in-out infinite",
       },
     },
   },

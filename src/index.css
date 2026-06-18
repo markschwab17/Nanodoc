@@ -437,6 +437,14 @@
 
 }
 
+/* Honor reduced-motion: neutralize the chat entrance/typing animations. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-message-in,
+  .animate-typing-dot {
+    animation: none !important;
+  }
+}
+
 
 
 

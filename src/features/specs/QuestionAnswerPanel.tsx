@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useRef } from "react";
-import { X, Loader2, Send, Trash2 } from "lucide-react";
+import { X, Send, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -20,7 +20,7 @@ import { buildAskAboutSelectionContext } from "./askActions";
 export function QuestionAnswerPanel() {
   const { getCurrentDocument } = usePDFStore();
   const { finishExtraction, setExtractionError, setTemporaryHighlight } = useSpecExtractionStore();
-  const { getMessages, appendMessages, clearConversation } = useConversationStore();
+  const { getMessages, appendMessage, clearConversation } = useConversationStore();
   const [isOpen, setIsOpen] = useState(false);
   const [followUpInput, setFollowUpInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
@@ -65,6 +65,8 @@ export function QuestionAnswerPanel() {
       setExtractionError(null);
 
       const previousMessages = getMessages(requestedDocId);
+      // Show the user's message immediately (animates in), then the typing indicator.
+      appendMessage(requestedDocId, { role: "user", content: questionText });
 
       try {
         const result = await answerQuestion(
@@ -74,7 +76,7 @@ export function QuestionAnswerPanel() {
           previousMessages,
           { model }
         );
-        appendMessages(requestedDocId, questionText, result.answer, result.citations);
+        appendMessage(requestedDocId, { role: "assistant", content: result.answer, citations: result.citations });
         setLastAnswer(result);
       } catch (error) {
         console.error("Question answering error:", error);
@@ -87,7 +89,7 @@ export function QuestionAnswerPanel() {
 
     window.addEventListener("ask-document-request", handleAskRequest as unknown as EventListener);
     return () => window.removeEventListener("ask-document-request", handleAskRequest as unknown as EventListener);
-  }, [documentId, currentDocument, finishExtraction, setExtractionError, getMessages, appendMessages]);
+  }, [documentId, currentDocument, finishExtraction, setExtractionError, getMessages, appendMessage]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -114,6 +116,8 @@ export function QuestionAnswerPanel() {
 
     const previousMessages = getMessages(documentId);
     const customPrompt = pinnedSelection ? buildAskAboutSelectionContext(pinnedSelection) : undefined;
+    // Show the user's message immediately (animates in), then the typing indicator.
+    appendMessage(documentId, { role: "user", content: text });
 
     try {
       const result = await answerQuestion(
@@ -122,7 +126,7 @@ export function QuestionAnswerPanel() {
         customPrompt,
         previousMessages
       );
-      appendMessages(documentId, text, result.answer, result.citations);
+      appendMessage(documentId, { role: "assistant", content: result.answer, citations: result.citations });
       setLastAnswer(result);
       setPinnedSelection(null);
     } catch (error) {
@@ -192,7 +196,8 @@ export function QuestionAnswerPanel() {
             return (
               <div
                 key={idx}
-                className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}
+                className={`flex flex-col animate-message-in ${isUser ? "items-end" : "items-start"}`}
+                style={{ transformOrigin: isUser ? "bottom right" : "bottom left" }}
               >
                 <span
                   className={`text-xs font-medium text-muted-foreground mb-1 ${
@@ -230,11 +235,12 @@ export function QuestionAnswerPanel() {
           })}
 
           {isProcessing && (
-            <div className="flex flex-col items-start">
+            <div className="flex flex-col items-start animate-message-in" style={{ transformOrigin: "bottom left" }}>
               <span className="text-xs font-medium text-muted-foreground ml-1 mb-1">Assistant</span>
-              <div className="flex items-center gap-2 max-w-[85%] rounded-2xl rounded-bl-md bg-muted px-4 py-2.5">
-                <Loader2 className="h-4 w-4 animate-spin shrink-0" />
-                <span className="text-sm">Processing...</span>
+              <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md bg-muted px-4 py-3.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "0ms" }} />
+                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "150ms" }} />
+                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-typing-dot" style={{ animationDelay: "300ms" }} />
               </div>
             </div>
           )}
