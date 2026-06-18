@@ -13,6 +13,7 @@ import { usePDFStore } from "@/shared/stores/pdfStore";
 import { answerQuestion, type QuestionAnswer } from "@/core/ai/QuestionAnsweringService";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { AnswerContent } from "./AnswerContent";
 import type { CiteRef } from "./citationMarkup";
 import { buildAskAboutSelectionContext } from "./askActions";
@@ -22,6 +23,7 @@ export function QuestionAnswerPanel() {
   const { getCurrentDocument } = usePDFStore();
   const { finishExtraction, setExtractionError, setTemporaryHighlight } = useSpecExtractionStore();
   const { getMessages, appendMessage, clearConversation } = useConversationStore();
+  const showNotification = useNotificationStore((s) => s.showNotification);
   const [isOpen, setIsOpen] = useState(false);
   const [followUpInput, setFollowUpInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
@@ -105,9 +107,27 @@ export function QuestionAnswerPanel() {
       setFollowUpInput((dictationBaseRef.current + finals + interim).replace(/\s+/g, " ").trimStart());
     };
     rec.onend = () => { setIsListening(false); recognitionRef.current = null; };
-    rec.onerror = () => { setIsListening(false); recognitionRef.current = null; };
+    rec.onerror = (e: any) => {
+      setIsListening(false);
+      recognitionRef.current = null;
+      const err = e?.error;
+      console.warn("[dictation] SpeechRecognition error:", err, e);
+      if (err === "not-allowed" || err === "service-not-allowed") {
+        showNotification("Microphone access is blocked. Allow microphone access for this site to dictate.", "error");
+      } else if (err === "no-speech") {
+        showNotification("Didn't catch that — try again.", "info");
+      } else if (err && err !== "aborted") {
+        showNotification(`Dictation error: ${err}`, "error");
+      }
+    };
     recognitionRef.current = rec;
-    try { rec.start(); setIsListening(true); } catch { /* already started */ }
+    try {
+      rec.start();
+      setIsListening(true);
+    } catch (e) {
+      console.warn("[dictation] start() failed:", e);
+      showNotification("Couldn't start dictation.", "error");
+    }
     setTimeout(() => inputRef.current?.focus(), 0);
   };
 
