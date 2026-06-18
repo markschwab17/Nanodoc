@@ -13,6 +13,7 @@ import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { CTOSplitScreenToolbar } from "@/features/toolbar/CTOSplitScreenToolbar";
+import { SelectionToolbar } from "@/features/specs/SelectionToolbar";
 import { AISidePanel } from "@/features/specs/AISidePanel";
 import { RedlinePanel } from "@/features/redline/RedlinePanel";
 import { TextFormattingToolbar } from "@/features/viewer/TextFormattingToolbar";
@@ -959,6 +960,8 @@ function Editor() {
             <PDFViewer />
           </div>
         </main>
+        {/* Floating toolbar shown on PDF text selection (Ask AI / Highlight / Copy / Add to table) */}
+        <SelectionToolbar />
         
         {/* Right Sidebar - AI panel (collapsible) + Tools (hidden in split-screen mode) */}
         {!splitScreenMode && esignMode === "prepare" && (

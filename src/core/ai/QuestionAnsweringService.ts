@@ -29,11 +29,13 @@ export async function answerQuestion(
   document: PDFDocument,
   question: string,
   customPrompt?: string,
-  previousMessages?: ChatMessage[]
+  previousMessages?: ChatMessage[],
+  opts?: { model?: string }
 ): Promise<QuestionAnswer> {
   if (!hasConfiguredAPIKey()) {
     throw new Error("Please configure your AI API key in settings.");
   }
+  const model = opts?.model ?? QA_MODEL;
 
   const chunks = await createChunks(document, {
     maxChunkTokens: 1200,
@@ -78,14 +80,14 @@ export async function answerQuestion(
       ...previousMessages,
       { role: "user", content: question },
     ];
-    response = await generateTextWithHistory(messages, { model: QA_MODEL });
+    response = await generateTextWithHistory(messages, { model });
   } else {
     const basePrompt = `${docContext}
 
 Question: ${question}
 
 Now answer the question with proper citations.`;
-    response = await generateText(basePrompt, { model: QA_MODEL });
+    response = await generateText(basePrompt, { model });
   }
 
   const { answer, citations } = parseAnswerWithCitations(response, selectedChunks, hasCoverPage);

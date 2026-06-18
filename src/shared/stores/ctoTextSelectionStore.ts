@@ -10,16 +10,18 @@ import { create } from "zustand";
 export interface CtoTextSelection {
   page: number;
   quote: string;
+  /** Viewport anchor (clientX/clientY) for positioning the floating selection toolbar. */
+  anchor?: { x: number; y: number } | null;
 }
 
 interface CtoTextSelectionState {
   selection: CtoTextSelection | null;
-  setSelection: (page: number, quote: string) => void;
+  setSelection: (page: number, quote: string, anchor?: { x: number; y: number } | null) => void;
   clearSelection: () => void;
 }
 
 export const useCtoTextSelectionStore = create<CtoTextSelectionState>((set) => ({
   selection: null,
-  setSelection: (page, quote) => set({ selection: { page, quote } }),
+  setSelection: (page, quote, anchor = null) => set({ selection: { page, quote, anchor } }),
   clearSelection: () => set({ selection: null }),
 }));

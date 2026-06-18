@@ -806,6 +806,79 @@ export const PageCanvas = React.memo(function PageCanvas({
     };
   }, [activeTool, selectedTextSpans, showNotification, editingAnnotation, isEditingMode, currentDocument, pageNumber, currentPage, copyTextAnnotation, pasteTextAnnotation, hasTextAnnotation, addAnnotation, clearTextAnnotationClipboard]);
 
+  // Create a highlight annotation from the current text selection (fired by the
+  // floating selection toolbar's "Highlight" action). Only the page canvas that
+  // holds the active selection (non-empty selectedTextSpans) acts. Reuses the same
+  // mupdf text-quad path as the Highlight tool so saved highlights render correctly.
+  useEffect(() => {
+    const handleHighlightSelection = () => {
+      if (!currentDocument || selectedTextSpans.length === 0) return;
+      try {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        selectedTextSpans.forEach((span) => {
+          const [x0, y0, x1, y1] = span.bbox;
+          minX = Math.min(minX, x0); maxX = Math.max(maxX, x1);
+          minY = Math.min(minY, y0); maxY = Math.max(maxY, y1);
+        });
+        const selectedText = selectedTextSpans.map((s) => s.text).join(" ").trim();
+
+        const mupdfDoc = currentDocument.getMupdfDocument();
+        const page = mupdfDoc.loadPage(pageNumber);
+        const pageMetadata = currentDocument.getPageMetadata(pageNumber);
+        const pageHeight = pageMetadata?.height || 792;
+        // mupdf highlight() takes display coords (Y=0 top); selection bbox is PDF coords (Y=0 bottom).
+        const displayMinY = pageHeight - maxY;
+        const displayMaxY = pageHeight - minY;
+        const structuredText = page.toStructuredText("preserve-whitespace");
+        let quads = structuredText.highlight([minX, displayMinY], [maxX, displayMaxY]);
+        if (!quads || quads.length === 0) {
+          quads = structuredText.highlight([minX - 2, displayMinY - 2], [maxX + 2, displayMaxY + 2]);
+        }
+        const { highlightColor, highlightOpacity } = useUIStore.getState();
+        // Convert mupdf display-coord quads back to PDF coords for storage/render.
+        const quadArray = (quads || []).map((quad: any) => {
+          const raw = Array.isArray(quad) && quad.length >= 8
+            ? quad
+            : [quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0, quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0];
+          return [
+            raw[0], pageHeight - raw[1], raw[2], pageHeight - raw[3],
+            raw[4], pageHeight - raw[5], raw[6], pageHeight - raw[7],
+          ];
+        });
+        const annotation: Annotation = {
+          id: `highlight_${Date.now()}`,
+          type: "highlight",
+          pageNumber,
+          x: minX,
+          y: minY,
+          width: Math.max(1, maxX - minX),
+          height: Math.max(1, maxY - minY),
+          quads: quadArray.length > 0 ? quadArray : undefined,
+          selectedText,
+          color: highlightColor,
+          opacity: highlightOpacity,
+          highlightMode: "text",
+        };
+        const docId = currentDocument.getId();
+        wrapAnnotationOperation(
+          () => addAnnotation(docId, annotation),
+          "addAnnotation",
+          docId,
+          annotation.id,
+          annotation,
+        );
+        setSelectedTextSpans([]);
+        useCtoTextSelectionStore.getState().clearSelection();
+        showNotification("Highlight added", "success");
+      } catch (e) {
+        console.error("Error highlighting selection:", e);
+        showNotification("Could not highlight selection", "error");
+      }
+    };
+    window.addEventListener("highlight-selected-text", handleHighlightSelection);
+    return () => window.removeEventListener("highlight-selected-text", handleHighlightSelection);
+  }, [currentDocument, pageNumber, selectedTextSpans, addAnnotation, showNotification]);
+
   // Global mouse position tracker - tracks mouse position across the entire window
   // This helps us get the mouse position when paste happens, even if mouse hasn't moved over the page recently
   useEffect(() => {
@@ -2873,11 +2946,16 @@ export const PageCanvas = React.memo(function PageCanvas({
         setSelectedTextSpans(result.spans);
         selectedTextRef.current = result.text;
         
-        // When embedded in CTO split screen, store selection for "Add to table" (0-based page per CTO contract)
+        // When embedded in CTO, store the selection (0-based page per CTO contract) so the
+        // floating selection toolbar can offer Ask AI / Highlight / Copy / Add to table.
+        // Anchor the toolbar at the cursor-release point.
         if (result.text?.trim()) {
           const params = parseCiviltakeoffViewParams(typeof window !== "undefined" ? window.location.search : "");
-          if (params.token && params.split_screen === "1") {
-            useCtoTextSelectionStore.getState().setSelection(pageNumber, result.text.trim());
+          if (params.token) {
+            const anchor = globalMousePositionRef.current
+              ? { x: globalMousePositionRef.current.clientX, y: globalMousePositionRef.current.clientY }
+              : null;
+            useCtoTextSelectionStore.getState().setSelection(pageNumber, result.text.trim(), anchor);
           }
         }
         
