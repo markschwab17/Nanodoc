@@ -2,6 +2,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
 import { buildCitedMarkdown, parseCitationMarkers, type CiteRef } from './citationMarkup'
+import { citationUrlTransform } from './citationUrlTransform'
 
 interface AnswerContentProps {
   answer: string
@@ -73,7 +74,7 @@ export function AnswerContent({ answer, citations, displayPage, onCiteClick }: A
 
   return (
     <div className="text-sm">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => citationUrlTransform(url)} components={components}>
         {markdown}
       </ReactMarkdown>
     </div>
