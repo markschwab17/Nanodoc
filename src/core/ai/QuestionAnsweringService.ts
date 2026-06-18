@@ -11,6 +11,7 @@ import { generateText, generateTextWithHistory, hasConfiguredAPIKey, type ChatMe
 import { buildDocContext } from "./answerPrompt";
 import { QA_MODEL } from "./modelSelection";
 import { chooseRetrieval } from "./retrievalPolicy";
+import { lexicalTopChunks } from "./lexicalRetrieval";
 
 export interface QuestionAnswer {
   answer: string;
@@ -66,6 +67,13 @@ export async function answerQuestion(
     // Document order preserved (createChunks emits chunks in reading order).
     selectedChunks = chunks;
   } else {
+    // HYBRID retrieval. Lexical (keyword) retrieval first — guarantees chunks that
+    // literally contain the query terms are included (so "find every place X is
+    // mentioned" never misses obvious matches), independent of embedding quality.
+    const lexicalIds = lexicalTopChunks(question, chunks, 40);
+
+    // Semantic (embedding) retrieval — adds conceptually-related chunks. Falls back
+    // to local TF-IDF if the embeddings proxy is unavailable.
     const chunkTexts = chunks.map(c => c.text);
     let questionEmbedding: number[];
     let chunkEmbeddings: number[][];
@@ -82,10 +90,18 @@ export async function answerQuestion(
       chunkEmbeddings = await svc.embedBatch(chunkTexts);
     }
     const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
-    // Use more chunks so the AI sees more of the document (info can be missed with too few)
-    const topChunks = findTopKChunks(questionEmbedding, embeddingMap, 35);
-    const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
-    selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
+    const semanticIds = findTopKChunks(questionEmbedding, embeddingMap, 35).map(t => t.chunkId);
+
+    // Merge lexical (priority) + semantic, de-duplicated, capped to bound context size.
+    const MAX_SELECTED = 60;
+    const seen = new Set<string>();
+    for (const id of [...lexicalIds, ...semanticIds]) {
+      if (!seen.has(id)) seen.add(id);
+      if (seen.size >= MAX_SELECTED) break;
+    }
+    console.log(`[Ask] RAG selected ${seen.size} chunks (${lexicalIds.length} lexical + ${semanticIds.length} semantic, merged).`);
+    // Preserve document order so citations read top-to-bottom.
+    selectedChunks = chunks.filter(c => seen.has(c.chunkId));
   }
 
   const chunksText = selectedChunks.map((chunk, idx) => {
