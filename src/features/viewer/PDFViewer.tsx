@@ -306,7 +306,7 @@ export function PDFViewer() {
 
   // Scroll to current page in read mode
   // Pages are positioned at zoomLevel scale, so scroll coordinates are at zoom level
-  const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[], force: boolean = false) => {
+  const scrollToPage = useCallback((pageNumber: number, center: boolean = true, bbox?: number[], force: boolean = false, behavior: ScrollBehavior = "smooth") => {
     if (!readMode || !scrollContainerRef.current || !currentDocument) return;
     
     // Validate page number is within bounds
@@ -392,7 +392,7 @@ export function PDFViewer() {
       isProgrammaticScrollRef.current = true;
       container.scrollTo({
         top: Math.max(0, targetScroll),
-        behavior: "smooth"
+        behavior
       });
       // Re-enable IntersectionObserver updates after scroll completes
       let scrollEndTimeout: NodeJS.Timeout | null = null;
@@ -414,12 +414,12 @@ export function PDFViewer() {
       const pageCenter = pageTop + (pageHeight / 2);
       const viewportCenter = containerHeight / 2;
       const targetScroll = pageCenter - viewportCenter;
-      
+
       // Set flag to prevent IntersectionObserver from overwriting currentPage during programmatic scroll
       isProgrammaticScrollRef.current = true;
       container.scrollTo({
         top: Math.max(0, targetScroll),
-        behavior: "smooth"
+        behavior
       });
       
       // Listen for scroll end to re-enable IntersectionObserver updates
@@ -1105,15 +1105,15 @@ export function PDFViewer() {
                   setBaseFitScale(calculatedScale);
                   // Wait one more frame for state to update
                   requestAnimationFrame(() => {
-                    scrollToPage(page, true, scrollBbox, true);
+                    scrollToPage(page, true, scrollBbox, true, "auto");
                     if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
                   });
                 } else {
-                  scrollToPage(page, true, scrollBbox, true);
+                  scrollToPage(page, true, scrollBbox, true, "auto");
                   if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
                 }
               } else {
-                scrollToPage(page, true, scrollBbox, true);
+                scrollToPage(page, true, scrollBbox, true, "auto");
                 if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
               }
             }
