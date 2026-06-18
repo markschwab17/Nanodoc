@@ -91,16 +91,16 @@ export async function extractGeotechnicalFromPDFBytes(
 /**
  * Generate text using the active AI provider
  */
-export async function generateText(prompt: string): Promise<string> {
+export async function generateText(prompt: string, opts?: { model?: string }): Promise<string> {
   const config = getAIConfig();
   if (!config) {
     throw new Error("Please configure your AI API key in settings.");
   }
-  
+
   if (config.provider === 'gemini') {
     const geminiConfig: GeminiConfig = {
       apiKey: config.apiKey,
-      model: config.model as any,
+      model: (opts?.model ?? config.model) as any,
       baseUrl: config.baseUrl,
       ctoProxy: config.ctoProxy,
     };
@@ -108,7 +108,7 @@ export async function generateText(prompt: string): Promise<string> {
   } else if (config.provider === 'chatgpt') {
     return openaiGenerateText(prompt, config);
   }
-  
+
   throw new Error(`Unsupported AI provider: ${config.provider}`);
 }
 
@@ -121,7 +121,7 @@ export interface ChatMessage {
 /**
  * Generate text with conversation history (for follow-up questions).
  */
-export async function generateTextWithHistory(messages: ChatMessage[]): Promise<string> {
+export async function generateTextWithHistory(messages: ChatMessage[], opts?: { model?: string }): Promise<string> {
   const config = getAIConfig();
   if (!config) {
     throw new Error("Please configure your AI API key in settings.");
@@ -129,7 +129,7 @@ export async function generateTextWithHistory(messages: ChatMessage[]): Promise<
   if (config.provider === 'gemini') {
     const geminiConfig: GeminiConfig = {
       apiKey: config.apiKey,
-      model: config.model as any,
+      model: (opts?.model ?? config.model) as any,
       baseUrl: config.baseUrl,
       ctoProxy: config.ctoProxy,
     };
