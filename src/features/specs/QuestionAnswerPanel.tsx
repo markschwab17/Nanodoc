@@ -15,6 +15,7 @@ import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
 import { AnswerContent } from "./AnswerContent";
 import type { CiteRef } from "./citationMarkup";
+import { buildAskAboutSelectionContext } from "./askActions";
 
 export function QuestionAnswerPanel() {
   const { getCurrentDocument } = usePDFStore();
@@ -27,6 +28,9 @@ export function QuestionAnswerPanel() {
   const [lastAnswer, setLastAnswer] = useState<QuestionAnswer | null>(null);
   const [panelWidth] = useState(384);
   const citationHighlightRef = useRef<string | null>(null);
+  /** Text the user selected in the PDF and pinned as context for their next question. */
+  const [pinnedSelection, setPinnedSelection] = useState<{ page: number; quote: string } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() ?? null;
@@ -34,9 +38,15 @@ export function QuestionAnswerPanel() {
 
   // Re-open conversation (no new question) when user wants to view existing chat
   useEffect(() => {
-    const handleOpenPanel = (event: CustomEvent<{ documentId: string }>) => {
+    const handleOpenPanel = (
+      event: CustomEvent<{ documentId: string; pinnedSelection?: { page: number; quote: string } }>
+    ) => {
       if (event.detail?.documentId === documentId) {
         setIsOpen(true);
+        if (event.detail.pinnedSelection) {
+          setPinnedSelection(event.detail.pinnedSelection);
+          setTimeout(() => inputRef.current?.focus(), 50);
+        }
       }
     };
     window.addEventListener("open-question-panel", handleOpenPanel as EventListener);
@@ -46,7 +56,7 @@ export function QuestionAnswerPanel() {
   // Open panel and send first question when "Ask" is triggered
   useEffect(() => {
     const handleAskRequest = async (event: CustomEvent) => {
-      const { documentId: requestedDocId, question: questionText, customPrompt } = event.detail;
+      const { documentId: requestedDocId, question: questionText, customPrompt, model } = event.detail;
       if (requestedDocId !== documentId || !currentDocument) return;
 
       setIsOpen(true);
@@ -61,7 +71,8 @@ export function QuestionAnswerPanel() {
           currentDocument,
           questionText,
           customPrompt,
-          previousMessages
+          previousMessages,
+          { model }
         );
         appendMessages(requestedDocId, questionText, result.answer, result.citations);
         setLastAnswer(result);
@@ -102,16 +113,18 @@ export function QuestionAnswerPanel() {
     setExtractionError(null);
 
     const previousMessages = getMessages(documentId);
+    const customPrompt = pinnedSelection ? buildAskAboutSelectionContext(pinnedSelection) : undefined;
 
     try {
       const result = await answerQuestion(
         currentDocument,
         text,
-        undefined,
+        customPrompt,
         previousMessages
       );
       appendMessages(documentId, text, result.answer, result.citations);
       setLastAnswer(result);
+      setPinnedSelection(null);
     } catch (error) {
       console.error("Question answering error:", error);
       setExtractionError(error instanceof Error ? error.message : "Failed to answer question");
@@ -229,10 +242,35 @@ export function QuestionAnswerPanel() {
       </ScrollArea>
 
       <div className="p-3 border-t shrink-0">
+        {pinnedSelection && (
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5">
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-medium text-primary">
+                Referencing (p.
+                {currentDocument
+                  ? currentDocument.getDisplayPageNumber(pinnedSelection.page)
+                  : pinnedSelection.page + 1}
+                )
+              </p>
+              <p className="line-clamp-2 text-xs italic text-muted-foreground">
+                &quot;{pinnedSelection.quote}&quot;
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPinnedSelection(null)}
+              className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Remove reference"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         <div className="flex gap-2">
           <input
+            ref={inputRef}
             type="text"
-            placeholder="Ask a follow-up..."
+            placeholder={pinnedSelection ? "Ask about the selected text…" : "Ask a follow-up..."}
             className="flex-1 min-w-0 rounded-md border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             value={followUpInput}
             onChange={(e) => setFollowUpInput(e.target.value)}
