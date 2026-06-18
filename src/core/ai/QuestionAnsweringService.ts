@@ -10,6 +10,7 @@ import { getEmbeddingService, findTopKChunks } from "./EmbeddingService";
 import { generateText, generateTextWithHistory, hasConfiguredAPIKey, type ChatMessage } from "./AIService";
 import { buildDocContext } from "./answerPrompt";
 import { QA_MODEL } from "./modelSelection";
+import { chooseRetrieval } from "./retrievalPolicy";
 
 export interface QuestionAnswer {
   answer: string;
@@ -54,15 +55,27 @@ export async function answerQuestion(
   }
 
   const hasCoverPage = document.hasCoverPage();
-  const embeddingService = getEmbeddingService();
-  const questionEmbedding = await embeddingService.embed(question);
-  const chunkTexts = chunks.map(c => c.text);
-  const chunkEmbeddings = await embeddingService.embedBatch(chunkTexts);
-  const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
-  // Use more chunks so the AI sees more of the document (info can be missed with too few)
-  const topChunks = findTopKChunks(questionEmbedding, embeddingMap, 35);
-  const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
-  const selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
+
+  // Hybrid retrieval: send the WHOLE document when it fits in context (most accurate,
+  // implicit-caching-friendly); fall back to semantic chunk retrieval for huge documents.
+  const policy = chooseRetrieval(totalChars);
+  console.log(`[Ask] Retrieval mode: ${policy.mode} — ${policy.reason}`);
+
+  let selectedChunks: typeof chunks;
+  if (policy.mode === 'full') {
+    // Document order preserved (createChunks emits chunks in reading order).
+    selectedChunks = chunks;
+  } else {
+    const embeddingService = getEmbeddingService();
+    const questionEmbedding = await embeddingService.embed(question);
+    const chunkTexts = chunks.map(c => c.text);
+    const chunkEmbeddings = await embeddingService.embedBatch(chunkTexts);
+    const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
+    // Use more chunks so the AI sees more of the document (info can be missed with too few)
+    const topChunks = findTopKChunks(questionEmbedding, embeddingMap, 35);
+    const selectedChunkIds = new Set(topChunks.map(t => t.chunkId));
+    selectedChunks = chunks.filter(c => selectedChunkIds.has(c.chunkId));
+  }
 
   const chunksText = selectedChunks.map((chunk, idx) => {
     const sectionPath = chunk.sectionPath.length > 0 ? `Section: ${chunk.sectionPath.join(' > ')}\n` : '';
