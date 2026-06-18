@@ -27,7 +27,32 @@ export function QuestionAnswerPanel() {
   const [isProcessing, setIsProcessing] = useState(false);
   /** Citations for the most recent reply only (for click-to-highlight). */
   const [lastAnswer, setLastAnswer] = useState<QuestionAnswer | null>(null);
-  const [panelWidth] = useState(384);
+  const [panelWidth, setPanelWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return 384;
+    const saved = Number(localStorage.getItem("nanodoc-qa-panel-width"));
+    return saved >= 320 && saved <= 1400 ? saved : 384;
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem("nanodoc-qa-panel-width", String(panelWidth)); } catch { /* ignore */ }
+  }, [panelWidth]);
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const onMove = (ev: MouseEvent) => {
+      // Panel is docked right; width grows as the left edge is dragged leftward.
+      const max = Math.min(1400, window.innerWidth - 80);
+      setPanelWidth(Math.min(Math.max(window.innerWidth - ev.clientX, 320), max));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
   const citationHighlightRef = useRef<string | null>(null);
   /** Text the user selected in the PDF and pinned as context for their next question. */
   const [pinnedSelection, setPinnedSelection] = useState<{ page: number; quote: string } | null>(null);
@@ -227,6 +252,12 @@ export function QuestionAnswerPanel() {
       className="fixed right-0 top-0 h-full bg-background border-l shadow-lg z-50 flex flex-col"
       style={{ width: `${panelWidth}px`, display: isOpen ? "flex" : "none" }}
     >
+      {/* Drag the left edge to resize the panel. */}
+      <div
+        onMouseDown={startResize}
+        title="Drag to resize"
+        className="absolute left-0 top-0 z-20 h-full w-1.5 cursor-col-resize hover:bg-primary/40 active:bg-primary/60 transition-colors"
+      />
       <div className="flex items-center justify-between p-4 border-b shrink-0">
         <h2 className="text-lg font-semibold">Question & Answer</h2>
         <div className="flex items-center gap-1">
@@ -254,7 +285,7 @@ export function QuestionAnswerPanel() {
             return (
               <div
                 key={idx}
-                className={`flex flex-col animate-message-in ${isUser ? "items-end" : "items-start"}`}
+                className={`flex flex-col w-full min-w-0 animate-message-in ${isUser ? "items-end" : "items-start"}`}
                 style={{ transformOrigin: isUser ? "bottom right" : "bottom left" }}
               >
                 <span
@@ -265,7 +296,7 @@ export function QuestionAnswerPanel() {
                   {isUser ? "You" : "Assistant"}
                 </span>
                 <div
-                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${
+                  className={`max-w-[85%] min-w-0 overflow-hidden break-words rounded-2xl px-4 py-2.5 text-sm ${
                     isUser
                       ? "bg-primary text-primary-foreground rounded-br-md whitespace-pre-wrap"
                       : "bg-muted rounded-bl-md"

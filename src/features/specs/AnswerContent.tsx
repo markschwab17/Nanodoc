@@ -73,7 +73,7 @@ export function AnswerContent({ answer, citations, displayPage, onCiteClick }: A
   }
 
   return (
-    <div className="text-sm">
+    <div className="text-sm min-w-0 break-words [overflow-wrap:anywhere]">
       <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => citationUrlTransform(url)} components={components}>
         {markdown}
       </ReactMarkdown>
