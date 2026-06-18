@@ -808,43 +808,29 @@ export const PageCanvas = React.memo(function PageCanvas({
 
   // Create a highlight annotation from the current text selection (fired by the
   // floating selection toolbar's "Highlight" action). Only the page canvas that
-  // holds the active selection (non-empty selectedTextSpans) acts. Reuses the same
-  // mupdf text-quad path as the Highlight tool so saved highlights render correctly.
+  // holds the active selection (non-empty selectedTextSpans) acts. Quads are built
+  // DIRECTLY from the selected spans' bboxes (one per span/line) so the highlight
+  // matches exactly what was selected — NOT a mupdf rubber-band re-selection, which
+  // over-extends a mid-line word back to the line start.
   useEffect(() => {
     const handleHighlightSelection = () => {
       if (!currentDocument || selectedTextSpans.length === 0) return;
       try {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const quadArray: number[][] = [];
         selectedTextSpans.forEach((span) => {
-          const [x0, y0, x1, y1] = span.bbox;
+          if (!Array.isArray(span.bbox) || span.bbox.length < 4) return;
+          const [x0, y0, x1, y1] = span.bbox; // PDF coords: y0=bottom, y1=top
           minX = Math.min(minX, x0); maxX = Math.max(maxX, x1);
           minY = Math.min(minY, y0); maxY = Math.max(maxY, y1);
+          // One quad per span, PDF coords, point order UL, UR, LL, LR (matches the
+          // Highlight tool's stored format).
+          quadArray.push([x0, y1, x1, y1, x0, y0, x1, y0]);
         });
+        if (quadArray.length === 0) return;
         const selectedText = selectedTextSpans.map((s) => s.text).join(" ").trim();
 
-        const mupdfDoc = currentDocument.getMupdfDocument();
-        const page = mupdfDoc.loadPage(pageNumber);
-        const pageMetadata = currentDocument.getPageMetadata(pageNumber);
-        const pageHeight = pageMetadata?.height || 792;
-        // mupdf highlight() takes display coords (Y=0 top); selection bbox is PDF coords (Y=0 bottom).
-        const displayMinY = pageHeight - maxY;
-        const displayMaxY = pageHeight - minY;
-        const structuredText = page.toStructuredText("preserve-whitespace");
-        let quads = structuredText.highlight([minX, displayMinY], [maxX, displayMaxY]);
-        if (!quads || quads.length === 0) {
-          quads = structuredText.highlight([minX - 2, displayMinY - 2], [maxX + 2, displayMaxY + 2]);
-        }
         const { highlightColor, highlightOpacity } = useUIStore.getState();
-        // Convert mupdf display-coord quads back to PDF coords for storage/render.
-        const quadArray = (quads || []).map((quad: any) => {
-          const raw = Array.isArray(quad) && quad.length >= 8
-            ? quad
-            : [quad.x0 || 0, quad.y0 || 0, quad.x1 || 0, quad.y1 || 0, quad.x2 || 0, quad.y2 || 0, quad.x3 || 0, quad.y3 || 0];
-          return [
-            raw[0], pageHeight - raw[1], raw[2], pageHeight - raw[3],
-            raw[4], pageHeight - raw[5], raw[6], pageHeight - raw[7],
-          ];
-        });
         const annotation: Annotation = {
           id: `highlight_${Date.now()}`,
           type: "highlight",
