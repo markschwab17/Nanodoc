@@ -12,6 +12,7 @@ import { buildDocContext } from "./answerPrompt";
 import { QA_MODEL } from "./modelSelection";
 import { chooseRetrieval } from "./retrievalPolicy";
 import { lexicalTopChunks } from "./lexicalRetrieval";
+import { runDocumentAgent, type AgentStep } from "./documentAgent";
 
 export interface QuestionAnswer {
   answer: string;
@@ -32,7 +33,7 @@ export async function answerQuestion(
   question: string,
   customPrompt?: string,
   previousMessages?: ChatMessage[],
-  opts?: { model?: string }
+  opts?: { model?: string; onStep?: (s: AgentStep) => void }
 ): Promise<QuestionAnswer> {
   if (!hasConfiguredAPIKey()) {
     throw new Error("Please configure your AI API key in settings.");
@@ -67,41 +68,42 @@ export async function answerQuestion(
     // Document order preserved (createChunks emits chunks in reading order).
     selectedChunks = chunks;
   } else {
-    // HYBRID retrieval. Lexical (keyword) retrieval first — guarantees chunks that
-    // literally contain the query terms are included (so "find every place X is
-    // mentioned" never misses obvious matches), independent of embedding quality.
-    const lexicalIds = lexicalTopChunks(question, chunks, 40);
-
-    // Semantic (embedding) retrieval — adds conceptually-related chunks. Falls back
-    // to local TF-IDF if the embeddings proxy is unavailable.
-    const chunkTexts = chunks.map(c => c.text);
-    let questionEmbedding: number[];
-    let chunkEmbeddings: number[][];
+    // Large document: hand off to the multi-step agent (search / read / reason).
     try {
-      const svc = getEmbeddingService();
-      questionEmbedding = await svc.embed(question);
-      chunkEmbeddings = await svc.embedBatch(chunkTexts);
+      return await runDocumentAgent({
+        document: document as any,
+        question,
+        chunks: chunks as any,
+        hasCoverPage,
+        previousMessages: previousMessages as any,
+        model,
+        onStep: opts?.onStep,
+      });
     } catch (e) {
-      // Proxy embeddings can fail (network/quota); fall back to local TF-IDF for the whole
-      // run so query + chunk vectors share dimensions.
-      console.warn('[Ask] Semantic embeddings failed; falling back to local TF-IDF retrieval:', e);
-      const svc = getLocalEmbeddingService();
-      questionEmbedding = await svc.embed(question);
-      chunkEmbeddings = await svc.embedBatch(chunkTexts);
+      console.warn('[Ask] Agent loop failed; falling back to fixed hybrid retrieval:', e);
+      // Fixed lexical + semantic single-pass fallback (previous behavior).
+      const lexicalIds = lexicalTopChunks(question, chunks, 40);
+      const chunkTexts = chunks.map(c => c.text);
+      let questionEmbedding: number[];
+      let chunkEmbeddings: number[][];
+      try {
+        const svc = getEmbeddingService();
+        questionEmbedding = await svc.embed(question);
+        chunkEmbeddings = await svc.embedBatch(chunkTexts);
+      } catch {
+        const svc = getLocalEmbeddingService();
+        questionEmbedding = await svc.embed(question);
+        chunkEmbeddings = await svc.embedBatch(chunkTexts);
+      }
+      const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
+      const semanticIds = findTopKChunks(questionEmbedding, embeddingMap, 35).map(t => t.chunkId);
+      const seen = new Set<string>();
+      for (const id of [...lexicalIds, ...semanticIds]) {
+        if (!seen.has(id)) seen.add(id);
+        if (seen.size >= 60) break;
+      }
+      selectedChunks = chunks.filter(c => seen.has(c.chunkId));
     }
-    const embeddingMap = new Map(chunks.map((c, i) => [c.chunkId, chunkEmbeddings[i]]));
-    const semanticIds = findTopKChunks(questionEmbedding, embeddingMap, 35).map(t => t.chunkId);
-
-    // Merge lexical (priority) + semantic, de-duplicated, capped to bound context size.
-    const MAX_SELECTED = 60;
-    const seen = new Set<string>();
-    for (const id of [...lexicalIds, ...semanticIds]) {
-      if (!seen.has(id)) seen.add(id);
-      if (seen.size >= MAX_SELECTED) break;
-    }
-    console.log(`[Ask] RAG selected ${seen.size} chunks (${lexicalIds.length} lexical + ${semanticIds.length} semantic, merged).`);
-    // Preserve document order so citations read top-to-bottom.
-    selectedChunks = chunks.filter(c => seen.has(c.chunkId));
   }
 
   const chunksText = selectedChunks.map((chunk, idx) => {
