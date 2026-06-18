@@ -214,6 +214,12 @@ export default function CiviltakeoffView() {
         if (params.split_screen === "1") {
           ui.setSplitScreenMode(true);
         }
+        // Default to the text-selection tool for normal document viewing so users can
+        // immediately select text → Ask AI / Highlight / Copy. Special modes (e-sign,
+        // redline) set their own tools below and override this.
+        if (!params.mode) {
+          ui.setActiveTool("selectText");
+        }
 
         // Note: extraction?.specHighlights from CTO use AI-provided bbox which is unreliable
         // (the AI hallucinates coordinates since it works from text, not spatial layout).
