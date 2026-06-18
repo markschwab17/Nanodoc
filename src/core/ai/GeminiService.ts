@@ -12,7 +12,7 @@ import { parseGeminiToolResponse, type ParsedToolResponse } from "./geminiToolRe
 
 export interface GeminiConfig {
   apiKey: string;
-  model?: 'gemini-1.5-pro' | 'gemini-1.5-flash' | string;
+  model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | string;
   baseUrl?: string;
   /** When set, use CTO's Gemini proxy instead of direct API (token + apiOrigin). */
   ctoProxy?: { token: string; apiOrigin: string };
@@ -442,7 +442,7 @@ export async function extractGeotechnicalFromPDF(
   ];
   const generationConfig = { temperature: 0.1, topP: 0.8, topK: 40 };
 
-  const modelOrder = ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'];
+  const modelOrder = ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash'];
   let modelVariants = config.model ? [config.model, ...modelOrder.filter((m) => m !== config.model)] : modelOrder;
   if (useCtoProxy) {
     modelVariants = config.model ? [config.model, 'gemini-2.5-flash'] : ['gemini-2.5-flash'];
@@ -561,8 +561,8 @@ export async function extractSpecsFromChunks(
   const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   // Geotechnical: prefer Gemini 3 Pro for large documents and thorough extraction
   const defaultOrder = extractionType === 'geotechnical'
-    ? ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro']
-    : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+    ? ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash']
+    : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite'];
   let modelVariants = [...defaultOrder];
   if (!useCtoProxy) {
     try {
@@ -792,7 +792,7 @@ export async function extractSpecsFromFile(
   config: GeminiConfig,
   query?: string
 ): Promise<SpecExtractionResult[]> {
-  const model = config.model || 'gemini-1.5-flash';
+  const model = config.model || 'gemini-2.5-flash';
   const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
   
   const prompt = query || `Extract all construction specifications from this document. 
