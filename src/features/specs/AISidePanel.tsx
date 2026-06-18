@@ -7,7 +7,9 @@
 
 import { useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
-import { Sparkles, FileText, MessageSquare, DollarSign, Loader2, X } from "lucide-react";
+import { Sparkles, FileText, MessageSquare, DollarSign, Loader2, X, Mic, Plus, Minus } from "lucide-react";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { useDictation } from "./useDictation";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,6 +38,13 @@ export function AISidePanel() {
   const [geotechnicalScope, setGeotechnicalScope] = useState<GeotechnicalScope | "">("");
   const [customPrompt, setCustomPrompt] = useState("");
   const [question, setQuestion] = useState("");
+  const [showContext, setShowContext] = useState(false);
+  const showNotification = useNotificationStore((s) => s.showNotification);
+  const dictation = useDictation({
+    getText: () => question,
+    setText: setQuestion,
+    onError: (m) => showNotification(m, "error"),
+  });
 
   const currentDocument = getCurrentDocument();
   const documentId = currentDocument?.getId() ?? null;
@@ -100,6 +109,7 @@ export function AISidePanel() {
 
   const handleAsk = () => {
     if (!currentDocument || !question.trim()) return;
+    dictation.stop();
     setAiPanelOpen(false);
     window.dispatchEvent(
       new CustomEvent("ask-document-request", {
@@ -256,31 +266,59 @@ export function AISidePanel() {
                 <Label htmlFor="question" className="text-xs">
                   Ask a Question
                 </Label>
-                <Textarea
-                  id="question"
-                  placeholder="What would you like to know about this document?"
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  className="min-h-[80px] text-xs"
-                  rows={4}
-                />
+                <div className="relative">
+                  <Textarea
+                    id="question"
+                    placeholder="What would you like to know about this document?"
+                    value={question}
+                    onChange={(e) => setQuestion(e.target.value)}
+                    className="min-h-[96px] text-xs pr-11"
+                    rows={5}
+                  />
+                  {dictation.supported && (
+                    <button
+                      type="button"
+                      onClick={dictation.toggle}
+                      title={dictation.isListening ? "Stop dictation" : "Dictate your question"}
+                      aria-label={dictation.isListening ? "Stop dictation" : "Dictate your question"}
+                      className={`absolute bottom-2 right-2 inline-flex items-center justify-center rounded-md p-1.5 transition-colors ${
+                        dictation.isListening
+                          ? "bg-red-500 text-white animate-pulse"
+                          : "text-muted-foreground hover:bg-muted"
+                      }`}
+                    >
+                      <Mic className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
                 <p className="text-xs text-muted-foreground">
                   The answer will include citations with page numbers and locations
                 </p>
               </div>
 
+              {/* Additional context: collapsed by default to keep focus on the question */}
               <div className="space-y-2">
-                <Label htmlFor="ask-custom-prompt" className="text-xs">
-                  Additional Context (Optional)
-                </Label>
-                <Textarea
-                  id="ask-custom-prompt"
-                  placeholder="Add any additional context or requirements..."
-                  value={customPrompt}
-                  onChange={(e) => setCustomPrompt(e.target.value)}
-                  className="min-h-[60px] text-xs"
-                  rows={3}
-                />
+                <button
+                  type="button"
+                  onClick={() => setShowContext((v) => !v)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showContext ? <Minus className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                  Additional context
+                  {!showContext && customPrompt.trim() && (
+                    <span className="ml-1 rounded-full bg-primary/15 px-1.5 text-[10px] text-primary">added</span>
+                  )}
+                </button>
+                {showContext && (
+                  <Textarea
+                    id="ask-custom-prompt"
+                    placeholder="Add any additional context or requirements..."
+                    value={customPrompt}
+                    onChange={(e) => setCustomPrompt(e.target.value)}
+                    className="min-h-[60px] text-xs"
+                    rows={3}
+                  />
+                )}
               </div>
 
               <Button

@@ -14,6 +14,7 @@ import { answerQuestion, type QuestionAnswer } from "@/core/ai/QuestionAnswering
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useConversationStore } from "@/shared/stores/conversationStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { useDictation } from "./useDictation";
 import { AnswerContent } from "./AnswerContent";
 import type { CiteRef } from "./citationMarkup";
 import { buildAskAboutSelectionContext } from "./askActions";
@@ -70,116 +71,19 @@ export function QuestionAnswerPanel() {
   const pushStep = (s: AgentStep) =>
     setAgentSteps((prev) => [...prev.map((p) => ({ ...p, done: true })), { label: stepLabel(s), done: false }]);
 
-  // --- Speech-to-text dictation ---
-  // When embedded in CTO (cross-origin/credentialless iframe), the mic is blocked here,
-  // so we delegate to a top-frame bridge over postMessage. Standalone, we run the
-  // Web Speech API locally.
-  const [isListening, setIsListening] = useState(false);
-  const recognitionRef = useRef<any>(null);
-  const dictationBaseRef = useRef<string>("");
-  const isEmbedded = typeof window !== "undefined" && window.parent !== window;
-  const speechSupported =
-    isEmbedded ||
-    (typeof window !== "undefined" && ("SpeechRecognition" in window || "webkitSpeechRecognition" in window));
-
-  useEffect(() => {
-    // Stop any in-flight local recognition when the panel unmounts.
-    return () => {
-      try { recognitionRef.current?.stop(); } catch { /* ignore */ }
-    };
-  }, []);
-
-  // Receive transcript/results from the top-frame dictation bridge (embedded mode).
-  useEffect(() => {
-    if (!isEmbedded) return;
-    const onMsg = (e: MessageEvent) => {
-      if (e.source !== window.parent && e.source !== window.top) return;
-      const d = e.data;
-      if (!d || typeof d !== "object") return;
-      if (typeof d.type === "string" && d.type.startsWith("nanodoc-dictation")) {
-        console.log("[dictation] received from parent:", d.type);
-      }
-      if (d.type === "nanodoc-dictation-result") {
-        setFollowUpInput((dictationBaseRef.current + (d.transcript || "")).replace(/\s+/g, " ").trimStart());
-      } else if (d.type === "nanodoc-dictation-end") {
-        setIsListening(false);
-      } else if (d.type === "nanodoc-dictation-error") {
-        setIsListening(false);
-        const err = d.error;
-        if (err === "not-allowed" || err === "service-not-allowed") {
-          showNotification("Microphone access is blocked. Allow microphone access for this site to dictate.", "error");
-        } else if (err === "not-supported") {
-          showNotification("Speech recognition isn't supported in this browser.", "error");
-        } else if (err && err !== "aborted" && err !== "no-speech") {
-          showNotification(`Dictation error: ${err}`, "error");
-        }
-      }
-    };
-    window.addEventListener("message", onMsg);
-    return () => window.removeEventListener("message", onMsg);
-  }, [isEmbedded, showNotification]);
-
+  // Speech-to-text dictation (shared hook: top-frame bridge when embedded, local otherwise).
+  const {
+    supported: speechSupported,
+    isListening,
+    toggle: toggleDictationBase,
+    stop: stopDictation,
+  } = useDictation({
+    getText: () => followUpInput,
+    setText: setFollowUpInput,
+    onError: (m) => showNotification(m, "error"),
+  });
   const toggleDictation = () => {
-    // Embedded: delegate to the parent-frame bridge.
-    if (isEmbedded) {
-      const target = window.top ?? window.parent;
-      if (isListening) {
-        target.postMessage({ type: "nanodoc-dictation-stop" }, "*");
-        setIsListening(false);
-        return;
-      }
-      dictationBaseRef.current = followUpInput ? followUpInput.trim() + " " : "";
-      console.log("[dictation] embedded → posting nanodoc-dictation-start to top frame");
-      target.postMessage({ type: "nanodoc-dictation-start" }, "*");
-      setIsListening(true);
-      setTimeout(() => inputRef.current?.focus(), 0);
-      return;
-    }
-
-    // Standalone: run the Web Speech API locally.
-    if (isListening) {
-      try { recognitionRef.current?.stop(); } catch { /* ignore */ }
-      return;
-    }
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    rec.continuous = true;
-    dictationBaseRef.current = followUpInput ? followUpInput.trim() + " " : "";
-    let finals = "";
-    rec.onresult = (e: any) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const transcript = e.results[i][0].transcript;
-        if (e.results[i].isFinal) finals += transcript;
-        else interim += transcript;
-      }
-      setFollowUpInput((dictationBaseRef.current + finals + interim).replace(/\s+/g, " ").trimStart());
-    };
-    rec.onend = () => { setIsListening(false); recognitionRef.current = null; };
-    rec.onerror = (e: any) => {
-      setIsListening(false);
-      recognitionRef.current = null;
-      const err = e?.error;
-      console.warn("[dictation] SpeechRecognition error:", err, e);
-      if (err === "not-allowed" || err === "service-not-allowed") {
-        showNotification("Microphone access is blocked. Allow microphone access for this site to dictate.", "error");
-      } else if (err === "no-speech") {
-        showNotification("Didn't catch that — try again.", "info");
-      } else if (err && err !== "aborted") {
-        showNotification(`Dictation error: ${err}`, "error");
-      }
-    };
-    recognitionRef.current = rec;
-    try {
-      rec.start();
-      setIsListening(true);
-    } catch (e) {
-      console.warn("[dictation] start() failed:", e);
-      showNotification("Couldn't start dictation.", "error");
-    }
+    toggleDictationBase();
     setTimeout(() => inputRef.current?.focus(), 0);
   };
 
@@ -261,11 +165,7 @@ export function QuestionAnswerPanel() {
     const text = followUpInput.trim();
     if (!text || !currentDocument || !documentId || isProcessing) return;
 
-    if (isListening) {
-      if (isEmbedded) (window.top ?? window.parent).postMessage({ type: "nanodoc-dictation-stop" }, "*");
-      else { try { recognitionRef.current?.stop(); } catch { /* ignore */ } }
-      setIsListening(false);
-    }
+    stopDictation();
     setFollowUpInput("");
     setIsProcessing(true);
     setLastAnswer(null);
