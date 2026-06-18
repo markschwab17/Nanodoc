@@ -931,18 +931,43 @@ export function PDFViewer() {
         }, HIGHLIGHT_DURATION_MS);
       };
 
-      // Center the viewport on the actual rendered highlight element. Uses real DOM
-      // layout (scrollIntoView) so it's immune to scale-math drift and self-corrects
-      // after any competing page-center re-scroll. Retries briefly until it paints.
-      const centerOnTempHighlight = (attempt = 0) => {
-        requestAnimationFrame(() => {
+      // Center the viewport on the actual rendered highlight element using real DOM
+      // layout. The highlight only exists once the (virtualized) target page mounts,
+      // and its position keeps moving while baseFitScale/zoom settle on a far jump —
+      // which is why a single early scroll lands "nearby" and a second click is exact.
+      // So we poll until the element's content-space position is STABLE (layout
+      // settled), then do one clean centered scroll. Falls back to centering at a
+      // timeout if it never fully stabilizes.
+      const centerOnTempHighlight = () => {
+        const start = Date.now();
+        let lastContentTop: number | null = null;
+        let stableTicks = 0;
+        const tick = () => {
+          const container = scrollContainerRef.current;
           const el = document.getElementById("nanodoc-temp-highlight");
-          if (el) {
-            el.scrollIntoView({ block: "center", behavior: "smooth" });
-          } else if (attempt < 6) {
-            setTimeout(() => centerOnTempHighlight(attempt + 1), 120);
+          if (el && container) {
+            // Scroll-independent position within the scroll content (only changes when
+            // layout/scale changes, not while a scroll animates).
+            const contentTop =
+              el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+            if (lastContentTop !== null && Math.abs(contentTop - lastContentTop) < 1) {
+              stableTicks++;
+            } else {
+              stableTicks = 0;
+            }
+            lastContentTop = contentTop;
+            if (stableTicks >= 2) {
+              el.scrollIntoView({ block: "center", behavior: "smooth" });
+              return;
+            }
           }
-        });
+          if (Date.now() - start < 2500) {
+            setTimeout(tick, 100);
+          } else if (el) {
+            el.scrollIntoView({ block: "center", behavior: "smooth" });
+          }
+        };
+        setTimeout(tick, 60);
       };
 
       const applyTemporaryHighlight = () => {
