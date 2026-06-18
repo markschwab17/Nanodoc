@@ -93,7 +93,7 @@ export function QuestionAnswerPanel() {
   useEffect(() => {
     if (!isEmbedded) return;
     const onMsg = (e: MessageEvent) => {
-      if (e.source !== window.parent) return;
+      if (e.source !== window.parent && e.source !== window.top) return;
       const d = e.data;
       if (!d || typeof d !== "object") return;
       if (typeof d.type === "string" && d.type.startsWith("nanodoc-dictation")) {
@@ -122,14 +122,15 @@ export function QuestionAnswerPanel() {
   const toggleDictation = () => {
     // Embedded: delegate to the parent-frame bridge.
     if (isEmbedded) {
+      const target = window.top ?? window.parent;
       if (isListening) {
-        window.parent.postMessage({ type: "nanodoc-dictation-stop" }, "*");
+        target.postMessage({ type: "nanodoc-dictation-stop" }, "*");
         setIsListening(false);
         return;
       }
       dictationBaseRef.current = followUpInput ? followUpInput.trim() + " " : "";
-      console.log("[dictation] embedded → posting nanodoc-dictation-start to parent");
-      window.parent.postMessage({ type: "nanodoc-dictation-start" }, "*");
+      console.log("[dictation] embedded → posting nanodoc-dictation-start to top frame");
+      target.postMessage({ type: "nanodoc-dictation-start" }, "*");
       setIsListening(true);
       setTimeout(() => inputRef.current?.focus(), 0);
       return;
@@ -261,7 +262,7 @@ export function QuestionAnswerPanel() {
     if (!text || !currentDocument || !documentId || isProcessing) return;
 
     if (isListening) {
-      if (isEmbedded) window.parent.postMessage({ type: "nanodoc-dictation-stop" }, "*");
+      if (isEmbedded) (window.top ?? window.parent).postMessage({ type: "nanodoc-dictation-stop" }, "*");
       else { try { recognitionRef.current?.stop(); } catch { /* ignore */ } }
       setIsListening(false);
     }
