@@ -5,7 +5,8 @@
  */
 
 import type { AIConfig, SpecExtractionResult, GeotechnicalSummary, AIProvider, GeotechnicalScope } from './types';
-import { extractSpecsFromChunks as geminiExtractSpecs, extractGeotechnicalFromPDF, callGeminiAPI, callGeminiAPIWithHistory, type GeminiConfig } from './GeminiService';
+import { extractSpecsFromChunks as geminiExtractSpecs, extractGeotechnicalFromPDF, callGeminiAPI, callGeminiAPIWithHistory, generateWithToolsGemini, type GeminiConfig } from './GeminiService';
+import type { ParsedToolResponse } from './geminiToolResponse';
 import { extractSpecsFromChunks as openaiExtractSpecs, generateText as openaiGenerateText, generateTextWithHistory as openaiGenerateTextWithHistory } from './OpenAIService';
 import { useAIProviderStore } from '@/shared/stores/aiProviderStore';
 import { useCiviltakeoffContextStore } from '@/shared/stores/civiltakeoffContextStore';
@@ -139,6 +140,28 @@ export async function generateTextWithHistory(messages: ChatMessage[], opts?: { 
     return openaiGenerateTextWithHistory(messages, config);
   }
   throw new Error(`Unsupported AI provider: ${config.provider}`);
+}
+
+/**
+ * One function-calling turn via the active Gemini provider (proxy or direct).
+ * Used by the document agent. Throws if the active provider isn't Gemini.
+ */
+export async function generateWithTools(
+  contents: any[],
+  tools: any,
+  opts?: { model?: string }
+): Promise<ParsedToolResponse> {
+  const config = getAIConfig();
+  if (!config || config.provider !== 'gemini') {
+    throw new Error('Tool-calling requires the Gemini provider.');
+  }
+  const geminiConfig: GeminiConfig = {
+    apiKey: config.apiKey,
+    model: (opts?.model ?? config.model) as any,
+    baseUrl: config.baseUrl,
+    ctoProxy: config.ctoProxy,
+  };
+  return generateWithToolsGemini(contents, tools, geminiConfig);
 }
 
 /**

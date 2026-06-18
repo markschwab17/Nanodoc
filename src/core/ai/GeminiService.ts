@@ -8,6 +8,8 @@
  * - Map-reduce processing for full document extraction
  */
 
+import { parseGeminiToolResponse, type ParsedToolResponse } from "./geminiToolResponse";
+
 export interface GeminiConfig {
   apiKey: string;
   model?: 'gemini-1.5-pro' | 'gemini-1.5-flash' | string;
@@ -1069,6 +1071,48 @@ export async function callGeminiAPIWithHistory(
     }
   }
   throw new Error(`Failed to call Gemini API with history. Last error: ${lastError || 'Unknown error'}`);
+}
+
+/**
+ * Single Gemini call with function-calling tools. Sends raw `contents` (already in
+ * Gemini parts format, including functionCall/functionResponse parts) plus a `tools`
+ * schema. Returns the parsed functionCalls/text/parts. Uses one model (no variant
+ * iteration) so tool state stays coherent. Pass `tools = undefined` to force a
+ * tool-free final answer.
+ */
+export async function generateWithToolsGemini(
+  contents: any[],
+  tools: any,
+  config: GeminiConfig
+): Promise<ParsedToolResponse> {
+  const model = (config.model || "gemini-2.5-pro").replace(/^models\//, "");
+  const generationConfig = { temperature: 0.1, topP: 0.8, topK: 40 };
+
+  if (config.ctoProxy?.token && config.ctoProxy?.apiOrigin) {
+    const apiOrigin = config.ctoProxy.apiOrigin.replace(/\/+$/, "");
+    const body: Record<string, unknown> = { token: config.ctoProxy.token, model, contents, generationConfig };
+    if (tools) body.tools = tools;
+    const res = await fetch(`${apiOrigin}/api/nanodoc/gemini`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error((result as { message?: string })?.message || `Proxy ${res.status}`);
+    return parseGeminiToolResponse((result as { response?: unknown }).response);
+  }
+
+  // Direct (local API key) fallback
+  const baseUrl = config.baseUrl || "https://generativelanguage.googleapis.com";
+  const directBody: Record<string, unknown> = { contents, generationConfig };
+  if (tools) directBody.tools = tools;
+  const res = await fetch(`${baseUrl}/v1beta/models/${model}:generateContent?key=${config.apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(directBody),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return parseGeminiToolResponse(await res.json());
 }
 
 /**
