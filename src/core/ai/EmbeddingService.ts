@@ -170,7 +170,16 @@ export class BrowserEmbeddingService implements EmbeddingService {
  */
 export class GeminiProxyEmbeddingService implements EmbeddingService {
   private cache = new Map<string, number[]>();
+  /** Once the proxy fails (e.g. route not deployed → 404), fall back to local TF-IDF
+   *  for the whole instance so vectors stay the same dimension and nothing crashes. */
+  private useLocal = false;
+  private local: BrowserEmbeddingService | null = null;
   constructor(private token: string, private apiOrigin: string) {}
+
+  private getLocal(): BrowserEmbeddingService {
+    if (!this.local) this.local = new BrowserEmbeddingService();
+    return this.local;
+  }
 
   async embed(text: string): Promise<number[]> {
     const [v] = await this.embedBatch([text]);
@@ -178,6 +187,8 @@ export class GeminiProxyEmbeddingService implements EmbeddingService {
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
+    if (this.useLocal) return this.getLocal().embedBatch(texts);
+
     const out: number[][] = new Array(texts.length);
     const missing: Array<{ idx: number; text: string }> = [];
     texts.forEach((t, i) => {
@@ -187,7 +198,17 @@ export class GeminiProxyEmbeddingService implements EmbeddingService {
     });
 
     if (missing.length > 0) {
-      const fetched = await this.fetchEmbeddings(missing.map((m) => m.text));
+      let fetched: number[][];
+      try {
+        fetched = await this.fetchEmbeddings(missing.map((m) => m.text));
+      } catch (e) {
+        // Proxy unavailable (404/network) — switch this instance to local TF-IDF and
+        // clear the cache so we never mix proxy- and local-dimension vectors.
+        console.warn("[embeddings] Gemini proxy unavailable, using local TF-IDF:", e);
+        this.useLocal = true;
+        this.cache.clear();
+        return this.getLocal().embedBatch(texts);
+      }
       missing.forEach((m, j) => {
         const v = fetched[j] ?? [];
         this.cache.set(m.text, v);
