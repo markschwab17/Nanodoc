@@ -769,6 +769,55 @@ export async function getStructuredTextForPage(
 }
 
 /**
+ * Find the word at a point (PDF coordinates) for double-click-to-select-word.
+ * extractStructuredText returns LINE-level spans, so we locate the line under the
+ * point, estimate the character index from the click x (even spacing across the
+ * line), then expand to the surrounding run of non-whitespace characters.
+ */
+export async function getWordSpanAtPoint(
+  document: PDFDocument,
+  pageNumber: number,
+  point: { x: number; y: number }
+): Promise<TextSpan | null> {
+  const lines = await extractStructuredText(document, pageNumber);
+  // Prefer the smallest line whose bbox contains the point.
+  let line: TextSpan | null = null;
+  for (const s of lines) {
+    if (!s.text) continue;
+    const [x0, y0, x1, y1] = s.bbox;
+    if (point.x >= x0 - 1 && point.x <= x1 + 1 && point.y >= y0 - 1 && point.y <= y1 + 1) {
+      if (!line || (x1 - x0) < (line.bbox[2] - line.bbox[0])) line = s;
+    }
+  }
+  if (!line) return null;
+
+  const [lx0, ly0, lx1, ly1] = line.bbox;
+  const text = line.text;
+  const n = text.length;
+  const width = lx1 - lx0;
+  if (n === 0 || width <= 0) return null;
+
+  const isWord = (c: string) => /\S/.test(c);
+  let idx = Math.floor(((point.x - lx0) / width) * n);
+  idx = Math.max(0, Math.min(n - 1, idx));
+  if (!isWord(text[idx])) {
+    if (idx + 1 < n && isWord(text[idx + 1])) idx += 1;
+    else if (idx - 1 >= 0 && isWord(text[idx - 1])) idx -= 1;
+    else return null;
+  }
+  let start = idx;
+  let end = idx;
+  while (start > 0 && isWord(text[start - 1])) start--;
+  while (end < n - 1 && isWord(text[end + 1])) end++;
+
+  const wordText = text.slice(start, end + 1);
+  if (!wordText.trim()) return null;
+  const wx0 = lx0 + (start / n) * width;
+  const wx1 = lx0 + ((end + 1) / n) * width;
+  return { text: wordText, bbox: [wx0, ly0, wx1, ly1], font: line.font, fontSize: line.fontSize };
+}
+
+/**
  * Clear text cache for a document
  */
 export function clearTextCache(documentId: string) {

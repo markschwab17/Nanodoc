@@ -35,7 +35,7 @@ import { useStampStore } from "@/shared/stores/stampStore";
 import { getStampPlacementDimensions } from "@/features/stamps/stampUtils";
 import { StampEditor } from "@/features/stamps/StampEditor";
 import SignatureFieldAnnotation from "@/features/esign/SignatureFieldAnnotation";
-import { getSpansInSelectionFromPage, getStructuredTextForPage, type TextSpan } from "@/core/pdf/PDFTextExtractor";
+import { getSpansInSelectionFromPage, getStructuredTextForPage, getWordSpanAtPoint, type TextSpan } from "@/core/pdf/PDFTextExtractor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 import { AnnotationContextMenu, type ContextMenuItem } from "./AnnotationContextMenu";
@@ -2871,6 +2871,26 @@ export const PageCanvas = React.memo(function PageCanvas({
   }, [currentDocument, editor, pageNumber, getAnnotations, setCurrentPage]);
 
 
+  // Double-click on the select-text tool selects the whole word under the cursor.
+  const handleDoubleClick = async (e: React.MouseEvent) => {
+    if (activeTool !== "selectText" || !currentDocument) return;
+    const coords = getPDFCoordinates(e);
+    if (!coords) return;
+    try {
+      const word = await getWordSpanAtPoint(currentDocument, pageNumber, coords);
+      if (!word || !word.text.trim()) return;
+      setSelectedTextSpans([word]);
+      selectedTextRef.current = word.text;
+      // Surface to the floating selection toolbar (Ask AI / Highlight / Copy) when embedded.
+      const params = parseCiviltakeoffViewParams(typeof window !== "undefined" ? window.location.search : "");
+      if (params.token) {
+        useCtoTextSelectionStore.getState().setSelection(pageNumber, word.text.trim(), { x: e.clientX, y: e.clientY });
+      }
+    } catch (err) {
+      console.warn("Double-click word selection failed:", err);
+    }
+  };
+
   const handleMouseUp = async (e: React.MouseEvent) => {
     // Clear middle mouse button tracking
     if (e.button === 1) {
@@ -3144,6 +3164,7 @@ export const PageCanvas = React.memo(function PageCanvas({
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onDoubleClick={handleDoubleClick}
       onMouseLeave={(e) => {
         // If we're in the middle of a highlight drag, commit it before cleaning up
         if ((activeTool === "highlight" || activeTool === "strikethrough") && isSelecting && selectionStart && overlayHighlightPath.length > 0) {
