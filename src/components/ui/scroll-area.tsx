@@ -13,7 +13,7 @@ const ScrollArea = React.forwardRef<
     {...props}
   >
     <ScrollAreaPrimitive.Viewport 
-      className="h-full w-full rounded-[inherit] [&>div]:block [&>div]:w-full outline-none"
+      className="h-full w-full rounded-[inherit] [&>div]:!block [&>div]:!w-full [&>div]:min-w-0 outline-none"
       tabIndex={-1}
     >
       {children}

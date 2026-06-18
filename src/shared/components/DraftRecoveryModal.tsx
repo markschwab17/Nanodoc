@@ -98,7 +98,7 @@ export function DraftRecoveryModal() {
               <div
                 key={draft.key}
                 className={cn(
-                  "flex items-center gap-2 p-2 rounded-md border",
+                  "flex items-center gap-2 p-2 rounded-md border min-w-0",
                   busyKey === draft.key && "opacity-50 pointer-events-none"
                 )}
               >
