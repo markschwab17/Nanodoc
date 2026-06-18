@@ -442,10 +442,10 @@ export async function extractGeotechnicalFromPDF(
   ];
   const generationConfig = { temperature: 0.1, topP: 0.8, topK: 40 };
 
-  const modelOrder = ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'];
+  const modelOrder = ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro'];
   let modelVariants = config.model ? [config.model, ...modelOrder.filter((m) => m !== config.model)] : modelOrder;
   if (useCtoProxy) {
-    modelVariants = config.model ? [config.model, 'gemini-2.0-flash'] : ['gemini-2.0-flash'];
+    modelVariants = config.model ? [config.model, 'gemini-2.5-flash'] : ['gemini-2.5-flash'];
   } else {
     try {
       const available = await listAvailableModels(config.apiKey, baseUrl);
@@ -544,7 +544,7 @@ export async function extractSpecsFromChunks(
   scope?: string
 ): Promise<SpecExtractionResult[] | GeotechnicalSummary> {
   // Try v1beta first (recommended), then v1 as fallback
-  // Updated model names: gemini-3-pro-preview (Gemini 3 Pro), gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash
+  // Updated model names: gemini-3-pro-preview (Gemini 3 Pro), gemini-2.5-flash, gemini-2.5-pro, gemini-2.5-flash
   // Note: gemini-1.5 models are deprecated
   const baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
 
@@ -561,8 +561,8 @@ export async function extractSpecsFromChunks(
   const useCtoProxy = Boolean(config.ctoProxy?.token && config.ctoProxy?.apiOrigin);
   // Geotechnical: prefer Gemini 3 Pro for large documents and thorough extraction
   const defaultOrder = extractionType === 'geotechnical'
-    ? ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro']
-    : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+    ? ['gemini-3-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-pro']
+    : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
   let modelVariants = [...defaultOrder];
   if (!useCtoProxy) {
     try {
@@ -584,8 +584,8 @@ export async function extractSpecsFromChunks(
     }
   } else {
     modelVariants = extractionType === 'geotechnical' && config.model
-      ? [config.model, 'gemini-2.0-flash']
-      : [config.model || 'gemini-2.0-flash'];
+      ? [config.model, 'gemini-2.5-flash']
+      : [config.model || 'gemini-2.5-flash'];
   }
   
   // API versions to try
@@ -623,7 +623,7 @@ export async function extractSpecsFromChunks(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             token: config.ctoProxy.token,
-            model: config.model || 'gemini-2.0-flash',
+            model: config.model || 'gemini-2.5-flash',
             contents: requestBody.contents,
             generationConfig: requestBody.generationConfig,
           }),
@@ -877,7 +877,7 @@ export async function callGeminiAPI(
   let modelVariants = [
     'gemini-2.5-flash',
     'gemini-2.5-pro',
-    'gemini-2.0-flash',
+    'gemini-2.5-flash',
   ];
 
   // Try to discover available models from API (skip when using proxy)
@@ -993,7 +993,7 @@ export async function callGeminiAPIWithHistory(
   let modelVariants = [
     'gemini-2.5-flash',
     'gemini-2.5-pro',
-    'gemini-2.0-flash',
+    'gemini-2.5-flash',
   ];
   if (!useCtoProxy) {
     try {

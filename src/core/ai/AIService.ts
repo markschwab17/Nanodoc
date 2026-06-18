@@ -23,7 +23,7 @@ export function getAIConfig(): AIConfig | null {
     return {
       apiKey: "",
       provider: "gemini",
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       ctoProxy: { token: ctx.token, apiOrigin: ctx.api_origin },
     };
   }
@@ -82,7 +82,7 @@ export async function extractGeotechnicalFromPDFBytes(
   }
   const geminiConfig: GeminiConfig = {
     apiKey: config.apiKey,
-    model: config.model ?? 'gemini-2.0-flash',
+    model: config.model ?? 'gemini-2.5-flash',
     baseUrl: config.baseUrl,
     ctoProxy: config.ctoProxy,
   };
