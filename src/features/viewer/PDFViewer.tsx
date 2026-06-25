@@ -456,8 +456,8 @@ export function PDFViewer() {
   // Handle scroll-to-spec events
   useEffect(() => {
     const handleScrollToSpec = (event: Event) => {
-      const customEvent = event as CustomEvent<{ page: number; bbox?: number[]; specId?: string; quote?: string }>;
-      const { page: requestedPage, bbox, specId, quote } = customEvent.detail;
+      const customEvent = event as CustomEvent<{ page: number; bbox?: number[]; specId?: string; quote?: string; fieldId?: string }>;
+      const { page: requestedPage, bbox, specId, quote, fieldId } = customEvent.detail;
 
       if (!currentDocument) return;
 
@@ -938,13 +938,13 @@ export function PDFViewer() {
       // So we poll until the element's content-space position is STABLE (layout
       // settled), then do one clean centered scroll. Falls back to centering at a
       // timeout if it never fully stabilizes.
-      const centerOnTempHighlight = () => {
+      const centerOnElement = (elementId: string) => {
         const start = Date.now();
         let lastContentTop: number | null = null;
         let stableTicks = 0;
         const tick = () => {
           const container = scrollContainerRef.current;
-          const el = document.getElementById("nanodoc-temp-highlight");
+          const el = document.getElementById(elementId);
           if (el && container) {
             // Scroll-independent position within the scroll content (only changes when
             // layout/scale changes, not while a scroll animates).
@@ -969,6 +969,7 @@ export function PDFViewer() {
         };
         setTimeout(tick, 60);
       };
+      const centerOnTempHighlight = () => centerOnElement("nanodoc-temp-highlight");
 
       const applyTemporaryHighlight = () => {
         // When quote quads were precomputed (from the text search before scrolling), use them directly
@@ -1055,7 +1056,20 @@ export function PDFViewer() {
           console.warn("Scroll-to-spec: could not set page fallback highlight", e);
         }
       };
-      
+
+      // Decide what runs after the page-level scroll lands.
+      // For an e-sign field (fieldId present) we have a precise on-page target:
+      // center on the actual rendered field element. This avoids
+      // applyTemporaryHighlight's page-top-strip fallback, whose centering would
+      // smooth-scroll the viewport back to the top of the page.
+      const afterScroll = () => {
+        if (fieldId) {
+          centerOnElement(`esign-field-${fieldId}`);
+        } else if (!specId || precomputedQuoteQuads) {
+          setTimeout(applyTemporaryHighlight, 280);
+        }
+      };
+
       // Compute a scroll-target bbox from the precomputed quote quads so the
       // viewer scrolls to the actual highlight location instead of the top of
       // the page. The first quad is the primary match.
@@ -1106,15 +1120,15 @@ export function PDFViewer() {
                   // Wait one more frame for state to update
                   requestAnimationFrame(() => {
                     scrollToPage(page, true, scrollBbox, true, "auto");
-                    if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
+                    afterScroll();
                   });
                 } else {
                   scrollToPage(page, true, scrollBbox, true, "auto");
-                  if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
+                  afterScroll();
                 }
               } else {
                 scrollToPage(page, true, scrollBbox, true, "auto");
-                if (!specId || precomputedQuoteQuads) setTimeout(applyTemporaryHighlight, 280);
+                afterScroll();
               }
             }
           });

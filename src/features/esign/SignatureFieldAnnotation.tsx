@@ -195,6 +195,7 @@ export default function SignatureFieldAnnotation({
   return (
     <>
       <div
+        id={`esign-field-${annotation.id}`}
         onClick={handleClick}
         style={{
           position: "absolute",

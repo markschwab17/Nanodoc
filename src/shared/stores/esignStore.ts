@@ -162,6 +162,9 @@ export const useESignStore = create<ESignState>((set, get) => ({
       new CustomEvent("scroll-to-spec", {
         detail: {
           page: field.page,
+          // fieldId lets the viewer center on the actual rendered field element
+          // (esign-field-<id>) instead of falling back to a page-top highlight.
+          fieldId: field.id,
           bbox: [field.x, field.y, field.x + field.width, field.y + field.height],
         },
       })
