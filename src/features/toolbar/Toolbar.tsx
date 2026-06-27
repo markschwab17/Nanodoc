@@ -5,6 +5,7 @@
  */
 
 import { isTauri } from "@/shared/utils/environment";
+import { saveCurrentPdfToCto } from "./saveToCto";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { Button } from "@/components/ui/button";
 import {
@@ -503,17 +504,7 @@ export function Toolbar() {
       setSavingToCto(true);
       try {
         await syncAndSavePDF(async (pdfData) => {
-          const form = new FormData();
-          form.append("token", ctx.token);
-          form.append("file", new Blob([pdfData as BlobPart], { type: "application/pdf" }), currentDoc.getName());
-          const saveRes = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
-            method: "POST",
-            body: form,
-          });
-          if (!saveRes.ok) {
-            const err = await saveRes.json().catch(() => ({}));
-            throw new Error((err as { message?: string }).message ?? "Failed to save PDF to Civiltakeoff");
-          }
+          await saveCurrentPdfToCto({ pdfData, ctx, fileName: currentDoc.getName() });
           const documentId = currentDoc.getId();
           const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(documentId);
           const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(documentId);
@@ -627,17 +618,7 @@ export function Toolbar() {
     setSavingToCto(true);
     try {
       await syncAndSavePDF(async (pdfData) => {
-        const form = new FormData();
-        form.append("token", ctx.token);
-        form.append("file", new Blob([pdfData as BlobPart], { type: "application/pdf" }), currentDoc.getName());
-        const saveRes = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
-          method: "POST",
-          body: form,
-        });
-        if (!saveRes.ok) {
-          const err = await saveRes.json().catch(() => ({}));
-          throw new Error((err as { message?: string }).message ?? "Failed to save PDF to Civiltakeoff");
-        }
+        await saveCurrentPdfToCto({ pdfData, ctx, fileName: currentDoc.getName() });
         const documentId = currentDoc.getId();
         const extractedSpecs = useSpecExtractionStore.getState().getExtractedSpecs(documentId);
         const specHighlights = useSpecExtractionStore.getState().getSpecHighlights(documentId);
