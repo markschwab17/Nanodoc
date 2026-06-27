@@ -72,10 +72,15 @@ export default function CiviltakeoffView() {
       if (data?.type === "nanodoc-open-document" && data?.token && data?.api_origin) {
         const apiOrigin = String(data.api_origin).replace(/\/+$/, "");
         const token = String(data.token);
+        const requestId = typeof data.requestId === "string" ? data.requestId : null;
         const projectId = data?.project_id != null ? String(data.project_id) : null;
         const displayName = typeof data.displayName === "string" && data.displayName.trim()
           ? data.displayName.trim()
           : "document.pdf";
+        // Reply to CTO's acknowledged-open handshake (no-op for older CTO that omits requestId).
+        const reply = (msg: Record<string, unknown>) =>
+          (window.parent ?? window).postMessage(msg, apiOrigin || "*");
+        if (requestId) reply({ type: "nanodoc-open-ack", requestId });
         try {
           // Set CTO context before load so the new tab gets it when addTab runs; Save will use this file
           if (projectId) {
@@ -110,15 +115,25 @@ export default function CiviltakeoffView() {
           const pdfData = new Uint8Array(arrayBuffer);
           const mupdfModule = await import("mupdf");
           await loadPDFRef.current(pdfData, displayName, mupdfModule.default, null);
+          if (requestId) reply({ type: "nanodoc-open-result", requestId, ok: true });
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Failed to open document.";
           usePDFStore.getState().setError(msg);
           showNotificationRef.current(msg, "error");
+          if (requestId) reply({ type: "nanodoc-open-result", requestId, ok: false, error: msg });
         }
       }
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
+  }, []);
+
+  // Announce readiness to CTO once mounted + listening, so any "open as tab" that
+  // CTO issued while this SPA was still booting gets (re)delivered instead of dropped.
+  useEffect(() => {
+    const params = parseCiviltakeoffViewParams(window.location.search);
+    const target = params.api_origin?.replace(/\/+$/, "") || "*";
+    (window.parent ?? window).postMessage({ type: "nanodoc-ready" }, target);
   }, []);
 
   useEffect(() => {
