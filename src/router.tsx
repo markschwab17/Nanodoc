@@ -17,6 +17,7 @@ const Why = lazy(() => import("./pages/Why"));
 const Partners = lazy(() => import("./pages/Partners"));
 const TileSmokeHarness = lazy(() => import("@/features/dev/TileSmokeHarness"));
 const TiledPageSmokeHarness = lazy(() => import("@/features/dev/TiledPageSmokeHarness"));
+const AutoStitchSmokeHarness = lazy(() => import("@/features/dev/AutoStitchSmokeHarness"));
 
 function lazyRoute(element: React.ReactNode) {
   return <Suspense fallback={null}>{element}</Suspense>;
@@ -74,6 +75,10 @@ export const router = createBrowserRouter([
         {
           path: "/dev/tiled-page-smoke",
           element: lazyRoute(<TiledPageSmokeHarness />),
+        },
+        {
+          path: "/dev/autostitch",
+          element: lazyRoute(<AutoStitchSmokeHarness />),
         },
       ]
     : []),
