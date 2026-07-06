@@ -23,6 +23,20 @@
 
 ---
 
+## Plan Revision — 2026-07-06 (resequencing: scale inference deferred)
+
+The POC's scale-inference code is being actively reworked (new `lib/scale-core.js`, `lib/page-labels.js`, a confidence-tier `decideScale`, cross-sheet `reconcileBySet`, and additive `tokens.js` fields `axis`/`sheetCode`/`detectNoScale`). Per decision on 2026-07-06 ("port latest, no snapshot; build stable engine now, port scale-infer last"), the sequence is revised:
+
+- **Same-scale stitching needs no scale inference.** Per-sheet scale cancels in the points→feet→canvas round-trip, so a uniform scale (user-entered or default) yields exact placement for a single-scale set. Scale only affects mixed-scale resizing and seam-error reporting in real feet.
+- **Task 2's committed tokens port stays as-is.** `stitch-core.js` is unchanged and consumes the original `parseScaleNotes(...).ftPerIn` / `parseSheetRefs(...).sheet/.edge`; the current tokens.js additions are all scale-only, so re-syncing them is folded into the deferred scale task.
+- **Task 3 (`scaleInfer`) is DEFERRED and superseded by Task 10.** Do not port the old single-file `scale-infer.js`. Skip Task 3 entirely in this pass.
+- **Task 7 (`autoStitch`) uses a thin scale interface** (user-entered/default scale), not `inferScale` — see the revised Task 7 below.
+- **Task 10 (final, deferred): port the current scale-inference stack** — re-sync `tokens.ts` (axis/detectNoScale/sheetCode) + port `scale-core.js` + `page-labels.js` + the reworked `scaleInfer.ts` (`{scale, confidence, source}` + `reconcileBySet`), then replace the thin scale interface in `autoStitch`. Its detailed brief is authored at execution time against the then-frozen POC source (the source is still changing, so a detailed brief now would be stale). Order after Task 9.
+
+Execution order this pass: **1 ✓ → 2 (review) → 4 → 5 → 6 → 7 (revised) → 8 → 9**, then **10** once the user confirms the POC scale logic is frozen.
+
+---
+
 ### Task 1: Scaffolding, shared types, and `reconstruct` port
 
 **Files:**
@@ -225,9 +239,11 @@ git commit -m "feat(autostitch): port deterministic token classifiers"
 
 ---
 
-### Task 3: `scaleInfer` port
+### Task 3: `scaleInfer` port — ⛔ DEFERRED / SUPERSEDED
 
-**Files:**
+> **Do not implement this task.** The POC's `scale-infer.js` was reworked after this plan was written (candidate-ladder + `decideScale` + `reconcileBySet`, depending on new `lib/scale-core.js` and `lib/page-labels.js`). The old single-file port below is obsolete. Scale inference is now **Task 10**, authored against the frozen source after Task 9. Skip to Task 4.
+
+**Files (obsolete — retained for reference only):**
 - Create: `src/features/stitch/autostitch/scaleInfer.ts`
 - Test: `src/features/stitch/autostitch/scaleInfer.test.ts`
 
@@ -836,8 +852,10 @@ git commit -m "feat(autostitch): mupdf capture device -> intermediate extract"
 
 > No vitest test (drives mupdf). The pure pieces it composes (`inferScale`, `stitchSheets`, `layoutPlacements`) are already covered. Verified end-to-end in Task 8's harness.
 
+> **Revised (2026-07-06):** scale inference is deferred to Task 10. This task uses a **thin scale interface** — a uniform user-entered/default scale, NOT `inferScale`. Do not import `scaleInfer`.
+
 **Interfaces:**
-- Consumes: `capturePage`, `inferScale`, `stitchSheets`/`SheetInput`, `layoutPlacements`/`TilePlacement`, `PageExtract`.
+- Consumes: `capturePage`, `stitchSheets`/`SheetInput`, `layoutPlacements`/`TilePlacement`, `PageExtract`.
 - Produces:
   ```ts
   export interface AutoStitchOptions { userScale?: number | null; onProgress?: (done: number, total: number) => void; }
@@ -850,7 +868,7 @@ git commit -m "feat(autostitch): mupdf capture device -> intermediate extract"
 ```ts
 import type { PageExtract } from "./types";
 import { capturePage } from "./captureDevice";
-import { inferScale } from "./scaleInfer";
+// NOTE: scale inference (inferScale) is deferred to Task 10. Do not import it yet.
 import { stitchSheets, type SheetInput } from "./stitchCore";
 import { layoutPlacements, type TilePlacement } from "./layout";
 
@@ -891,10 +909,11 @@ export async function autoStitch(
     } finally {
       page.destroy?.();
     }
-    const inferred = inferScale(extract).combined?.ftPerIn;
-    const scale = Number.isFinite(inferred) && (inferred as number) > 0
-      ? (inferred as number)
-      : opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
+    // Scale inference is deferred to Task 10. Until then use a uniform scale
+    // (user-entered or default). Same-scale sets place exactly regardless of the
+    // value (per-sheet scale cancels in points->feet->canvas). Task 10 replaces
+    // this line with per-page inferScale(extract).
+    const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
     const w = extract.view[2] - extract.view[0];
     const h = extract.view[3] - extract.view[1];
     let no = pageIndex + 1;
