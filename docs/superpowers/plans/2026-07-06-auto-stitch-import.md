@@ -721,7 +721,11 @@ git commit -m "feat(autostitch): feet-frame to canvas pose mapping"
 import type { PageExtract, Atom, Geom, Label } from "./types";
 import { reconstruct } from "./reconstruct";
 
-type Mupdf = typeof import("mupdf");
+// `mupdf` here is the module NAMESPACE — callers pass (await import("mupdf")).default,
+// exactly like PDFRenderer and the render workers. The ambient src/types/mupdf.d.ts shim
+// types the module as { default: any }, so the namespace is `any`; access mupdf.Device /
+// mupdf.Matrix directly, NEVER mupdf.default.Device (that would need the raw module and
+// crash under the app's standard `.then(m => m.default)` wiring).
 const CURVE_STEPS = 8; // chords per bezier when flattening
 
 /** fz matrix concat: result = m * n, both [a,b,c,d,e,f]. */
@@ -746,7 +750,7 @@ const apply = (m: number[], x: number, y: number): [number, number] => [
  * geometry — all in mupdf page space (points, y-down). Identity CTM at page.run
  * keeps everything in one frame that matches the tile raster and DOM canvas.
  */
-export function capturePage(mupdf: Mupdf, page: any): PageExtract {
+export function capturePage(mupdf: any, page: any): PageExtract {
   const visAtoms: Atom[] = [];
   const shxAtoms: Atom[] = [];
   const geometry: Geom[] = [];
@@ -813,12 +817,14 @@ export function capturePage(mupdf: Mupdf, page: any): PageExtract {
     flush();
   };
 
+  // `mupdf: any` (the namespace) means Device callbacks need explicit `any` params
+  // under strict/noImplicitAny. Access mupdf.Device / mupdf.Matrix directly (namespace).
   const device = new mupdf.Device({
-    fillText: (text, ctm) => walkText(text, ctm as unknown as number[], visAtoms),
-    strokeText: (text, _s, ctm) => walkText(text, ctm as unknown as number[], visAtoms),
-    ignoreText: (text, ctm) => walkText(text, ctm as unknown as number[], shxAtoms),
-    fillPath: (path, _eo, ctm) => walkPath(path, ctm as unknown as number[]),
-    strokePath: (path, _s, ctm) => walkPath(path, ctm as unknown as number[]),
+    fillText: (text: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
+    strokeText: (text: any, _s: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
+    ignoreText: (text: any, ctm: any) => walkText(text, ctm as unknown as number[], shxAtoms),
+    fillPath: (path: any, _eo: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
+    strokePath: (path: any, _s: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
   });
   page.run(device, mupdf.Matrix.identity);
   (device as any).close?.();
@@ -860,7 +866,8 @@ git commit -m "feat(autostitch): mupdf capture device -> intermediate extract"
   ```ts
   export interface AutoStitchOptions { userScale?: number | null; onProgress?: (done: number, total: number) => void; }
   export interface AutoStitchResult { placements: TilePlacement[]; rootFtPerIn: number; alignedCount: number; unplacedCount: number; worstResidFt: number; }
-  export async function autoStitch(mupdf: typeof import("mupdf"), doc: any, pageIndices: number[], opts?: AutoStitchOptions): Promise<AutoStitchResult>;
+  export async function autoStitch(mupdf: any, doc: any, pageIndices: number[], opts?: AutoStitchOptions): Promise<AutoStitchResult>;
+  // `mupdf` is the namespace — (await import("mupdf")).default — same as PDFRenderer/harness/modal pass.
   ```
 
 - [ ] **Step 1: Write `autoStitch.ts`**
@@ -872,7 +879,6 @@ import { capturePage } from "./captureDevice";
 import { stitchSheets, type SheetInput } from "./stitchCore";
 import { layoutPlacements, type TilePlacement } from "./layout";
 
-type Mupdf = typeof import("mupdf");
 const DEFAULT_SCALE = 20;
 
 export interface AutoStitchOptions {
@@ -891,7 +897,7 @@ export interface AutoStitchResult {
 const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
 
 export async function autoStitch(
-  mupdf: Mupdf,
+  mupdf: any,
   doc: any,
   pageIndices: number[],
   opts: AutoStitchOptions = {}
