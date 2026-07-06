@@ -1,7 +1,8 @@
 import type { PageExtract, Atom, Geom, Label } from "./types";
 import { reconstruct } from "./reconstruct";
 
-type Mupdf = typeof import("mupdf");
+// mupdf is the module namespace; callers pass (await import("mupdf")).default.
+// Access mupdf.Device / mupdf.Matrix directly, never mupdf.default.
 const CURVE_STEPS = 8; // chords per bezier when flattening
 
 /** fz matrix concat: result = m * n, both [a,b,c,d,e,f]. */
@@ -26,7 +27,7 @@ const apply = (m: number[], x: number, y: number): [number, number] => [
  * geometry — all in mupdf page space (points, y-down). Identity CTM at page.run
  * keeps everything in one frame that matches the tile raster and DOM canvas.
  */
-export function capturePage(mupdf: Mupdf, page: any): PageExtract {
+export function capturePage(mupdf: any, page: any): PageExtract {
   const visAtoms: Atom[] = [];
   const shxAtoms: Atom[] = [];
   const geometry: Geom[] = [];
@@ -93,14 +94,14 @@ export function capturePage(mupdf: Mupdf, page: any): PageExtract {
     flush();
   };
 
-  const device = new mupdf.default.Device({
+  const device = new mupdf.Device({
     fillText: (text: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
     strokeText: (text: any, _s: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
     ignoreText: (text: any, ctm: any) => walkText(text, ctm as unknown as number[], shxAtoms),
     fillPath: (path: any, _eo: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
     strokePath: (path: any, _s: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
   });
-  page.run(device, mupdf.default.Matrix.identity);
+  page.run(device, mupdf.Matrix.identity);
   (device as any).close?.();
 
   const bounds = page.getBounds();
