@@ -1,5 +1,6 @@
 /**
- * Token classifiers over extracted labels/words (PDF user space, y-up).
+ * Token classifiers over extracted labels/words. In this nanodoc port, the frame
+ * is mupdf page space (points, y-DOWN); algorithms are frame-agnostic (relative geometry).
  * All parsing is pure regex + geometry — zero models.
  */
 import type { Label, Pt } from "./types";

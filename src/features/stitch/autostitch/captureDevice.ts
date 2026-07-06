@@ -46,7 +46,7 @@ export function capturePage(mupdf: any, page: any): PageExtract {
         // kerning/advance, incl. skipped space glyphs); last glyph falls back to h.
         const len = i + 1 < span.length
           ? Math.hypot(span[i + 1].m[4] - m[4], span[i + 1].m[5] - m[5])
-          : Math.hypot(c, d);
+          : (Math.hypot(c, d) || 1);
         bucket.push({
           text: ch, x: m[4], y: m[5],
           dirX: a / norm, dirY: b / norm,
@@ -103,6 +103,7 @@ export function capturePage(mupdf: any, page: any): PageExtract {
   });
   page.run(device, mupdf.Matrix.identity);
   (device as any).close?.();
+  (device as any).destroy?.();
 
   const bounds = page.getBounds();
   const view: [number, number, number, number] = [bounds[0], bounds[1], bounds[2], bounds[3]];

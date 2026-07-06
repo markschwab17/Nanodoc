@@ -4,8 +4,9 @@
  * An ATOM = one positioned run: a single glyph (operator walk) or a pdf.js
  * getTextContent item (a pre-combined chunk). Shape:
  *   { text, x, y, dirX, dirY, h, len, angle, font }
- *   (x,y) = baseline start in PDF default user space, len = baseline length,
+ *   (x,y) = baseline start in mupdf page space (y-DOWN), len = baseline length,
  *   h = font height in user space, angle = baseline angle in degrees.
+ *   (In this nanodoc port, frame is mupdf page space; reconstruction is frame-agnostic.)
  *
  * Algorithm — pure geometry, no language model:
  *   1. Group atoms by baseline angle (±ANGLE_TOL, cyclic).
