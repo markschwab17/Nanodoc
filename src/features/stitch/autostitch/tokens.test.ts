@@ -39,4 +39,12 @@ describe("tokens", () => {
     expect(r.matchline).toBe(true);
     expect(r.station).toBe("10+72.00");
   });
+
+  it("parses an alphanumeric discipline-code cross-reference", () => {
+    const r = parseSheetRefs([L("MATCHLINE (SEE SHEET C5.4)", 50, 800)], [0, 0, 2592, 1728])[0];
+    expect(r.sheetCode).toBe("C5.4");
+    expect(r.sheet).toBeNull();
+    expect(r.matchline).toBe(true);
+    expect(r.edge).toBe("left");
+  });
 });

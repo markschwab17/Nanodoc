@@ -16,6 +16,7 @@
  */
 
 import { parseSheetRefs } from "./tokens";
+import { extractPageLabel } from "./pageLabels";
 import type { Label, Geom, PageExtract } from "./types";
 
 export const FT = (pt: number, scale: number): number => (pt / 72) * scale; // pts -> world feet at sheet scale
@@ -278,7 +279,7 @@ export interface StitchResult { root: number; placements: Map<number, { x: numbe
 interface DriverSheet {
   id: string; no: number; scale: number; view: [number, number, number, number];
   raw: { shxLabels: Label[]; labels: Label[]; geometry: Geom[]; view: [number, number, number, number] };
-  key: number; tok?: TokFeat[]; seg?: SegFeat[];
+  key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null;
 }
 
 export function stitchSheets(inputs: SheetInput[]): StitchResult {
@@ -292,14 +293,20 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     // matches "SEE SHEET"/"MATCHLINE" regexes, and the furniture filter needs
     // len>=6 + a digit — single-char garbage survives none of these.
     const text = [...(s.extract.shxLabels || []), ...(s.extract.labels || [])];
+    // Each sheet's OWN title-block discipline code (e.g. "C2.01"), used to resolve
+    // discipline-code cross-references ("SEE SHEET C2.01") into adjacency edges.
+    const label = extractPageLabel({ labels: s.extract.labels || [], shxLabels: s.extract.shxLabels || [], view: s.view });
     return {
       id: s.id, no: s.no, scale: s.scale, view: s.view,
       raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
-      key: s.no,
+      key: s.no, sheetCode: label.sheetCode,
     };
   });
   const byNo = new Map(sheets.map((s) => [s.no, s]));
   const keys = sheets.map((s) => s.no);
+  // sheet-code -> sheet no, for resolving "SEE SHEET C2.01" cross-references.
+  const codeToNo = new Map<string, number>();
+  for (const s of sheets) if (s.sheetCode) codeToNo.set(s.sheetCode.toUpperCase(), s.no);
 
   const FURN_MIN = Math.max(2, Math.min(3, sheets.length));
   const furn = buildFurnitureFilter(sheets, FURN_MIN);
@@ -309,9 +316,17 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
   const OPPREL: Record<string, string> = { left: "right", right: "left", above: "below", below: "above" };
   const relOf = new Map<string, string>();
   for (const s of sheets) {
-    const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view)
-      .filter((r) => r.edge !== "interior" && r.sheet && byNo.has(r.sheet) && r.sheet !== s.no);
-    for (const r of refs) if (!relOf.has(`${s.no}-${r.sheet}`)) relOf.set(`${s.no}-${r.sheet}`, EDGE2REL[r.edge]);
+    const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view).filter((r) => r.edge !== "interior");
+    for (const r of refs) {
+      // resolve the neighbor: numeric sheet number, else discipline-code -> that page.
+      let target: number | null = null;
+      if (r.sheet != null && byNo.has(r.sheet) && r.sheet !== s.no) target = r.sheet;
+      else if (r.sheetCode) {
+        const t = codeToNo.get(r.sheetCode.toUpperCase());
+        if (t != null && t !== s.no) target = t;
+      }
+      if (target != null && !relOf.has(`${s.no}-${target}`)) relOf.set(`${s.no}-${target}`, EDGE2REL[r.edge]);
+    }
   }
   const relFor = (ni: number, nj: number): string | null =>
     relOf.get(`${ni}-${nj}`) ?? (relOf.has(`${nj}-${ni}`) ? OPPREL[relOf.get(`${nj}-${ni}`)!] : null);
