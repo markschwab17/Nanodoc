@@ -283,17 +283,23 @@ interface DriverSheet {
 
 export function stitchSheets(inputs: SheetInput[]): StitchResult {
   const sheets: DriverSheet[] = inputs.map((s) => {
-    let shx = s.extract.shxLabels || [];
-    if (shx.length < 8 && s.extract.labels?.length) shx = s.extract.labels; // visible fallback
+    // Channel-agnostic: use BOTH text channels (invisible SHX + visible). Some
+    // sets are pure-SHX (Santee), some pure-visible (Rose Hill), some mixed — and
+    // the invisible channel often carries stray single-glyph garbage that a
+    // "shx.length < 8 ? labels" fallback fails to reject, hiding the good visible
+    // labels AND the visible MATCHLINE/SEE-SHEET refs. Unioning is safe because
+    // the consumers filter: tokenFeats requires len>=6 + a digit, parseSheetRefs
+    // matches "SEE SHEET"/"MATCHLINE" regexes, and the furniture filter needs
+    // len>=6 + a digit — single-char garbage survives none of these.
+    const text = [...(s.extract.shxLabels || []), ...(s.extract.labels || [])];
     return {
       id: s.id, no: s.no, scale: s.scale, view: s.view,
-      raw: { shxLabels: shx, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
+      raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
       key: s.no,
     };
   });
   const byNo = new Map(sheets.map((s) => [s.no, s]));
   const keys = sheets.map((s) => s.no);
-  const rootKey = sheets[0].no;
 
   const FURN_MIN = Math.max(2, Math.min(3, sheets.length));
   const furn = buildFurnitureFilter(sheets, FURN_MIN);
@@ -318,7 +324,13 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     const si = sheets[a], sj = sheets[b];
     const span = Math.max(FT(si.view[2] - si.view[0], si.scale), FT(sj.view[2] - sj.view[0], sj.scale)) * 1.4;
     const t = tv(si, sj);
-    if (t && Math.hypot(t.dx, t.dy) < span) pairKeys.add(`${si.no}-${sj.no}`);
+    if (t && Math.hypot(t.dx, t.dy) < span) { pairKeys.add(`${si.no}-${sj.no}`); continue; }
+    // Facing MATCHLINE labels are also candidates. Match-lined sets often
+    // reference neighbors by discipline code ("MATCHLINE (SEE SHEET C2.01)"),
+    // which the numeric SEE-SHEET adjacency can't resolve — but matchlinePrior
+    // pairs facing labels directly, and the windowed segment vote gates out
+    // spurious (non-adjacent) matchline pairs whose geometry doesn't agree.
+    if (matchlinePrior(si, sj)) pairKeys.add(`${si.no}-${sj.no}`);
   }
 
   const pairs: (PairReport & { _final?: { dx: number; dy: number } })[] = [];
@@ -354,9 +366,41 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
 
   const constraints = pairs.filter((r) => r._final && r.weight > 0)
     .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy, weight: r.weight }));
+
+  // Connected components over the constraint graph. Place the LARGEST component
+  // and root it at that component's most-connected sheet — NOT blindly at
+  // sheets[0], which on a real set is often a title/notes/details sheet with no
+  // drawing tokens; rooting there leaves the entire real plan cluster unplaced.
+  const adj = new Map<number, Set<number>>(keys.map((k) => [k, new Set<number>()]));
+  for (const c of constraints) { adj.get(c.i)!.add(c.j); adj.get(c.j)!.add(c.i); }
+  const seen = new Set<number>();
+  const components: number[][] = [];
+  for (const k of keys) {
+    if (seen.has(k)) continue;
+    const comp: number[] = []; const stack = [k]; seen.add(k);
+    while (stack.length) {
+      const u = stack.pop()!; comp.push(u);
+      for (const v of adj.get(u)!) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+    }
+    components.push(comp);
+  }
+  components.sort((a, b) => b.length - a.length);
+  const main = components[0] && components[0].length >= 2 ? components[0] : [];
+  const mainSet = new Set(main);
+  let rootKey = sheets[0].no;
+  if (main.length) {
+    let bestDeg = -1;
+    for (const k of main) {
+      const deg = adj.get(k)!.size;
+      if (deg > bestDeg || (deg === bestDeg && k < rootKey)) { bestDeg = deg; rootKey = k; }
+    }
+  }
+
   const { pos } = solveGlobal(keys, rootKey, constraints);
 
-  const refCons = pairs.filter((r) => r._final && /token/.test(String(r.channel)))
+  // worst residual over the PLACED component's token pairs only (a floating,
+  // out-of-component pair would otherwise report a huge spurious residual).
+  const refCons = pairs.filter((r) => r._final && /token/.test(String(r.channel)) && mainSet.has(r.i) && mainSet.has(r.j))
     .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy }));
   let worst = 0;
   for (const c of refCons) { const rr = residual(c, pos); if (rr > worst) worst = rr; }
@@ -365,18 +409,8 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     delete r._final;
   }
 
-  // Keep only sheets reachable from root through the constraint graph.
-  const connected = new Set<number>([rootKey]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const c of constraints) {
-      if (connected.has(c.i) && !connected.has(c.j)) { connected.add(c.j); changed = true; }
-      if (connected.has(c.j) && !connected.has(c.i)) { connected.add(c.i); changed = true; }
-    }
-  }
   const placements = new Map<number, { x: number; y: number }>();
-  for (const k of keys) if (connected.has(k)) placements.set(k, pos.get(k)!);
+  for (const k of main) placements.set(k, pos.get(k)!);
 
   return { root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs };
 }

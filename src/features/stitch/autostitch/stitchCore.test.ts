@@ -53,4 +53,47 @@ describe("stitchSheets", () => {
     expect(res.placements.has(2)).toBe(true);
     expect(res.placements.has(3)).toBe(false);
   });
+
+  // Regression (Bug A): visible-text sets carry stray render-mode-3 glyphs, so
+  // the invisible channel is >=8 single-char garbage. The driver must union the
+  // channels and use the good VISIBLE labels, not the garbage. (Old code did
+  // `shx.length < 8 ? labels : shx` and used the garbage -> nothing aligned.)
+  it("uses the visible channel even when the invisible channel is >=8 stray glyphs", () => {
+    const OFF_PT = (300 * 72) / 20;
+    const texts = ["TC347.33", "TC348.10", "FL346.90", "TC349.55", "FL347.10", "TC350.02"];
+    // 10 single-char invisible glyphs (>= the 8 threshold) — real tokens live only in `labels`
+    const garbage: Label[] = "ABCDEFGHIJ".split("").map((c, i) => lbl(c, 50 + i * 7, 50));
+    const mk = (id: string, no: number, x0: number): SheetInput => {
+      const labels = texts.map((t, i) => lbl(t, 400 + i * 120 - x0, 800 + (i % 2) * 60));
+      return {
+        id, no, scale: 20, view: [0, 0, 2592, 1728],
+        extract: { view: [0, 0, 2592, 1728], shxLabels: garbage, labels, words: labels, geometry: [] } as PageExtract,
+      };
+    };
+    const res = stitchSheets([mk("a", 1, 0), mk("b", 2, OFF_PT)]);
+    expect(res.placements.has(1)).toBe(true);
+    expect(res.placements.has(2)).toBe(true);
+    expect(res.placements.get(2)!.x).toBeCloseTo(300, 0);
+  });
+
+  // Regression (Bug B): placement must root at the LARGEST connected component,
+  // not blindly at sheets[0]. On a real set sheets[0] is often a title/notes
+  // sheet with no drawing tokens; rooting there dropped the whole plan cluster.
+  it("roots at the largest component, not an isolated sheets[0] title sheet", () => {
+    const OFF_PT = (300 * 72) / 20;
+    const shared = ["TC347.33", "TC348.10", "FL346.90", "TC349.55", "FL347.10", "TC350.02"];
+    const b = shared.map((t, i) => lbl(t, 400 + i * 120, 800));
+    const c = shared.map((t, i) => lbl(t, 400 + i * 120 - OFF_PT, 800));
+    const title = ["COVER1.0", "INDEX2.0", "NOTES3.0"].map((t, i) => lbl(t, 100 + i * 60, 100));
+    const mk = (id: string, no: number, labels: Label[]): SheetInput => ({
+      id, no, scale: 20, view: [0, 0, 2592, 1728],
+      extract: { view: [0, 0, 2592, 1728], shxLabels: labels, labels, words: labels, geometry: [] } as PageExtract,
+    });
+    // sheet 1 = isolated title sheet (first); 2 & 3 = the connected plan sheets
+    const res = stitchSheets([mk("t", 1, title), mk("b", 2, b), mk("c", 3, c)]);
+    expect(res.placements.has(1)).toBe(false);
+    expect(res.placements.has(2)).toBe(true);
+    expect(res.placements.has(3)).toBe(true);
+    expect([2, 3]).toContain(res.root);
+  });
 });
