@@ -22,6 +22,8 @@ import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContext
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
+import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
+import { useNotificationStore } from "@/shared/stores/notificationStore";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -60,6 +62,7 @@ export function AddPdfModal({
   const fileSystem = useFileSystem();
   const addTiles = useStitchStore((s) => s.addTiles);
   const setReferenceScaleFeetPerInch = useStitchStore((s) => s.setReferenceScaleFeetPerInch);
+  const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
   const [sourceTab, setSourceTab] = useState<SourceTab>("device");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -454,6 +457,70 @@ export function AddPdfModal({
     }
   }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch]);
 
+  const handleAddAndAutoAlign = useCallback(async () => {
+    if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
+    setAdding(true);
+    setLoadError(null);
+    const selected = Array.from(selectedPages).sort((a, b) => a - b);
+    setAddingProgress({ done: 0, total: selected.length });
+    try {
+      const mupdf = await import("mupdf").then((m) => m.default);
+      if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
+      const renderer = rendererRef.current;
+
+      // 1. Render rasters (same as the plain add), keyed by page index.
+      const rasters = new Map<number, string>();
+      for (let i = 0; i < selected.length; i++) {
+        const pageIndex = selected[i];
+        await new Promise<void>((r) => setTimeout(r, 0));
+        const rendered = await renderer.renderPage(mupdfDoc, pageIndex, { scale: TILE_RENDER_SCALE });
+        const imageData = rendered.imageData as ImageData;
+        if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
+        if (imageData?.data) rasters.set(pageIndex, imageDataToDataUrl(imageData));
+        setAddingProgress({ done: i + 1, total: selected.length * 2 }); // rasters are first half
+      }
+
+      // 2. Run the deterministic pipeline.
+      const userScaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
+      const result = await autoStitch(mupdf, mupdfDoc, selected, {
+        userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
+        onProgress: (done, total) => setAddingProgress({ done: selected.length + done, total: selected.length + total }),
+      });
+
+      // 3. Build aligned tiles and commit as one undo step.
+      const byPage = new Map(result.placements.map((p) => [p.pageIndex, p]));
+      const newTiles = selected.map((pageIndex) => {
+        const p = byPage.get(pageIndex)!;
+        return {
+          sourcePdfBytes: pdfBytes,
+          sourcePageIndex: pageIndex,
+          sourceFileName: pdfFileName || undefined,
+          x: p.x, y: p.y, width: p.width, height: p.height,
+          imageDataUrl: rasters.get(pageIndex),
+        };
+      });
+      addTiles(newTiles);
+      setReferenceScaleFeetPerInch(result.rootFtPerIn);
+
+      // 4. Leave unaligned tiles selected so the user can place them manually.
+      const added = useStitchStore.getState().tiles.slice(-selected.length);
+      const unalignedIds = added.filter((t) => byPage.get(t.sourcePageIndex)?.aligned === false).map((t) => t.id);
+      if (unalignedIds.length) setSelectedTileIds(unalignedIds);
+
+      // 5. Report.
+      const msg = result.unplacedCount > 0
+        ? `Aligned ${result.alignedCount} of ${selected.length} pages · worst seam ${result.worstResidFt.toFixed(2)} ft. ${result.unplacedCount} placed below for manual alignment.`
+        : `Aligned ${selected.length} pages · worst seam ${result.worstResidFt.toFixed(2)} ft.`;
+      useNotificationStore.getState().showNotification(msg, result.unplacedCount > 0 ? "info" : "success");
+      onClose();
+    } catch (e) {
+      console.error(e);
+      setLoadError("Could not auto-align the selected pages. Try 'Add to canvas' and align manually.");
+    } finally {
+      setAdding(false);
+    }
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds]);
+
   const thumbsStillLoading = pageCount > 0 && thumbProgress < pageCount;
 
   return (
@@ -510,7 +577,7 @@ export function AddPdfModal({
         {adding ? (
           <div className="flex flex-col items-center justify-center py-12 gap-3 text-muted-foreground">
             <Loader2 className="h-10 w-10 animate-spin" />
-            <p>Rendering page {addingProgress.done} of {addingProgress.total}…</p>
+            <p>Working… {addingProgress.done} of {addingProgress.total}</p>
             {addingProgress.total > 0 && (
               <div className="w-48 h-1.5 rounded-full bg-muted overflow-hidden">
                 <div
@@ -668,6 +735,14 @@ export function AddPdfModal({
             disabled={!pdfBytes || selectedPages.size === 0 || adding}
           >
             {adding ? "Adding…" : `Add ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""} to canvas`}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={handleAddAndAutoAlign}
+            disabled={!pdfBytes || selectedPages.size < 2 || adding}
+            title={selectedPages.size < 2 ? "Select at least 2 pages to auto-align" : undefined}
+          >
+            {adding ? "Aligning…" : `Add & auto-align ${selectedPages.size} pages`}
           </Button>
         </DialogFooter>
       </DialogContent>
