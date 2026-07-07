@@ -186,6 +186,8 @@ export interface StitchCanvasProps {
   onUpdateCleanupRegion?: (tileId: string, index: number, rect: { x: number; y: number; w: number; h: number }) => void;
   /** Delete a proposed region. */
   onDeleteCleanupRegion?: (tileId: string, index: number) => void;
+  /** Relocate a proposed region's content by an offset (fractions), or null to un-relocate. */
+  onRelocateCleanupRegion?: (tileId: string, index: number, move: { dx: number; dy: number } | null) => void;
   /** User drew a manual hide-box (canvas-space rect). */
   onCleanupManualBox?: (rect: CanvasRect) => void;
 }
@@ -214,6 +216,7 @@ export function StitchCanvas({
   onToggleCleanupRegion,
   onUpdateCleanupRegion,
   onDeleteCleanupRegion,
+  onRelocateCleanupRegion,
   onCleanupManualBox,
 }: StitchCanvasProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -462,6 +465,7 @@ export function StitchCanvas({
             onToggleRegion={onToggleCleanupRegion ?? (() => {})}
             onUpdateRegion={onUpdateCleanupRegion ?? (() => {})}
             onDeleteRegion={onDeleteCleanupRegion ?? (() => {})}
+            onRelocateRegion={onRelocateCleanupRegion ?? (() => {})}
             onManualBox={onCleanupManualBox ?? (() => {})}
           />
         )}

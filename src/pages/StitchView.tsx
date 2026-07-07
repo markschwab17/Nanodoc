@@ -287,7 +287,15 @@ export default function StitchView() {
             confidence: "high" as const,
             enabled: true,
           }));
-        return { tileId: p.tileId, regions: [...fresh, ...existing] };
+        // Carry forward already-relocated regions so a re-run + Apply doesn't wipe them.
+        const relocated = (tile?.relocatedRegions ?? []).map((r) => ({
+          rect: { ...r.rect },
+          kind: "manual" as const,
+          confidence: "high" as const,
+          enabled: true,
+          move: { dx: r.dx, dy: r.dy },
+        }));
+        return { tileId: p.tileId, regions: [...fresh, ...existing, ...relocated] };
       });
       const freshTotal = proposals.reduce((s, p) => s + p.regions.length, 0);
       setCleanupProposals(ui);
@@ -338,6 +346,20 @@ export default function StitchView() {
       )
     );
   }, []);
+
+  // Relocate a region's content (offset in tile fractions), or null to un-relocate.
+  const handleRelocateCleanupRegion = useCallback(
+    (tileId: string, index: number, move: { dx: number; dy: number } | null) => {
+      setCleanupProposals((prev) =>
+        prev.map((p) =>
+          p.tileId === tileId
+            ? { ...p, regions: p.regions.map((r, i) => (i === index ? { ...r, move: move ?? undefined } : r)) }
+            : p
+        )
+      );
+    },
+    []
+  );
 
   const handleCleanupManualBox = useCallback(
     (rect: CanvasRect) => {
@@ -390,22 +412,31 @@ export default function StitchView() {
   );
 
   const handleCleanupApply = useCallback(() => {
-    const { setHiddenRegions, tiles } = useStitchStore.getState();
-    let total = 0;
+    const { setCleanupRegions, tiles } = useStitchStore.getState();
+    let hiddenTotal = 0, movedTotal = 0;
     for (const p of cleanupProposals) {
-      const rects = p.regions.filter((r) => r.enabled).map((r) => ({ ...r.rect }));
-      total += rects.length;
-      // Skip the write (and its undo snapshot) when nothing actually
-      // changed — avoids clobbering a tile's hiddenRegions with a no-op set.
+      // enabled + not moved → hide in place; moved → relocate (source hidden + drawn at offset).
+      const hidden = p.regions.filter((r) => r.enabled && !r.move).map((r) => ({ ...r.rect }));
+      const relocated = p.regions
+        .filter((r) => r.move)
+        .map((r) => ({ rect: { ...r.rect }, dx: r.move!.dx, dy: r.move!.dy }));
+      hiddenTotal += hidden.length;
+      movedTotal += relocated.length;
+      // Skip the write (and its undo snapshot) when nothing changed for this tile.
       const tile = tiles.find((t) => t.id === p.tileId);
-      if (!rectsEqual(rects, tile?.hiddenRegions ?? [])) {
-        setHiddenRegions(p.tileId, rects);
+      const hiddenSame = rectsEqual(hidden, tile?.hiddenRegions ?? []);
+      const relocatedSame = JSON.stringify(relocated) === JSON.stringify(tile?.relocatedRegions ?? []);
+      if (!hiddenSame || !relocatedSame) {
+        setCleanupRegions(p.tileId, hidden, relocated);
       }
     }
     setCleanupReviewMode(false);
     setCleanupProposals([]);
+    const parts: string[] = [];
+    if (hiddenTotal) parts.push(`hid ${hiddenTotal}`);
+    if (movedTotal) parts.push(`relocated ${movedTotal}`);
     showNotification(
-      total > 0 ? `Hid ${total} region${total === 1 ? "" : "s"} from the composite.` : "No regions hidden.",
+      parts.length ? `Clean up: ${parts.join(" · ")} region${hiddenTotal + movedTotal === 1 ? "" : "s"}.` : "No changes applied.",
       "success"
     );
   }, [cleanupProposals, showNotification]);
@@ -420,8 +451,12 @@ export default function StitchView() {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [cleanupReviewMode, exitCleanupReview]);
 
-  const cleanupEnabledCount = cleanupProposals.reduce(
-    (s, p) => s + p.regions.filter((r) => r.enabled).length,
+  const cleanupHideCount = cleanupProposals.reduce(
+    (s, p) => s + p.regions.filter((r) => r.enabled && !r.move).length,
+    0
+  );
+  const cleanupMoveCount = cleanupProposals.reduce(
+    (s, p) => s + p.regions.filter((r) => r.move).length,
     0
   );
 
@@ -657,6 +692,7 @@ export default function StitchView() {
           onToggleCleanupRegion={handleToggleCleanupRegion}
           onUpdateCleanupRegion={handleUpdateCleanupRegion}
           onDeleteCleanupRegion={handleDeleteCleanupRegion}
+          onRelocateCleanupRegion={handleRelocateCleanupRegion}
           onCleanupManualBox={handleCleanupManualBox}
         />
         {cleanupBusy && (
@@ -670,9 +706,9 @@ export default function StitchView() {
         {cleanupReviewMode && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2.5 shadow-lg">
             <span className="text-sm font-medium text-popover-foreground">
-              Clean up: {cleanupEnabledCount} region{cleanupEnabledCount === 1 ? "" : "s"} will be hidden
+              Clean up: {cleanupHideCount} to hide{cleanupMoveCount ? ` · ${cleanupMoveCount} to relocate` : ""}
             </span>
-            <span className="hidden sm:inline text-xs text-muted-foreground">Click toggle · drag move · handles resize · ✕ delete · drag empty to add</span>
+            <span className="hidden sm:inline text-xs text-muted-foreground">Drag a box to relocate · click hide/keep · handles resize · ✕ delete · drag empty to add</span>
             <Button variant="ghost" size="sm" className="h-7" onClick={exitCleanupReview}>
               Cancel
             </Button>

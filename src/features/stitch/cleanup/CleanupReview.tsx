@@ -23,13 +23,20 @@
 import { useRef, useState } from "react";
 import { useStitchStore, type StitchTile } from "@/shared/stores/stitchStore";
 import type { CleanupRegion } from "./cleanupDetect";
-import { moveRegion, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
+import { clampOffset, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
+import { cssClipToRect } from "./clipRegions";
 import type { CanvasRect } from "../imageUtils";
 import { MIN_ERASE_SIZE, REGION_DRAG_THRESHOLD_PX, RESIZE_CURSORS } from "../stitchConstants";
 
-/** A detected/manual region plus its review toggle state. */
+/** Below this (fractions) a relocation offset snaps back to "not moved". */
+const RELOCATE_EPS = 0.004;
+
+/** A detected/manual region plus its review state. `move` (offset in tile
+ *  fractions) marks a relocated region — its content is drawn at the offset and
+ *  its source hidden, instead of hidden in place. */
 export interface CleanupRegionUI extends CleanupRegion {
   enabled: boolean;
+  move?: { dx: number; dy: number };
 }
 export interface TileProposalUI {
   tileId: string;
@@ -57,24 +64,27 @@ interface CleanupReviewProps {
   onToggleRegion: (tileId: string, index: number) => void;
   onUpdateRegion: (tileId: string, index: number, rect: FRect) => void;
   onDeleteRegion: (tileId: string, index: number) => void;
+  /** Relocate a region's content by an offset (fractions), or null to un-relocate. */
+  onRelocateRegion: (tileId: string, index: number, move: { dx: number; dy: number } | null) => void;
   /** Called with a canvas-space rect when the user finishes drawing a manual box. */
   onManualBox: (rect: CanvasRect) => void;
 }
 
-/** One editable hide-region: drag body to move, hover handles to resize, ✕ to
- *  delete, a barely-moved press to toggle keep/hide. */
+/** One editable region: drag body to RELOCATE its content, hover handles to
+ *  resize the source, ✕ to delete, a barely-moved press to toggle keep/hide. */
 function RegionBox({
-  region, tileId, index, tileW, tileH, zoom, clientToCanvas, onToggle, onUpdate, onDelete,
+  region, tileId, index, tileW, tileH, zoom, clientToCanvas, onToggle, onUpdate, onDelete, onRelocate,
 }: {
   region: CleanupRegionUI; tileId: string; index: number; tileW: number; tileH: number; zoom: number;
   clientToCanvas: CleanupReviewProps["clientToCanvas"];
   onToggle: (t: string, i: number) => void;
   onUpdate: (t: string, i: number, r: FRect) => void;
   onDelete: (t: string, i: number) => void;
+  onRelocate: (t: string, i: number, move: { dx: number; dy: number } | null) => void;
 }) {
   const [hover, setHover] = useState(false);
   const [active, setActive] = useState(false); // a drag is in progress — keep handles mounted even if the pointer leaves
-  const drag = useRef<{ mode: "move" | ResizeHandle; sx: number; sy: number; rect: FRect; moved: boolean } | null>(null);
+  const drag = useRef<{ mode: "move" | ResizeHandle; sx: number; sy: number; rect: FRect; startMove: { dx: number; dy: number }; moved: boolean } | null>(null);
 
   const left = region.rect.x * tileW, top = region.rect.y * tileH;
   const width = region.rect.w * tileW, height = region.rect.h * tileH;
@@ -87,7 +97,7 @@ function RegionBox({
     e.stopPropagation();
     const c = clientToCanvas(e.clientX, e.clientY);
     if (!c) return;
-    drag.current = { mode, sx: c.x, sy: c.y, rect: region.rect, moved: mode !== "move" };
+    drag.current = { mode, sx: c.x, sy: c.y, rect: region.rect, startMove: region.move ?? { dx: 0, dy: 0 }, moved: mode !== "move" };
     setActive(true);
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
   };
@@ -100,7 +110,10 @@ function RegionBox({
     if (d.mode === "move") {
       if (!d.moved && Math.hypot(dx, dy) < threshold) return; // still a click
       d.moved = true;
-      onUpdate(tileId, index, moveRegion(d.rect, dx / tileW, dy / tileH));
+      // Relocate: accumulate onto the region's existing offset, clamped to the tile.
+      const off = clampOffset(d.rect, d.startMove.dx + dx / tileW, d.startMove.dy + dy / tileH);
+      const cleared = Math.abs(off.dx) < RELOCATE_EPS && Math.abs(off.dy) < RELOCATE_EPS;
+      onRelocate(tileId, index, cleared ? null : off);
     } else {
       onUpdate(tileId, index, resizeRegion(d.rect, d.mode, dx / tileW, dy / tileH, minWFrac, minHFrac));
     }
@@ -115,9 +128,9 @@ function RegionBox({
 
   return (
     <div
-      className={`absolute border-2 border-dashed ${region.enabled ? "border-red-500 bg-red-500/15 hover:bg-red-500/25" : "border-amber-500 bg-amber-500/10 hover:bg-amber-500/20"}`}
+      className={`absolute border-2 border-dashed ${region.move ? "border-sky-500 bg-sky-500/10 hover:bg-sky-500/20" : region.enabled ? "border-red-500 bg-red-500/15 hover:bg-red-500/25" : "border-amber-500 bg-amber-500/10 hover:bg-amber-500/20"}`}
       style={{ left, top, width, height, pointerEvents: "auto", cursor: "move", touchAction: "none" }}
-      title={`${KIND_LABEL[region.kind]} — drag to move · handles to resize · ✕ to delete · click to ${region.enabled ? "keep" : "hide"}`}
+      title={`${KIND_LABEL[region.kind]} — drag to relocate · handles to resize · ✕ to delete · click to ${region.enabled ? "keep in place" : "hide in place"}`}
       onPointerEnter={() => setHover(true)}
       onPointerLeave={() => setHover(false)}
       onPointerDown={begin("move")}
@@ -125,10 +138,10 @@ function RegionBox({
       onPointerUp={end}
     >
       <span
-        className={`absolute left-0 top-0 px-1 font-medium leading-tight text-white pointer-events-none ${region.enabled ? "bg-red-600/80" : "bg-amber-600/80"}`}
+        className={`absolute left-0 top-0 px-1 font-medium leading-tight text-white pointer-events-none ${region.move ? "bg-sky-600/85" : region.enabled ? "bg-red-600/80" : "bg-amber-600/80"}`}
         style={{ fontSize: 11 / zoom, transformOrigin: "left top" }}
       >
-        {KIND_LABEL[region.kind]}{region.enabled ? "" : " · off"}
+        {KIND_LABEL[region.kind]}{region.move ? " · moved" : region.enabled ? "" : " · off"}
       </span>
 
       {(hover || active) && HANDLES.map((h) => {
@@ -146,7 +159,7 @@ function RegionBox({
               width: hpx,
               height: hpx,
               background: "#fff",
-              border: `${1 / zoom}px solid ${region.enabled ? "#ef4444" : "#f59e0b"}`,
+              border: `${1 / zoom}px solid ${region.move ? "#0ea5e9" : region.enabled ? "#ef4444" : "#f59e0b"}`,
               cursor: RESIZE_CURSORS[h],
               touchAction: "none",
             }}
@@ -192,6 +205,7 @@ export function CleanupReview({
   onToggleRegion,
   onUpdateRegion,
   onDeleteRegion,
+  onRelocateRegion,
   onManualBox,
 }: CleanupReviewProps) {
   const zoom = useStitchStore((s) => s.zoomLevel) || 1;
@@ -276,6 +290,33 @@ export function CleanupReview({
               pointerEvents: "none",
             }}
           >
+            {/* Live cut-out preview for relocated regions: a copy of the sheet
+                image clipped to the source rect, translated by the offset — the
+                content shows at its new spot while you drag (source still shows
+                via StitchTile until Apply). */}
+            {tile.imageDataUrl && p.regions.map((r, i) => {
+              if (!r.move) return null;
+              const clip = cssClipToRect(tile.width, tile.height, {
+                x: r.rect.x * tile.width, y: r.rect.y * tile.height,
+                w: r.rect.w * tile.width, h: r.rect.h * tile.height,
+              });
+              return (
+                <img
+                  key={`reloc-${i}`}
+                  src={tile.imageDataUrl}
+                  alt=""
+                  draggable={false}
+                  className="absolute inset-0 w-full h-full select-none"
+                  style={{
+                    pointerEvents: "none",
+                    transform: `translate(${r.move.dx * tile.width}px, ${r.move.dy * tile.height}px)`,
+                    clipPath: clip ?? undefined,
+                    WebkitClipPath: clip ?? undefined,
+                    outline: "1px dashed #0ea5e9",
+                  }}
+                />
+              );
+            })}
             {p.regions.map((r, i) => (
               <RegionBox
                 key={i}
@@ -289,6 +330,7 @@ export function CleanupReview({
                 onToggle={onToggleRegion}
                 onUpdate={onUpdateRegion}
                 onDelete={onDeleteRegion}
+                onRelocate={onRelocateRegion}
               />
             ))}
           </div>
