@@ -418,8 +418,9 @@ interface Hole { x: number; y: number; w: number; h: number; }
  */
 export function cssClipPathWithHoles(tileW: number, tileH: number, holes: Hole[]): string | null {
   if (!holes.length || tileW <= 0 || tileH <= 0) return null;
-  const px = (v: number) => `${((v / tileW) * 100).toFixed(3)}%`;
-  const py = (v: number) => `${((v / tileH) * 100).toFixed(3)}%`;
+  // `+(...).toFixed(3)` drops trailing zeros so a whole number reads "25%" not "25.000%".
+  const px = (v: number) => `${+((v / tileW) * 100).toFixed(3)}%`;
+  const py = (v: number) => `${+((v / tileH) * 100).toFixed(3)}%`;
   const pt = (x: number, y: number) => `${px(x)} ${py(y)}`;
   const parts: string[] = [
     pt(0, 0), pt(tileW, 0), pt(tileW, tileH), pt(0, tileH), pt(0, 0),
