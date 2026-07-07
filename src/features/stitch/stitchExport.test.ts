@@ -136,6 +136,10 @@ describe("tileHoleRectsInPdf", () => {
   test("no hidden regions -> empty", () => {
     expect(tileHoleRectsInPdf({ x: 0, y: 0, width: 10, height: 10 } as any, 0, 0, 100)).toEqual([]);
   });
+  test("rotated tile drops hole clipping (v1)", () => {
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 90, hiddenRegions: [{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }] } as any;
+    expect(tileHoleRectsInPdf(tile, 0, 0, 200)).toEqual([]);
+  });
 });
 
 describe("canVectorEmbedRotation", () => {

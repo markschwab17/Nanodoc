@@ -252,7 +252,7 @@ export default function StitchView() {
       exitCleanupReview();
       return;
     }
-    const reviewable = useStitchStore.getState().tiles.filter((t) => !t.isScaleStamp);
+    const reviewable = useStitchStore.getState().tiles.filter((t) => !t.isScaleStamp && !(t.rotation ?? 0));
     if (reviewable.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
