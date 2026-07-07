@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf } from "./stitchExport";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
 
@@ -139,6 +139,31 @@ describe("tileHoleRectsInPdf", () => {
   test("rotated tile drops hole clipping (v1)", () => {
     const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 90, hiddenRegions: [{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }] } as any;
     expect(tileHoleRectsInPdf(tile, 0, 0, 200)).toEqual([]);
+  });
+
+  test("a relocated region's source is also clipped out (a hole)", () => {
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0,
+      relocatedRegions: [{ rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, dx: 0.5, dy: 0.3 }] } as any;
+    const holes = tileHoleRectsInPdf(tile, 0, 0, 200);
+    expect(holes).toEqual([{ x: 40, y: 145, w: 20, h: 10 }]); // same as the hidden-region case
+  });
+});
+
+describe("tileRelocationsInPdf", () => {
+  test("dest = source shifted; offX = dx·w, offY = −dy·h (y-up)", () => {
+    // tile 100x50 at (30,40); crop full-height 200. source frac (0.1,0.1,0.2,0.2)
+    // → px (10,5,20,10); source PDF x=40, y=200−(40+5+10)=145.
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0,
+      relocatedRegions: [{ rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, dx: 0.5, dy: 0.3 }] } as any;
+    const [rel] = tileRelocationsInPdf(tile, 0, 0, 200);
+    expect(rel.offX).toBeCloseTo(50); // 0.5 * 100
+    expect(rel.offY).toBeCloseTo(-15); // −0.3 * 50
+    expect(rel.dest).toEqual({ x: 40 + 50, y: 145 - 15, w: 20, h: 10 });
+  });
+  test("rotated tile relocates nothing (v1)", () => {
+    const tile = { x: 0, y: 0, width: 100, height: 50, rotation: 90,
+      relocatedRegions: [{ rect: { x: 0, y: 0, w: 0.2, h: 0.2 }, dx: 0.1, dy: 0.1 }] } as any;
+    expect(tileRelocationsInPdf(tile, 0, 0, 200)).toEqual([]);
   });
 });
 

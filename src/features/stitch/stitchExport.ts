@@ -198,12 +198,18 @@ export function tileHoleRectsInPdf(
     height: number;
     rotation?: number;
     hiddenRegions?: { x: number; y: number; w: number; h: number }[];
+    relocatedRegions?: { rect: { x: number; y: number; w: number; h: number } }[];
   },
   cropX: number,
   cropY: number,
   cropH: number
 ): { x: number; y: number; w: number; h: number }[] {
-  const regions = tile.hiddenRegions ?? [];
+  // A relocated region's SOURCE is clipped out too (its content is drawn at the
+  // destination by tileRelocationsInPdf).
+  const regions = [
+    ...(tile.hiddenRegions ?? []),
+    ...(tile.relocatedRegions ?? []).map((r) => r.rect),
+  ];
   if (!regions.length || (tile.rotation ?? 0) !== 0) return [];
   return regions.map((r) => {
     // fraction (0..1) → tile-local px
@@ -217,6 +223,42 @@ export function tileHoleRectsInPdf(
       w: rw,
       h: rh,
     };
+  });
+}
+
+/**
+ * Map a tile's `relocatedRegions` into PDF (y-up) space. For each region returns
+ * the DESTINATION rect (source rect shifted by the offset — used to clip the
+ * relocated copy) and the draw offset `(offX, offY)` in PDF points to translate
+ * the whole page/image so the region's content lands at the destination.
+ * `offX = dx·width`, `offY = −dy·height` (dy is y-down; PDF is y-up). Returns []
+ * for a rotated tile (relocation is v1-scoped to unrotated tiles). For tests.
+ */
+export function tileRelocationsInPdf(
+  tile: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    rotation?: number;
+    relocatedRegions?: { rect: { x: number; y: number; w: number; h: number }; dx: number; dy: number }[];
+  },
+  cropX: number,
+  cropY: number,
+  cropH: number
+): { dest: { x: number; y: number; w: number; h: number }; offX: number; offY: number }[] {
+  const regions = tile.relocatedRegions ?? [];
+  if (!regions.length || (tile.rotation ?? 0) !== 0) return [];
+  return regions.map((rr) => {
+    const r = rr.rect;
+    const rx = r.x * tile.width, ry = r.y * tile.height;
+    const rw = r.w * tile.width, rh = r.h * tile.height;
+    // source rect in PDF (same mapping as tileHoleRectsInPdf)
+    const sx = tile.x - cropX + rx;
+    const sy = cropH - (tile.y - cropY + ry + rh);
+    const offX = rr.dx * tile.width;
+    const offY = -rr.dy * tile.height;
+    return { dest: { x: sx + offX, y: sy + offY, w: rw, h: rh }, offX, offY };
   });
 }
 
@@ -264,9 +306,11 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
     // Draw pose in PDF coord system (origin bottom-left, Y up, CCW rotation)
     const { x: drawX, y: drawY, rotationDeg: rotation } = pdfPoseForTile(tile, cropX, cropY, cropH);
 
-    // Clean-Composite: tile-local hidden regions mapped into PDF page space.
-    // Non-empty only for unrotated tiles with hiddenRegions set (v1 scope).
+    // Clean-Composite: tile-local hidden regions (incl. relocated sources) mapped
+    // into PDF page space. Non-empty only for unrotated tiles (v1 scope).
     const holes = tileHoleRectsInPdf(tile, cropX, cropY, cropH);
+    // Relocated regions: content drawn a second time, clipped-to-dest + translated.
+    const relocations = tileRelocationsInPdf(tile, cropX, cropY, cropH);
     // Open a Multiply graphics state, optionally clipped (even-odd) to exclude
     // the tile's hidden regions so the export matches the editor's clean view.
     const openClipped = () => {
@@ -291,6 +335,26 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
         }
         ops.push(clipEvenOdd(), endPath());
         page.pushOperators(...ops);
+      }
+    };
+
+    // Draw each relocated region's content: clip to its destination rect, then
+    // draw the whole page/image shifted by the offset so only that piece shows
+    // at its new spot. `drawOne(x, y)` places the page/image at (x, y).
+    const drawRelocations = (drawOne: (x: number, y: number) => void) => {
+      for (const rel of relocations) {
+        page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
+        page.pushOperators(
+          moveTo(rel.dest.x, rel.dest.y),
+          lineTo(rel.dest.x + rel.dest.w, rel.dest.y),
+          lineTo(rel.dest.x + rel.dest.w, rel.dest.y + rel.dest.h),
+          lineTo(rel.dest.x, rel.dest.y + rel.dest.h),
+          closePath(),
+          clipEvenOdd(),
+          endPath()
+        );
+        drawOne(drawX + rel.offX, drawY + rel.offY);
+        page.pushOperators(popGraphicsState());
       }
     };
 
@@ -332,6 +396,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
         openClipped();
         page.drawPage(embeddedPage, opts);
         page.pushOperators(popGraphicsState());
+        drawRelocations((x, y) => page.drawPage(embeddedPage, { x, y, width: tile.width, height: tile.height }));
         continue;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -390,6 +455,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
     openClipped();
     page.drawImage(pdfImage, imgOpts);
     page.pushOperators(popGraphicsState());
+    drawRelocations((x, y) => page.drawImage(pdfImage, { x, y, width: tile.width, height: tile.height }));
   }
 
   for (const doc of mupdfDocCache.values()) {
