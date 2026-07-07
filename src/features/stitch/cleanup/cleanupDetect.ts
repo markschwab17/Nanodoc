@@ -1,4 +1,5 @@
 import type { PageExtract, Label, Geom } from "@/features/stitch/autostitch/types";
+import { parseSheetRefs } from "@/features/stitch/autostitch/tokens";
 
 export interface Rect { x: number; y: number; w: number; h: number; }
 export type CleanupKind = "title-block" | "match-margin" | "manual";
@@ -73,4 +74,56 @@ export function detectTitleBlock(page: PageExtract, isFurniture: (l: Label) => b
       : { rect: { x: x0, y: y0, w: W, h: by - y0 }, kind: "title-block", confidence: conf };
   }
   return null;
+}
+
+/** Find the match-line stroke coordinate near a matchline label. `axis` = "h"
+ *  (label near top/bottom → horizontal line, return its y) or "v" (left/right →
+ *  vertical line, return its x). Searches within `band` of the label's cross-coord. */
+function findMatchLineStroke(
+  geometry: Geom[], axis: "h" | "v", labelCross: number, x0: number, y0: number, x1: number, y1: number, band = 80
+): number | null {
+  const W = x1 - x0, H = y1 - y0;
+  let bestPos = 0, bestSpan = -1;
+  eachSegment(geometry, (ax, ay, bx, by) => {
+    if (axis === "h") {
+      if (Math.abs(by - ay) > 3) return;               // horizontal stroke
+      const y = (ay + by) / 2;
+      if (Math.abs(y - labelCross) > band) return;
+      const span = Math.abs(bx - ax);
+      if (span < 0.4 * W) return;                        // dashed lines: this catches the longest dash; good enough for the edge
+      if (span > bestSpan) { bestSpan = span; bestPos = y; }
+    } else {
+      if (Math.abs(bx - ax) > 3) return;
+      const x = (ax + bx) / 2;
+      if (Math.abs(x - labelCross) > band) return;
+      const span = Math.abs(by - ay);
+      if (span < 0.4 * H) return;
+      if (span > bestSpan) { bestSpan = span; bestPos = x; }
+    }
+  });
+  return bestSpan >= 0 ? bestPos : null;
+}
+
+export function detectMatchMargins(page: PageExtract): CleanupRegion[] {
+  const [x0, y0, x1, y1] = page.view;
+  const refs = parseSheetRefs([...page.shxLabels, ...page.labels], page.view)
+    .filter((r) => r.matchline && r.edge !== "interior");
+  const out: CleanupRegion[] = [];
+  const seenEdges = new Set<string>();
+  for (const r of refs) {
+    if (seenEdges.has(r.edge)) continue;               // one margin per edge
+    const horizontal = r.edge === "top" || r.edge === "bottom";
+    const cross = horizontal ? r.at.y : r.at.x;
+    const pos = findMatchLineStroke(page.geometry, horizontal ? "h" : "v", cross, x0, y0, x1, y1);
+    if (pos == null) continue;
+    seenEdges.add(r.edge);
+    // parseSheetRefs edge (y-down frame): "top" => label near y1, "bottom" => near y0.
+    let rect: Rect;
+    if (r.edge === "top") rect = { x: x0, y: pos, w: x1 - x0, h: y1 - pos };
+    else if (r.edge === "bottom") rect = { x: x0, y: y0, w: x1 - x0, h: pos - y0 };
+    else if (r.edge === "right") rect = { x: pos, y: y0, w: x1 - pos, h: y1 - y0 };
+    else rect = { x: x0, y: y0, w: pos - x0, h: y1 - y0 }; // left
+    if (rect.w > 2 && rect.h > 2) out.push({ rect, kind: "match-margin", confidence: "medium" });
+  }
+  return out;
 }

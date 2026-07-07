@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectTitleBlock } from "./cleanupDetect";
+import { detectTitleBlock, detectMatchMargins } from "./cleanupDetect";
 import type { PageExtract, Label, Geom } from "@/features/stitch/autostitch/types";
 
 const L = (text: string, x: number, y: number): Label =>
@@ -26,5 +26,27 @@ describe("detectTitleBlock", () => {
 
   it("abstains when there is no furniture cluster", () => {
     expect(detectTitleBlock(base([L("BUILDING D", 800, 600)]), () => false)).toBeNull();
+  });
+});
+
+describe("detectMatchMargins", () => {
+  it("proposes the overlap strip between a match line and its paper edge", () => {
+    // A MATCHLINE label near y=250 (y-down frame: this is near y0, so parseSheetRefs
+    // classifies it edge="bottom" — see cleanupDetect.ts's detectMatchMargins comment),
+    // plus the actual long horizontal match-line stroke at y=260.
+    const label = { text: "MATCHLINE (SEE SHEET C5.01)", x: 900, y: 250, endX: 1400, endY: 250, angle: 0, h: 10, font: null };
+    const line = { id: "m", pts: [[60, 260], [2500, 260]] as [number, number][], closed: false };
+    const regions = detectMatchMargins({ view: VIEW, shxLabels: [], labels: [label], words: [label], geometry: [line] });
+    expect(regions.length).toBe(1);
+    expect(regions[0].kind).toBe("match-margin");
+    // near-y0 ("bottom") edge: strip from y0=0 down to the line at 260
+    expect(regions[0].rect.y).toBeCloseTo(0, 0);
+    expect(regions[0].rect.h).toBeCloseTo(260, 0);
+    expect(regions[0].rect.w).toBeCloseTo(2592, 0);
+  });
+
+  it("abstains when the match-line stroke isn't found", () => {
+    const label = { text: "MATCHLINE (SEE SHEET C5.01)", x: 900, y: 250, endX: 1400, endY: 250, angle: 0, h: 10, font: null };
+    expect(detectMatchMargins({ view: VIEW, shxLabels: [], labels: [label], words: [label], geometry: [] })).toEqual([]);
   });
 });
