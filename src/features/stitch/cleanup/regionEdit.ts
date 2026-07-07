@@ -50,3 +50,30 @@ export function clampOffset(r: FRect, dx: number, dy: number): { dx: number; dy:
     dy: Math.min(Math.max(dy, -r.y), 1 - r.h - r.y),
   };
 }
+
+/**
+ * Clamp a relocation offset (tile fractions) so the region's PIECE stays within
+ * the composite canvas `[0,canvasW]×[0,canvasH]` — it may leave the source
+ * tile's frame and land anywhere on the bigger stitched canvas, but never off
+ * the exportable page. `tileX/tileY` are the tile's canvas position; `tileW/tileH`
+ * its size; offset is in fractions of tile size.
+ */
+export function clampOffsetToCanvas(
+  r: FRect,
+  dx: number,
+  dy: number,
+  tileX: number,
+  tileY: number,
+  tileW: number,
+  tileH: number,
+  canvasW: number,
+  canvasH: number
+): { dx: number; dy: number } {
+  const pieceW = r.w * tileW, pieceH = r.h * tileH;
+  const baseX = tileX + r.x * tileW, baseY = tileY + r.y * tileH; // dest top-left at dx=dy=0
+  const clamp = (v: number, lo: number, hi: number) => (hi < lo ? lo : Math.min(Math.max(v, lo), hi));
+  return {
+    dx: clamp(dx, (0 - baseX) / tileW, (canvasW - pieceW - baseX) / tileW),
+    dy: clamp(dy, (0 - baseY) / tileH, (canvasH - pieceH - baseY) / tileH),
+  };
+}

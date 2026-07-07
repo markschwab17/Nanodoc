@@ -23,7 +23,7 @@
 import { useRef, useState } from "react";
 import { useStitchStore, type StitchTile } from "@/shared/stores/stitchStore";
 import type { CleanupRegion } from "./cleanupDetect";
-import { clampOffset, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
+import { clampOffsetToCanvas, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
 import { cssClipToRect } from "./clipRegions";
 import type { CanvasRect } from "../imageUtils";
 import { MIN_ERASE_SIZE, REGION_DRAG_THRESHOLD_PX, RESIZE_CURSORS } from "../stitchConstants";
@@ -73,9 +73,10 @@ interface CleanupReviewProps {
 /** One editable region: drag body to RELOCATE its content, hover handles to
  *  resize the source, ✕ to delete, a barely-moved press to toggle keep/hide. */
 function RegionBox({
-  region, tileId, index, tileW, tileH, zoom, clientToCanvas, onToggle, onUpdate, onDelete, onRelocate,
+  region, tileId, index, tileX, tileY, tileW, tileH, canvasW, canvasH, zoom, clientToCanvas, onToggle, onUpdate, onDelete, onRelocate,
 }: {
-  region: CleanupRegionUI; tileId: string; index: number; tileW: number; tileH: number; zoom: number;
+  region: CleanupRegionUI; tileId: string; index: number;
+  tileX: number; tileY: number; tileW: number; tileH: number; canvasW: number; canvasH: number; zoom: number;
   clientToCanvas: CleanupReviewProps["clientToCanvas"];
   onToggle: (t: string, i: number) => void;
   onUpdate: (t: string, i: number, r: FRect) => void;
@@ -110,8 +111,13 @@ function RegionBox({
     if (d.mode === "move") {
       if (!d.moved && Math.hypot(dx, dy) < threshold) return; // still a click
       d.moved = true;
-      // Relocate: accumulate onto the region's existing offset, clamped to the tile.
-      const off = clampOffset(d.rect, d.startMove.dx + dx / tileW, d.startMove.dy + dy / tileH);
+      // Relocate: accumulate onto the region's existing offset. Clamp to the
+      // whole composite canvas so the piece can leave its sheet's frame and land
+      // anywhere on the bigger stitched page (but stays exportable).
+      const off = clampOffsetToCanvas(
+        d.rect, d.startMove.dx + dx / tileW, d.startMove.dy + dy / tileH,
+        tileX, tileY, tileW, tileH, canvasW, canvasH
+      );
       const cleared = Math.abs(off.dx) < RELOCATE_EPS && Math.abs(off.dy) < RELOCATE_EPS;
       onRelocate(tileId, index, cleared ? null : off);
     } else {
@@ -209,6 +215,8 @@ export function CleanupReview({
   onManualBox,
 }: CleanupReviewProps) {
   const zoom = useStitchStore((s) => s.zoomLevel) || 1;
+  const canvasW = useStitchStore((s) => s.canvasWidth);
+  const canvasH = useStitchStore((s) => s.canvasHeight);
   const [box, setBox] = useState<{ start: { x: number; y: number }; current: { x: number; y: number } } | null>(null);
   const drawingRef = useRef(false);
 
@@ -323,8 +331,12 @@ export function CleanupReview({
                 region={r}
                 tileId={p.tileId}
                 index={i}
+                tileX={tile.x}
+                tileY={tile.y}
                 tileW={tile.width}
                 tileH={tile.height}
+                canvasW={canvasW}
+                canvasH={canvasH}
                 zoom={zoom}
                 clientToCanvas={clientToCanvas}
                 onToggle={onToggleRegion}

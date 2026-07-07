@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { moveRegion, resizeRegion, clampRegion, deleteAt, clampOffset, type FRect } from "./regionEdit";
+import { moveRegion, resizeRegion, clampRegion, deleteAt, clampOffset, clampOffsetToCanvas, type FRect } from "./regionEdit";
 
 const R = { x: 0.4, y: 0.4, w: 0.2, h: 0.2 };
 // field-wise approx equality (fraction math carries floating-point noise)
@@ -72,5 +72,25 @@ describe("clampOffset", () => {
     const o = clampOffset(R, 1, 1);
     expect(o.dx).toBeCloseTo(1 - 0.2 - 0.4); // 0.4 → 0.8 (x1 = 1)
     expect(o.dy).toBeCloseTo(1 - 0.2 - 0.4);
+  });
+});
+
+describe("clampOffsetToCanvas", () => {
+  // tile 200x100 at (100,50); region frac (0.7,0,0.3,0.2) → piece 60x20; base (240,50).
+  const rr = { x: 0.7, y: 0, w: 0.3, h: 0.2 };
+  it("lets the piece leave the tile but not the canvas (left/top edge)", () => {
+    const o = clampOffsetToCanvas(rr, -5, -5, 100, 50, 200, 100, 1000, 1000);
+    expect(o.dx).toBeCloseTo((0 - 240) / 200); // dest x → 0
+    expect(o.dy).toBeCloseTo((0 - 50) / 100); // dest y → 0
+  });
+  it("clamps at the right/bottom canvas edge", () => {
+    const o = clampOffsetToCanvas(rr, 99, 99, 100, 50, 200, 100, 1000, 1000);
+    expect(o.dx).toBeCloseTo((1000 - 60 - 240) / 200); // dest x → 940 = canvasW - pieceW
+    expect(o.dy).toBeCloseTo((1000 - 20 - 50) / 100); // dest y → 980
+  });
+  it("passes a mid-canvas offset through (piece well outside the tile)", () => {
+    const o = clampOffsetToCanvas(rr, -1, 3, 100, 50, 200, 100, 1000, 1000);
+    expect(o.dx).toBeCloseTo(-1); // dest x = 240 - 200 = 40 (left of the tile), in bounds
+    expect(o.dy).toBeCloseTo(3); // dest y = 50 + 300 = 350, in bounds
   });
 });
