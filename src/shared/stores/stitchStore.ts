@@ -54,6 +54,13 @@ interface StitchState {
   setHiddenRegions: (id: string, regions: CropRect[]) => void;
   /** Set both hide + relocate regions for a tile in one undo step (Clean-Composite Apply). */
   setCleanupRegions: (id: string, hidden: CropRect[], relocated: RelocatedRegion[]) => void;
+  /** Clean-Composite Apply that promotes relocated regions to standalone tiles:
+   *  set each source tile's hiddenRegions and append the new crop tiles, in one
+   *  undo step. The new tiles are selected so their move/resize handles show. */
+  applyCleanupPromotion: (
+    updates: { id: string; hiddenRegions: CropRect[] }[],
+    newTiles: Omit<StitchTile, "id">[]
+  ) => void;
   removeTile: (id: string) => void;
   /** Remove multiple tiles in one update (one undo step). */
   removeTiles: (ids: string[]) => void;
@@ -165,6 +172,21 @@ export const useStitchStore = create<StitchState>((set, get) => ({
         t.id === id ? { ...t, hiddenRegions: hidden, relocatedRegions: relocated } : t
       ),
     }),
+
+  applyCleanupPromotion: (updates, newTiles) => {
+    const created = newTiles.map((t) => ({ ...t, id: generateTileId() }));
+    pushUndoAndSet(set, get, {
+      tiles: [
+        ...get().tiles.map((t) => {
+          const u = updates.find((x) => x.id === t.id);
+          // Promoted regions leave the source; clear any relocatedRegions there.
+          return u ? { ...t, hiddenRegions: u.hiddenRegions, relocatedRegions: [] } : t;
+        }),
+        ...created,
+      ],
+      selectedTileIds: created.map((t) => t.id),
+    });
+  },
 
   updateTiles: (updates) =>
     set((state) => {

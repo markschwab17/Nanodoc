@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useStitchStore, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
@@ -45,6 +45,31 @@ function rectsEqual(
 ): boolean {
   if (!b || a.length !== b.length) return false;
   return a.every((r, i) => r.x === b[i].x && r.y === b[i].y && r.w === b[i].w && r.h === b[i].h);
+}
+
+/** Render a tile-fraction sub-rect of a tile's image to a standalone PNG data URL
+ *  (at the source image's resolution) — used to promote a relocated region into
+ *  its own tile. Returns null if the tile has no image or the crop is empty. */
+async function cropRegionToDataUrl(tile: StitchTile, rect: CropRect): Promise<string | null> {
+  if (!tile.imageDataUrl) return null;
+  const img = new Image();
+  img.src = tile.imageDataUrl;
+  try {
+    await img.decode();
+  } catch {
+    return null;
+  }
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  if (!iw || !ih) return null;
+  const sx = rect.x * iw, sy = rect.y * ih, sw = rect.w * iw, sh = rect.h * ih;
+  if (sw < 1 || sh < 1) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(sw);
+  canvas.height = Math.round(sh);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
 }
 
 export default function StitchView() {
@@ -411,34 +436,48 @@ export default function StitchView() {
     [showNotification]
   );
 
-  const handleCleanupApply = useCallback(() => {
-    const { setCleanupRegions, tiles } = useStitchStore.getState();
+  const handleCleanupApply = useCallback(async () => {
+    const { applyCleanupPromotion, tiles } = useStitchStore.getState();
+    const updates: { id: string; hiddenRegions: CropRect[] }[] = [];
+    const newTiles: Omit<StitchTile, "id">[] = [];
     let hiddenTotal = 0, movedTotal = 0;
     for (const p of cleanupProposals) {
-      // enabled + not moved → hide in place; moved → relocate (source hidden + drawn at offset).
-      const hidden = p.regions.filter((r) => r.enabled && !r.move).map((r) => ({ ...r.rect }));
-      const relocated = p.regions
-        .filter((r) => r.move)
-        .map((r) => ({ rect: { ...r.rect }, dx: r.move!.dx, dy: r.move!.dy }));
-      hiddenTotal += hidden.length;
-      movedTotal += relocated.length;
-      // Skip the write (and its undo snapshot) when nothing changed for this tile.
       const tile = tiles.find((t) => t.id === p.tileId);
-      const hiddenSame = rectsEqual(hidden, tile?.hiddenRegions ?? []);
-      const relocatedSame = JSON.stringify(relocated) === JSON.stringify(tile?.relocatedRegions ?? []);
-      if (!hiddenSame || !relocatedSame) {
-        setCleanupRegions(p.tileId, hidden, relocated);
+      if (!tile) continue;
+      const hiddenRects = p.regions.filter((r) => r.enabled && !r.move).map((r) => ({ ...r.rect }));
+      const moved = p.regions.filter((r) => r.move);
+      hiddenTotal += hiddenRects.length;
+      // Promote each moved region to its own tile (raster crop at the destination)
+      // and hide its source on the original sheet.
+      for (const r of moved) {
+        const crop = await cropRegionToDataUrl(tile, r.rect);
+        if (!crop) continue;
+        newTiles.push({
+          sourcePdfBytes: new Uint8Array(0),
+          sourcePageIndex: -1,
+          x: tile.x + (r.rect.x + r.move!.dx) * tile.width,
+          y: tile.y + (r.rect.y + r.move!.dy) * tile.height,
+          width: r.rect.w * tile.width,
+          height: r.rect.h * tile.height,
+          imageDataUrl: crop,
+          imageModified: true, // raster export path (no PDF source)
+          rotation: 0,
+        });
+        movedTotal++;
+      }
+      const hidden = [...hiddenRects, ...moved.map((r) => ({ ...r.rect }))];
+      const hiddenSame = rectsEqual(hidden, tile.hiddenRegions ?? []);
+      if (!hiddenSame || (tile.relocatedRegions?.length ?? 0) > 0) {
+        updates.push({ id: p.tileId, hiddenRegions: hidden });
       }
     }
+    applyCleanupPromotion(updates, newTiles);
     setCleanupReviewMode(false);
     setCleanupProposals([]);
     const parts: string[] = [];
     if (hiddenTotal) parts.push(`hid ${hiddenTotal}`);
-    if (movedTotal) parts.push(`relocated ${movedTotal}`);
-    showNotification(
-      parts.length ? `Clean up: ${parts.join(" · ")} region${hiddenTotal + movedTotal === 1 ? "" : "s"}.` : "No changes applied.",
-      "success"
-    );
+    if (movedTotal) parts.push(`relocated ${movedTotal} as movable ${movedTotal === 1 ? "object" : "objects"}`);
+    showNotification(parts.length ? `Clean up: ${parts.join(" · ")}.` : "No changes applied.", "success");
   }, [cleanupProposals, showNotification]);
 
   // Escape cancels clean-up review.
