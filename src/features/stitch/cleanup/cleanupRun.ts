@@ -1,6 +1,6 @@
 import { capturePage } from "@/features/stitch/autostitch/captureDevice";
 import { buildFurnitureFilter } from "@/features/stitch/autostitch/stitchCore";
-import { detectTitleBlock, detectMatchMargins, type CleanupRegion, type Rect } from "./cleanupDetect";
+import { detectTitleBlocks, detectMatchMargins, type CleanupRegion, type Rect } from "./cleanupDetect";
 import type { PageExtract } from "@/features/stitch/autostitch/types";
 
 export interface TileProposal { tileId: string; regions: CleanupRegion[]; }
@@ -51,8 +51,7 @@ export async function detectCleanupForTiles(
     const toLocal = (r: Rect): Rect => ({ x: (r.x - x0) / pw, y: (r.y - y0) / ph, w: r.w / pw, h: r.h / ph });
     const regions: CleanupRegion[] = [];
     const furnCount = [...ex.shxLabels, ...ex.labels].filter((l) => furn.isFurniture(l)).length;
-    const tb = detectTitleBlock(ex, (l) => furn.isFurniture(l));
-    if (tb) regions.push({ ...tb, rect: toLocal(tb.rect) });
+    for (const tb of detectTitleBlocks(ex, (l) => furn.isFurniture(l))) regions.push({ ...tb, rect: toLocal(tb.rect) });
     for (const m of detectMatchMargins(ex)) regions.push({ ...m, rect: toLocal(m.rect) });
     // Boundary evidence (dev only): what detection produced per tile at runtime —
     // view size, furniture count, and each region's kind/confidence + tile-local

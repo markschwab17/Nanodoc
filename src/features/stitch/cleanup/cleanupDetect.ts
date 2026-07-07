@@ -7,10 +7,6 @@ export interface CleanupRegion { rect: Rect; kind: CleanupKind; confidence: "hig
 
 const cx = (l: Label) => (l.x + l.endX) / 2;
 const cy = (l: Label) => (l.y + l.endY) / 2;
-function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b);
-  return s.length ? s[Math.floor(s.length / 2)] : 0;
-}
 
 /** Iterate a page's straight segments (endpoints), calling back with each. */
 function eachSegment(geometry: Geom[], cb: (ax: number, ay: number, bx: number, by: number) => void) {
@@ -84,36 +80,49 @@ function findTitleBlockBorder(
   return best;
 }
 
-export function detectTitleBlock(page: PageExtract, isFurniture: (l: Label) => boolean): CleanupRegion | null {
+/**
+ * Detect title-block strips on a sheet. Returns MULTIPLE regions because plan
+ * sheets are commonly L-shaped: a right (or left) column AND a bottom footer
+ * strip (the architect's-name band). The old single-region, median-based
+ * detector saw only the dominant edge — on an L-shape the right column's labels
+ * outvote the footer in the median, so the footer was never proposed.
+ *
+ * Each edge is detected independently from the furniture hugging it, with a
+ * discriminator that separates a genuine perpendicular strip from the *corner
+ * overlap* of the other strip: a right column must have furniture spanning the
+ * height (labels above the footer band), and a bottom footer must have furniture
+ * left of the column (not just the column's own bottom row).
+ */
+export function detectTitleBlocks(page: PageExtract, isFurniture: (l: Label) => boolean): CleanupRegion[] {
   const [x0, y0, x1, y1] = page.view;
   const W = x1 - x0, H = y1 - y0;
   const furn = [...page.shxLabels, ...page.labels].filter(isFurniture);
-  if (furn.length < 3) return null;
-  const xs = furn.map(cx), ys = furn.map(cy);
-  const rightFrac = (median(xs) - x0) / W, botFrac = (median(ys) - y0) / H;
+  if (furn.length < 3) return [];
+  const fx = (l: Label) => (cx(l) - x0) / W; // 0 = left edge, 1 = right edge
+  const fy = (l: Label) => (cy(l) - y0) / H; // 0 = top edge,  1 = bottom edge
+  const out: CleanupRegion[] = [];
 
-  if (rightFrac > 0.72) {
-    // Inner edge from ONLY the right-region furniture — a stray furniture-flagged
-    // label out in the drawing must not widen the strip across the sheet (Rose Hill).
-    const rightXs = xs.filter((x) => (x - x0) / W > 0.6);
-    const furnInnerX = Math.min(...(rightXs.length ? rightXs : xs));
+  // RIGHT column — furniture in the right band, spanning the height (≥2 labels
+  // above the footer band, so a footer's right end alone can't trigger it).
+  const rightHug = furn.filter((l) => fx(l) > 0.6);
+  if (rightHug.length >= 3 && rightHug.filter((l) => fy(l) < 0.85).length >= 2) {
+    const furnInnerX = Math.min(...rightHug.map(cx)); // stray drawing labels (fx≤0.6) excluded
     const border = findTitleBlockBorder(page.geometry, "right", x0, y0, x1, y1, furnInnerX);
     const bx = border ?? furnInnerX;
-    return { rect: { x: bx, y: y0, w: x1 - bx, h: H }, kind: "title-block", confidence: border != null ? "high" : "medium" };
+    out.push({ rect: { x: bx, y: y0, w: x1 - bx, h: H }, kind: "title-block", confidence: border != null ? "high" : "medium" });
   }
-  if (botFrac > 0.72 || botFrac < 0.14) {
-    const bottom = botFrac >= 0.5;
-    const bandYs = ys.filter((y) => (bottom ? (y - y0) / H > 0.6 : (y - y0) / H < 0.4));
-    const src = bandYs.length ? bandYs : ys;
-    const furnInnerY = bottom ? Math.min(...src) : Math.max(...src);
-    const border = findTitleBlockBorder(page.geometry, bottom ? "bottom" : "top", x0, y0, x1, y1, furnInnerY);
+
+  // BOTTOM footer — furniture hugging the bottom edge, with ≥2 labels LEFT of the
+  // right column (distinguishes a real full-width footer from the column's bottom).
+  const bottomHug = furn.filter((l) => fy(l) > 0.85);
+  if (bottomHug.length >= 3 && bottomHug.filter((l) => fx(l) < 0.6).length >= 2) {
+    const furnInnerY = Math.min(...bottomHug.map(cy));
+    const border = findTitleBlockBorder(page.geometry, "bottom", x0, y0, x1, y1, furnInnerY);
     const by = border ?? furnInnerY;
-    const conf = border != null ? "high" : "medium";
-    return bottom
-      ? { rect: { x: x0, y: by, w: W, h: y1 - by }, kind: "title-block", confidence: conf }
-      : { rect: { x: x0, y: y0, w: W, h: by - y0 }, kind: "title-block", confidence: conf };
+    out.push({ rect: { x: x0, y: by, w: W, h: y1 - by }, kind: "title-block", confidence: border != null ? "high" : "medium" });
   }
-  return null;
+
+  return out;
 }
 
 /** Find the match-line stroke coordinate near a matchline label. `axis` = "h"
