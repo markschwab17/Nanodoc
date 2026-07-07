@@ -58,14 +58,22 @@ export function detectTitleBlock(page: PageExtract, isFurniture: (l: Label) => b
   const rightFrac = (median(xs) - x0) / W, botFrac = (median(ys) - y0) / H;
 
   if (rightFrac > 0.72) {
-    const innerX = Math.min(...xs);
+    // Inner edge from ONLY the furniture in the right region — a stray
+    // furniture-flagged label out in the drawing area must not widen the strip
+    // across the sheet (seen on Rose Hill C5.01/C7.01/C8.00: a lone left label
+    // dragged innerX to ~33% width, hiding 2/3 of the drawing).
+    const rightXs = xs.filter((x) => (x - x0) / W > 0.6);
+    const innerX = Math.min(...(rightXs.length ? rightXs : xs));
     const snapped = snapVerticalBorder(page.geometry, innerX, y0, y1);
     const bx = snapped ?? innerX;
     return { rect: { x: bx, y: y0, w: x1 - bx, h: H }, kind: "title-block", confidence: snapped != null ? "high" : "medium" };
   }
   if (botFrac > 0.72 || botFrac < 0.14) {
     const bottom = botFrac >= 0.5;
-    const innerY = bottom ? Math.min(...ys) : Math.max(...ys);
+    // Same robustness for a bottom/top strip: only cluster furniture near the edge.
+    const bandYs = ys.filter((y) => (bottom ? (y - y0) / H > 0.6 : (y - y0) / H < 0.4));
+    const src = bandYs.length ? bandYs : ys;
+    const innerY = bottom ? Math.min(...src) : Math.max(...src);
     const snapped = snapHorizontalBorder(page.geometry, innerY, x0, x1);
     const by = snapped ?? innerY;
     const conf = snapped != null ? "high" : "medium";

@@ -27,6 +27,18 @@ describe("detectTitleBlock", () => {
   it("abstains when there is no furniture cluster", () => {
     expect(detectTitleBlock(base([L("BUILDING D", 800, 600)]), () => false)).toBeNull();
   });
+
+  it("ignores a stray furniture label in the drawing area (strip stays at the right cluster)", () => {
+    const furn = [
+      L("RICK ENGINEERING", 2120, 200), L("REV 3  06/01/26", 2120, 400), L("SHEET C5.01", 2120, 1600),
+      L("BENCHMARK NOTE 12", 700, 900), // a repeated label out in the drawing area, furniture-flagged
+    ];
+    const r = detectTitleBlock(base(furn), () => true);
+    expect(r).not.toBeNull();
+    // inner edge stays at the right cluster (~2120), NOT dragged left to the 700 outlier
+    expect(r!.rect.x).toBeGreaterThan(2000);
+    expect(r!.rect.w).toBeLessThan(700);
+  });
 });
 
 describe("detectMatchMargins", () => {
