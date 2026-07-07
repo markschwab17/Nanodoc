@@ -18,6 +18,10 @@ import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
 import { useScaleAlignMode } from "@/features/stitch/useScaleAlignMode";
 import { exportStitchToPdf } from "@/features/stitch/stitchExport";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
+import { detectCleanupForTiles } from "@/features/stitch/cleanup/cleanupRun";
+import type { TileProposalUI } from "@/features/stitch/cleanup/CleanupReview";
+import { hitTestTileAtPoint, canvasToTileLocal } from "@/features/stitch/stitchGeometry";
+import type { CanvasRect } from "@/features/stitch/imageUtils";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import {
@@ -29,7 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { FilePlus } from "lucide-react";
+import { FilePlus, Loader2 } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
 import { useTourStore } from "@/shared/stores/tourStore";
 
@@ -98,6 +102,31 @@ export default function StitchView() {
   const [deleteElementMode, setDeleteElementMode] = useState(false);
   const [panMode, setPanMode] = useState(false);
   const [canvasVisible, setCanvasVisible] = useState(true);
+  const [cleanupReviewMode, setCleanupReviewMode] = useState(false);
+  const [cleanupProposals, setCleanupProposals] = useState<TileProposalUI[]>([]);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+
+  /** Leave clean-up review (no-op re-render when not in review). */
+  const exitCleanupReview = useCallback(() => {
+    setCleanupReviewMode(false);
+    setCleanupProposals((p) => (p.length ? [] : p));
+  }, []);
+
+  // Entering the content/element erase tools exits clean-up review first.
+  const handleContentDeleteModeChange = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) => {
+      exitCleanupReview();
+      setContentDeleteMode(v);
+    },
+    [exitCleanupReview]
+  );
+  const handleDeleteElementModeChange = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) => {
+      exitCleanupReview();
+      setDeleteElementMode(v);
+    },
+    [exitCleanupReview]
+  );
 
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
 
@@ -142,7 +171,8 @@ export default function StitchView() {
     setPanMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
-  }, [pointAlign, scaleAlign]);
+    exitCleanupReview();
+  }, [pointAlign, scaleAlign, exitCleanupReview]);
 
   const handlePointAlignModeChange = (active: boolean) => {
     if (active) {
@@ -150,6 +180,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       setPanMode(false);
       scaleAlign.setScaleAlignMode(false);
+      exitCleanupReview();
     }
     pointAlign.setPointAlignMode(active);
   };
@@ -160,6 +191,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       setPanMode(false);
       pointAlign.setPointAlignMode(false);
+      exitCleanupReview();
     }
     scaleAlign.setScaleAlignMode(active);
   };
@@ -170,6 +202,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       pointAlign.setPointAlignMode(false);
       scaleAlign.setScaleAlignMode(false);
+      exitCleanupReview();
     }
     setPanMode(active);
   };
@@ -180,8 +213,9 @@ export default function StitchView() {
     setDeleteElementMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    exitCleanupReview();
     setSelectedTileIds(useStitchStore.getState().tiles.map((t) => t.id));
-  }, [setSelectedTileIds]);
+  }, [setSelectedTileIds, exitCleanupReview]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -200,6 +234,126 @@ export default function StitchView() {
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [handleSelectToolActivate]);
+
+  // --- Clean-Composite (hide title blocks / match margins) ---
+  const handleCleanup = useCallback(async () => {
+    // Toolbar button toggles: a second click while reviewing cancels.
+    if (cleanupReviewMode) {
+      exitCleanupReview();
+      return;
+    }
+    const reviewable = useStitchStore.getState().tiles.filter((t) => !t.isScaleStamp);
+    if (reviewable.length === 0) {
+      showNotification("Add at least one page to the canvas first.", "info");
+      return;
+    }
+    // Clean-up is its own mode — turn the other tools off.
+    setContentDeleteMode(false);
+    setDeleteElementMode(false);
+    setPanMode(false);
+    pointAlign.setPointAlignMode(false);
+    scaleAlign.setScaleAlignMode(false);
+    setSelectedTileIds([]);
+    setCleanupBusy(true);
+    showNotification("Analyzing sheets for title blocks and match margins…", "info");
+    try {
+      const mupdf = await import("mupdf").then((m) => m.default);
+      const proposals = await detectCleanupForTiles(mupdf, reviewable);
+      const ui: TileProposalUI[] = proposals.map((p) => ({
+        tileId: p.tileId,
+        regions: p.regions.map((r) => ({ ...r, enabled: true })),
+      }));
+      const total = ui.reduce((s, p) => s + p.regions.length, 0);
+      setCleanupProposals(ui);
+      setCleanupReviewMode(true);
+      showNotification(
+        total > 0
+          ? `Found ${total} region${total === 1 ? "" : "s"} to clean up. Toggle any off, draw a box to add, then Apply.`
+          : "No title blocks or match margins detected. Draw a box to hide a region manually, then Apply.",
+        "info"
+      );
+    } catch (e) {
+      console.error(e);
+      showNotification("Clean up couldn't analyze the sheets.", "error");
+    } finally {
+      setCleanupBusy(false);
+    }
+  }, [cleanupReviewMode, exitCleanupReview, showNotification, pointAlign, scaleAlign, setSelectedTileIds]);
+
+  const handleToggleCleanupRegion = useCallback((tileId: string, index: number) => {
+    setCleanupProposals((prev) =>
+      prev.map((p) =>
+        p.tileId === tileId
+          ? { ...p, regions: p.regions.map((r, i) => (i === index ? { ...r, enabled: !r.enabled } : r)) }
+          : p
+      )
+    );
+  }, []);
+
+  const handleCleanupManualBox = useCallback(
+    (rect: CanvasRect) => {
+      const tiles = useStitchStore.getState().tiles;
+      const center = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+      const hit = hitTestTileAtPoint(center, tiles, true);
+      if (!hit || hit.tile.isScaleStamp) {
+        showNotification("Draw the box over a page to hide part of it.", "info");
+        return;
+      }
+      const tile = hit.tile;
+      // Canvas rect → tile-local (rotation-aware); clamp inside the tile.
+      const a = canvasToTileLocal({ x: rect.x, y: rect.y }, tile);
+      const b = canvasToTileLocal({ x: rect.x + rect.w, y: rect.y + rect.h }, tile);
+      if (!a || !b) return;
+      const lx = Math.max(0, Math.min(a.u, b.u));
+      const ly = Math.max(0, Math.min(a.v, b.v));
+      const rx = Math.min(tile.width, Math.max(a.u, b.u));
+      const ry = Math.min(tile.height, Math.max(a.v, b.v));
+      if (rx - lx < 2 || ry - ly < 2) return;
+      setCleanupProposals((prev) => {
+        const region = {
+          rect: { x: lx, y: ly, w: rx - lx, h: ry - ly },
+          kind: "manual" as const,
+          confidence: "high" as const,
+          enabled: true,
+        };
+        const idx = prev.findIndex((p) => p.tileId === tile.id);
+        if (idx === -1) return [...prev, { tileId: tile.id, regions: [region] }];
+        return prev.map((p, i) => (i === idx ? { ...p, regions: [...p.regions, region] } : p));
+      });
+    },
+    [showNotification]
+  );
+
+  const handleCleanupApply = useCallback(() => {
+    const setHiddenRegions = useStitchStore.getState().setHiddenRegions;
+    let total = 0;
+    for (const p of cleanupProposals) {
+      const rects = p.regions.filter((r) => r.enabled).map((r) => ({ ...r.rect }));
+      total += rects.length;
+      setHiddenRegions(p.tileId, rects);
+    }
+    setCleanupReviewMode(false);
+    setCleanupProposals([]);
+    showNotification(
+      total > 0 ? `Hid ${total} region${total === 1 ? "" : "s"} from the composite.` : "No regions hidden.",
+      "success"
+    );
+  }, [cleanupProposals, showNotification]);
+
+  // Escape cancels clean-up review.
+  useEffect(() => {
+    if (!cleanupReviewMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") exitCleanupReview();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [cleanupReviewMode, exitCleanupReview]);
+
+  const cleanupEnabledCount = cleanupProposals.reduce(
+    (s, p) => s + p.regions.filter((r) => r.enabled).length,
+    0
+  );
 
   const handleSaveAndFlatten = (openInEditor: boolean) => {
     if (tileCount === 0) {
@@ -355,9 +509,9 @@ export default function StitchView() {
         onAddPdf={() => setShowAddPdf(true)}
         hasTiles={tileCount > 0}
         contentDeleteMode={contentDeleteMode}
-        setContentDeleteMode={setContentDeleteMode}
+        setContentDeleteMode={handleContentDeleteModeChange}
         deleteElementMode={deleteElementMode}
-        setDeleteElementMode={setDeleteElementMode}
+        setDeleteElementMode={handleDeleteElementModeChange}
         onCropCanvas={handleCropCanvas}
         onClearCrop={handleClearCrop}
         onSaveAndFlatten={handleSaveAndFlatten}
@@ -381,6 +535,8 @@ export default function StitchView() {
         onPanModeChange={handlePanModeChange}
         onSelectToolActivate={handleSelectToolActivate}
         onClearSession={handleClearSession}
+        onCleanup={handleCleanup}
+        cleanupActive={cleanupReviewMode}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
         {tileCount === 0 && (
@@ -425,7 +581,33 @@ export default function StitchView() {
           panMode={panMode}
           canvasVisible={canvasVisible}
           forwardedContainerRef={canvasContainerRef}
+          cleanupReviewMode={cleanupReviewMode}
+          cleanupProposals={cleanupProposals}
+          onToggleCleanupRegion={handleToggleCleanupRegion}
+          onCleanupManualBox={handleCleanupManualBox}
         />
+        {cleanupBusy && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[2px]" aria-live="polite" aria-busy="true">
+            <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-5 py-4 shadow-lg">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <span className="text-sm font-medium text-muted-foreground">Analyzing sheets…</span>
+            </div>
+          </div>
+        )}
+        {cleanupReviewMode && (
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2.5 shadow-lg">
+            <span className="text-sm font-medium text-popover-foreground">
+              Clean up: {cleanupEnabledCount} region{cleanupEnabledCount === 1 ? "" : "s"} will be hidden
+            </span>
+            <span className="hidden sm:inline text-xs text-muted-foreground">Click a box to toggle · drag a box to add</span>
+            <Button variant="ghost" size="sm" className="h-7" onClick={exitCleanupReview}>
+              Cancel
+            </Button>
+            <Button size="sm" className="h-7" onClick={handleCleanupApply}>
+              Apply
+            </Button>
+          </div>
+        )}
       </main>
       <StitchBottomToolbar
         onRecenter={handleRecenter}

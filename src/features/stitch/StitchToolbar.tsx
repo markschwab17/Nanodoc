@@ -27,6 +27,7 @@ import {
   Expand,
   Save,
   Shrink,
+  Sparkles,
   Stamp,
   Trash2,
   Undo2,
@@ -73,6 +74,10 @@ export interface StitchToolbarProps {
   onPanModeChange: (active: boolean) => void;
   onSelectToolActivate: () => void;
   onClearSession?: () => void;
+  /** Clean-Composite: detect + review title-block/match-margin hide-regions. */
+  onCleanup?: () => void;
+  /** True while the clean-up review overlay is active. */
+  cleanupActive?: boolean;
 }
 
 const POINT_ALIGN_STEP_LABELS = [
@@ -147,6 +152,8 @@ export function StitchToolbar({
   onPanModeChange,
   onSelectToolActivate,
   onClearSession,
+  onCleanup,
+  cleanupActive,
 }: StitchToolbarProps) {
   // Shallow-picked subscription: avoids re-rendering the whole toolbar on
   // store changes it doesn't use (e.g. panOffset during panning). Tile
@@ -319,7 +326,7 @@ export function StitchToolbar({
   // but hasn't interacted with any tool for 15 seconds
   const [showHelpNudge, setShowHelpNudge] = useState(false);
   const nudgeDismissedRef = useRef(false);
-  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || hasSelection;
+  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || hasSelection || Boolean(cleanupActive);
 
   useEffect(() => {
     // Don't show if: no tiles, user already interacted, nudge was dismissed, or tour is running
@@ -481,6 +488,18 @@ export function StitchToolbar({
           <Ruler className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
         </div>
+        {onCleanup && (
+          <IconButtonWithTooltip
+            variant={cleanupActive ? "secondary" : "outline"}
+            disabled={!hasTiles}
+            title="Clean up: auto-detect title blocks and match-line margins to hide so the sheets read as one continuous drawing. Review the boxes, toggle any off, or draw your own, then Apply."
+            label={cleanupActive ? "Reviewing…" : "Clean up"}
+            tooltipDescription="Auto-detect title blocks & match-line margins to hide, so the sheets read as one continuous drawing. Review, toggle, or draw your own boxes, then Apply."
+            onClick={onCleanup}
+          >
+            <Sparkles className="h-3.5 w-3.5 shrink-0" />
+          </IconButtonWithTooltip>
+        )}
         <IconButtonWithTooltip variant="outline" title="Crop output to the bounding box of all tiles" label="Crop to content" onClick={onCropCanvas}>
           <Crop className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>

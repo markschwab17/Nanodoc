@@ -20,6 +20,7 @@ function rulerLabel(inches: number): string {
   return inches % 1 === 0 ? String(inches) : inches.toFixed(1);
 }
 import { hitTestTileAtPoint, type CanvasPoint } from "./stitchGeometry";
+import { CleanupReview, type TileProposalUI } from "./cleanup/CleanupReview";
 
 /**
  * Rulers and inch grid only depend on the canvas dimensions — memoized so
@@ -175,6 +176,14 @@ export interface StitchCanvasProps {
   canvasVisible?: boolean;
   /** Optional ref to receive the viewport container element (e.g. for recenter). */
   forwardedContainerRef?: React.RefObject<HTMLDivElement | null>;
+  /** Clean-Composite review mode: overlay proposed hide-regions + allow drawing manual boxes. */
+  cleanupReviewMode?: boolean;
+  /** Proposed hide-regions (per tile) with per-region enabled state. */
+  cleanupProposals?: TileProposalUI[];
+  /** Toggle a proposed region's enabled state. */
+  onToggleCleanupRegion?: (tileId: string, index: number) => void;
+  /** User drew a manual hide-box (canvas-space rect). */
+  onCleanupManualBox?: (rect: CanvasRect) => void;
 }
 
 export function StitchCanvas({
@@ -196,6 +205,10 @@ export function StitchCanvas({
   panMode = false,
   canvasVisible = true,
   forwardedContainerRef,
+  cleanupReviewMode = false,
+  cleanupProposals,
+  onToggleCleanupRegion,
+  onCleanupManualBox,
 }: StitchCanvasProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const setContainerRef = useCallback(
@@ -435,6 +448,15 @@ export function StitchCanvas({
           <StitchTile key={tile.id} tile={tile} />
         ))}
         <GroupSelectionOverlay />
+        {cleanupReviewMode && cleanupProposals && (
+          <CleanupReview
+            proposals={cleanupProposals}
+            tiles={tiles}
+            clientToCanvas={clientToCanvas}
+            onToggleRegion={onToggleCleanupRegion ?? (() => {})}
+            onManualBox={onCleanupManualBox ?? (() => {})}
+          />
+        )}
         {/* Delete-element stroke visualization: positioned in canvas-space so it tracks the stroke path */}
         {(deleteStrokePath.length >= 1 || deleteStrokeCurrent) && (
           <svg
