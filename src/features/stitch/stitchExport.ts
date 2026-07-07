@@ -182,6 +182,36 @@ export function pdfPoseForTile(
   return { x: drawX, y: drawY, rotationDeg: rotation };
 }
 
+/**
+ * Map a tile's `hiddenRegions` (tile-local coords) into the export page's
+ * PDF (y-up) coordinate space, given the tile's draw pose. Returns [] when
+ * the tile has no hidden regions, or when the tile is rotated — v1 skips
+ * hole-clipping on rotated tiles (auto-align always produces rotation 0).
+ * Exported for tests.
+ */
+export function tileHoleRectsInPdf(
+  tile: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    rotation?: number;
+    hiddenRegions?: { x: number; y: number; w: number; h: number }[];
+  },
+  cropX: number,
+  cropY: number,
+  cropH: number
+): { x: number; y: number; w: number; h: number }[] {
+  const regions = tile.hiddenRegions ?? [];
+  if (!regions.length || (tile.rotation ?? 0) !== 0) return [];
+  return regions.map((r) => ({
+    x: tile.x - cropX + r.x,
+    y: cropH - (tile.y - cropY + r.y + r.h), // flip to PDF y-up
+    w: r.w,
+    h: r.h,
+  }));
+}
+
 export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
 
@@ -195,7 +225,19 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   if (tilesToDraw.length === 0) return null;
 
   const pdfLib = await import("pdf-lib");
-  const { PDFDocument, degrees, pushGraphicsState, popGraphicsState, setGraphicsState, PDFName } = pdfLib;
+  const {
+    PDFDocument,
+    degrees,
+    pushGraphicsState,
+    popGraphicsState,
+    setGraphicsState,
+    PDFName,
+    moveTo,
+    lineTo,
+    closePath,
+    clipEvenOdd,
+    endPath,
+  } = pdfLib;
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([cropW, cropH]);
 
@@ -213,6 +255,36 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   for (const tile of tilesToDraw) {
     // Draw pose in PDF coord system (origin bottom-left, Y up, CCW rotation)
     const { x: drawX, y: drawY, rotationDeg: rotation } = pdfPoseForTile(tile, cropX, cropY, cropH);
+
+    // Clean-Composite: tile-local hidden regions mapped into PDF page space.
+    // Non-empty only for unrotated tiles with hiddenRegions set (v1 scope).
+    const holes = tileHoleRectsInPdf(tile, cropX, cropY, cropH);
+    // Open a Multiply graphics state, optionally clipped (even-odd) to exclude
+    // the tile's hidden regions so the export matches the editor's clean view.
+    const openClipped = () => {
+      page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
+      if (holes.length) {
+        const ops = [
+          // Outer rect = full crop so the tile draws everywhere except holes.
+          moveTo(0, 0),
+          lineTo(cropW, 0),
+          lineTo(cropW, cropH),
+          lineTo(0, cropH),
+          closePath(),
+        ];
+        for (const h of holes) {
+          ops.push(
+            moveTo(h.x, h.y),
+            lineTo(h.x + h.w, h.y),
+            lineTo(h.x + h.w, h.y + h.h),
+            lineTo(h.x, h.y + h.h),
+            closePath()
+          );
+        }
+        ops.push(clipEvenOdd(), endPath());
+        page.pushOperators(...ops);
+      }
+    };
 
     // ── Vector embed path (unmodified tiles only) ──────────────────────
     const canUseVector =
@@ -249,7 +321,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
           height: tile.height,
         };
         if (rotation !== 0) opts.rotate = degrees(rotation);
-        page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
+        openClipped();
         page.drawPage(embeddedPage, opts);
         page.pushOperators(popGraphicsState());
         continue;
@@ -307,7 +379,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       height: tile.height,
     };
     if (rotation !== 0) imgOpts.rotate = degrees(rotation);
-    page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
+    openClipped();
     page.drawImage(pdfImage, imgOpts);
     page.pushOperators(popGraphicsState());
   }

@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf } from "./stitchExport";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
 
@@ -119,6 +119,20 @@ describe("pdfPoseForTile", () => {
       expect(actual.x).toBeCloseTo(expected.x, 6);
       expect(actual.y).toBeCloseTo(expected.y, 6);
     }
+  });
+});
+
+describe("tileHoleRectsInPdf", () => {
+  test("maps an unrotated tile's hidden region into PDF (y-up) space", () => {
+    // tile 100x50 at (30,40); crop full page height 200; hidden region local (10,5,20,10)
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0, hiddenRegions: [{ x: 10, y: 5, w: 20, h: 10 }] } as any;
+    const holes = tileHoleRectsInPdf(tile, 0, 0, 200);
+    expect(holes).toHaveLength(1);
+    // pdf x = tile.x + local.x = 40 ; pdf y = cropH - (tile.y + local.y + local.h) = 200 - (40+5+10) = 145
+    expect(holes[0]).toEqual({ x: 40, y: 145, w: 20, h: 10 });
+  });
+  test("no hidden regions -> empty", () => {
+    expect(tileHoleRectsInPdf({ x: 0, y: 0, width: 10, height: 10 } as any, 0, 0, 100)).toEqual([]);
   });
 });
 
