@@ -326,7 +326,7 @@ export function StitchCanvas({
   const handlePointerDownCapture = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
       const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
@@ -340,13 +340,13 @@ export function StitchCanvas({
         e.stopPropagation();
       }
     },
-    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode]
+    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode]
   );
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
       const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
@@ -363,7 +363,7 @@ export function StitchCanvas({
         }
       }
     },
-    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, setSelectedTileIds]
+    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, setSelectedTileIds]
   );
 
   const handlePointerMove = useCallback(

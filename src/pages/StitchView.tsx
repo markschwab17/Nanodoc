@@ -37,6 +37,16 @@ import { FilePlus, Loader2 } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
 import { useTourStore } from "@/shared/stores/tourStore";
 
+/** Shallow rect-list equality (order-sensitive) — used to skip a no-op store
+ *  write for tiles whose hidden regions didn't actually change. */
+function rectsEqual(
+  a: Array<{ x: number; y: number; w: number; h: number }>,
+  b: Array<{ x: number; y: number; w: number; h: number }> | undefined
+): boolean {
+  if (!b || a.length !== b.length) return false;
+  return a.every((r, i) => r.x === b[i].x && r.y === b[i].y && r.w === b[i].w && r.h === b[i].h);
+}
+
 export default function StitchView() {
   // Subscribe to the count only — tile content changes every drag frame and
   // would re-render the whole page (toolbars included) per frame.
@@ -259,16 +269,27 @@ export default function StitchView() {
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       const proposals = await detectCleanupForTiles(mupdf, reviewable);
-      const ui: TileProposalUI[] = proposals.map((p) => ({
-        tileId: p.tileId,
-        regions: p.regions.map((r) => ({ ...r, enabled: true })),
-      }));
-      const total = ui.reduce((s, p) => s + p.regions.length, 0);
+      // Merge in each tile's already-hidden regions so a re-run never drops
+      // prior work (a manual box, or regions applied from an earlier
+      // Clean-up pass) — only the freshly detected regions start unchecked.
+      const currentTiles = useStitchStore.getState().tiles;
+      const ui: TileProposalUI[] = proposals.map((p) => {
+        const fresh = p.regions.map((r) => ({ ...r, enabled: false }));
+        const tile = currentTiles.find((t) => t.id === p.tileId);
+        const existing = (tile?.hiddenRegions ?? []).map((rect) => ({
+          rect: { ...rect },
+          kind: "manual" as const,
+          confidence: "high" as const,
+          enabled: true,
+        }));
+        return { tileId: p.tileId, regions: [...fresh, ...existing] };
+      });
+      const freshTotal = proposals.reduce((s, p) => s + p.regions.length, 0);
       setCleanupProposals(ui);
       setCleanupReviewMode(true);
       showNotification(
-        total > 0
-          ? `Found ${total} region${total === 1 ? "" : "s"} to clean up. Toggle any off, draw a box to add, then Apply.`
+        freshTotal > 0
+          ? `Found ${freshTotal} region${freshTotal === 1 ? "" : "s"} to clean up. Toggle any off, draw a box to add, then Apply.`
           : "No title blocks or match margins detected. Draw a box to hide a region manually, then Apply.",
         "info"
       );
@@ -325,12 +346,17 @@ export default function StitchView() {
   );
 
   const handleCleanupApply = useCallback(() => {
-    const setHiddenRegions = useStitchStore.getState().setHiddenRegions;
+    const { setHiddenRegions, tiles } = useStitchStore.getState();
     let total = 0;
     for (const p of cleanupProposals) {
       const rects = p.regions.filter((r) => r.enabled).map((r) => ({ ...r.rect }));
       total += rects.length;
-      setHiddenRegions(p.tileId, rects);
+      // Skip the write (and its undo snapshot) when nothing actually
+      // changed — avoids clobbering a tile's hiddenRegions with a no-op set.
+      const tile = tiles.find((t) => t.id === p.tileId);
+      if (!rectsEqual(rects, tile?.hiddenRegions)) {
+        setHiddenRegions(p.tileId, rects);
+      }
     }
     setCleanupReviewMode(false);
     setCleanupProposals([]);
@@ -537,6 +563,7 @@ export default function StitchView() {
         onClearSession={handleClearSession}
         onCleanup={handleCleanup}
         cleanupActive={cleanupReviewMode}
+        cleanupBusy={cleanupBusy}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
         {tileCount === 0 && (

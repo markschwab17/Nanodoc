@@ -78,6 +78,8 @@ export interface StitchToolbarProps {
   onCleanup?: () => void;
   /** True while the clean-up review overlay is active. */
   cleanupActive?: boolean;
+  /** True while a clean-up detection pass is in flight (before review opens). */
+  cleanupBusy?: boolean;
 }
 
 const POINT_ALIGN_STEP_LABELS = [
@@ -154,6 +156,7 @@ export function StitchToolbar({
   onClearSession,
   onCleanup,
   cleanupActive,
+  cleanupBusy,
 }: StitchToolbarProps) {
   // Shallow-picked subscription: avoids re-rendering the whole toolbar on
   // store changes it doesn't use (e.g. panOffset during panning). Tile
@@ -491,7 +494,7 @@ export function StitchToolbar({
         {onCleanup && (
           <IconButtonWithTooltip
             variant={cleanupActive ? "secondary" : "outline"}
-            disabled={!hasTiles}
+            disabled={!hasTiles || cleanupBusy || cleanupActive}
             title="Clean up: auto-detect title blocks and match-line margins to hide so the sheets read as one continuous drawing. Review the boxes, toggle any off, or draw your own, then Apply."
             label={cleanupActive ? "Reviewing…" : "Clean up"}
             tooltipDescription="Auto-detect title blocks & match-line margins to hide, so the sheets read as one continuous drawing. Review, toggle, or draw your own boxes, then Apply."
