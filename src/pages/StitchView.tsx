@@ -269,19 +269,24 @@ export default function StitchView() {
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       const proposals = await detectCleanupForTiles(mupdf, reviewable);
-      // Merge in each tile's already-hidden regions so a re-run never drops
-      // prior work (a manual box, or regions applied from an earlier
-      // Clean-up pass) — only the freshly detected regions start unchecked.
+      // Fresh detections default to enabled — the user confirms by Applying,
+      // toggling off any false positives. Merge in each tile's already-hidden
+      // regions so a re-run never drops prior work (a manual box, or regions
+      // applied from an earlier Clean-up pass), but skip any existing rect
+      // that a fresh detection already covers so re-running doesn't duplicate
+      // an already-applied region.
       const currentTiles = useStitchStore.getState().tiles;
       const ui: TileProposalUI[] = proposals.map((p) => {
-        const fresh = p.regions.map((r) => ({ ...r, enabled: false }));
+        const fresh = p.regions.map((r) => ({ ...r, enabled: true }));
         const tile = currentTiles.find((t) => t.id === p.tileId);
-        const existing = (tile?.hiddenRegions ?? []).map((rect) => ({
-          rect: { ...rect },
-          kind: "manual" as const,
-          confidence: "high" as const,
-          enabled: true,
-        }));
+        const existing = (tile?.hiddenRegions ?? [])
+          .filter((rect) => !fresh.some((f) => rectsEqual([f.rect], [rect])))
+          .map((rect) => ({
+            rect: { ...rect },
+            kind: "manual" as const,
+            confidence: "high" as const,
+            enabled: true,
+          }));
         return { tileId: p.tileId, regions: [...fresh, ...existing] };
       });
       const freshTotal = proposals.reduce((s, p) => s + p.regions.length, 0);
@@ -354,7 +359,7 @@ export default function StitchView() {
       // Skip the write (and its undo snapshot) when nothing actually
       // changed — avoids clobbering a tile's hiddenRegions with a no-op set.
       const tile = tiles.find((t) => t.id === p.tileId);
-      if (!rectsEqual(rects, tile?.hiddenRegions)) {
+      if (!rectsEqual(rects, tile?.hiddenRegions ?? [])) {
         setHiddenRegions(p.tileId, rects);
       }
     }
