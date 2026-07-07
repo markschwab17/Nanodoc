@@ -39,10 +39,11 @@ export default function CleanupSmokeHarness() {
       const lines = proposals.map((p) => {
         const tile = tiles.find((t) => t.id === p.tileId)!;
         if (p.regions.length === 0) return `  ${p.tileId} (${tile.width.toFixed(0)}×${tile.height.toFixed(0)}pt): (no regions)`;
-        const rs = p.regions.map(
-          (r) =>
-            `      ${r.kind} [${r.confidence}]  x=${r.rect.x.toFixed(0)} y=${r.rect.y.toFixed(0)} w=${r.rect.w.toFixed(0)} h=${r.rect.h.toFixed(0)}`
-        );
+        const rs = p.regions.map((r) => {
+          // regions are tile-local FRACTIONS (0..1); reconstruct points for readability.
+          const px = (f: number, dim: number) => (f * dim).toFixed(0);
+          return `      ${r.kind} [${r.confidence}]  frac x=${r.rect.x.toFixed(3)} y=${r.rect.y.toFixed(3)} w=${r.rect.w.toFixed(3)} h=${r.rect.h.toFixed(3)}  ≈pts x=${px(r.rect.x, tile.width)} y=${px(r.rect.y, tile.height)} w=${px(r.rect.w, tile.width)} h=${px(r.rect.h, tile.height)}`;
+        });
         return [`  ${p.tileId} (${tile.width.toFixed(0)}×${tile.height.toFixed(0)}pt): ${p.regions.length} region(s)`, ...rs].join("\n");
       });
       setLog([`${count} pages in ${ms} ms — ${totalRegions} region(s) total`, ...lines].join("\n"));

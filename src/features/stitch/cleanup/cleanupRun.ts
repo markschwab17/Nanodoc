@@ -50,9 +50,23 @@ export async function detectCleanupForTiles(
     const pw = (x1 - x0) || 1, ph = (y1 - y0) || 1;
     const toLocal = (r: Rect): Rect => ({ x: (r.x - x0) / pw, y: (r.y - y0) / ph, w: r.w / pw, h: r.h / ph });
     const regions: CleanupRegion[] = [];
+    const furnCount = [...ex.shxLabels, ...ex.labels].filter((l) => furn.isFurniture(l)).length;
     const tb = detectTitleBlock(ex, (l) => furn.isFurniture(l));
     if (tb) regions.push({ ...tb, rect: toLocal(tb.rect) });
     for (const m of detectMatchMargins(ex)) regions.push({ ...m, rect: toLocal(m.rect) });
+    // Boundary evidence (dev only): what detection produced per tile at runtime —
+    // view size, furniture count, and each region's kind/confidence + tile-local
+    // fractions. Silent in production; open DevTools to see why a strip is/ isn't
+    // proposed. y≈0.9 h≈0.1 = a bottom footer band; y≈0 h≈1 = a side column.
+    if (import.meta.env.DEV) {
+      console.log(
+        `[cleanupRun] ${tile.id} view=${(x1 - x0).toFixed(0)}x${(y1 - y0).toFixed(0)} furn=${furnCount} → ${
+          regions.length
+            ? regions.map((r) => `${r.kind}/${r.confidence}[y=${r.rect.y.toFixed(3)} h=${r.rect.h.toFixed(3)}]`).join(", ")
+            : "NONE"
+        }`,
+      );
+    }
     out.push({ tileId: tile.id, regions });
   }
   return out;
