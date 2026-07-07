@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { moveRegion, resizeRegion, clampRegion, deleteAt, type FRect } from "./regionEdit";
+import { moveRegion, resizeRegion, clampRegion, deleteAt, clampOffset, type FRect } from "./regionEdit";
 
 const R = { x: 0.4, y: 0.4, w: 0.2, h: 0.2 };
 // field-wise approx equality (fraction math carries floating-point noise)
@@ -54,5 +54,23 @@ describe("clampRegion", () => {
 describe("deleteAt", () => {
   it("removes the index", () => {
     expect(deleteAt([1, 2, 3], 1)).toEqual([1, 3]);
+  });
+});
+
+describe("clampOffset", () => {
+  it("passes an in-bounds offset through", () => {
+    const o = clampOffset(R, 0.1, -0.1);
+    expect(o.dx).toBeCloseTo(0.1);
+    expect(o.dy).toBeCloseTo(-0.1);
+  });
+  it("clamps so the rect can't leave the left/top edge", () => {
+    const o = clampOffset(R, -1, -1);
+    expect(o.dx).toBeCloseTo(-0.4); // x0 (0.4) → 0
+    expect(o.dy).toBeCloseTo(-0.4);
+  });
+  it("clamps so the rect can't leave the right/bottom edge", () => {
+    const o = clampOffset(R, 1, 1);
+    expect(o.dx).toBeCloseTo(1 - 0.2 - 0.4); // 0.4 → 0.8 (x1 = 1)
+    expect(o.dy).toBeCloseTo(1 - 0.2 - 0.4);
   });
 });

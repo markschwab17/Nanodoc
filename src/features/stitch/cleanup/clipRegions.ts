@@ -23,3 +23,16 @@ export function cssClipPathWithHoles(tileW: number, tileH: number, holes: Hole[]
   }
   return `polygon(evenodd, ${parts.join(", ")})`;
 }
+
+/**
+ * Build a CSS `clip-path: polygon(...)` that shows ONLY the given rect (the
+ * inverse of the holes clip) — used to render a relocated region's cut-out from
+ * a copy of the tile image. Coordinates are percentages of the tile size.
+ */
+export function cssClipToRect(tileW: number, tileH: number, rect: Hole): string | null {
+  if (tileW <= 0 || tileH <= 0) return null;
+  const px = (v: number) => `${+((v / tileW) * 100).toFixed(3)}%`;
+  const py = (v: number) => `${+((v / tileH) * 100).toFixed(3)}%`;
+  const x2 = rect.x + rect.w, y2 = rect.y + rect.h;
+  return `polygon(${px(rect.x)} ${py(rect.y)}, ${px(x2)} ${py(rect.y)}, ${px(x2)} ${py(y2)}, ${px(rect.x)} ${py(y2)})`;
+}

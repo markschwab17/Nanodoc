@@ -41,3 +41,12 @@ export function resizeRegion(r: FRect, handle: ResizeHandle, dx: number, dy: num
 export function deleteAt<T>(regions: T[], index: number): T[] {
   return regions.filter((_, i) => i !== index);
 }
+
+/** Clamp a relocation offset (fractions) so `rect` shifted by it stays fully
+ *  inside the tile: x0+dx ∈ [0, 1−w], y0+dy ∈ [0, 1−h]. */
+export function clampOffset(r: FRect, dx: number, dy: number): { dx: number; dy: number } {
+  return {
+    dx: Math.min(Math.max(dx, -r.x), 1 - r.w - r.x),
+    dy: Math.min(Math.max(dy, -r.y), 1 - r.h - r.y),
+  };
+}
