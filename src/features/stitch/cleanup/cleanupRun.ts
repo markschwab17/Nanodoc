@@ -16,18 +16,25 @@ export async function detectCleanupForTiles(
   // 1. capture every tile's source page.
   const docCache = new Map<Uint8Array, any>();
   const extracts: { tile: (typeof tiles)[number]; ex: PageExtract }[] = [];
-  for (let i = 0; i < tiles.length; i++) {
-    const t = tiles[i];
-    await yieldToMain();
-    let doc = docCache.get(t.sourcePdfBytes);
-    if (!doc) { doc = mupdf.Document.openDocument(t.sourcePdfBytes, "application/pdf"); docCache.set(t.sourcePdfBytes, doc); }
-    const page = doc.loadPage(t.sourcePageIndex);
-    let ex: PageExtract;
-    try { ex = capturePage(mupdf, page); } finally { page.destroy?.(); }
-    extracts.push({ tile: t, ex });
-    onProgress?.(i + 1, tiles.length);
+  try {
+    for (let i = 0; i < tiles.length; i++) {
+      const t = tiles[i];
+      await yieldToMain();
+      try {
+        let doc = docCache.get(t.sourcePdfBytes);
+        if (!doc) { doc = mupdf.Document.openDocument(t.sourcePdfBytes, "application/pdf"); docCache.set(t.sourcePdfBytes, doc); }
+        const page = doc.loadPage(t.sourcePageIndex);
+        let ex: PageExtract;
+        try { ex = capturePage(mupdf, page); } finally { page.destroy?.(); }
+        extracts.push({ tile: t, ex });
+      } catch (e) {
+        console.warn(`[cleanupRun] Failed to capture tile ${t.id}:`, e);
+      }
+      onProgress?.(i + 1, tiles.length);
+    }
+  } finally {
+    for (const doc of docCache.values()) { try { doc.destroy?.(); } catch { /* already freed */ } }
   }
-  for (const doc of docCache.values()) doc.destroy?.();
 
   // 2. set-shared furniture filter (needs the whole set to spot repeated boilerplate).
   const furnSheets = extracts.map(({ ex }, i) => ({ key: i, raw: { shxLabels: [...ex.shxLabels, ...ex.labels] } }));
