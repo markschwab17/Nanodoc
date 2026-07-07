@@ -14,7 +14,7 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
 import { computeResizedPose } from "@/features/stitch/stitchGeometry";
 import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
-import { cssClipPathWithHoles } from "./cleanup/clipRegions";
+import { cssClipPathWithHoles, cssClipToRect } from "./cleanup/clipRegions";
 import { Lock, RotateCw, Unlock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -336,14 +336,20 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // hiddenRegions are stored as fractions (0..1) of the tile — scale to px for
   // the clip helper. Rotated tiles are NOT clipped (v1): the export drops holes
   // on rotated tiles too, so preview and export stay consistent.
-  const holesPx = (tile.hiddenRegions ?? []).map((r) => ({
+  const isRotated = (tile.rotation ?? 0) !== 0;
+  const relocated = isRotated ? [] : tile.relocatedRegions ?? [];
+  // Hide hiddenRegions AND every relocated region's SOURCE (its content is
+  // redrawn at the offset below).
+  const holesPx = [
+    ...(tile.hiddenRegions ?? []),
+    ...relocated.map((r) => r.rect),
+  ].map((r) => ({
     x: r.x * tile.width,
     y: r.y * tile.height,
     w: r.w * tile.width,
     h: r.h * tile.height,
   }));
-  const hiddenClip =
-    (tile.rotation ?? 0) !== 0 ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
+  const hiddenClip = isRotated ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
 
   return (
     <div
@@ -377,6 +383,30 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
           WebkitClipPath: hiddenClip ?? undefined,
         }}
       />
+      {/* Relocated pieces: a copy of the sheet clipped to the source region and
+          translated by the offset, so the cut-out content shows at its new spot. */}
+      {relocated.map((r, i) => {
+        const clip = cssClipToRect(tile.width, tile.height, {
+          x: r.rect.x * tile.width,
+          y: r.rect.y * tile.height,
+          w: r.rect.w * tile.width,
+          h: r.rect.h * tile.height,
+        });
+        return (
+          <img
+            key={i}
+            src={tile.imageDataUrl}
+            alt=""
+            className="absolute inset-0 w-full h-full pointer-events-none select-none object-fill"
+            draggable={false}
+            style={{
+              transform: `translate(${r.dx * tile.width}px, ${r.dy * tile.height}px)`,
+              clipPath: clip ?? undefined,
+              WebkitClipPath: clip ?? undefined,
+            }}
+          />
+        );
+      })}
       {isSingleSelected && (() => {
         // Controls live inside the zoom-scaled canvas — divide by zoom so they
         // stay a constant size on screen (like the lock button always did).
