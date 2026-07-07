@@ -14,6 +14,7 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
 import { computeResizedPose } from "@/features/stitch/stitchGeometry";
 import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
+import { cssClipPathWithHoles } from "./cleanup/clipRegions";
 import { Lock, RotateCw, Unlock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -332,6 +333,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // so the canvas must show the same thing (scale stamps included).
   const displayWidth = tile.width;
   const displayHeight = tile.height;
+  const hiddenClip = cssClipPathWithHoles(tile.width, tile.height, tile.hiddenRegions ?? []);
 
   return (
     <div
@@ -360,6 +362,10 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         alt=""
         className="w-full h-full pointer-events-none select-none object-fill"
         draggable={false}
+        style={{
+          clipPath: hiddenClip ?? undefined,
+          WebkitClipPath: hiddenClip ?? undefined,
+        }}
       />
       {isSingleSelected && (() => {
         // Controls live inside the zoom-scaled canvas — divide by zoom so they
