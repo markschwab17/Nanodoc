@@ -146,6 +146,20 @@ export function tileIntersectsCrop(
 }
 
 /**
+ * Whether a tile's source page may use the lossless VECTOR embed path.
+ *
+ * pdf-lib's `drawPage` does NOT bake a source page's `/Rotate` into the embedded
+ * form, but the tile's width/height and the preview raster use mupdf's
+ * rotation-applied (displayed) dimensions. So for a rotated source page the
+ * vector embed would export stretched and unrotated. Only unrotated pages are
+ * safe for vector; rotated pages fall to the raster path (mupdf's render is
+ * already correctly oriented). Exported for tests.
+ */
+export function canVectorEmbedRotation(srcRotationDeg: number): boolean {
+  return ((((srcRotationDeg % 360) + 360) % 360)) === 0;
+}
+
+/**
  * Compute the pdf-lib draw pose (position + rotation) for a tile so the
  * exported page matches the editor exactly. Exported for tests.
  */
@@ -216,6 +230,12 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
           sourceDoc = await PDFDocument.load(tile.sourcePdfBytes, { ignoreEncryption: true });
           sourceDocCache.set(tile.sourcePdfBytes, sourceDoc);
         }
+        // A rotated source page (/Rotate != 0) can't use the vector embed: pdf-lib
+        // won't bake the rotation, so it would export stretched + unrotated. Fall
+        // through to the raster path (mupdf's stored render is already oriented).
+        const srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
+        if (!canVectorEmbedRotation(srcRotation)) throw new Error(`ROTATED_SOURCE:${srcRotation}`);
+
         const [embeddedPage] = await pdfDoc.embedPdf(sourceDoc, [tile.sourcePageIndex]);
 
         const opts: {
@@ -234,7 +254,11 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
         page.pushOperators(popGraphicsState());
         continue;
       } catch (e) {
-        console.warn("Vector embed failed, falling back to raster:", e);
+        const msg = e instanceof Error ? e.message : String(e);
+        // Rotated source pages fall to the raster path on purpose — not a failure.
+        if (!msg.startsWith("ROTATED_SOURCE:")) {
+          console.warn("Vector embed failed, falling back to raster:", e);
+        }
       }
     }
 

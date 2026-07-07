@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation } from "./stitchExport";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
 
@@ -119,5 +119,19 @@ describe("pdfPoseForTile", () => {
       expect(actual.x).toBeCloseTo(expected.x, 6);
       expect(actual.y).toBeCloseTo(expected.y, 6);
     }
+  });
+});
+
+describe("canVectorEmbedRotation", () => {
+  // Only an unrotated source page may use pdf-lib's vector embed — pdf-lib does
+  // not bake /Rotate, so a rotated page must use the (correctly oriented) raster.
+  test("allows vector embed only for an unrotated source page", () => {
+    expect(canVectorEmbedRotation(0)).toBe(true);
+    expect(canVectorEmbedRotation(360)).toBe(true);
+    expect(canVectorEmbedRotation(-360)).toBe(true);
+    expect(canVectorEmbedRotation(90)).toBe(false);
+    expect(canVectorEmbedRotation(180)).toBe(false);
+    expect(canVectorEmbedRotation(270)).toBe(false); // the Rose Hill case
+    expect(canVectorEmbedRotation(-90)).toBe(false);
   });
 });
