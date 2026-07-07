@@ -73,6 +73,7 @@ function RegionBox({
   onDelete: (t: string, i: number) => void;
 }) {
   const [hover, setHover] = useState(false);
+  const [active, setActive] = useState(false); // a drag is in progress — keep handles mounted even if the pointer leaves
   const drag = useRef<{ mode: "move" | ResizeHandle; sx: number; sy: number; rect: FRect; moved: boolean } | null>(null);
 
   const left = region.rect.x * tileW, top = region.rect.y * tileH;
@@ -87,6 +88,7 @@ function RegionBox({
     const c = clientToCanvas(e.clientX, e.clientY);
     if (!c) return;
     drag.current = { mode, sx: c.x, sy: c.y, rect: region.rect, moved: mode !== "move" };
+    setActive(true);
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
   };
   const move = (e: React.PointerEvent) => {
@@ -106,6 +108,7 @@ function RegionBox({
   const end = (e: React.PointerEvent) => {
     const d = drag.current;
     drag.current = null;
+    setActive(false);
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
     if (d && d.mode === "move" && !d.moved) onToggle(tileId, index); // click → toggle
   };
@@ -128,7 +131,7 @@ function RegionBox({
         {KIND_LABEL[region.kind]}{region.enabled ? "" : " · off"}
       </span>
 
-      {hover && HANDLES.map((h) => {
+      {(hover || active) && HANDLES.map((h) => {
         const p = HANDLE_POS[h];
         return (
           <div
@@ -151,7 +154,7 @@ function RegionBox({
         );
       })}
 
-      {hover && (
+      {(hover || active) && (
         <button
           type="button"
           onPointerDown={(e) => e.stopPropagation()}
