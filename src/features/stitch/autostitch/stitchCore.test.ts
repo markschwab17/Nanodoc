@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tokenVote, stitchSheets, type SheetInput } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -95,5 +95,35 @@ describe("stitchSheets", () => {
     expect(res.placements.has(2)).toBe(true);
     expect(res.placements.has(3)).toBe(true);
     expect([2, 3]).toContain(res.root);
+  });
+});
+
+describe("refineOffset", () => {
+  // Fine registration: sheet B's linework is sheet A's shifted by a known offset.
+  // Starting from a nearby coarse estimate, it must recover the offset to sub-foot.
+  it("recovers a precise translation from matching linework", () => {
+    const OFF = { dx: 5.3, dy: -2.1 }; // A - B = OFF (so B = A - OFF)
+    const fineA: SegFeat[] = Array.from({ length: 30 }, (_, i) => ({
+      mx: (i * 37) % 400, my: (i * 53) % 300, len: 3 + i * 0.7, ang: (i * 11) % 180,
+    }));
+    const fineB: SegFeat[] = fineA.map((s) => ({ ...s, mx: s.mx - OFF.dx, my: s.my - OFF.dy }));
+    const r = refineOffset(fineA, fineB, { dx: 5, dy: -2 }); // coarse start, within the window
+    expect(r).not.toBeNull();
+    expect(r!.dx).toBeCloseTo(5.3, 1);
+    expect(r!.dy).toBeCloseTo(-2.1, 1);
+    expect(r!.inliers).toBeGreaterThanOrEqual(12);
+    expect(r!.rms).toBeLessThan(0.1);
+  });
+
+  it("returns null when the true offset is outside the tight search window", () => {
+    const fineA: SegFeat[] = Array.from({ length: 30 }, (_, i) => ({
+      mx: (i * 37) % 400, my: (i * 53) % 300, len: 3 + i * 0.7, ang: (i * 11) % 180,
+    }));
+    const fineB: SegFeat[] = fineA.map((s) => ({ ...s, mx: s.mx - 50, my: s.my })); // 50 ft off
+    expect(refineOffset(fineA, fineB, { dx: 0, dy: 0 })).toBeNull(); // 50 >> window (6)
+  });
+
+  it("no-ops (null) with no geometry", () => {
+    expect(refineOffset([], [], { dx: 0, dy: 0 })).toBeNull();
   });
 });

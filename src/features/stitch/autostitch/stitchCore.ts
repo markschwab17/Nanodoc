@@ -65,7 +65,7 @@ export function tokenFeats(s: any, furn: { isFurniture(l: Label): boolean } | nu
     .filter((l: Label) => l.text.length >= 6 && /\d/.test(l.text) && (counts.get(l.text) || 0) <= 2 && !(furn && furn.isFurniture(l)))
     .map((l: Label) => ({ text: l.text, x: FT((l.x + l.endX) / 2, s.scale), y: FT((l.y + l.endY) / 2, s.scale) }));
 }
-export function segFeats(s: any): SegFeat[] {
+export function segFeats(s: any, minLenFt = 8): SegFeat[] {
   const out: SegFeat[] = [];
   for (const g of s.raw.geometry as Geom[]) {
     const pts = g.pts;
@@ -75,7 +75,7 @@ export function segFeats(s: any): SegFeat[] {
       const a = pts[i], b = pts[(i + 1) % pts.length];
       const dx = b[0] - a[0], dy = b[1] - a[1];
       const len = Math.hypot(dx, dy);
-      if (FT(len, s.scale) < 8) continue;
+      if (FT(len, s.scale) < minLenFt) continue;
       let ang = (Math.atan2(dy, dx) * 180) / Math.PI;
       ang = ((ang % 180) + 180) % 180;
       out.push({
@@ -276,10 +276,58 @@ export interface SheetInput { id: string; no: number; scale: number; view: [numb
 export interface PairReport { i: number; j: number; channel: string | null; conf: string | null; dxFt: number | null; dyFt: number | null; weight: number; residFt: number | null; }
 export interface StitchResult { root: number; placements: Map<number, { x: number; y: number }>; worstResidFt: number; pairs: PairReport[]; }
 
+/**
+ * FINE seam registration: the precise translation that best overlays sheet j's
+ * dense linework onto sheet i's, searched in a TIGHT window around a coarse
+ * offset d0 (from the global solve — already in the correct basin because the
+ * solve is anchored by the precise token pairs). Matches (len,angle)-signatured
+ * segments and votes their midpoint deltas into 0.25 ft bins, returning the
+ * inlier-mean. This turns a token-poor seam (matchline-only, few-foot precision)
+ * into a sub-foot lock; the inlier count is the confidence used to re-weight it.
+ * A no-op when a sheet carries no geometry (returns null). Exported for tests.
+ */
+export function refineOffset(
+  fineA: SegFeat[], fineB: SegFeat[], d0: { dx: number; dy: number },
+  { window = 6, bin = 0.25, lenTol = 0.5, angTol = 1.5, minInliers = 12 } = {}
+): { dx: number; dy: number; inliers: number; rms: number } | null {
+  const idx = new Map<string, SegFeat[]>();
+  const key = (s: SegFeat) => `${Math.round(s.len / lenTol)}:${Math.round(s.ang / angTol)}`;
+  for (const s of fineB) (idx.get(key(s)) || idx.set(key(s), []).get(key(s))!).push(s);
+  const bins = new Map<string, number>();
+  const deltas: { dx: number; dy: number }[] = [];
+  for (const a of fineA) {
+    const cand = idx.get(key(a));
+    if (!cand || cand.length > 25) continue; // skip signatures that alias everywhere
+    for (const c of cand) {
+      const dx = a.mx - c.mx, dy = a.my - c.my;
+      if (Math.abs(dx - d0.dx) > window || Math.abs(dy - d0.dy) > window) continue;
+      deltas.push({ dx, dy });
+      const k = `${Math.round(dx / bin)},${Math.round(dy / bin)}`;
+      bins.set(k, (bins.get(k) || 0) + 1);
+    }
+  }
+  if (deltas.length < minInliers) return null;
+  let best: { kx: number; ky: number; n9: number } | null = null;
+  for (const [k] of bins) {
+    const [kx, ky] = k.split(",").map(Number);
+    let n9 = 0;
+    for (let ux = -1; ux <= 1; ux++) for (let uy = -1; uy <= 1; uy++) n9 += bins.get(`${kx + ux},${ky + uy}`) || 0;
+    if (!best || n9 > best.n9) best = { kx, ky, n9 };
+  }
+  if (!best) return null;
+  const cx = best.kx * bin, cy = best.ky * bin;
+  const inl = deltas.filter((d) => Math.hypot(d.dx - cx, d.dy - cy) <= 2 * bin);
+  if (inl.length < minInliers) return null;
+  const mx = inl.reduce((s, d) => s + d.dx, 0) / inl.length;
+  const my = inl.reduce((s, d) => s + d.dy, 0) / inl.length;
+  const rms = Math.sqrt(inl.reduce((s, d) => s + (d.dx - mx) ** 2 + (d.dy - my) ** 2, 0) / inl.length);
+  return { dx: mx, dy: my, inliers: inl.length, rms };
+}
+
 interface DriverSheet {
   id: string; no: number; scale: number; view: [number, number, number, number];
   raw: { shxLabels: Label[]; labels: Label[]; geometry: Geom[]; view: [number, number, number, number] };
-  key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null;
+  key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null; segFine?: SegFeat[];
 }
 
 export function stitchSheets(inputs: SheetInput[]): StitchResult {
@@ -411,7 +459,30 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     }
   }
 
-  const { pos } = solveGlobal(keys, rootKey, constraints);
+  const { pos: coarsePos } = solveGlobal(keys, rootKey, constraints);
+
+  // ── FINE REGISTRATION ──────────────────────────────────────────────────────
+  // The coarse solve (anchored by the precise token pairs) lands each seam in the
+  // correct basin, but token-poor seams inherit matchline/segment coarseness.
+  // Refine each placed pair's delta by densely registering the overlap linework in
+  // a TIGHT window around the coarse offset, then re-solve with the precise,
+  // inlier-weighted geometry locks so every seam tightens to sub-foot. No-op when
+  // sheets carry no geometry (refineOffset returns null → constraint unchanged).
+  let pos = coarsePos;
+  if (mainSet.size >= 2) {
+    for (const s of sheets) if (mainSet.has(s.no) && !s.segFine) s.segFine = segFeats(s, 2);
+    const refinedConstraints = constraints.map((c) => {
+      if (!mainSet.has(c.i) || !mainSet.has(c.j)) return c;
+      const si = byNo.get(c.i)!, sj = byNo.get(c.j)!;
+      const pi = coarsePos.get(c.i)!, pj = coarsePos.get(c.j)!;
+      const r = refineOffset(si.segFine!, sj.segFine!, { dx: pj.x - pi.x, dy: pj.y - pi.y });
+      if (r && r.rms < 1) {
+        return { i: c.i, j: c.j, dx: r.dx, dy: r.dy, weight: r.inliers / (r.rms ** 2 + 0.01) };
+      }
+      return c;
+    });
+    pos = solveGlobal(keys, rootKey, refinedConstraints).pos;
+  }
 
   // worst residual over the PLACED component's token pairs only (a floating,
   // out-of-component pair would otherwise report a huge spurious residual).
