@@ -149,10 +149,12 @@ export function CleanupReview({
                     : "border-amber-500 bg-amber-500/10 hover:bg-amber-500/20"
                 }`}
                 style={{
-                  left: r.rect.x,
-                  top: r.rect.y,
-                  width: r.rect.w,
-                  height: r.rect.h,
+                  // region.rect is stored as fractions (0..1) of the tile — scale
+                  // back to this tile's local px so it aligns inside the transform.
+                  left: r.rect.x * tile.width,
+                  top: r.rect.y * tile.height,
+                  width: r.rect.w * tile.width,
+                  height: r.rect.h * tile.height,
                   pointerEvents: "auto",
                 }}
                 title={`${KIND_LABEL[r.kind]} — click to ${r.enabled ? "keep this area" : "hide this area"}`}

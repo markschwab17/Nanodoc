@@ -40,12 +40,15 @@ export async function detectCleanupForTiles(
   const furnSheets = extracts.map(({ ex }, i) => ({ key: i, raw: { shxLabels: [...ex.shxLabels, ...ex.labels] } }));
   const furn = buildFurnitureFilter(furnSheets, Math.max(2, Math.min(3, extracts.length)));
 
-  // 3. detect per page, map page-local points -> tile-local px (tile size / page size).
+  // 3. detect per page, map page-local points -> page FRACTIONS (0..1 of the
+  //    page view). Storing fractions instead of tile px makes hidden regions
+  //    survive resize + composition-scale automatically (the tile's width/height
+  //    can change without touching the stored region).
   const out: TileProposal[] = [];
   for (const { tile, ex } of extracts) {
     const [x0, y0, x1, y1] = ex.view;
-    const sx = tile.width / (x1 - x0 || 1), sy = tile.height / (y1 - y0 || 1);
-    const toLocal = (r: Rect): Rect => ({ x: (r.x - x0) * sx, y: (r.y - y0) * sy, w: r.w * sx, h: r.h * sy });
+    const pw = (x1 - x0) || 1, ph = (y1 - y0) || 1;
+    const toLocal = (r: Rect): Rect => ({ x: (r.x - x0) / pw, y: (r.y - y0) / ph, w: r.w / pw, h: r.h / ph });
     const regions: CleanupRegion[] = [];
     const tb = detectTitleBlock(ex, (l) => furn.isFurniture(l));
     if (tb) regions.push({ ...tb, rect: toLocal(tb.rect) });

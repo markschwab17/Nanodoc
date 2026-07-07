@@ -123,12 +123,14 @@ describe("pdfPoseForTile", () => {
 });
 
 describe("tileHoleRectsInPdf", () => {
-  test("maps an unrotated tile's hidden region into PDF (y-up) space", () => {
-    // tile 100x50 at (30,40); crop full page height 200; hidden region local (10,5,20,10)
-    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0, hiddenRegions: [{ x: 10, y: 5, w: 20, h: 10 }] } as any;
+  test("maps an unrotated tile's hidden region (tile-size fractions) into PDF (y-up) space", () => {
+    // tile 100x50 at (30,40); crop full page height 200; hidden region stored as
+    // fractions (0.1,0.1,0.2,0.2) → tile-local px (10,5,20,10).
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0, hiddenRegions: [{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }] } as any;
     const holes = tileHoleRectsInPdf(tile, 0, 0, 200);
     expect(holes).toHaveLength(1);
-    // pdf x = tile.x + local.x = 40 ; pdf y = cropH - (tile.y + local.y + local.h) = 200 - (40+5+10) = 145
+    // px: x=0.1*100=10, y=0.1*50=5, w=0.2*100=20, h=0.2*50=10
+    // pdf x = tile.x + px.x = 40 ; pdf y = cropH - (tile.y + px.y + px.h) = 200 - (40+5+10) = 145
     expect(holes[0]).toEqual({ x: 40, y: 145, w: 20, h: 10 });
   });
   test("no hidden regions -> empty", () => {

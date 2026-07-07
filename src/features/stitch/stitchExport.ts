@@ -183,11 +183,12 @@ export function pdfPoseForTile(
 }
 
 /**
- * Map a tile's `hiddenRegions` (tile-local coords) into the export page's
- * PDF (y-up) coordinate space, given the tile's draw pose. Returns [] when
- * the tile has no hidden regions, or when the tile is rotated — v1 skips
- * hole-clipping on rotated tiles (auto-align always produces rotation 0).
- * Exported for tests.
+ * Map a tile's `hiddenRegions` (stored as fractions 0..1 of the tile's
+ * width/height) into the export page's PDF (y-up) coordinate space, given the
+ * tile's draw pose. Fractions are scaled to tile px first, then to PDF space.
+ * Returns [] when the tile has no hidden regions, or when the tile is rotated —
+ * v1 skips hole-clipping on rotated tiles (auto-align always produces rotation
+ * 0). Exported for tests.
  */
 export function tileHoleRectsInPdf(
   tile: {
@@ -204,12 +205,19 @@ export function tileHoleRectsInPdf(
 ): { x: number; y: number; w: number; h: number }[] {
   const regions = tile.hiddenRegions ?? [];
   if (!regions.length || (tile.rotation ?? 0) !== 0) return [];
-  return regions.map((r) => ({
-    x: tile.x - cropX + r.x,
-    y: cropH - (tile.y - cropY + r.y + r.h), // flip to PDF y-up
-    w: r.w,
-    h: r.h,
-  }));
+  return regions.map((r) => {
+    // fraction (0..1) → tile-local px
+    const rx = r.x * tile.width;
+    const ry = r.y * tile.height;
+    const rw = r.w * tile.width;
+    const rh = r.h * tile.height;
+    return {
+      x: tile.x - cropX + rx,
+      y: cropH - (tile.y - cropY + ry + rh), // flip to PDF y-up
+      w: rw,
+      h: rh,
+    };
+  });
 }
 
 export async function exportStitchToPdf(): Promise<Uint8Array | null> {

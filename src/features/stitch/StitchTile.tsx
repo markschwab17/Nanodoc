@@ -333,7 +333,17 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // so the canvas must show the same thing (scale stamps included).
   const displayWidth = tile.width;
   const displayHeight = tile.height;
-  const hiddenClip = cssClipPathWithHoles(tile.width, tile.height, tile.hiddenRegions ?? []);
+  // hiddenRegions are stored as fractions (0..1) of the tile — scale to px for
+  // the clip helper. Rotated tiles are NOT clipped (v1): the export drops holes
+  // on rotated tiles too, so preview and export stay consistent.
+  const holesPx = (tile.hiddenRegions ?? []).map((r) => ({
+    x: r.x * tile.width,
+    y: r.y * tile.height,
+    w: r.w * tile.width,
+    h: r.h * tile.height,
+  }));
+  const hiddenClip =
+    (tile.rotation ?? 0) !== 0 ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
 
   return (
     <div

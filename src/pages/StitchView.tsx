@@ -326,6 +326,15 @@ export default function StitchView() {
         return;
       }
       const tile = hit.tile;
+      // v1 does not clip rotated tiles (both preview and export skip them), so a
+      // manual box on a rotated sheet would be stored but never take effect.
+      // Refuse it up front instead of silently dropping a dead region.
+      if ((tile.rotation ?? 0) !== 0) {
+        useNotificationStore
+          .getState()
+          .showNotification("Rotate the sheet upright before cleaning it up", "info");
+        return;
+      }
       // Canvas rect → tile-local (rotation-aware); clamp inside the tile.
       const a = canvasToTileLocal({ x: rect.x, y: rect.y }, tile);
       const b = canvasToTileLocal({ x: rect.x + rect.w, y: rect.y + rect.h }, tile);
@@ -336,8 +345,15 @@ export default function StitchView() {
       const ry = Math.min(tile.height, Math.max(a.v, b.v));
       if (rx - lx < 2 || ry - ly < 2) return;
       setCleanupProposals((prev) => {
+        // Store as fractions (0..1) of the tile so the region survives resize /
+        // composition-scale without recomputation.
         const region = {
-          rect: { x: lx, y: ly, w: rx - lx, h: ry - ly },
+          rect: {
+            x: lx / tile.width,
+            y: ly / tile.height,
+            w: (rx - lx) / tile.width,
+            h: (ry - ly) / tile.height,
+          },
           kind: "manual" as const,
           confidence: "high" as const,
           enabled: true,
