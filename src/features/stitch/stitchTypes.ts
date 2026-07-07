@@ -23,6 +23,8 @@ export interface StitchTile {
   scaleStampFeetPerInch?: number;
   /** Set to true when content-delete has modified this tile's image. Export will use raster instead of vector source. */
   imageModified?: boolean;
+  /** Non-destructive Clean-Composite regions to hide (tile-local coords). Never bakes into the raster. */
+  hiddenRegions?: CropRect[];
 }
 
 export interface CropRect {
