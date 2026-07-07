@@ -4,11 +4,11 @@
  */
 
 import { create } from "zustand";
-import type { StitchTile, CropRect, StitchUndoSnapshot } from "@/features/stitch/stitchTypes";
+import type { StitchTile, CropRect, RelocatedRegion, StitchUndoSnapshot } from "@/features/stitch/stitchTypes";
 import { CANVAS_PRESETS, UNDO_MAX_SIZE } from "@/features/stitch/stitchConstants";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
 
-export type { StitchTile, CropRect, StitchUndoSnapshot };
+export type { StitchTile, CropRect, RelocatedRegion, StitchUndoSnapshot };
 export { CANVAS_PRESETS };
 
 const defaultSize = CANVAS_PRESETS[0];
@@ -48,10 +48,12 @@ interface StitchState {
   redoStack: StitchUndoSnapshot[];
   setCanvasSize: (width: number, height: number) => void;
   addTiles: (tiles: Omit<StitchTile, "id">[]) => void;
-  updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified" | "hiddenRegions">>) => void;
+  updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified" | "hiddenRegions" | "relocatedRegions">>) => void;
   /** Apply patches to multiple tiles in one update (one undo step). */
   updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl" | "imageModified">> }>) => void;
   setHiddenRegions: (id: string, regions: CropRect[]) => void;
+  /** Set both hide + relocate regions for a tile in one undo step (Clean-Composite Apply). */
+  setCleanupRegions: (id: string, hidden: CropRect[], relocated: RelocatedRegion[]) => void;
   removeTile: (id: string) => void;
   /** Remove multiple tiles in one update (one undo step). */
   removeTiles: (ids: string[]) => void;
@@ -70,7 +72,7 @@ interface StitchState {
   setCropRect: (rect: CropRect | null) => void;
   setCropToContent: (margin?: number) => void;
   /** Update a tile WITHOUT pushing an undo snapshot — use during continuous drag/resize. */
-  updateTileNoUndo: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified" | "hiddenRegions">>) => void;
+  updateTileNoUndo: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified" | "hiddenRegions" | "relocatedRegions">>) => void;
   /** Update multiple tiles WITHOUT pushing an undo snapshot — use during continuous group drag/resize/rotate. */
   updateTilesNoUndo: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl" | "imageModified">> }>) => void;
   /** Manually push the current state as an undo snapshot. Call before starting a drag/resize operation. */
@@ -155,6 +157,13 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   setHiddenRegions: (id, regions) =>
     pushUndoAndSet(set, get, {
       tiles: get().tiles.map((t) => (t.id === id ? { ...t, hiddenRegions: regions } : t)),
+    }),
+
+  setCleanupRegions: (id, hidden, relocated) =>
+    pushUndoAndSet(set, get, {
+      tiles: get().tiles.map((t) =>
+        t.id === id ? { ...t, hiddenRegions: hidden, relocatedRegions: relocated } : t
+      ),
     }),
 
   updateTiles: (updates) =>

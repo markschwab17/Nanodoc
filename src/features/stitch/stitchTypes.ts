@@ -25,6 +25,10 @@ export interface StitchTile {
   imageModified?: boolean;
   /** Non-destructive Clean-Composite regions to hide, stored as fractions (0..1) of the tile's width/height. Never bakes into the raster. */
   hiddenRegions?: CropRect[];
+  /** Non-destructive Clean-Composite regions whose content is relocated (cut from
+   *  `rect` and redrawn at `rect` shifted by `dx`,`dy`). All fractions (0..1) of
+   *  the tile's width/height; y-down. Source is hidden, piece drawn at the offset. */
+  relocatedRegions?: RelocatedRegion[];
 }
 
 export interface CropRect {
@@ -32,6 +36,13 @@ export interface CropRect {
   y: number;
   w: number;
   h: number;
+}
+
+/** A Clean-Composite region relocated within its tile: source `rect` + offset. */
+export interface RelocatedRegion {
+  rect: CropRect;
+  dx: number;
+  dy: number;
 }
 
 /** Snapshot of state for undo/redo (tiles are shallow-copied; refs for blobs/urls kept). */
