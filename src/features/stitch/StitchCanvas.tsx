@@ -182,6 +182,10 @@ export interface StitchCanvasProps {
   cleanupProposals?: TileProposalUI[];
   /** Toggle a proposed region's enabled state. */
   onToggleCleanupRegion?: (tileId: string, index: number) => void;
+  /** Move/resize a proposed region (rect in tile-size fractions). */
+  onUpdateCleanupRegion?: (tileId: string, index: number, rect: { x: number; y: number; w: number; h: number }) => void;
+  /** Delete a proposed region. */
+  onDeleteCleanupRegion?: (tileId: string, index: number) => void;
   /** User drew a manual hide-box (canvas-space rect). */
   onCleanupManualBox?: (rect: CanvasRect) => void;
 }
@@ -208,6 +212,8 @@ export function StitchCanvas({
   cleanupReviewMode = false,
   cleanupProposals,
   onToggleCleanupRegion,
+  onUpdateCleanupRegion,
+  onDeleteCleanupRegion,
   onCleanupManualBox,
 }: StitchCanvasProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -454,6 +460,8 @@ export function StitchCanvas({
             tiles={tiles}
             clientToCanvas={clientToCanvas}
             onToggleRegion={onToggleCleanupRegion ?? (() => {})}
+            onUpdateRegion={onUpdateCleanupRegion ?? (() => {})}
+            onDeleteRegion={onDeleteCleanupRegion ?? (() => {})}
             onManualBox={onCleanupManualBox ?? (() => {})}
           />
         )}

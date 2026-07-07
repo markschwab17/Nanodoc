@@ -316,6 +316,29 @@ export default function StitchView() {
     );
   }, []);
 
+  // Move/resize a proposed region (rect in tile-size fractions, 0..1).
+  const handleUpdateCleanupRegion = useCallback(
+    (tileId: string, index: number, rect: { x: number; y: number; w: number; h: number }) => {
+      setCleanupProposals((prev) =>
+        prev.map((p) =>
+          p.tileId === tileId
+            ? { ...p, regions: p.regions.map((r, i) => (i === index ? { ...r, rect } : r)) }
+            : p
+        )
+      );
+    },
+    []
+  );
+
+  // Remove a proposed region entirely.
+  const handleDeleteCleanupRegion = useCallback((tileId: string, index: number) => {
+    setCleanupProposals((prev) =>
+      prev.map((p) =>
+        p.tileId === tileId ? { ...p, regions: p.regions.filter((_, i) => i !== index) } : p
+      )
+    );
+  }, []);
+
   const handleCleanupManualBox = useCallback(
     (rect: CanvasRect) => {
       const tiles = useStitchStore.getState().tiles;
@@ -632,6 +655,8 @@ export default function StitchView() {
           cleanupReviewMode={cleanupReviewMode}
           cleanupProposals={cleanupProposals}
           onToggleCleanupRegion={handleToggleCleanupRegion}
+          onUpdateCleanupRegion={handleUpdateCleanupRegion}
+          onDeleteCleanupRegion={handleDeleteCleanupRegion}
           onCleanupManualBox={handleCleanupManualBox}
         />
         {cleanupBusy && (
@@ -647,7 +672,7 @@ export default function StitchView() {
             <span className="text-sm font-medium text-popover-foreground">
               Clean up: {cleanupEnabledCount} region{cleanupEnabledCount === 1 ? "" : "s"} will be hidden
             </span>
-            <span className="hidden sm:inline text-xs text-muted-foreground">Click a box to toggle · drag a box to add</span>
+            <span className="hidden sm:inline text-xs text-muted-foreground">Click toggle · drag move · handles resize · ✕ delete · drag empty to add</span>
             <Button variant="ghost" size="sm" className="h-7" onClick={exitCleanupReview}>
               Cancel
             </Button>

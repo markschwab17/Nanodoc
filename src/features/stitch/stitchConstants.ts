@@ -35,6 +35,9 @@ export const RESIZE_CURSORS: Record<string, string> = {
 };
 
 export const MIN_ERASE_SIZE = 5;
+/** Drag distance (screen px) below which a Clean-up region pointer press counts
+ *  as a click (toggle keep/hide) rather than a move. */
+export const REGION_DRAG_THRESHOLD_PX = 4;
 /** Min distance (canvas px) between points when recording stroke. */
 export const STROKE_POINT_MIN_DIST = 2;
 
