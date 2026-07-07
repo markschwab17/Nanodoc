@@ -21,32 +21,67 @@ function eachSegment(geometry: Geom[], cb: (ax: number, ay: number, bx: number, 
   }
 }
 
-/** Longest near-vertical stroke whose x is within `band` of nearX and which spans most of [y0,y1]. Returns its x or null. */
-function snapVerticalBorder(geometry: Geom[], nearX: number, y0: number, y1: number, band = 120): number | null {
-  const H = y1 - y0; let bestX: number | null = null, bestSpan = -1;
+/**
+ * Find the title-block's precise inner border on one edge, given the inner edge
+ * of the furniture cluster (`furnInner`, the coordinate of the furniture furthest
+ * from the sheet edge). Walks full-span parallel border lines INWARD from the
+ * sheet edge, bridging the title-block grid (first prominent border within
+ * `maxFrac`, then consecutive borders within `gapFrac`) until a big gap = open
+ * drawing. Returns the walked border ONLY if it encloses the furniture cluster —
+ * otherwise the walk was trapped on the outer sheet frame (a wide right strip
+ * whose inner boundary is horizontal dividers, not one tall vertical line), so we
+ * snap to the nearest full-span line to `furnInner`, and failing that return null
+ * (caller falls back to `furnInner` itself). This captures a tall FOOTER band
+ * (whose small text sits only at the very edge, but whose top border is a
+ * closely-spaced grid line) yet still handles a wide right column with no full-
+ * height inner border, without over-extending into the drawing.
+ */
+function findTitleBlockBorder(
+  geometry: Geom[], edge: "right" | "left" | "top" | "bottom",
+  x0: number, y0: number, x1: number, y1: number, furnInner: number,
+  maxFrac = 0.4, gapFrac = 0.12, minSpanFrac = 0.5,
+): number | null {
+  const W = x1 - x0, H = y1 - y0;
+  const vertical = edge === "right" || edge === "left";
+  const dim = vertical ? W : H;
+  const minSpan = minSpanFrac * (vertical ? H : W);
+  const edgeCoord = edge === "right" ? x1 : edge === "left" ? x0 : edge === "bottom" ? y1 : y0;
+  const furnInnerDist = Math.abs(furnInner - edgeCoord);
+  const coords: number[] = [];
   eachSegment(geometry, (ax, ay, bx, by) => {
-    if (Math.abs(bx - ax) > 3) return;                 // vertical
-    const x = (ax + bx) / 2;
-    if (Math.abs(x - nearX) > band) return;
-    const span = Math.abs(by - ay);
-    if (span < 0.5 * H) return;                          // spans most of the sheet
-    if (span > bestSpan) { bestSpan = span; bestX = x; }
+    if (vertical) {
+      if (Math.abs(bx - ax) > 3 || Math.abs(by - ay) < minSpan) return; // full-height vertical
+      coords.push((ax + bx) / 2);
+    } else {
+      if (Math.abs(by - ay) > 3 || Math.abs(bx - ax) < minSpan) return; // full-width horizontal
+      coords.push((ay + by) / 2);
+    }
   });
-  return bestX;
-}
+  // Bound the search to the title block: no further than maxFrac of the sheet, and
+  // no more than gapFrac past the furniture inner edge (stops runaway into the drawing).
+  const cap = Math.min(maxFrac * dim, furnInnerDist + gapFrac * dim);
+  const cand = coords
+    .map((c) => ({ c, dist: Math.abs(c - edgeCoord) }))
+    .filter((o) => o.dist > 2 && o.dist <= cap)
+    .sort((a, b) => a.dist - b.dist);
 
-/** Longest near-horizontal stroke near nearY spanning most of [x0,x1]. Returns its y or null. */
-function snapHorizontalBorder(geometry: Geom[], nearY: number, x0: number, x1: number, band = 120): number | null {
-  const W = x1 - x0; let bestY: number | null = null, bestSpan = -1;
-  eachSegment(geometry, (ax, ay, bx, by) => {
-    if (Math.abs(by - ay) > 3) return;                 // horizontal
-    const y = (ay + by) / 2;
-    if (Math.abs(y - nearY) > band) return;
-    const span = Math.abs(bx - ax);
-    if (span < 0.5 * W) return;
-    if (span > bestSpan) { bestSpan = span; bestY = y; }
-  });
-  return bestY;
+  // Walk inward through the grid.
+  let border: number | null = null, prevDist = 0;
+  for (const o of cand) {
+    const allowed = border === null ? maxFrac * dim : gapFrac * dim;
+    if (o.dist - prevDist > allowed) break;
+    border = o.c; prevDist = o.dist;
+  }
+  // Accept the walk only if it reaches (encloses) the furniture cluster.
+  if (border != null && prevDist >= furnInnerDist - 0.04 * dim) return border;
+
+  // Trapped (or no grid): snap to the full-span line nearest the furniture inner edge.
+  let best: number | null = null, bestD = Infinity;
+  for (const o of cand) {
+    const d = Math.abs(o.dist - furnInnerDist);
+    if (d < bestD && d <= gapFrac * dim) { bestD = d; best = o.c; }
+  }
+  return best;
 }
 
 export function detectTitleBlock(page: PageExtract, isFurniture: (l: Label) => boolean): CleanupRegion | null {
@@ -58,25 +93,22 @@ export function detectTitleBlock(page: PageExtract, isFurniture: (l: Label) => b
   const rightFrac = (median(xs) - x0) / W, botFrac = (median(ys) - y0) / H;
 
   if (rightFrac > 0.72) {
-    // Inner edge from ONLY the furniture in the right region — a stray
-    // furniture-flagged label out in the drawing area must not widen the strip
-    // across the sheet (seen on Rose Hill C5.01/C7.01/C8.00: a lone left label
-    // dragged innerX to ~33% width, hiding 2/3 of the drawing).
+    // Inner edge from ONLY the right-region furniture — a stray furniture-flagged
+    // label out in the drawing must not widen the strip across the sheet (Rose Hill).
     const rightXs = xs.filter((x) => (x - x0) / W > 0.6);
-    const innerX = Math.min(...(rightXs.length ? rightXs : xs));
-    const snapped = snapVerticalBorder(page.geometry, innerX, y0, y1);
-    const bx = snapped ?? innerX;
-    return { rect: { x: bx, y: y0, w: x1 - bx, h: H }, kind: "title-block", confidence: snapped != null ? "high" : "medium" };
+    const furnInnerX = Math.min(...(rightXs.length ? rightXs : xs));
+    const border = findTitleBlockBorder(page.geometry, "right", x0, y0, x1, y1, furnInnerX);
+    const bx = border ?? furnInnerX;
+    return { rect: { x: bx, y: y0, w: x1 - bx, h: H }, kind: "title-block", confidence: border != null ? "high" : "medium" };
   }
   if (botFrac > 0.72 || botFrac < 0.14) {
     const bottom = botFrac >= 0.5;
-    // Same robustness for a bottom/top strip: only cluster furniture near the edge.
     const bandYs = ys.filter((y) => (bottom ? (y - y0) / H > 0.6 : (y - y0) / H < 0.4));
     const src = bandYs.length ? bandYs : ys;
-    const innerY = bottom ? Math.min(...src) : Math.max(...src);
-    const snapped = snapHorizontalBorder(page.geometry, innerY, x0, x1);
-    const by = snapped ?? innerY;
-    const conf = snapped != null ? "high" : "medium";
+    const furnInnerY = bottom ? Math.min(...src) : Math.max(...src);
+    const border = findTitleBlockBorder(page.geometry, bottom ? "bottom" : "top", x0, y0, x1, y1, furnInnerY);
+    const by = border ?? furnInnerY;
+    const conf = border != null ? "high" : "medium";
     return bottom
       ? { rect: { x: x0, y: by, w: W, h: y1 - by }, kind: "title-block", confidence: conf }
       : { rect: { x: x0, y: y0, w: W, h: by - y0 }, kind: "title-block", confidence: conf };

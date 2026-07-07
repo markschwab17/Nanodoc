@@ -28,6 +28,37 @@ describe("detectTitleBlock", () => {
     expect(detectTitleBlock(base([L("BUILDING D", 800, 600)]), () => false)).toBeNull();
   });
 
+  it("captures a full FOOTER band up to its top border, above the low-sitting text", () => {
+    // Constant footer fields sit at the very bottom edge (y ~ 1690), but the
+    // footer's TOP border is a full-width grid line 140pt higher (y = 1548).
+    // The strip must reach the top border, not stop at the text or the frame.
+    const furn = [L("PROJECT 194786001", 1100, 1690), L("04/28/2026", 1900, 1695), L("30850 DATE PALM DR", 900, 1700)];
+    const topBorder: Geom = { id: "t", pts: [[20, 1548], [2570, 1548]], closed: false }; // footer top
+    const frame: Geom = { id: "f", pts: [[20, 1691], [2570, 1691]], closed: false };      // outer sheet frame
+    const r = detectTitleBlock(base(furn, [topBorder, frame]), () => true);
+    expect(r).not.toBeNull();
+    expect(r!.kind).toBe("title-block");
+    expect(r!.rect.x).toBeCloseTo(0, 0);
+    expect(r!.rect.w).toBeCloseTo(2592, 0);
+    expect(r!.rect.y).toBeCloseTo(1548, 0);       // reaches the top border, not the 1691 frame
+    expect(r!.rect.h).toBeCloseTo(1728 - 1548, 0);
+    expect(r!.confidence).toBe("high");
+  });
+
+  it("falls back to the furniture inner edge for a wide right strip with no inner border line", () => {
+    // A right-column title block whose inner boundary is horizontal dividers, not
+    // one tall vertical line — the only full-height vertical is the outer frame.
+    // The walk would trap on the frame; it must fall back to the furniture edge.
+    const furn = [L("RICK ENGINEERING", 1855, 300), L("VICINITY MAP", 2000, 800), L("SHEET C1.0", 2200, 1400)];
+    const frame: Geom = { id: "f", pts: [[2556, 40], [2556, 1690]], closed: false }; // outer frame only
+    const r = detectTitleBlock(base(furn, [frame]), () => true);
+    expect(r).not.toBeNull();
+    // innermost furniture CENTER (label at x=1855, cx = 1855 + 60), NOT trapped at the 2556 frame
+    expect(r!.rect.x).toBeCloseTo(1915, 0);
+    expect(r!.rect.w).toBeCloseTo(2592 - 1915, 0);
+    expect(r!.confidence).toBe("medium");          // no inner border to snap to
+  });
+
   it("ignores a stray furniture label in the drawing area (strip stays at the right cluster)", () => {
     const furn = [
       L("RICK ENGINEERING", 2120, 200), L("REV 3  06/01/26", 2120, 400), L("SHEET C5.01", 2120, 1600),
