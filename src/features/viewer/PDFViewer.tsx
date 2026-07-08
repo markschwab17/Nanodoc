@@ -46,7 +46,7 @@ export function PDFViewer() {
   const getCurrentDocument = usePDFStore((s) => s.getCurrentDocument);
   const getAnnotations = usePDFStore((s) => s.getAnnotations);
   const updateAnnotation = usePDFStore((s) => s.updateAnnotation);
-  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, splitScreenMode } = useUIStore();
+  const { readMode, toggleReadMode, zoomLevel, fitMode, setZoomLevel, setFitMode, zoomToCenter, splitScreenMode, activeTool } = useUIStore();
   const { showRulers, toggleRulers } = useDocumentSettingsStore();
   const { setSelectedSpec, getSpecHighlights, setTemporaryHighlight } = useSpecExtractionStore();
   const { showNotification } = useNotificationStore();
@@ -1236,6 +1236,97 @@ export function PDFViewer() {
       if (zoomRAFRef.current !== null) cancelAnimationFrame(zoomRAFRef.current);
     };
   }, [readMode, zoomToPoint]);
+
+  // Read-mode drag-to-pan (hand tool). Read mode uses a native-scrolling
+  // container, so panning here means grab-dragging to adjust scrollLeft/scrollTop
+  // (edit mode instead uses PageCanvas's transform-based panOffset, which is
+  // gated off in read mode). Active on: left-drag while the pan tool is selected
+  // or Space is held, or a middle-mouse drag. Normal left-clicks fall through so
+  // text selection / links keep working.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!readMode || !container) return;
+
+    let isSpacePressed = false;
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startScrollLeft = 0;
+    let startScrollTop = 0;
+
+    const canPan = () => activeTool === "pan" || isSpacePressed;
+    const updateCursor = () => {
+      container.style.cursor = isDragging ? "grabbing" : canPan() ? "grab" : "";
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      e.preventDefault();
+      container.scrollLeft = startScrollLeft - (e.clientX - startX);
+      container.scrollTop = startScrollTop - (e.clientY - startY);
+    };
+
+    const endDrag = () => {
+      if (!isDragging) return;
+      isDragging = false;
+      container.classList.remove("read-pan-dragging");
+      container.style.scrollBehavior = "smooth"; // restore the smooth-scroll used elsewhere
+      window.removeEventListener("mousemove", onMouseMove, true);
+      window.removeEventListener("mouseup", endDrag, true);
+      updateCursor();
+    };
+
+    const onMouseDown = (e: MouseEvent) => {
+      const middle = e.button === 1;
+      const leftPan = e.button === 0 && canPan();
+      if (!middle && !leftPan) return;
+      e.preventDefault(); // suppress text-selection and the middle-click autoscroll circle
+      e.stopPropagation(); // capture-phase: keep PageCanvas / annotation handlers from firing
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startScrollLeft = container.scrollLeft;
+      startScrollTop = container.scrollTop;
+      container.style.scrollBehavior = "auto"; // instant tracking while dragging
+      container.classList.add("read-pan-dragging");
+      window.addEventListener("mousemove", onMouseMove, true);
+      window.addEventListener("mouseup", endDrag, true);
+      updateCursor();
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || e.repeat) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el) {
+        const tag = el.tagName.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable) return;
+      }
+      isSpacePressed = true;
+      e.preventDefault(); // don't page-scroll on Space while it's the pan modifier
+      if (!isDragging) updateCursor();
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== "Space") return;
+      isSpacePressed = false;
+      if (!isDragging) updateCursor();
+    };
+
+    container.addEventListener("mousedown", onMouseDown, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    updateCursor();
+
+    return () => {
+      container.removeEventListener("mousedown", onMouseDown, true);
+      window.removeEventListener("mousemove", onMouseMove, true);
+      window.removeEventListener("mouseup", endDrag, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      container.classList.remove("read-pan-dragging");
+      container.style.cursor = "";
+      container.style.scrollBehavior = "";
+    };
+  }, [readMode, activeTool]);
 
   // Expose read mode zoom function via UI store callback
   // For button clicks, zoom to viewport center

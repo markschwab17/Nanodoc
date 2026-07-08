@@ -445,6 +445,13 @@
   }
 }
 
+/* Read-mode drag-to-pan: force the grabbing cursor over pages (which set their
+   own cursor) while a hand-tool drag is in progress on the scroll container. */
+.read-pan-dragging,
+.read-pan-dragging * {
+  cursor: grabbing !important;
+}
+
 
 
 
