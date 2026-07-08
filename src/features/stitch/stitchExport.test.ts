@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds } from "./stitchExport";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
 
@@ -164,6 +164,21 @@ describe("tileRelocationsInPdf", () => {
     const tile = { x: 0, y: 0, width: 100, height: 50, rotation: 90,
       relocatedRegions: [{ rect: { x: 0, y: 0, w: 0.2, h: 0.2 }, dx: 0.1, dy: 0.1 }] } as any;
     expect(tileRelocationsInPdf(tile, 0, 0, 200)).toEqual([]);
+  });
+});
+
+describe("contentExportBounds", () => {
+  test("returns the canvas when all tiles are inside it", () => {
+    const b = contentExportBounds(1000, 800, [{ x: 100, y: 100, width: 200, height: 200 }]);
+    expect(b).toEqual({ cropX: 0, cropY: 0, cropW: 1000, cropH: 800 });
+  });
+  test("expands to include a tile parked in the open space (right/below)", () => {
+    const b = contentExportBounds(1000, 800, [{ x: 1100, y: 850, width: 300, height: 200 }]);
+    expect(b).toEqual({ cropX: 0, cropY: 0, cropW: 1400, cropH: 1050 });
+  });
+  test("expands with a negative origin for a tile above/left of the canvas", () => {
+    const b = contentExportBounds(1000, 800, [{ x: -150, y: -60, width: 100, height: 100 }]);
+    expect(b).toEqual({ cropX: -150, cropY: -60, cropW: 1150, cropH: 860 });
   });
 });
 

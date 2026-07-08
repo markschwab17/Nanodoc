@@ -262,13 +262,35 @@ export function tileRelocationsInPdf(
   });
 }
 
+/**
+ * Export page bounds when there is no explicit crop: the canvas rect (0,0,W,H)
+ * expanded to include every tile AABB, so tiles parked in the open space around
+ * the canvas are not cut from the export. Exported for tests.
+ */
+export function contentExportBounds(
+  canvasWidth: number,
+  canvasHeight: number,
+  aabbs: { x: number; y: number; width: number; height: number }[]
+): { cropX: number; cropY: number; cropW: number; cropH: number } {
+  let minX = 0, minY = 0, maxX = canvasWidth, maxY = canvasHeight;
+  for (const a of aabbs) {
+    minX = Math.min(minX, a.x);
+    minY = Math.min(minY, a.y);
+    maxX = Math.max(maxX, a.x + a.width);
+    maxY = Math.max(maxY, a.y + a.height);
+  }
+  return { cropX: minX, cropY: minY, cropW: maxX - minX, cropH: maxY - minY };
+}
+
 export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
 
-  const cropX = cropRect?.x ?? 0;
-  const cropY = cropRect?.y ?? 0;
-  const cropW = cropRect?.w ?? canvasWidth;
-  const cropH = cropRect?.h ?? canvasHeight;
+  // No explicit crop: the page is the canvas, EXPANDED to include any tiles the
+  // user parked in the open space around the canvas (e.g. relocated notes), so
+  // nothing off-page is silently cut from the export.
+  const { cropX, cropY, cropW, cropH } = cropRect
+    ? { cropX: cropRect.x, cropY: cropRect.y, cropW: cropRect.w, cropH: cropRect.h }
+    : contentExportBounds(canvasWidth, canvasHeight, tiles.map((t) => getTileAABB(t)));
 
   const tilesToDraw = tiles.filter((t) => tileIntersectsCrop(t, cropX, cropY, cropW, cropH));
 
