@@ -219,7 +219,11 @@ export default function CiviltakeoffView() {
         // Apply CTO project-details defaults: read mode (fit width for split-screen), thumbnail sidebar open
         const ui = useUIStore.getState();
         if (params.read_mode === "1") {
-          ui.setReadMode(true);
+          // Single-page PDFs open in normal (edit) mode; read mode is for multi-page docs.
+          // Page count is available here because the PDF finished loading above.
+          const pageCount =
+            usePDFStore.getState().getCurrentDocument()?.getPageCount() ?? 1;
+          ui.setReadMode(pageCount > 1);
         }
         if (params.sidebar === "1") {
           ui.setInitialSidebarOpen(true);
