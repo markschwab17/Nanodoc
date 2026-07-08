@@ -277,7 +277,11 @@ export default function StitchView() {
       exitCleanupReview();
       return;
     }
-    const reviewable = useStitchStore.getState().tiles.filter((t) => !t.isScaleStamp && !(t.rotation ?? 0));
+    // Only sheets with a PDF source get analyzed — skip scale stamps, rotated
+    // tiles (v1), and promoted note tiles (no source, would fail to capture).
+    const reviewable = useStitchStore
+      .getState()
+      .tiles.filter((t) => !t.isScaleStamp && !(t.rotation ?? 0) && t.sourcePdfBytes.length > 0);
     if (reviewable.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
