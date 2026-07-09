@@ -389,3 +389,18 @@ describe("page labels: integrated reader", () => {
     expect(readIntegratedPageLabels(doc.asPDF(), 3)).toEqual([null, null, null]);
   });
 });
+
+describe("page labels: /NanodocLabel metadata", () => {
+  it("readPageMetadata surfaces a written /NanodocLabel", async () => {
+    const bytes = await buildBasicPdf(2);
+    const doc = new PDFDocument("doc_label_meta", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    // Write /NanodocLabel directly on page 1's dict.
+    const pdfDoc = doc.getMupdfDocument().asPDF();
+    const page = pdfDoc.loadPage(1);
+    page.getObject().put("NanodocLabel", pdfDoc.newString("Appendix A"));
+    doc.refreshPageMetadata();
+    expect(doc.getPageMetadata(1)?.label).toBe("Appendix A");
+    expect(doc.getPageMetadata(0)?.label).toBeUndefined();
+  });
+});

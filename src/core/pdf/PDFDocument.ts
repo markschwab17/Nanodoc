@@ -10,6 +10,8 @@ export interface PDFPageMetadata {
   width: number;
   height: number;
   rotation: number;
+  /** Stored per-page label from the /NanodocLabel page-dict key. Undefined when unstored. */
+  label?: string;
 }
 
 export interface PDFDocumentMetadata {
@@ -106,11 +108,25 @@ export class PDFDocument {
     // Normalize rotation to 0-360 range
     rotation = ((rotation % 360) + 360) % 360;
 
+    // Read stored per-page label (custom /NanodocLabel key), if present.
+    let label: string | undefined;
+    try {
+      const pageObj = page.getObject();
+      const labelObj = pageObj?.get("NanodocLabel");
+      if (labelObj !== null && labelObj !== undefined && !(labelObj.isNull?.() ?? false)) {
+        const s = typeof labelObj.asString === "function" ? labelObj.asString() : null;
+        if (s) label = s;
+      }
+    } catch {
+      label = undefined;
+    }
+
     return {
       pageNumber: i,
       width: bounds[2] - bounds[0],
       height: bounds[3] - bounds[1],
       rotation,
+      label,
     };
   }
 
