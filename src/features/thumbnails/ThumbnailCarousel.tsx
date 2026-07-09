@@ -8,6 +8,7 @@ import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/s
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { ThumbnailItem } from "./ThumbnailItem";
+import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import {
   getOrCreateTiledRenderer,
@@ -27,7 +28,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useRef } from "react";
-import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal, Plus, FilePlus, FileUp, FileIcon } from "lucide-react";
+import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal, Plus, FilePlus, FileUp, FileIcon, Bookmark } from "lucide-react";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
@@ -38,7 +39,7 @@ import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useESignStore } from "@/shared/stores/esignStore";
 
-type TabType = "pages" | "search";
+type TabType = "pages" | "search" | "bookmarks";
 
 export function ThumbnailCarousel() {
   const { currentPage, setCurrentPage, getCurrentDocument, setSearchResults, getSearchResults, currentSearchResult, setCurrentSearchResult, getAnnotations, documents } = usePDFStore();
@@ -1486,31 +1487,46 @@ export function ThumbnailCarousel() {
 
   return (
     <div className="flex flex-col h-full w-full min-w-0">
-      {/* Tab Navigation */}
-      <div className="flex border-b bg-background flex-shrink-0">
+      {/* Tab Navigation. pr-7 reserves the top-right corner for the sidebar
+          collapse chevron (an absolute overlay in Editor.tsx) so the last tab
+          never slides under it. Compact padding/type keeps all three labels
+          visible in the 256px sidebar. */}
+      <div className="flex border-b bg-background flex-shrink-0 pr-7">
         <Button
           variant="ghost"
           size="sm"
           className={cn(
-            "rounded-none border-b-2 border-transparent",
+            "rounded-none border-b-2 border-transparent px-1.5 text-xs",
             activeTab === "pages" && "border-primary"
           )}
           onClick={() => setActiveTab("pages")}
         >
-          <FileText className="h-4 w-4 mr-2" />
+          <FileText className="h-3.5 w-3.5 mr-1 shrink-0" />
           Pages
         </Button>
         <Button
           variant="ghost"
           size="sm"
           className={cn(
-            "rounded-none border-b-2 border-transparent",
+            "rounded-none border-b-2 border-transparent px-1.5 text-xs",
             activeTab === "search" && "border-primary"
           )}
           onClick={() => setActiveTab("search")}
         >
-          <Search className="h-4 w-4 mr-2" />
+          <Search className="h-3.5 w-3.5 mr-1 shrink-0" />
           Search
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "rounded-none border-b-2 border-transparent px-1.5 text-xs",
+            activeTab === "bookmarks" && "border-primary"
+          )}
+          onClick={() => setActiveTab("bookmarks")}
+        >
+          <Bookmark className="h-3.5 w-3.5 mr-1 shrink-0" />
+          Bookmarks
         </Button>
       </div>
 
@@ -1799,7 +1815,7 @@ export function ThumbnailCarousel() {
               </Popover>
             </div>}
           </div>
-        ) : (
+        ) : activeTab === "search" ? (
           <div className="flex flex-col p-3 gap-3">
             {/* Search Input */}
             <div className="relative">
@@ -1891,6 +1907,8 @@ export function ThumbnailCarousel() {
               </div>
             )}
           </div>
+        ) : (
+          <BookmarksPanel />
         )}
       </ScrollArea>
 

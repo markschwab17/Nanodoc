@@ -8,17 +8,14 @@ import { useEffect, useState } from "react";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { BookmarkItem } from "./BookmarkItem";
 import { PDFBookmarks } from "@/core/pdf/PDFBookmarks";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { BookmarkPlus, ChevronUp, ChevronDown } from "lucide-react";
+import { BookmarkPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 
 export function BookmarksPanel() {
   const { getCurrentDocument, getBookmarks, addBookmark, setCurrentPage } = usePDFStore();
   const currentDocument = getCurrentDocument();
   const [pdfBookmarks, setPdfBookmarks] = useState<PDFBookmarks | null>(null);
   const [appBookmarks, setAppBookmarks] = useState<any[]>([]);
-  const [isExpanded, setIsExpanded] = useState(false);
 
   useEffect(() => {
     const initBookmarks = async () => {
@@ -74,59 +71,43 @@ export function BookmarksPanel() {
     return null;
   }
 
+  // Rendered as the "Bookmarks" tab content inside ThumbnailCarousel's shared
+  // ScrollArea, so this only lays out the header row + list (no scroll wrapper
+  // or collapsible chrome of its own).
   return (
-    <div className={cn(
-      "flex flex-col border-t bg-background transition-all duration-300",
-      isExpanded ? "max-h-[50vh]" : "max-h-[40px]"
-    )}>
-      {/* Header - always visible */}
-      <div className="p-2 border-b bg-background flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-2 flex-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            onClick={() => setIsExpanded(!isExpanded)}
-            title={isExpanded ? "Collapse bookmarks" : "Expand bookmarks"}
-          >
-            {isExpanded ? (
-              <ChevronDown className="h-4 w-4" />
-            ) : (
-              <ChevronUp className="h-4 w-4" />
-            )}
-          </Button>
-          <h2 className="text-sm font-semibold">Bookmarks</h2>
-        </div>
+    <div className="flex flex-col p-3 gap-2">
+      {/* Header row: count + add-current-page */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground">
+          {appBookmarks.length} bookmark{appBookmarks.length === 1 ? "" : "s"}
+        </span>
         <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6"
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1.5"
           onClick={handleAddBookmark}
           title="Bookmark current page"
         >
-          <BookmarkPlus className="h-4 w-4" />
+          <BookmarkPlus className="h-3.5 w-3.5" />
+          Add
         </Button>
       </div>
-      
-      {/* Content - expands/collapses */}
-      {isExpanded && (
-        <ScrollArea className="flex-1 min-h-0">
-          <div className="p-2">
-            {appBookmarks.length === 0 ? (
-              <div className="text-sm text-muted-foreground text-center py-8">
-                No bookmarks yet
-              </div>
-            ) : (
-              appBookmarks.map((bookmark) => (
-                <BookmarkItem
-                  key={bookmark.id}
-                  bookmark={bookmark}
-                  onClick={() => handleBookmarkClick(bookmark.pageNumber)}
-                />
-              ))
-            )}
-          </div>
-        </ScrollArea>
+
+      {/* List */}
+      {appBookmarks.length === 0 ? (
+        <div className="text-sm text-muted-foreground text-center py-8">
+          No bookmarks yet
+        </div>
+      ) : (
+        <div className="flex flex-col">
+          {appBookmarks.map((bookmark) => (
+            <BookmarkItem
+              key={bookmark.id}
+              bookmark={bookmark}
+              onClick={() => handleBookmarkClick(bookmark.pageNumber)}
+            />
+          ))}
+        </div>
       )}
     </div>
   );

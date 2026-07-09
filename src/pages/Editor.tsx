@@ -9,7 +9,6 @@ import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { PDFViewer } from "@/features/viewer/PDFViewer";
 import { TabBar } from "@/features/tabs/TabBar";
-import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
 import { Toolbar } from "@/features/toolbar/Toolbar";
 import { CTOSplitScreenToolbar } from "@/features/toolbar/CTOSplitScreenToolbar";
@@ -884,9 +883,6 @@ function Editor() {
                   </div>
                 </div>
               )}
-            <div className="flex-shrink-0">
-              <BookmarksPanel />
-            </div>
             </div>
           </div>
           {/* Expand button: visible when collapsed, on top so it receives clicks */}
