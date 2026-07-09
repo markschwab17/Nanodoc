@@ -344,9 +344,35 @@ export class PDFPageOperations {
     
     // Rotate annotations on this page to match the page rotation
     await this.rotatePageAnnotations(document, pageNumber, currentRotation, finalRotation);
-    
+
     document.refreshPageMetadata();
-    
+
+  }
+
+  /**
+   * Set (or clear) a page's stored label (/NanodocLabel in the page dict).
+   * Empty/whitespace text deletes the key. Mirrors rotatePage's dict access
+   * so the label rides the physical page through rearrange/delete/insert.
+   */
+  async setPageLabel(
+    document: PDFDocument,
+    pageNumber: number,
+    text: string
+  ): Promise<void> {
+    const pdfDoc = document.getMupdfDocument().asPDF();
+    if (!pdfDoc) throw new Error("Document is not a PDF");
+
+    const page = pdfDoc.loadPage(pageNumber);
+    const pageObj = page.getObject();
+    if (!pageObj) throw new Error("Could not get page object");
+
+    const trimmed = (text ?? "").trim();
+    if (trimmed.length === 0) {
+      try { pageObj.delete("NanodocLabel"); } catch { /* key may not exist */ }
+    } else {
+      pageObj.put("NanodocLabel", pdfDoc.newString(trimmed));
+    }
+    document.refreshPageMetadata();
   }
 
   /**

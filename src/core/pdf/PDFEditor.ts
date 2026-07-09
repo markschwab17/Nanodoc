@@ -77,6 +77,15 @@ export class PDFEditor {
     return this.pageOps.rotatePage(document, pageNumber, degrees);
   }
 
+  /** Set (or clear, when text is empty) a page's stored /NanodocLabel. */
+  async setPageLabel(
+    document: PDFDocument,
+    pageNumber: number,
+    text: string
+  ): Promise<void> {
+    return this.pageOps.setPageLabel(document, pageNumber, text);
+  }
+
   /**
    * Flip a page horizontally (mirror left-right). Toggles flip state in store and mirrors annotations.
    * The actual mirror is applied at render time; PDF Rotate is not changed.

@@ -404,3 +404,30 @@ describe("page labels: /NanodocLabel metadata", () => {
     expect(doc.getPageMetadata(0)?.label).toBeUndefined();
   });
 });
+
+describe("page labels: setPageLabel", () => {
+  it("writes a label, reads it back, and it survives save+reload", async () => {
+    const bytes = await buildBasicPdf(2);
+    const doc = new PDFDocument("doc_setlabel", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+
+    await editor.setPageLabel(doc, 0, "Cover");
+    expect(doc.getPageMetadata(0)?.label).toBe("Cover");
+
+    const saved = await editor.saveDocument(doc, []);
+    const reopened = new PDFDocument("doc_setlabel_2", "fixture.pdf", saved.length);
+    await reopened.loadFromData(saved, mupdf);
+    expect(reopened.getPageMetadata(0)?.label).toBe("Cover");
+  });
+
+  it("empty text unstores the label", async () => {
+    const bytes = await buildBasicPdf(1);
+    const doc = new PDFDocument("doc_unset", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+    await editor.setPageLabel(doc, 0, "Temp");
+    await editor.setPageLabel(doc, 0, "   ");
+    expect(doc.getPageMetadata(0)?.label).toBeUndefined();
+  });
+});
