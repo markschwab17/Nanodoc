@@ -1,7 +1,7 @@
 import type { PageExtract } from "./types";
 import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10. Do not import it yet.
-import { stitchSheets, type SheetInput } from "./stitchCore";
+import { stitchSheets, type SheetInput, type StitchMethod } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
 import { layoutPlacements, type TilePlacement } from "./layout";
 
@@ -17,6 +17,7 @@ export interface AutoStitchResult {
   alignedCount: number;
   unplacedCount: number;
   worstResidFt: number;
+  method: StitchMethod;
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
@@ -61,12 +62,13 @@ export async function autoStitch(
   const used = new Set<number>();
   for (const r of rows) { while (used.has(r.no)) r.no += 10000; used.add(r.no); }
 
-  if (!rows.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0 };
+  if (!rows.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none" };
 
   const rootFtPerIn = rows[0].scale; // == the stitch root sheet's scale (consistent frame)
 
   let placementsByNo = new Map<number, { x: number; y: number }>();
   let worstResidFt = 0;
+  let method: StitchMethod = "none";
   if (rows.length >= 2) {
     const inputs: SheetInput[] = rows.map((r) => ({
       id: String(r.pageIndex), no: r.no, scale: r.scale, view: r.extract.view, extract: r.extract,
@@ -87,6 +89,7 @@ export async function autoStitch(
     const res = stitchSheets(inputs, grid);
     placementsByNo = res.placements;
     worstResidFt = res.worstResidFt;
+    method = res.method;
   }
 
   const placements = layoutPlacements(
@@ -94,5 +97,5 @@ export async function autoStitch(
     rootFtPerIn
   );
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method };
 }

@@ -238,3 +238,35 @@ describe("refineOffset", () => {
     expect(refineOffset([], [], { dx: 0, dy: 0 })).toBeNull();
   });
 });
+
+describe("stitchSheets method", () => {
+  const mk = (id: string, no: number, labels: Label[]): SheetInput => ({
+    id, no, scale: 20, view: [0, 0, 2592, 1728],
+    extract: { view: [0, 0, 2592, 1728], shxLabels: labels, labels, words: labels, geometry: [] } as PageExtract,
+  });
+
+  it("reports 'geometric' when sheets stitch by shared tokens", () => {
+    const OFF_PT = (300 * 72) / 20;
+    const texts = ["TC347.33", "TC348.10", "FL346.90", "TC349.55", "FL347.10", "TC350.02"];
+    const a = texts.map((t, i) => lbl(t, 400 + i * 120, 800 + (i % 2) * 60));
+    const b = texts.map((t, i) => lbl(t, 400 + i * 120 - OFF_PT, 800 + (i % 2) * 60));
+    const res = stitchSheets([mk("a", 1, a), mk("b", 2, b)]);
+    expect(res.placements.size).toBe(2);
+    expect(res.method).toBe("geometric");
+  });
+
+  it("reports 'none' when nothing connects", () => {
+    const m1 = lbl("MATCHLINE (SEE SHEET 99)", 2450, 850);
+    const m2 = lbl("MATCHLINE (SEE SHEET 88)", 60, 850);
+    const res = stitchSheets([mk("1", 1, [m1]), mk("2", 2, [m2])]);
+    expect(res.placements.size).toBe(0);
+    expect(res.method).toBe("none");
+  });
+
+  it("reports 'keymap' when a site grid is supplied", () => {
+    const grid = new Map([[1, { col: 0, row: 0 }], [2, { col: 1, row: 0 }]]);
+    const res = stitchSheets([mk("1", 1, []), mk("2", 2, [])], grid);
+    expect(res.method).toBe("keymap");
+    expect(res.placements.size).toBe(2);
+  });
+});

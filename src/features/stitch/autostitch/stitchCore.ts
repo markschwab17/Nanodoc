@@ -366,9 +366,11 @@ function gaussSolve(A: Float64Array[] | number[][], b: Float64Array): Float64Arr
 
 // ---------------------------------------------------------------- driver
 
+export type StitchMethod = "keymap" | "geometric" | "none";
+
 export interface SheetInput { id: string; no: number; scale: number; view: [number, number, number, number]; extract: PageExtract; }
 export interface PairReport { i: number; j: number; channel: string | null; conf: string | null; dxFt: number | null; dyFt: number | null; weight: number; residFt: number | null; }
-export interface StitchResult { root: number; placements: Map<number, { x: number; y: number }>; worstResidFt: number; pairs: PairReport[]; }
+export interface StitchResult { root: number; placements: Map<number, { x: number; y: number }>; worstResidFt: number; pairs: PairReport[]; method: StitchMethod; }
 
 /**
  * FINE seam registration: the precise translation that best overlays sheet j's
@@ -554,7 +556,7 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
     const placements = new Map<number, { x: number; y: number }>();
     for (const [ni, g] of grid) if (byNoG.has(ni)) placements.set(ni, { x: g.col * sx, y: g.row * sy });
     const rootKey = [...grid.keys()].find((k) => byNoG.has(k)) ?? sheets[0].no;
-    return { root: rootKey, placements, worstResidFt: 0, pairs: [] };
+    return { root: rootKey, placements, worstResidFt: 0, pairs: [], method: "keymap" };
   }
 
   const EDGE2REL: Record<string, string> = { left: "left", right: "right", top: "above", bottom: "below" };
@@ -749,5 +751,5 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
   const placements = new Map<number, { x: number; y: number }>();
   for (const k of main) placements.set(k, pos.get(k)!);
 
-  return { root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs };
+  return { root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs, method: main.length ? "geometric" : "none" };
 }
