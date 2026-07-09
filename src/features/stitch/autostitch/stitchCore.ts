@@ -461,6 +461,20 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     if (gfurn.size) for (const s of sheets) s.raw.geometry = (s.raw.geometry as Geom[]).filter((g) => !gfurn.isFurniture(g));
   }
   for (const s of sheets) { s.tok = tokenFeats(s, furn); s.seg = segFeats(s); }
+  // Segment-level boilerplate filter: a segment at the same feet-position on
+  // >= min sheets is repeated title-block / notes / legend / key-map geometry.
+  // It makes segVote lock onto the identical columns (offset ≈ 0) instead of the
+  // drawing overlap. The path-level filter above misses it — the boilerplate is
+  // drawn as differently-grouped paths whose SEGMENTS still coincide. This is what
+  // lets two sheets stitch on geometry alone (e.g. matchline refs outlined to vector).
+  if (sheets.length >= 2) {
+    const segSig = (s: SegFeat) => `${Math.round(s.mx / 5)},${Math.round(s.my / 5)},${Math.round(s.len / 3)},${Math.round(s.ang / 3)}`;
+    const cnt = new Map<string, number>();
+    for (const s of sheets) { const seen = new Set<string>(); for (const seg of s.seg!) { const sig = segSig(seg); if (!seen.has(sig)) { seen.add(sig); cnt.set(sig, (cnt.get(sig) || 0) + 1); } } }
+    const min = sheets.length <= 3 ? sheets.length : Math.max(3, Math.ceil(0.4 * sheets.length));
+    const boiler = new Set([...cnt].filter(([, c]) => c >= min).map(([sig]) => sig));
+    if (boiler.size) for (const s of sheets) s.seg = s.seg!.filter((seg) => !boiler.has(segSig(seg)));
+  }
 
   const EDGE2REL: Record<string, string> = { left: "left", right: "right", top: "above", bottom: "below" };
   const OPPREL: Record<string, string> = { left: "right", right: "left", above: "below", below: "above" };
@@ -496,6 +510,28 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     // pairs facing labels directly, and the windowed segment vote gates out
     // spurious (non-adjacent) matchline pairs whose geometry doesn't agree.
     if (matchlinePrior(si, sj)) pairKeys.add(`${si.no}-${sj.no}`);
+  }
+
+  // Geometry-only pairing: a sheet with NO token/matchline candidate (matchline
+  // refs outlined to vector, few shared tokens) can still overlap on the drawing.
+  // For each such orphan, run a full-window segment vote against the others and
+  // adopt the best confident match. Boilerplate is already segment-filtered, so
+  // the vote lands on the real overlap, not the identical columns at (0,0).
+  {
+    const paired = new Set<number>();
+    for (const k of pairKeys) { const [a, b] = k.split("-").map(Number); paired.add(a); paired.add(b); }
+    for (const si of sheets.filter((s) => !paired.has(s.no))) {
+      let best: { key: string; inl: number } | null = null;
+      for (const sj of sheets) {
+        if (sj.no === si.no) continue;
+        const key = si.no < sj.no ? `${si.no}-${sj.no}` : `${sj.no}-${si.no}`;
+        if (pairKeys.has(key)) continue;
+        const sp = Math.max(FT(si.view[2] - si.view[0], si.scale), FT(sj.view[2] - sj.view[0], sj.scale));
+        const sv = segVote(si, sj, { x0: -sp, x1: sp, y0: -sp, y1: sp });
+        if (sv && sv.inliers >= 12 && (sv.rmsFt ?? 9) < 2 && (!best || sv.inliers > best.inl)) best = { key, inl: sv.inliers };
+      }
+      if (best) pairKeys.add(best.key);
+    }
   }
 
   const pairs: (PairReport & { _final?: { dx: number; dy: number } })[] = [];

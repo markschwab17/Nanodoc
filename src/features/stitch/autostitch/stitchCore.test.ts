@@ -39,6 +39,30 @@ describe("stitchSheets", () => {
     expect(res.worstResidFt).toBeLessThan(0.1);
   });
 
+  it("stitches two sheets by geometry alone (no tokens/matchlines) past identical boilerplate", () => {
+    const VIEW: [number, number, number, number] = [0, 0, 3024, 2160];
+    const seg = (id: string, x1: number, y1: number, x2: number, y2: number): Geom => ({ id, pts: [[x1, y1], [x2, y2]], closed: false });
+    // A distinctive drawing shape — VARIED lengths/angles so each segment's
+    // (len,angle) signature is unique and segVote matches by index (each ≥8ft).
+    const SHAPE: [number, number][] = [[90, 0], [0, 70], [110, 35], [45, -55], [75, 25], [0, 95], [60, 60], [130, 15], [30, 80], [85, -40], [50, 50], [0, 120], [100, 65], [40, -70], [95, 30], [70, 90], [120, -25], [55, 45]];
+    const drawing = (ox: number, oy: number) => SHAPE.map(([dx, dy], i) => seg(`d${i}`, ox + i * 90, oy + i * 20, ox + i * 90 + dx, oy + i * 20 + dy));
+    // Identical boilerplate (title-block column) at the SAME position on both sheets.
+    const boiler = Array.from({ length: 14 }, (_, i) => seg(`b${i}`, 2700, 100 + i * 130, 2700, 100 + i * 130 + 90));
+    // Same drawing on both, offset vertically (adjacent tiles); boilerplate identical.
+    const gA = [...drawing(400, 1650), ...boiler];
+    const gB = [...drawing(400, 250), ...boiler];
+    const mk = (no: number, geometry: Geom[]): SheetInput => ({
+      id: String(no), no, scale: 20, view: VIEW,
+      extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+    });
+    const res = stitchSheets([mk(1, gA), mk(2, gB)]);
+    expect(res.placements.size).toBe(2); // both placed via geometry-only pairing
+    const p2 = res.placements.get(2)!;
+    // aligned on the DRAWING offset (~FT(1400)=389ft), NOT the boilerplate self-match at 0
+    expect(Math.abs(p2.y)).toBeGreaterThan(300);
+    expect(res.worstResidFt).toBeLessThan(1);
+  });
+
   it("leaves a disconnected sheet out of placements", () => {
     const shared = ["AA111.1", "BB222.2", "CC333.3", "DD444.4", "EE555.5", "FF666.6"];
     const a = shared.map((t, i) => lbl(t, 400 + i * 120, 800));
