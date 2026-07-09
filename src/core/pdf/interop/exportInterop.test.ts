@@ -21,6 +21,7 @@ import { PDFDocument as PDFLibDocument } from "pdf-lib";
 import { PDFDocument } from "../PDFDocument";
 import { PDFEditor } from "../PDFEditor";
 import type { Annotation } from "../PDFEditor";
+import { readIntegratedPageLabels } from "../PageLabels";
 import {
   buildBasicPdf,
   buildAcroFormPdf,
@@ -364,5 +365,27 @@ describe.skipIf(!hasQpdf)("encrypted/restricted PDFs", () => {
     expect(qpdfIsEncrypted(saved)).toBe(false);
     const res = qpdfCheck(saved);
     expect(res.ok).toBe(true);
+  });
+});
+
+describe("page labels: integrated reader", () => {
+  it("reads roman front-matter + decimal body + prefixed range", async () => {
+    // Build a 6-page PDF and stamp a /PageLabels tree via mupdf itself.
+    const bytes = await buildBasicPdf(6);
+    const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+    const pdfDoc = doc.asPDF();
+    // pages 0-1 => i, ii ; pages 2-4 => 1,2,3 ; page 5 => "A-1"
+    pdfDoc.setPageLabels(0, mupdf.PDFDocument.PAGE_LABEL_ROMAN_LC);
+    pdfDoc.setPageLabels(2, mupdf.PDFDocument.PAGE_LABEL_DECIMAL, undefined, 1);
+    pdfDoc.setPageLabels(5, mupdf.PDFDocument.PAGE_LABEL_DECIMAL, "A-", 1);
+
+    const labels = readIntegratedPageLabels(pdfDoc, 6);
+    expect(labels).toEqual(["i", "ii", "1", "2", "3", "A-1"]);
+  });
+
+  it("returns all-null when the document has no /PageLabels", async () => {
+    const bytes = await buildBasicPdf(3);
+    const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+    expect(readIntegratedPageLabels(doc.asPDF(), 3)).toEqual([null, null, null]);
   });
 });

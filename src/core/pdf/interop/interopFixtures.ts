@@ -15,18 +15,28 @@ import {
 
 const LETTER: [number, number] = [612, 792];
 
-/** One letter page with known text content (for annotation + redaction tests). */
-export async function buildBasicPdf(): Promise<Uint8Array> {
+/**
+ * One or more letter pages with known text content (for annotation + redaction
+ * tests, and multi-page page-label tests). Default `pages = 1` preserves the
+ * original single-page fixture for existing callers.
+ */
+export async function buildBasicPdf(pages: number = 1): Promise<Uint8Array> {
   const doc = await PDFLibDocument.create();
-  const page = doc.addPage(LETTER);
   const font = await doc.embedFont(StandardFonts.Helvetica);
-  page.drawText("CONFIDENTIAL BID 12345", { x: 72, y: 700, size: 18, font, color: rgb(0, 0, 0) });
-  page.drawText("General notes: construct 6-inch PCC curb per detail 2.", {
-    x: 72,
-    y: 660,
-    size: 11,
-    font,
-  });
+  for (let p = 0; p < pages; p++) {
+    const page = doc.addPage(LETTER);
+    if (p === 0) {
+      page.drawText("CONFIDENTIAL BID 12345", { x: 72, y: 700, size: 18, font, color: rgb(0, 0, 0) });
+      page.drawText("General notes: construct 6-inch PCC curb per detail 2.", {
+        x: 72,
+        y: 660,
+        size: 11,
+        font,
+      });
+    } else {
+      page.drawText(`Page ${p + 1} body text`, { x: 72, y: 700, size: 12, font });
+    }
+  }
   return doc.save({ useObjectStreams: false });
 }
 
