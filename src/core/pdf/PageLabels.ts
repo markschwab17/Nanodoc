@@ -116,3 +116,27 @@ export function readIntegratedPageLabels(pdfDoc: any, pageCount: number): (strin
   }
   return out;
 }
+
+/**
+ * Emit a standard /PageLabels tree from per-page labels. Stored labels become
+ * prefix-only NONE ranges (correct for arbitrary text); unstored pages become
+ * decimal ranges anchored at their display number so their number still shows.
+ * No-op if every entry is null (keeps plain documents pristine).
+ */
+export function writePageLabelsTree(
+  pdfDoc: any,
+  mupdf: any,
+  labels: (string | null)[],
+  displayNumberOf: (i: number) => number,
+): void {
+  if (!labels.some((l) => l !== null && l !== undefined)) return;
+  const S = mupdf.PDFDocument;
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i];
+    if (label !== null && label !== undefined) {
+      pdfDoc.setPageLabels(i, S.PAGE_LABEL_NONE, label);
+    } else {
+      pdfDoc.setPageLabels(i, S.PAGE_LABEL_DECIMAL, undefined, displayNumberOf(i));
+    }
+  }
+}

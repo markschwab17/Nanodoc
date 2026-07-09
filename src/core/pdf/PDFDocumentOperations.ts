@@ -650,6 +650,17 @@ export class PDFDocumentOperations {
     }
   }
 
+  // Emit a standard /PageLabels tree from the per-page stored labels so other
+  // viewers show them. No-op when the document has no stored labels.
+  try {
+    const { writePageLabelsTree } = await import("./PageLabels");
+    const meta = document.getMetadata();
+    const labels = meta.pages.map((p) => p.label ?? null);
+    writePageLabelsTree(pdfDoc, this.mupdf, labels, (i) => document.getDisplayPageNumber(i));
+  } catch (e) {
+    console.warn("[PDFDocumentOperations] Failed to write /PageLabels:", e);
+  }
+
   // Encrypted sources: save explicitly decrypted so output is CONSISTENT
   // across all save paths (the pdf-lib post-passes below cannot write
   // encrypted files). The UI warns the user before this happens (owner

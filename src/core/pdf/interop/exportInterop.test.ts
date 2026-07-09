@@ -431,3 +431,39 @@ describe("page labels: setPageLabel", () => {
     expect(doc.getPageMetadata(0)?.label).toBeUndefined();
   });
 });
+
+describe("page labels: /PageLabels export on save", () => {
+  it("writes a standard /PageLabels tree that round-trips through the full save pipeline", async () => {
+    const bytes = await buildBasicPdf(3);
+    const doc = new PDFDocument("doc_export", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+    await editor.setPageLabel(doc, 0, "i");   // stored
+    await editor.setPageLabel(doc, 2, "B-1"); // stored; page 1 stays unstored
+
+    const saved = await editor.saveDocument(doc, []);
+
+    // Reopen and read the standard tree back with our reader.
+    const reDoc = mupdf.Document.openDocument(saved, "application/pdf");
+    const labels = readIntegratedPageLabels(reDoc.asPDF(), 3);
+    expect(labels[0]).toBe("i");
+    expect(labels[2]).toBe("B-1");
+    expect(labels[1]).toBe("2"); // unstored page shows its decimal display number
+
+    // And /NanodocLabel still survives too.
+    const reApp = new PDFDocument("doc_export_2", "fixture.pdf", saved.length);
+    await reApp.loadFromData(saved, mupdf);
+    expect(reApp.getPageMetadata(0)?.label).toBe("i");
+    expect(reApp.getPageMetadata(2)?.label).toBe("B-1");
+    expect(reApp.getPageMetadata(1)?.label).toBeUndefined();
+  });
+
+  it("writes NO /PageLabels tree when the document has no stored labels", async () => {
+    const bytes = await buildBasicPdf(2);
+    const doc = new PDFDocument("doc_none", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const saved = await new PDFEditor(mupdf).saveDocument(doc, []);
+    const reDoc = mupdf.Document.openDocument(saved, "application/pdf");
+    expect(readIntegratedPageLabels(reDoc.asPDF(), 2)).toEqual([null, null]);
+  });
+});
