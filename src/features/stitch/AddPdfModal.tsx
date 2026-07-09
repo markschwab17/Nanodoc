@@ -26,6 +26,7 @@ import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
+import type { TilePlacement } from "@/features/stitch/autostitch/layout";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -517,7 +518,7 @@ export function AddPdfModal({
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
       const renderer = rendererRef.current;
 
-      // 1. Render rasters (same as the plain add), keyed by page index.
+      // 1. Render rasters for the selected pages (same as the plain add).
       const rasters = new Map<number, string>();
       for (let i = 0; i < selected.length; i++) {
         const pageIndex = selected[i];
@@ -526,41 +527,59 @@ export function AddPdfModal({
         const imageData = rendered.imageData as ImageData;
         if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
         if (imageData?.data) rasters.set(pageIndex, imageDataToDataUrl(imageData));
-        setAddingProgress({ done: i + 1, total: selected.length * 2 }); // rasters are first half
+        setAddingProgress({ done: i + 1, total: selected.length });
       }
 
-      // 2. Run the deterministic pipeline.
-      const userScaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
-      const result = await autoStitch(mupdf, mupdfDoc, selected, {
-        userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
-        onProgress: (done, total) => setAddingProgress({ done: selected.length + done, total: selected.length + total }),
-      });
+      // 2. Placements: prefer the cached probe (skip the second stitch); else
+      //    fall back to running the aligner live (probe absent/errored/running).
+      let placements: TilePlacement[];
+      let rootFtPerIn: number;
+      let worstResidFt: number;
+      if (probe && probeState === "done") {
+        const sel = new Set(selected);
+        placements = probe.placements.filter((p) => sel.has(p.pageIndex));
+        rootFtPerIn = probe.rootFtPerIn;
+        worstResidFt = probe.worstResidFt;
+      } else {
+        const userScaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
+        const result = await autoStitch(mupdf, mupdfDoc, selected, {
+          userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
+          onProgress: (done, total) => setAddingProgress({ done, total }),
+        });
+        placements = result.placements;
+        rootFtPerIn = result.rootFtPerIn;
+        worstResidFt = result.worstResidFt;
+      }
 
       // 3. Build aligned tiles and commit as one undo step.
-      const byPage = new Map(result.placements.map((p) => [p.pageIndex, p]));
+      const byPage = new Map(placements.map((p) => [p.pageIndex, p]));
       const newTiles = selected.map((pageIndex) => {
-        const p = byPage.get(pageIndex)!;
+        const p = byPage.get(pageIndex);
         return {
           sourcePdfBytes: pdfBytes,
           sourcePageIndex: pageIndex,
           sourceFileName: pdfFileName || undefined,
-          x: p.x, y: p.y, width: p.width, height: p.height,
+          x: p?.x ?? MARGIN, y: p?.y ?? MARGIN,
+          width: p?.width ?? 0, height: p?.height ?? 0,
           imageDataUrl: rasters.get(pageIndex),
         };
       });
       addTiles(newTiles);
-      setReferenceScaleFeetPerInch(result.rootFtPerIn);
+      const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
+      setReferenceScaleFeetPerInch(Number.isFinite(scaleNum) && scaleNum > 0 ? scaleNum : rootFtPerIn);
 
       // 4. Leave unaligned tiles selected so the user can place them manually.
       const added = useStitchStore.getState().tiles.slice(-selected.length);
-      const unalignedIds = added.filter((t) => byPage.get(t.sourcePageIndex)?.aligned === false).map((t) => t.id);
+      const alignedSet = new Set(placements.filter((p) => p.aligned).map((p) => p.pageIndex));
+      const unalignedIds = added.filter((t) => !alignedSet.has(t.sourcePageIndex)).map((t) => t.id);
       if (unalignedIds.length) setSelectedTileIds(unalignedIds);
 
       // 5. Report.
-      const msg = result.unplacedCount > 0
-        ? `Aligned ${result.alignedCount} of ${selected.length} pages · worst seam ${result.worstResidFt.toFixed(2)} ft. ${result.unplacedCount} placed below for manual alignment.`
-        : `Aligned ${selected.length} pages · worst seam ${result.worstResidFt.toFixed(2)} ft.`;
-      useNotificationStore.getState().showNotification(msg, result.unplacedCount > 0 ? "info" : "success");
+      const alignedCount = selected.length - unalignedIds.length;
+      const msg = unalignedIds.length > 0
+        ? `Aligned ${alignedCount} of ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft. ${unalignedIds.length} placed below for manual alignment.`
+        : `Aligned ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft.`;
+      useNotificationStore.getState().showNotification(msg, unalignedIds.length > 0 ? "info" : "success");
       onClose();
     } catch (e) {
       console.error(e);
@@ -568,7 +587,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState]);
 
   const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
