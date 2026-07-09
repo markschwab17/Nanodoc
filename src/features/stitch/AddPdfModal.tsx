@@ -6,7 +6,7 @@
  * bar shows how many pages have been processed.
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -25,6 +25,7 @@ import { getTileAABB } from "@/features/stitch/stitchGeometry";
 import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
+import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -569,6 +570,12 @@ export function AddPdfModal({
     }
   }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds]);
 
+  const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
+  const feasibility = useMemo(
+    () => (probe ? deriveFeasibility(probe, selectedIndices) : null),
+    [probe, selectedIndices]
+  );
+
   const thumbsStillLoading = pageCount > 0 && thumbProgress < pageCount;
 
   return (
@@ -780,6 +787,13 @@ export function AddPdfModal({
             <Button onClick={handleChooseFile}>Choose file</Button>
           </div>
         ) : null}
+        {probeState === "done" && feasibility && feasibility.status !== "unstitchable" && (
+          <p className="text-xs text-muted-foreground text-right px-1">
+            {feasibility.status === "confident"
+              ? "✓ Tiled sheet set detected — will auto-align"
+              : `${feasibility.alignedInSelection} of ${feasibility.selectedCount} will align · the rest are added below to place manually`}
+          </p>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
@@ -790,14 +804,33 @@ export function AddPdfModal({
           >
             {adding ? "Adding…" : `Add ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""} to canvas`}
           </Button>
-          <Button
-            variant="secondary"
-            onClick={handleAddAndAutoAlign}
-            disabled={!pdfBytes || selectedPages.size < 2 || adding}
-            title={selectedPages.size < 2 ? "Select at least 2 pages to auto-align" : undefined}
-          >
-            {adding ? "Aligning…" : `Add & auto-align ${selectedPages.size} pages`}
-          </Button>
+          {(() => {
+            // Fail-open: a still-running probe only DISABLES with a "checking"
+            // label; error/absent probe leaves the button enabled (clicking runs
+            // the live pipeline, per handleAddAndAutoAlign's fallback).
+            const tooFew = selectedPages.size < 2;
+            const checking = probeState === "running";
+            const unstitchable = probeState === "done" && feasibility?.status === "unstitchable";
+            const disabled = adding || tooFew || checking || unstitchable;
+            const label = adding
+              ? "Aligning…"
+              : checking
+              ? "Checking alignment…"
+              : unstitchable
+              ? "Auto-align unavailable"
+              : `Add & auto-align ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""}`;
+            const title = tooFew
+              ? "Select at least 2 pages to auto-align"
+              : unstitchable
+              ? "These pages don't look like one tiled plan set — add them and align manually"
+              : undefined;
+            return (
+              <Button variant="secondary" onClick={handleAddAndAutoAlign} disabled={disabled} title={title}>
+                {checking && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
+                {label}
+              </Button>
+            );
+          })()}
         </DialogFooter>
       </DialogContent>
     </Dialog>
