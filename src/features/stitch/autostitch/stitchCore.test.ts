@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -76,6 +76,25 @@ describe("stitchSheets", () => {
     const m2 = lbl("MATCHLINE (SEE SHEET 1)", 60, 850);
     const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [m2])]);
     expect(res.placements.size).toBe(2); // referenced matchlines still bond
+  });
+});
+
+describe("buildGeomFurnitureFilter", () => {
+  it("flags boilerplate repeated at the same page position, not unique drawing", () => {
+    const boilerPts: [number, number][] = [[100, 100], [300, 100], [300, 200]];
+    const sheet = (key: number, unique: [number, number][]) => ({
+      key,
+      raw: { geometry: [{ id: "b", pts: boilerPts.map((p) => [...p] as [number, number]), closed: false }, { id: "u", pts: unique, closed: false }] },
+    });
+    const sheets = [
+      sheet(1, [[500, 500], [600, 600]]),
+      sheet(2, [[700, 800], [800, 900]]),
+      sheet(3, [[900, 100], [950, 200]]),
+      sheet(4, [[120, 700], [220, 760]]),
+    ];
+    const gf = buildGeomFurnitureFilter(sheets, 3);
+    expect(gf.isFurniture({ id: "x", pts: boilerPts.map((p) => [...p] as [number, number]), closed: false })).toBe(true);
+    expect(gf.isFurniture({ id: "y", pts: [[500, 500], [600, 600]], closed: false })).toBe(false);
   });
 
   // Regression (Bug A): visible-text sets carry stray render-mode-3 glyphs, so

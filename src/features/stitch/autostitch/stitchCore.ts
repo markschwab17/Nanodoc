@@ -57,6 +57,37 @@ export function buildFurnitureFilter(sheets: any[], minSheets: number): { size: 
   };
 }
 
+/**
+ * Geometry furniture = a path whose quantized signature (page-local bbox center +
+ * size + point count) repeats at the SAME place on >= minSheets sheets. On a
+ * multi-sheet set that's the identical boilerplate drawn at fixed page coords on
+ * every sheet — the key map, legend/keynote symbols, title-block frame. Like
+ * token furniture it would otherwise let segVote lock onto the repeated columns
+ * instead of the real drawing overlap. Uses page-LOCAL position, so genuinely
+ * shared drawing content (which sits at DIFFERENT page positions on two
+ * overlapping sheets) is never flagged. Returns a predicate over a Geom.
+ */
+export function buildGeomFurnitureFilter(sheets: any[], minSheets: number): { size: number; isFurniture(g: Geom): boolean } {
+  const sigOf = (g: Geom): string => {
+    const pts = g.pts;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) { if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0]; if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; }
+    const q = (v: number) => Math.round(v / 8); // 8pt page bins
+    return `${q((minX + maxX) / 2)},${q((minY + maxY) / 2)},${q(maxX - minX)},${q(maxY - minY)},${pts.length}`;
+  };
+  const seen = new Map<string, Set<any>>();
+  for (const s of sheets) {
+    const local = new Set<string>();
+    for (const g of s.raw.geometry as Geom[]) {
+      const sig = sigOf(g);
+      if (!local.has(sig)) { local.add(sig); (seen.get(sig) || seen.set(sig, new Set()).get(sig)!).add(s.key); }
+    }
+  }
+  const furn = new Set<string>();
+  for (const [sig, set] of seen) if (set.size >= minSheets) furn.add(sig);
+  return { size: furn.size, isFurniture: (g: Geom) => furn.has(sigOf(g)) };
+}
+
 // ---------------------------------------------------------------- features
 export function tokenFeats(s: any, furn: { isFurniture(l: Label): boolean } | null): TokFeat[] {
   const counts = new Map<string, number>();
@@ -358,6 +389,14 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
 
   const FURN_MIN = Math.max(2, Math.min(3, sheets.length));
   const furn = buildFurnitureFilter(sheets, FURN_MIN);
+  // Drop repeated boilerplate GEOMETRY (identical on ≥25% of a 4+ sheet set: key
+  // map, legend, title-block frame) before feature extraction — it makes segVote
+  // lock onto the identical columns instead of the real drawing overlap, and it
+  // ~halves the geometry on boilerplate-heavy sets.
+  if (sheets.length >= 4) {
+    const gfurn = buildGeomFurnitureFilter(sheets, Math.max(3, Math.ceil(0.25 * sheets.length)));
+    if (gfurn.size) for (const s of sheets) s.raw.geometry = (s.raw.geometry as Geom[]).filter((g) => !gfurn.isFurniture(g));
+  }
   for (const s of sheets) { s.tok = tokenFeats(s, furn); s.seg = segFeats(s); }
 
   const EDGE2REL: Record<string, string> = { left: "left", right: "right", top: "above", bottom: "below" };
