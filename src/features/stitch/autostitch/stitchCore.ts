@@ -418,7 +418,12 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     } else if (tok) { final = tok; channel = "token"; conf = "high"; w = tok.inliers / (tok.rmsFt ** 2 + 0.01); }
     else if (seg && prior) { final = seg; channel = "matchline+segment"; conf = seg.votes! >= 2 * seg.secondVotes! ? "high" : "medium"; w = seg.inliers / (seg.rmsFt ** 2 + 0.09); }
     else if (seg) { final = seg; channel = "segment(windowed)"; conf = seg.votes! >= 2 * seg.secondVotes! ? "medium" : "low"; w = 0.5 * seg.inliers / (seg.rmsFt ** 2 + 0.25); }
-    else if (prior) { final = prior; channel = "matchline-label-only"; conf = "low"; w = 2; }
+    // Label-only matchline is trusted ONLY when the two sheets actually reference
+    // each other (`rel` from a "SEE SHEET"/"MATCHLINE" number/code). Two sheets
+    // that merely have opposite-edge matchlines pointing at OTHER neighbors must be
+    // confirmed by the segment vote above — otherwise they'd bond with a garbage
+    // offset (observed resid ~680ft on a 35-sheet street set). No rel + no seg = drop.
+    else if (prior && rel) { final = prior; channel = "matchline-label-only"; conf = "low"; w = 2; }
 
     pairs.push({
       i: ni, j: nj, channel, conf,

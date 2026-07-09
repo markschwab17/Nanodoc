@@ -54,6 +54,30 @@ describe("stitchSheets", () => {
     expect(res.placements.has(3)).toBe(false);
   });
 
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+  const mkSheet = (no: number, labels: Label[]): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW,
+    extract: { view: VIEW, shxLabels: labels, labels, words: labels, geometry: [] } as PageExtract,
+  });
+
+  it("does NOT bond two sheets whose opposite-edge matchlines reference OTHER sheets", () => {
+    // Sheet 1's right-edge matchline points to sheet 99 (absent); sheet 2's
+    // left-edge matchline to 88 (absent). Opposite edges but NO mutual reference,
+    // no shared tokens, no geometry — they must not bond (previously they got a
+    // garbage matchline-label-only offset, resid ~680ft on a real 35-sheet set).
+    const m1 = lbl("MATCHLINE (SEE SHEET 99)", 2450, 850); // near right edge
+    const m2 = lbl("MATCHLINE (SEE SHEET 88)", 60, 850);   // near left edge
+    const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [m2])]);
+    expect(res.placements.size).toBe(0); // no spurious bond
+  });
+
+  it("bonds two sheets whose matchlines DO reference each other (label-only)", () => {
+    const m1 = lbl("MATCHLINE (SEE SHEET 2)", 2450, 850);
+    const m2 = lbl("MATCHLINE (SEE SHEET 1)", 60, 850);
+    const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [m2])]);
+    expect(res.placements.size).toBe(2); // referenced matchlines still bond
+  });
+
   // Regression (Bug A): visible-text sets carry stray render-mode-3 glyphs, so
   // the invisible channel is >=8 single-char garbage. The driver must union the
   // channels and use the good VISIBLE labels, not the garbage. (Old code did
