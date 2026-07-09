@@ -492,8 +492,21 @@ export function ThumbnailCarousel() {
                   quad: quad,
                   text: searchQuery,
                   matchIndex: matchIndex++,
+                  kind: "text",
                 });
               }
+            }
+
+            // Also match this page's label (case-insensitive substring).
+            const label = currentDocument.getPageMetadata(i)?.label;
+            if (label && label.toLowerCase().includes(searchQuery.toLowerCase())) {
+              allMatches.push({
+                pageNumber: i,
+                quad: [],
+                text: label,
+                matchIndex: matchIndex++,
+                kind: "label",
+              });
             }
           } catch (error) {
             console.error(`Error searching page ${i}:`, error);
@@ -1900,7 +1913,7 @@ export function ThumbnailCarousel() {
                       <div className="flex flex-col gap-1">
                         <div className="font-medium">Page {currentDocument ? currentDocument.getDisplayPageNumber(match.pageNumber) : match.pageNumber + 1}</div>
                         <div className="text-xs text-muted-foreground">
-                          Match {idx + 1}
+                          {match.kind === "label" ? `Label: "${match.text}"` : `Match ${idx + 1}`}
                         </div>
                       </div>
                     </Button>

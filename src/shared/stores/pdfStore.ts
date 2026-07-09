@@ -24,6 +24,8 @@ export interface SearchMatch {
   quad: number[][]; // Array of quads (each quad is [x0, y0, x1, y1, x2, y2, x3, y3]) - multi-line matches have multiple quads
   text: string;
   matchIndex: number; // Global index across all pages
+  /** "text" = full-text hit (has quads); "label" = page-label hit (no quads). */
+  kind?: "text" | "label";
 }
 
 // Results structure stored per document
