@@ -1270,6 +1270,18 @@ export function ThumbnailCarousel() {
     setPagesToDelete([]);
   };
 
+  // Commit an inline-edited page label. Writes /NanodocLabel on the page dict
+  // (empty clears it) and bumps thumbnailVersion so the badge re-reads metadata.
+  const handleLabelChange = async (pageNumber: number, text: string) => {
+    if (!currentDocument || !editor) return;
+    try {
+      await editor.setPageLabel(currentDocument, pageNumber, text);
+      setThumbnailVersion((v) => v + 1);
+    } catch (err) {
+      console.error("Failed to set page label:", err);
+    }
+  };
+
   const handleRotatePages = async (pageNumbers: number[], rotationDegrees: number) => {
     if (!currentDocument || !editor || pageNumbers.length === 0) {
       return;
@@ -1755,6 +1767,8 @@ export function ThumbnailCarousel() {
                     onClick={(e) => handleThumbnailClick(e, i)}
                     onDelete={esignMode !== "sign" ? (e) => handleThumbnailDelete(e, i) : undefined}
                     onRotate={esignMode !== "sign" ? (e) => handleThumbnailRotate(e, i) : undefined}
+                    label={currentDocument.getPageMetadata(i)?.label}
+                    onLabelChange={esignMode !== "sign" ? handleLabelChange : undefined}
                   />
                 </div>
               </div>

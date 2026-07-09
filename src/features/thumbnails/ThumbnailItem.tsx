@@ -28,6 +28,10 @@ interface ThumbnailItemProps {
   onDelete?: (e: React.MouseEvent) => void;
   onRotate?: (e: React.MouseEvent) => void;
   onDragStart?: () => void;
+  /** Stored label for this page; falls back to the 1-based number when absent. */
+  label?: string;
+  /** Commit an edited label (empty string clears it). */
+  onLabelChange?: (pageNumber: number, text: string) => void;
 }
 
 export function ThumbnailItem({
@@ -40,9 +44,13 @@ export function ThumbnailItem({
   onDelete,
   onRotate,
   onDragStart: _onDragStart,
+  label,
+  onLabelChange,
 }: ThumbnailItemProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [painted, setPainted] = useState(false);
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [draftLabel, setDraftLabel] = useState("");
   // Bumps every time a LOD-0 tile arrives for our page. Drives the paint
   // useLayoutEffect to re-run and pick up the fresh bitmap. Using a counter
   // (rather than toggling a boolean) means re-fetches after invalidate also
@@ -261,7 +269,32 @@ export function ThumbnailItem({
         )}
       </div>
       <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-sm font-medium text-center py-1.5 rounded-b">
-        {pageNumber + 1}
+        {editingLabel ? (
+          <input
+            autoFocus
+            value={draftLabel}
+            onChange={(e) => setDraftLabel(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onBlur={() => { onLabelChange?.(pageNumber, draftLabel); setEditingLabel(false); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { onLabelChange?.(pageNumber, draftLabel); setEditingLabel(false); }
+              else if (e.key === "Escape") { setEditingLabel(false); }
+            }}
+            className="w-11/12 bg-white/90 text-black text-center text-sm rounded px-1 outline-none"
+          />
+        ) : (
+          <span
+            title="Double-click to rename this page label"
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setDraftLabel(label ?? String(pageNumber + 1));
+              setEditingLabel(true);
+            }}
+          >
+            {label ?? pageNumber + 1}
+          </span>
+        )}
       </div>
     </div>
   );
