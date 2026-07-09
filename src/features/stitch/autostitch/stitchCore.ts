@@ -528,7 +528,15 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
         if (pairKeys.has(key)) continue;
         const sp = Math.max(FT(si.view[2] - si.view[0], si.scale), FT(sj.view[2] - sj.view[0], sj.scale));
         const sv = segVote(si, sj, { x0: -sp, x1: sp, y0: -sp, y1: sp });
-        if (sv && sv.inliers >= 12 && (sv.rmsFt ?? 9) < 2 && (!best || sv.inliers > best.inl)) best = { key, inl: sv.inliers };
+        if (!sv || sv.inliers < 12 || (sv.rmsFt ?? 9) >= 2) continue;
+        // Adjacent tiles ABUT — a horizontal seam offsets by ≈ the sheet WIDTH,
+        // a vertical seam by ≈ the HEIGHT. Reject a heavy-overlap match (neither
+        // axis near a full sheet): that's repeated interior content (parking,
+        // curbs, buildings) aligning at a false offset, which otherwise out-votes
+        // the true small-overlap seam and piles the sheets up.
+        const wf = FT(si.view[2] - si.view[0], si.scale), hf = FT(si.view[3] - si.view[1], si.scale);
+        if (Math.abs(sv.dx) < 0.55 * wf && Math.abs(sv.dy) < 0.55 * hf) continue;
+        if (!best || sv.inliers > best.inl) best = { key, inl: sv.inliers };
       }
       if (best) pairKeys.add(best.key);
     }
@@ -583,39 +591,48 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     });
   }
 
-  const constraints = pairs.filter((r) => r._final && r.weight > 0)
+  let constraints = pairs.filter((r) => r._final && r.weight > 0)
     .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy, weight: r.weight }));
 
   // Connected components over the constraint graph. Place the LARGEST component
   // and root it at that component's most-connected sheet — NOT blindly at
   // sheets[0], which on a real set is often a title/notes/details sheet with no
   // drawing tokens; rooting there leaves the entire real plan cluster unplaced.
-  const adj = new Map<number, Set<number>>(keys.map((k) => [k, new Set<number>()]));
-  for (const c of constraints) { adj.get(c.i)!.add(c.j); adj.get(c.j)!.add(c.i); }
-  const seen = new Set<number>();
-  const components: number[][] = [];
-  for (const k of keys) {
-    if (seen.has(k)) continue;
-    const comp: number[] = []; const stack = [k]; seen.add(k);
-    while (stack.length) {
-      const u = stack.pop()!; comp.push(u);
-      for (const v of adj.get(u)!) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+  const placeFrom = (cons: { i: number; j: number; dx: number; dy: number; weight: number }[]) => {
+    const adj = new Map<number, Set<number>>(keys.map((k) => [k, new Set<number>()]));
+    for (const c of cons) { adj.get(c.i)!.add(c.j); adj.get(c.j)!.add(c.i); }
+    const seen = new Set<number>();
+    const components: number[][] = [];
+    for (const k of keys) {
+      if (seen.has(k)) continue;
+      const comp: number[] = []; const stack = [k]; seen.add(k);
+      while (stack.length) {
+        const u = stack.pop()!; comp.push(u);
+        for (const v of adj.get(u)!) if (!seen.has(v)) { seen.add(v); stack.push(v); }
+      }
+      components.push(comp);
     }
-    components.push(comp);
-  }
-  components.sort((a, b) => b.length - a.length);
-  const main = components[0] && components[0].length >= 2 ? components[0] : [];
-  const mainSet = new Set(main);
-  let rootKey = sheets[0].no;
-  if (main.length) {
-    let bestDeg = -1;
-    for (const k of main) {
-      const deg = adj.get(k)!.size;
-      if (deg > bestDeg || (deg === bestDeg && k < rootKey)) { bestDeg = deg; rootKey = k; }
+    components.sort((a, b) => b.length - a.length);
+    const main = components[0] && components[0].length >= 2 ? components[0] : [];
+    const mainSet = new Set(main);
+    let rootKey = sheets[0].no;
+    if (main.length) {
+      let bestDeg = -1;
+      for (const k of main) { const deg = adj.get(k)!.size; if (deg > bestDeg || (deg === bestDeg && k < rootKey)) { bestDeg = deg; rootKey = k; } }
     }
-  }
+    return { main, mainSet, rootKey, pos: solveGlobal(keys, rootKey, cons).pos };
+  };
 
-  const { pos: coarsePos } = solveGlobal(keys, rootKey, constraints);
+  let { main, mainSet, rootKey, pos: coarsePos } = placeFrom(constraints);
+  // Outlier rejection: a geometry match can align two sheets at a plausible-but-
+  // wrong offset (repeated site features). Drop constraints grossly inconsistent
+  // with the solve and re-place, so one bad seam doesn't drag the layout. One pass.
+  const OUTLIER_FT = 30;
+  const clean = constraints.filter((c) => !(mainSet.has(c.i) && mainSet.has(c.j)) || residual(c, coarsePos) <= OUTLIER_FT);
+  if (clean.length < constraints.length) {
+    constraints = clean;
+    ({ main, mainSet, rootKey, pos: coarsePos } = placeFrom(constraints));
+  }
 
   // ── FINE REGISTRATION ──────────────────────────────────────────────────────
   // The coarse solve (anchored by the precise token pairs) lands each seam in the
