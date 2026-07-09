@@ -2,6 +2,7 @@ import type { PageExtract } from "./types";
 import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10. Do not import it yet.
 import { stitchSheets, type SheetInput } from "./stitchCore";
+import { detectKeymapGrid } from "./keymap";
 import { layoutPlacements, type TilePlacement } from "./layout";
 
 const DEFAULT_SCALE = 20;
@@ -70,7 +71,20 @@ export async function autoStitch(
     const inputs: SheetInput[] = rows.map((r) => ({
       id: String(r.pageIndex), no: r.no, scale: r.scale, view: r.extract.view, extract: r.extract,
     }));
-    const res = stitchSheets(inputs);
+    // Key-map site grid, when present (sheets whose matchlines are unreadable
+    // outlined text): gives the exact tile topology → keyed by sheet `no`.
+    let grid: Map<number, { col: number; row: number }> | undefined;
+    try {
+      const byPage = detectKeymapGrid(mupdf, doc, pageIndices);
+      if (byPage) {
+        grid = new Map();
+        for (const r of rows) { const g = byPage.get(r.pageIndex); if (g) grid.set(r.no, g); }
+        if (grid.size < 2) grid = undefined;
+      }
+    } catch (e) {
+      console.warn("[autoStitch] key-map detection failed:", e);
+    }
+    const res = stitchSheets(inputs, grid);
     placementsByNo = res.placements;
     worstResidFt = res.worstResidFt;
   }

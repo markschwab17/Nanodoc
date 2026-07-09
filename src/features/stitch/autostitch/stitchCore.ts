@@ -464,7 +464,7 @@ interface DriverSheet {
   key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null; segFine?: SegFeat[];
 }
 
-export function stitchSheets(inputs: SheetInput[]): StitchResult {
+export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: number; row: number }>): StitchResult {
   const sheets: DriverSheet[] = inputs.map((s) => {
     // Channel-agnostic: use BOTH text channels (invisible SHX + visible). Some
     // sets are pure-SHX (Santee), some pure-visible (Rose Hill), some mixed — and
@@ -514,6 +514,47 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     const min = sheets.length <= 3 ? sheets.length : Math.max(3, Math.ceil(0.4 * sheets.length));
     const boiler = new Set([...cnt].filter(([, c]) => c >= min).map(([sig]) => sig));
     if (boiler.size) for (const s of sheets) s.seg = s.seg!.filter((seg) => !boiler.has(segSig(seg)));
+  }
+
+  // ── KEY-MAP GRID PLACEMENT ──────────────────────────────────────────────────
+  // When the caller supplies the site grid (from each sheet's key map — see
+  // keymap.ts), the topology is KNOWN. The drawing geometry is too self-similar to
+  // pin per-pair offsets, but the grid is REGULAR, so we estimate one column and
+  // one row spacing from the clean abutting seams and place every sheet at
+  // (col·sx, row·sy). This resolves sets whose matchline refs are outlined text.
+  if (grid && grid.size >= 2) {
+    const byNoG = new Map(sheets.map((s) => [s.no, s]));
+    const W = FT(sheets[0].view[2] - sheets[0].view[0], sheets[0].scale);
+    const H = FT(sheets[0].view[3] - sheets[0].view[1], sheets[0].scale);
+    // strongest abutting, perpendicular-constrained seam between two neighbours
+    const seamOffset = (a: DriverSheet, b: DriverSheet, axis: "H" | "V"): number | null => {
+      const wins = axis === "H"
+        ? [{ x0: 0.35 * W, x1: 1.1 * W, y0: -120, y1: 120 }, { x0: -1.1 * W, x1: -0.35 * W, y0: -120, y1: 120 }]
+        : [{ x0: -120, x1: 120, y0: 0.35 * H, y1: 1.1 * H }, { x0: -120, x1: 120, y0: -1.1 * H, y1: -0.35 * H }];
+      let best: Vote | null = null;
+      for (const w of wins) { const v = segVote(a, b, w); if (v && (!best || v.inliers > best.inliers)) best = v; }
+      return best ? (axis === "H" ? best.dx : best.dy) : null;
+    };
+    const hx: number[] = [], vy: number[] = [];
+    for (const [ni, gi] of grid) for (const [nj, gj] of grid) {
+      const a = byNoG.get(ni), b = byNoG.get(nj);
+      if (!a || !b) continue;
+      if (gj.col === gi.col + 1 && gj.row === gi.row) { const d = seamOffset(a, b, "H"); if (d != null) hx.push(d); }
+      else if (gj.row === gi.row + 1 && gj.col === gi.col) { const d = seamOffset(a, b, "V"); if (d != null) vy.push(d); }
+    }
+    // sign-consistent median (a few pairs mismatch on the self-similar interior).
+    const consensus = (vals: number[], fallback: number): number => {
+      if (!vals.length) return fallback;
+      const pos = vals.filter((v) => v > 0), neg = vals.filter((v) => v < 0);
+      const side = pos.length >= neg.length ? pos : neg;
+      const s = side.sort((a, b) => a - b);
+      return s.length ? s[Math.floor(s.length / 2)] : fallback;
+    };
+    const sx = consensus(hx, 0.82 * W), sy = consensus(vy, 0.82 * H);
+    const placements = new Map<number, { x: number; y: number }>();
+    for (const [ni, g] of grid) if (byNoG.has(ni)) placements.set(ni, { x: g.col * sx, y: g.row * sy });
+    const rootKey = [...grid.keys()].find((k) => byNoG.has(k)) ?? sheets[0].no;
+    return { root: rootKey, placements, worstResidFt: 0, pairs: [] };
   }
 
   const EDGE2REL: Record<string, string> = { left: "left", right: "right", top: "above", bottom: "below" };
