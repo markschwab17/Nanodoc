@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, type SheetInput, type SegFeat } from "./stitchCore";
-import type { Label, PageExtract } from "./types";
+import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, type SheetInput, type SegFeat } from "./stitchCore";
+import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
 const lbl = (text: string, x: number, y: number): Label =>
@@ -76,6 +76,32 @@ describe("stitchSheets", () => {
     const m2 = lbl("MATCHLINE (SEE SHEET 1)", 60, 850);
     const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [m2])]);
     expect(res.placements.size).toBe(2); // referenced matchlines still bond
+  });
+});
+
+describe("matchlineStrokePrior", () => {
+  it("takes the perpendicular offset from the matchline STROKES, not the labels", () => {
+    const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+    const hstroke = (id: string, y: number): Geom => ({ id, pts: [[40, y], [2550, y]], closed: false });
+    // Sheet 1: matchline near the y1 edge (label at y=1600), stroke at y=1550.
+    // Sheet 2: matchline near the y0 edge (label at y=120), stroke at y=170.
+    // Labels sit at DIFFERENT offsets from their strokes (50 vs 50 but opposite),
+    // so a label-based offset would differ from the stroke-based one.
+    const s1 = { no: 1, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 2)", 1200, 1600)], view: VIEW, geometry: [hstroke("a", 1550)] } };
+    const s2 = { no: 2, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 1)", 1200, 120)], view: VIEW, geometry: [hstroke("b", 170)] } };
+    const r = matchlineStrokePrior(s1, s2);
+    expect(r).not.toBeNull();
+    expect(r!.perp).toBe("y");
+    // dy from strokes: FT(1550) - FT(170) = (1550-170)/72*20
+    expect(r!.dy).toBeCloseTo(((1550 - 170) / 72) * 20, 1);
+  });
+
+  it("returns null when the matchlines don't cross-reference", () => {
+    const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+    const hstroke = (id: string, y: number): Geom => ({ id, pts: [[40, y], [2550, y]], closed: false });
+    const s1 = { no: 1, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 99)", 1200, 1600)], view: VIEW, geometry: [hstroke("a", 1550)] } };
+    const s2 = { no: 2, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 88)", 1200, 120)], view: VIEW, geometry: [hstroke("b", 170)] } };
+    expect(matchlineStrokePrior(s1, s2)).toBeNull();
   });
 });
 

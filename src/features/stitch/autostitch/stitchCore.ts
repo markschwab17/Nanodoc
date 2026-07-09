@@ -165,6 +165,69 @@ export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; same
   return null;
 }
 
+/**
+ * Locate a matchline STROKE near a label's cross-coord (page pts): axis "h" → a
+ * horizontal line, returns its y; "v" → vertical, returns its x. Matchlines are
+ * usually DASHED, so we bin collinear segments by cross-coord and sum their
+ * spans — the cross-coord whose dashes cover >= minTotalFrac of the perpendicular
+ * sheet dimension is the matchline. Returns null if none.
+ */
+function findEdgeStroke(
+  geometry: Geom[], axis: "h" | "v", cross: number,
+  view: [number, number, number, number], band = 100, minTotalFrac = 0.3
+): number | null {
+  const [x0, y0, x1, y1] = view; const W = x1 - x0, H = y1 - y0;
+  const perpDim = axis === "h" ? W : H;
+  const BIN = 2;
+  const spans = new Map<number, number>(); // rounded cross-coord -> summed dash span
+  for (const g of geometry) {
+    const pts = g.pts; if (!pts || pts.length < 2) continue;
+    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const cc = axis === "h" ? (a[1] + b[1]) / 2 : (a[0] + b[0]) / 2;
+      if (Math.abs((axis === "h" ? b[1] - a[1] : b[0] - a[0])) > 3) continue; // must be axis-aligned
+      if (Math.abs(cc - cross) > band) continue;
+      const span = axis === "h" ? Math.abs(b[0] - a[0]) : Math.abs(b[1] - a[1]);
+      const k = Math.round(cc / BIN);
+      spans.set(k, (spans.get(k) || 0) + span);
+    }
+  }
+  let bestKey: number | null = null, bestTot = -1;
+  for (const [k, tot] of spans) if (tot > bestTot) { bestTot = tot; bestKey = k; }
+  return bestKey != null && bestTot >= minTotalFrac * perpDim ? bestKey * BIN : null;
+}
+
+/**
+ * Precise matchline offset from the physical matchline STROKES, for two sheets
+ * whose matchlines cross-reference each other. The stroke gives the PERPENDICULAR
+ * component exactly (label positions do not — they sit at inconsistent offsets
+ * from the line); the PARALLEL component is a coarse label estimate (segVote,
+ * windowed tight on the perp axis, refines it). Returns { dx, dy, perp } where
+ * `perp` is the precise axis ("y" for a top/bottom matchline, "x" for left/right).
+ */
+export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number; perp: "x" | "y" } | null {
+  const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
+  const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view).filter((r) => r.matchline && r.edge !== "interior");
+  const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view).filter((r) => r.matchline && r.edge !== "interior");
+  const refs = (r: any, other: any) =>
+    (r.sheet != null && r.sheet === other.no) ||
+    (r.sheetCode && other.sheetCode && r.sheetCode.toUpperCase() === other.sheetCode.toUpperCase());
+  for (const a of refsI) for (const b of refsJ) {
+    if (OPP[a.edge] !== b.edge) continue;
+    if (!(refs(a, sj) || refs(b, si))) continue; // only trust cross-referenced matchlines
+    const horiz = a.edge === "top" || a.edge === "bottom";
+    const axis = horiz ? "h" : "v";
+    const as = findEdgeStroke(si.raw.geometry, axis, horiz ? a.at.y : a.at.x, si.raw.view);
+    const bs = findEdgeStroke(sj.raw.geometry, axis, horiz ? b.at.y : b.at.x, sj.raw.view);
+    if (as == null || bs == null) continue;
+    return horiz
+      ? { dx: FT(a.at.x, si.scale) - FT(b.at.x, sj.scale), dy: FT(as, si.scale) - FT(bs, sj.scale), perp: "y" }
+      : { dx: FT(as, si.scale) - FT(bs, sj.scale), dy: FT(a.at.y, si.scale) - FT(b.at.y, sj.scale), perp: "x" };
+  }
+  return null;
+}
+
 export function segVote(si: any, sj: any, win: { x0: number; x1: number; y0: number; y1: number }): Vote | null {
   const idx = new Map<string, SegFeat[]>();
   const key = (s: SegFeat) => `${Math.round(s.len / 0.5)}:${Math.round(s.ang / 1.5)}`;
@@ -442,9 +505,18 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     const span = Math.max(FT(si.view[2] - si.view[0], si.scale), FT(sj.view[2] - sj.view[0], sj.scale));
     const rel = relFor(ni, nj);
     const tok = tv(si, sj);
+    const stroke = matchlineStrokePrior(si, sj);
     const prior = matchlinePrior(si, sj);
     let win: { x0: number; x1: number; y0: number; y1: number };
-    if (prior) win = { x0: prior.dx - 60, x1: prior.dx + 60, y0: prior.dy - 60, y1: prior.dy + 60 };
+    if (stroke) {
+      // Perp axis is precise (from the stroke) → tight; parallel axis is free →
+      // wide, so segVote resolves it even from a small drawing overlap.
+      const P = 20;
+      win = stroke.perp === "y"
+        ? { x0: stroke.dx - span, x1: stroke.dx + span, y0: stroke.dy - P, y1: stroke.dy + P }
+        : { x0: stroke.dx - P, x1: stroke.dx + P, y0: stroke.dy - span, y1: stroke.dy + span };
+    }
+    else if (prior) win = { x0: prior.dx - 60, x1: prior.dx + 60, y0: prior.dy - 60, y1: prior.dy + 60 };
     else if (tok) win = { x0: tok.dx - 30, x1: tok.dx + 30, y0: tok.dy - 30, y1: tok.dy + 30 };
     else if (rel) win = windowFor(rel, span);
     else win = { x0: -span, x1: span, y0: -span, y1: span };
@@ -455,8 +527,12 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
       final = { dx: (tok.dx + seg.dx) / 2, dy: (tok.dy + seg.dy) / 2 }; channel = "token+segment"; conf = "high";
       w = tok.inliers / (tok.rmsFt ** 2 + 0.01) + seg.inliers / (seg.rmsFt ** 2 + 0.04);
     } else if (tok) { final = tok; channel = "token"; conf = "high"; w = tok.inliers / (tok.rmsFt ** 2 + 0.01); }
-    else if (seg && prior) { final = seg; channel = "matchline+segment"; conf = seg.votes! >= 2 * seg.secondVotes! ? "high" : "medium"; w = seg.inliers / (seg.rmsFt ** 2 + 0.09); }
+    else if (seg && (stroke || prior)) { final = seg; channel = "matchline+segment"; conf = seg.votes! >= 2 * seg.secondVotes! ? "high" : "medium"; w = seg.inliers / (seg.rmsFt ** 2 + 0.09); }
     else if (seg) { final = seg; channel = "segment(windowed)"; conf = seg.votes! >= 2 * seg.secondVotes! ? "medium" : "low"; w = 0.5 * seg.inliers / (seg.rmsFt ** 2 + 0.25); }
+    // Cross-referenced matchline STROKES: the perpendicular offset is exact (from
+    // the physical line); the parallel is a coarse label estimate segVote couldn't
+    // refine (no drawing overlap). Far better than label-only — used when seg fails.
+    else if (stroke) { final = { dx: stroke.dx, dy: stroke.dy }; channel = "matchline-stroke"; conf = "medium"; w = 8; }
     // Label-only matchline is trusted ONLY when the two sheets actually reference
     // each other (`rel` from a "SEE SHEET"/"MATCHLINE" number/code). Two sheets
     // that merely have opposite-edge matchlines pointing at OTHER neighbors must be
