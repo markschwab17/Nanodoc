@@ -271,7 +271,20 @@ export function ThumbnailItem({
           </button>
         )}
       </div>
-      <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-sm font-medium text-center py-1.5 rounded-b">
+      {/* Double-click anywhere on the full-width badge bar to rename — the
+          handler lives on the bar, not the (often 1-char) label text, so short
+          labels like "i" are still an easy target. */}
+      <div
+        className={`absolute bottom-0 left-0 right-0 bg-black/50 text-white text-sm font-medium text-center py-1.5 rounded-b${editingLabel ? "" : " cursor-text"}`}
+        title={editingLabel ? undefined : "Double-click to rename this page label"}
+        onDoubleClick={(e) => {
+          if (editingLabel) return;
+          e.stopPropagation();
+          labelEditDoneRef.current = false;
+          setDraftLabel(label ?? String(pageNumber + 1));
+          setEditingLabel(true);
+        }}
+      >
         {editingLabel ? (
           <input
             autoFocus
@@ -291,17 +304,7 @@ export function ThumbnailItem({
             className="w-11/12 bg-white/90 text-black text-center text-sm rounded px-1 outline-none"
           />
         ) : (
-          <span
-            title="Double-click to rename this page label"
-            onDoubleClick={(e) => {
-              e.stopPropagation();
-              labelEditDoneRef.current = false;
-              setDraftLabel(label ?? String(pageNumber + 1));
-              setEditingLabel(true);
-            }}
-          >
-            {label ?? pageNumber + 1}
-          </span>
+          <span>{label ?? pageNumber + 1}</span>
         )}
       </div>
     </div>
