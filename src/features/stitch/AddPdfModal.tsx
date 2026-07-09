@@ -24,6 +24,7 @@ import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
 import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -99,6 +100,13 @@ export function AddPdfModal({
   const rendererRef = useRef<PDFRenderer | null>(null);
   /** Mirror of mupdfDoc for cleanup — destroy frees its WASM memory. */
   const mupdfDocRef = useRef<any>(null);
+  /** Background stitch probe: runs the real aligner once per loaded doc so the
+   *  auto-align button reflects the ACTUAL outcome (see stitchProbe.worker.ts). */
+  const probeWorkerRef = useRef<Worker | null>(null);
+  /** Monotonic id; a probe reply whose docId != current is stale and ignored. */
+  const probeDocIdRef = useRef(0);
+  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error">("idle");
 
   const releaseDoc = useCallback(() => {
     try {
@@ -119,6 +127,26 @@ export function AddPdfModal({
     },
     [releaseDoc]
   );
+
+  // One probe worker per modal session; terminated on unmount.
+  useEffect(() => {
+    const w = new Worker(new URL("./autostitch/stitchProbe.worker.ts", import.meta.url), { type: "module" });
+    w.onmessage = (ev: MessageEvent<ProbeMessage>) => {
+      const msg = ev.data;
+      if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
+      if ("error" in msg) {
+        console.warn("[stitchProbe] failed:", msg.error);
+        setProbe(null);
+        setProbeState("error");
+        return;
+      }
+      console.debug("[stitchProbe] method", msg.method, "aligned", msg.alignedPageIndices.length, "/", msg.placements.length);
+      setProbe(msg);
+      setProbeState("done");
+    };
+    probeWorkerRef.current = w;
+    return () => { w.terminate(); probeWorkerRef.current = null; };
+  }, []);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -169,6 +197,23 @@ export function AddPdfModal({
         setMupdfDoc(doc);
         setPageCount(count);
         setSelectedPages(new Set());
+        // Kick off the background feasibility probe over the WHOLE document.
+        // userScale is null: placements are scale-invariant for a uniform set,
+        // so the probe outcome is unaffected and we avoid a stale-closure dep.
+        const probeDocId = ++probeDocIdRef.current;
+        setProbe(null);
+        if (count >= 2) {
+          setProbeState("running");
+          const req: ProbeRequest = {
+            docId: probeDocId,
+            pdfBytes: data,
+            pageIndices: Array.from({ length: count }, (_, i) => i),
+            userScale: null,
+          };
+          probeWorkerRef.current?.postMessage(req);
+        } else {
+          setProbeState("idle");
+        }
         // Show the page grid right away (loading = false), then generate thumbs in background
         setLoading(false);
 
@@ -219,6 +264,9 @@ export function AddPdfModal({
       setSelectedPages(new Set());
       setThumbnails({});
       setThumbProgress(0);
+      setProbe(null);
+      setProbeState("idle");
+      probeDocIdRef.current++;
       setCtoListening(false);
       setLoadError(null);
       // Reset the guard so the next open triggers the file picker
@@ -545,6 +593,9 @@ export function AddPdfModal({
                 setSelectedPages(new Set());
                 setThumbnails({});
                 setLoadError(null);
+                setProbe(null);
+                setProbeState("idle");
+                probeDocIdRef.current++;
               }}
             >
               From device
@@ -563,6 +614,9 @@ export function AddPdfModal({
                 setSelectedPages(new Set());
                 setThumbnails({});
                 setLoadError(null);
+                setProbe(null);
+                setProbeState("idle");
+                probeDocIdRef.current++;
               }}
             >
               From Civiltakeoff
