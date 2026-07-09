@@ -4,6 +4,12 @@ import { reconstruct } from "./reconstruct";
 // mupdf is the module namespace; callers pass (await import("mupdf")).default.
 // Access mupdf.Device / mupdf.Matrix directly, never mupdf.default.
 const CURVE_STEPS = 8; // chords per bezier when flattening
+// Drop paths whose whole bounding box is smaller than this (points). The stitch
+// keeps only segments ≥8ft and cleanup only full-span borders — both far larger
+// than a few points at any realistic plan scale (8ft = 5.8pt even at 100 ft/in),
+// so sub-threshold paths (hatching, glyph detail, tiny symbols) are pure noise.
+// On heavy sheets this drops ~90% of captured paths → no OOM, faster downstream.
+const MIN_GEOM_EXTENT_PT = 3;
 
 /** fz matrix concat: result = m * n, both [a,b,c,d,e,f]. */
 function matMul(m: number[], n: number[]): number[] {
@@ -72,20 +78,34 @@ export function capturePage(mupdf: any, page: any): PageExtract {
     let cur: [number, number][] = [];
     let closed = false;
     let px = 0, py = 0;
+    // Track the page-space bbox as we go so flush() can reject a tiny path in O(1).
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const push = (x: number, y: number) => {
+      const p = apply(ctm, x, y);
+      cur.push(p);
+      if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+      if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+    };
     const flush = () => {
-      if (cur.length >= 2) geometry.push({ id: `g${gid++}`, pts: cur, closed });
-      cur = []; closed = false;
+      // Drop tiny paths: no stitch segment (≥8ft) or cleanup border (full-span)
+      // can live in a sub-MIN_GEOM_EXTENT_PT bounding box. ~90% of paths on a
+      // heavy sheet, so this is the memory/throughput win.
+      if (cur.length >= 2 && Math.hypot(maxX - minX, maxY - minY) >= MIN_GEOM_EXTENT_PT) {
+        geometry.push({ id: `g${gid++}`, pts: cur, closed });
+      }
+      cur = []; closed = false; minX = minY = Infinity; maxX = maxY = -Infinity;
     };
     path.walk({
-      moveTo(x: number, y: number) { flush(); px = x; py = y; cur = [apply(ctm, x, y)]; },
-      lineTo(x: number, y: number) { px = x; py = y; cur.push(apply(ctm, x, y)); },
+      moveTo(x: number, y: number) { flush(); px = x; py = y; push(x, y); },
+      lineTo(x: number, y: number) { px = x; py = y; push(x, y); },
       curveTo(x1: number, y1: number, x2: number, y2: number, x3: number, y3: number) {
         const x0 = px, y0 = py;
         for (let k = 1; k <= CURVE_STEPS; k++) {
           const t = k / CURVE_STEPS, u = 1 - t;
-          const bx = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3;
-          const by = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3;
-          cur.push(apply(ctm, bx, by));
+          push(
+            u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+            u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3
+          );
         }
         px = x3; py = y3;
       },
