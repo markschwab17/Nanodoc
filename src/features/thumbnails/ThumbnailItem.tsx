@@ -51,6 +51,9 @@ export function ThumbnailItem({
   const [painted, setPainted] = useState(false);
   const [editingLabel, setEditingLabel] = useState(false);
   const [draftLabel, setDraftLabel] = useState("");
+  // Set true once Enter/Escape has handled the edit, so the subsequent onBlur
+  // (from the input unmounting) doesn't commit or double-commit.
+  const labelEditDoneRef = useRef(false);
   // Bumps every time a LOD-0 tile arrives for our page. Drives the paint
   // useLayoutEffect to re-run and pick up the fresh bitmap. Using a counter
   // (rather than toggling a boolean) means re-fetches after invalidate also
@@ -276,10 +279,14 @@ export function ThumbnailItem({
             onChange={(e) => setDraftLabel(e.target.value)}
             onClick={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
-            onBlur={() => { onLabelChange?.(pageNumber, draftLabel); setEditingLabel(false); }}
+            onBlur={() => {
+              if (labelEditDoneRef.current) return;
+              onLabelChange?.(pageNumber, draftLabel);
+              setEditingLabel(false);
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") { onLabelChange?.(pageNumber, draftLabel); setEditingLabel(false); }
-              else if (e.key === "Escape") { setEditingLabel(false); }
+              if (e.key === "Enter") { labelEditDoneRef.current = true; onLabelChange?.(pageNumber, draftLabel); setEditingLabel(false); }
+              else if (e.key === "Escape") { labelEditDoneRef.current = true; setEditingLabel(false); }
             }}
             className="w-11/12 bg-white/90 text-black text-center text-sm rounded px-1 outline-none"
           />
@@ -288,6 +295,7 @@ export function ThumbnailItem({
             title="Double-click to rename this page label"
             onDoubleClick={(e) => {
               e.stopPropagation();
+              labelEditDoneRef.current = false;
               setDraftLabel(label ?? String(pageNumber + 1));
               setEditingLabel(true);
             }}

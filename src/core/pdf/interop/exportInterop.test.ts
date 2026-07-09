@@ -466,6 +466,26 @@ describe("page labels: /PageLabels export on save", () => {
     const reDoc = mupdf.Document.openDocument(saved, "application/pdf");
     expect(readIntegratedPageLabels(reDoc.asPDF(), 2)).toEqual([null, null]);
   });
+
+  it("labels survive the pdf-lib AI-metadata post-pass (load+resave)", async () => {
+    // Passing aiMetadata routes the saved bytes through attachAIMetadataToPdfBuffer,
+    // a pdf-lib PDFDocument.load()+save() round trip AFTER the mupdf label write.
+    const bytes = await buildBasicPdf(2);
+    const doc = new PDFDocument("doc_pdflib", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+    await editor.setPageLabel(doc, 0, "i");
+
+    const saved = await editor.saveDocument(doc, [], { version: 1 });
+
+    // /NanodocLabel survives (nanodoc's own round trip)
+    const reApp = new PDFDocument("doc_pdflib_2", "fixture.pdf", saved.length);
+    await reApp.loadFromData(saved, mupdf);
+    expect(reApp.getPageMetadata(0)?.label).toBe("i");
+    // /PageLabels catalog tree survives (external-viewer portability)
+    const reDoc = mupdf.Document.openDocument(saved, "application/pdf");
+    expect(readIntegratedPageLabels(reDoc.asPDF(), 2)[0]).toBe("i");
+  });
 });
 
 describe("page labels: auto-populate on open", () => {
@@ -483,13 +503,12 @@ describe("page labels: auto-populate on open", () => {
   });
 
   it("stores bookmark titles when there is no integrated label", async () => {
-    const bytes = await buildOutlinePdf();
+    const bytes = await buildOutlinePdf(); // one outline item "Sheet 1 - Grading Plan" -> page 0
     const doc = new PDFDocument("doc_auto_bm", "fixture.pdf", bytes.length);
     await doc.loadFromData(bytes, mupdf);
     await new PDFEditor(mupdf).autoPopulatePageLabels(doc);
-    // The outline's first bookmark title should be stored on its target page.
-    const bookmarked = doc.getMetadata().pages.find((p) => p.label !== undefined);
-    expect(bookmarked?.label).toBeTruthy();
+    // The bookmark title must land on its exact target page (page 0), not just "some" page.
+    expect(doc.getPageMetadata(0)?.label).toBe("Sheet 1 - Grading Plan");
   });
 
   it("stores nothing for a plain document (no /PageLabels, no bookmarks)", async () => {

@@ -138,7 +138,8 @@ export function writePageLabelsTree(
     if (label !== null && label !== undefined) {
       pdfDoc.setPageLabels(i, S.PAGE_LABEL_NONE, label);
     } else {
-      pdfDoc.setPageLabels(i, S.PAGE_LABEL_DECIMAL, undefined, displayNumberOf(i));
+      // /St must be a positive integer; a cover page has display number 0.
+      pdfDoc.setPageLabels(i, S.PAGE_LABEL_DECIMAL, undefined, Math.max(1, displayNumberOf(i)));
     }
   }
 }
