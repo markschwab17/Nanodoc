@@ -51,4 +51,24 @@ describe("deriveFeasibility", () => {
     const f = deriveFeasibility({ method: "keymap", alignedPageIndices: [0, 1], worstResidFt: 0 }, []);
     expect(f.status).toBe("unstitchable");
   });
+
+  it("counts only aligned pages that are also selected (intersection, not min-of-lengths)", () => {
+    // aligned = [0,1,5,6] but only [0,1,2] selected -> alignedInSelection = 2, ratio 2/3
+    const f = deriveFeasibility({ method: "keymap", alignedPageIndices: [0, 1, 5, 6], worstResidFt: 0 }, [0, 1, 2]);
+    expect(f.alignedInSelection).toBe(2);
+    expect(f.selectedCount).toBe(3);
+    expect(f.status).toBe("partial"); // a naive min(4,3)=3 would wrongly read ratio 1.0 -> confident
+  });
+
+  it("rejects when the aligned pages are disjoint from the selection", () => {
+    // aligned = [5,6], selected = [0,1,2] -> alignedInSelection = 0 -> unstitchable
+    const f = deriveFeasibility({ method: "keymap", alignedPageIndices: [5, 6], worstResidFt: 0 }, [0, 1, 2]);
+    expect(f.alignedInSelection).toBe(0);
+    expect(f.status).toBe("unstitchable"); // a naive min(2,3)=2 would wrongly pass the gate
+  });
+
+  it("rejects method 'none' even when every selected page is 'aligned'", () => {
+    const f = deriveFeasibility({ method: "none", alignedPageIndices: [0, 1], worstResidFt: 0 }, [0, 1]);
+    expect(f.status).toBe("unstitchable");
+  });
 });
