@@ -86,6 +86,12 @@ export class PDFEditor {
     return this.pageOps.setPageLabel(document, pageNumber, text);
   }
 
+  /** On open: store meaningful page labels from integrated /PageLabels or bookmarks. */
+  async autoPopulatePageLabels(document: PDFDocument): Promise<void> {
+    const { autoPopulatePageLabels } = await import("./PageLabels");
+    return autoPopulatePageLabels(document, this.mupdf);
+  }
+
   /**
    * Flip a page horizontally (mirror left-right). Toggles flip state in store and mirrors annotations.
    * The actual mirror is applied at render time; PDF Rotate is not changed.

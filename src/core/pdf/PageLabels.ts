@@ -4,6 +4,8 @@
  * unit-tested and reused by the save pipeline.
  */
 
+import { PDFBookmarks } from "./PDFBookmarks";
+
 /** Mirrors mupdf's PDFDocument.PAGE_LABEL_* constants (usable without a live mupdf). */
 export const PAGE_LABEL_STYLE = {
   NONE: "\0",
@@ -138,5 +140,48 @@ export function writePageLabelsTree(
     } else {
       pdfDoc.setPageLabels(i, S.PAGE_LABEL_DECIMAL, undefined, displayNumberOf(i));
     }
+  }
+}
+
+/**
+ * On open: give each page a stored label where one is meaningful.
+ * Precedence: existing /NanodocLabel (skip) → integrated /PageLabels → bookmark
+ * title. The sequential number is a display-only fallback and is NOT stored.
+ * Best-effort: never throws.
+ */
+export async function autoPopulatePageLabels(document: any, mupdf: any): Promise<void> {
+  try {
+    const pdfDoc = document.getMupdfDocument().asPDF();
+    if (!pdfDoc) return;
+    const pageCount = document.getPageCount();
+
+    const integrated = readIntegratedPageLabels(pdfDoc, pageCount);
+
+    // pageNumber -> first bookmark title
+    const bmTitle = new Map<number, string>();
+    try {
+      const bookmarks = await new PDFBookmarks(mupdf).getPDFBookmarks(document);
+      for (const b of bookmarks) {
+        if (!bmTitle.has(b.pageNumber) && b.title) bmTitle.set(b.pageNumber, b.title);
+      }
+    } catch { /* outline read is best-effort */ }
+
+    let wroteAny = false;
+    for (let i = 0; i < pageCount; i++) {
+      const page = pdfDoc.loadPage(i);
+      const pageObj = page.getObject();
+      const existing = pageObj?.get("NanodocLabel");
+      const hasExisting = existing !== null && existing !== undefined && !(existing.isNull?.() ?? false);
+      if (hasExisting) continue;
+
+      const derived = integrated[i] ?? bmTitle.get(i) ?? null;
+      if (derived === null || derived.trim().length === 0) continue; // sequential fallback: don't store
+
+      pageObj.put("NanodocLabel", pdfDoc.newString(derived));
+      wroteAny = true;
+    }
+    if (wroteAny) document.refreshPageMetadata();
+  } catch (e) {
+    console.warn("[PageLabels] autoPopulatePageLabels failed:", e);
   }
 }

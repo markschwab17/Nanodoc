@@ -467,3 +467,36 @@ describe("page labels: /PageLabels export on save", () => {
     expect(readIntegratedPageLabels(reDoc.asPDF(), 2)).toEqual([null, null]);
   });
 });
+
+describe("page labels: auto-populate on open", () => {
+  it("stores integrated labels", async () => {
+    const bytes = await buildBasicPdf(3);
+    const seed = mupdf.Document.openDocument(bytes, "application/pdf").asPDF();
+    seed.setPageLabels(0, mupdf.PDFDocument.PAGE_LABEL_ROMAN_LC);
+    const withLabels = seed.saveToBuffer().asUint8Array();
+
+    const doc = new PDFDocument("doc_auto_int", "fixture.pdf", withLabels.length);
+    await doc.loadFromData(withLabels, mupdf);
+    await new PDFEditor(mupdf).autoPopulatePageLabels(doc);
+    expect(doc.getPageMetadata(0)?.label).toBe("i");
+    expect(doc.getPageMetadata(2)?.label).toBe("iii");
+  });
+
+  it("stores bookmark titles when there is no integrated label", async () => {
+    const bytes = await buildOutlinePdf();
+    const doc = new PDFDocument("doc_auto_bm", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    await new PDFEditor(mupdf).autoPopulatePageLabels(doc);
+    // The outline's first bookmark title should be stored on its target page.
+    const bookmarked = doc.getMetadata().pages.find((p) => p.label !== undefined);
+    expect(bookmarked?.label).toBeTruthy();
+  });
+
+  it("stores nothing for a plain document (no /PageLabels, no bookmarks)", async () => {
+    const bytes = await buildBasicPdf(3);
+    const doc = new PDFDocument("doc_auto_plain", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    await new PDFEditor(mupdf).autoPopulatePageLabels(doc);
+    expect(doc.getMetadata().pages.every((p) => p.label === undefined)).toBe(true);
+  });
+});

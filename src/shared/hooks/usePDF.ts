@@ -81,6 +81,14 @@ export function usePDF() {
         pdfStore.addDocument(document, normalizedFilePath || null);
         pdfStore.setCurrentDocument(documentId);
 
+        // Give each page a label (integrated /PageLabels or bookmark titles).
+        // Best-effort — never blocks opening the document.
+        try {
+          await new PDFEditor(mupdf).autoPopulatePageLabels(document);
+        } catch (e) {
+          console.warn("Auto page-label population failed:", e);
+        }
+
         // Restore AI metadata: sidecar (desktop) → IndexedDB (browser) → embedded file → PDF Info/Keywords
         let aiPayload: PDFAIMetadataPayload | null = null;
         if (normalizedFilePath) {
