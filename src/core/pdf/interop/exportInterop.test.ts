@@ -500,3 +500,22 @@ describe("page labels: auto-populate on open", () => {
     expect(doc.getMetadata().pages.every((p) => p.label === undefined)).toBe(true);
   });
 });
+
+describe("page labels: follow page on reorder", () => {
+  it("a stored label rides its page through reorder", async () => {
+    const bytes = await buildBasicPdf(3);
+    const doc = new PDFDocument("doc_reorder", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+    await editor.setPageLabel(doc, 0, "FIRST");
+    await editor.setPageLabel(doc, 2, "THIRD");
+
+    // Move page 0 to the end: [0,1,2] -> [1,2,0].
+    await editor.reorderPages(doc, [{ fromIndex: 0, toIndex: 2 }]);
+    doc.refreshPageMetadata();
+
+    // New order: old page1(none), old page2(THIRD), old page0(FIRST).
+    const labels = doc.getMetadata().pages.map((p) => p.label);
+    expect(labels).toEqual([undefined, "THIRD", "FIRST"]);
+  });
+});
