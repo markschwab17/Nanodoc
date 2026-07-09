@@ -418,6 +418,46 @@ export function refineOffset(
   return { dx: mx, dy: my, inliers: inl.length, rms };
 }
 
+/**
+ * Band-seam matchline detector — the geometric adjacency signal for sheets whose
+ * matchline references are unreadable (outlined to vector, no text) and share no
+ * tokens. Adjacent TILES overlap only in a strip at their touching edges, so we
+ * match the outer edge BANDS, NOT whole sheets: A's bottom band vs B's top band,
+ * etc. (whole-sheet matching false-matches on repeated interior content — parking,
+ * curbs, buildings). A true grid seam is AXIS-ALIGNED: a vertical seam shifts by
+ * ≈ one sheet HEIGHT with ~0 horizontal offset; a horizontal seam by ≈ WIDTH with
+ * ~0 vertical — which rejects the diagonal false matches. Requires boilerplate
+ * already segment-filtered. Returns the best (most-inliers) seam, or null.
+ * `s.seg` holds the filtered segFeats. Exported for tests.
+ */
+export function bandSeamPrior(si: any, sj: any): { dx: number; dy: number; inliers: number; rmsFt: number } | null {
+  const BAND = 0.28, AX = 45; // edge-band fraction; axis-alignment tolerance (ft)
+  const Wi = FT(si.view[2] - si.view[0], si.scale), Hi = FT(si.view[3] - si.view[1], si.scale);
+  const Wj = FT(sj.view[2] - sj.view[0], sj.scale), Hj = FT(sj.view[3] - sj.view[1], sj.scale);
+  const bnd = (seg: SegFeat[], W: number, H: number, which: string) => {
+    const bx = BAND * W, by = BAND * H;
+    return seg.filter((g) => which === "top" ? g.my < by : which === "bottom" ? g.my > H - by : which === "left" ? g.mx < bx : g.mx > W - bx);
+  };
+  const win = { x0: -Wi * 1.3, x1: Wi * 1.3, y0: -Hi * 1.3, y1: Hi * 1.3 };
+  const trials: [SegFeat[], SegFeat[], "v" | "h", number][] = [
+    [bnd(si.seg, Wi, Hi, "bottom"), bnd(sj.seg, Wj, Hj, "top"), "v", (Hi + Hj) / 2],
+    [bnd(si.seg, Wi, Hi, "top"), bnd(sj.seg, Wj, Hj, "bottom"), "v", (Hi + Hj) / 2],
+    [bnd(si.seg, Wi, Hi, "right"), bnd(sj.seg, Wj, Hj, "left"), "h", (Wi + Wj) / 2],
+    [bnd(si.seg, Wi, Hi, "left"), bnd(sj.seg, Wj, Hj, "right"), "h", (Wi + Wj) / 2],
+  ];
+  let best: { dx: number; dy: number; inliers: number; rmsFt: number } | null = null;
+  for (const [sa, sb, axis, dim] of trials) {
+    if (sa.length < 8 || sb.length < 8) continue;
+    const v = segVote({ seg: sa }, { seg: sb }, win);
+    if (!v || v.inliers < 10 || (v.rmsFt ?? 9) >= 1.5) continue;
+    const perp = axis === "v" ? Math.abs(v.dx) : Math.abs(v.dy);
+    const par = axis === "v" ? Math.abs(v.dy) : Math.abs(v.dx);
+    if (perp > AX || par < 0.5 * dim || par > 1.15 * dim) continue; // axis-aligned + abutting
+    if (!best || v.inliers > best.inliers) best = { dx: v.dx, dy: v.dy, inliers: v.inliers, rmsFt: v.rmsFt ?? 0 };
+  }
+  return best;
+}
+
 interface DriverSheet {
   id: string; no: number; scale: number; view: [number, number, number, number];
   raw: { shxLabels: Label[]; labels: Label[]; geometry: Geom[]; view: [number, number, number, number] };
@@ -512,11 +552,12 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     if (matchlinePrior(si, sj)) pairKeys.add(`${si.no}-${sj.no}`);
   }
 
-  // Geometry-only pairing: a sheet with NO token/matchline candidate (matchline
-  // refs outlined to vector, few shared tokens) can still overlap on the drawing.
-  // For each such orphan, run a full-window segment vote against the others and
-  // adopt the best confident match. Boilerplate is already segment-filtered, so
-  // the vote lands on the real overlap, not the identical columns at (0,0).
+  // Band-seam matchline detector for sheets with no token/matchline candidate
+  // (matchline refs outlined to vector). bandSeamPrior matches axis-aligned edge
+  // BANDS — interior repeats (parking, curbs) can't false-match. Each orphan adopts
+  // only its STRONGEST seam: edge content is itself somewhat repetitive across a
+  // plan set, so accepting every seam pollutes the solve; the best-per-orphan keeps
+  // the graph clean. The constraint loop uses the seam offset directly.
   {
     const paired = new Set<number>();
     for (const k of pairKeys) { const [a, b] = k.split("-").map(Number); paired.add(a); paired.add(b); }
@@ -526,17 +567,8 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
         if (sj.no === si.no) continue;
         const key = si.no < sj.no ? `${si.no}-${sj.no}` : `${sj.no}-${si.no}`;
         if (pairKeys.has(key)) continue;
-        const sp = Math.max(FT(si.view[2] - si.view[0], si.scale), FT(sj.view[2] - sj.view[0], sj.scale));
-        const sv = segVote(si, sj, { x0: -sp, x1: sp, y0: -sp, y1: sp });
-        if (!sv || sv.inliers < 12 || (sv.rmsFt ?? 9) >= 2) continue;
-        // Adjacent tiles ABUT — a horizontal seam offsets by ≈ the sheet WIDTH,
-        // a vertical seam by ≈ the HEIGHT. Reject a heavy-overlap match (neither
-        // axis near a full sheet): that's repeated interior content (parking,
-        // curbs, buildings) aligning at a false offset, which otherwise out-votes
-        // the true small-overlap seam and piles the sheets up.
-        const wf = FT(si.view[2] - si.view[0], si.scale), hf = FT(si.view[3] - si.view[1], si.scale);
-        if (Math.abs(sv.dx) < 0.55 * wf && Math.abs(sv.dy) < 0.55 * hf) continue;
-        if (!best || sv.inliers > best.inl) best = { key, inl: sv.inliers };
+        const seam = bandSeamPrior(si, sj);
+        if (seam && (!best || seam.inliers > best.inl)) best = { key, inl: seam.inliers };
       }
       if (best) pairKeys.add(best.key);
     }
@@ -551,20 +583,22 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
     const tok = tv(si, sj);
     const stroke = matchlineStrokePrior(si, sj);
     const prior = matchlinePrior(si, sj);
-    let win: { x0: number; x1: number; y0: number; y1: number };
+    const seam = bandSeamPrior(si, sj);
+    // segVote only with a prior window (stroke/matchline/token/reference). Pure-
+    // geometry pairs use the band-seam match instead of a full-window vote, which
+    // would false-match repeated interior content.
+    let seg: Vote | null = null;
     if (stroke) {
       // Perp axis is precise (from the stroke) → tight; parallel axis is free →
       // wide, so segVote resolves it even from a small drawing overlap.
       const P = 20;
-      win = stroke.perp === "y"
+      seg = segVote(si, sj, stroke.perp === "y"
         ? { x0: stroke.dx - span, x1: stroke.dx + span, y0: stroke.dy - P, y1: stroke.dy + P }
-        : { x0: stroke.dx - P, x1: stroke.dx + P, y0: stroke.dy - span, y1: stroke.dy + span };
+        : { x0: stroke.dx - P, x1: stroke.dx + P, y0: stroke.dy - span, y1: stroke.dy + span });
     }
-    else if (prior) win = { x0: prior.dx - 60, x1: prior.dx + 60, y0: prior.dy - 60, y1: prior.dy + 60 };
-    else if (tok) win = { x0: tok.dx - 30, x1: tok.dx + 30, y0: tok.dy - 30, y1: tok.dy + 30 };
-    else if (rel) win = windowFor(rel, span);
-    else win = { x0: -span, x1: span, y0: -span, y1: span };
-    const seg = segVote(si, sj, win);
+    else if (prior) seg = segVote(si, sj, { x0: prior.dx - 60, x1: prior.dx + 60, y0: prior.dy - 60, y1: prior.dy + 60 });
+    else if (tok) seg = segVote(si, sj, { x0: tok.dx - 30, x1: tok.dx + 30, y0: tok.dy - 30, y1: tok.dy + 30 });
+    else if (rel) seg = segVote(si, sj, windowFor(rel, span));
 
     let final: { dx: number; dy: number } | null = null, channel: string | null = null, conf: string | null = null, w = 0;
     if (tok && seg && Math.hypot(tok.dx - seg.dx, tok.dy - seg.dy) < 5) {
@@ -572,6 +606,9 @@ export function stitchSheets(inputs: SheetInput[]): StitchResult {
       w = tok.inliers / (tok.rmsFt ** 2 + 0.01) + seg.inliers / (seg.rmsFt ** 2 + 0.04);
     } else if (tok) { final = tok; channel = "token"; conf = "high"; w = tok.inliers / (tok.rmsFt ** 2 + 0.01); }
     else if (seg && (stroke || prior)) { final = seg; channel = "matchline+segment"; conf = seg.votes! >= 2 * seg.secondVotes! ? "high" : "medium"; w = seg.inliers / (seg.rmsFt ** 2 + 0.09); }
+    // Band-seam: axis-aligned edge-band match between two tiles (no readable
+    // matchline/tokens). The seam offset is the true adjacency, not the interior.
+    else if (seam) { final = { dx: seam.dx, dy: seam.dy }; channel = "seam"; conf = seam.inliers >= 20 ? "high" : "medium"; w = seam.inliers / (seam.rmsFt ** 2 + 0.09); }
     else if (seg) { final = seg; channel = "segment(windowed)"; conf = seg.votes! >= 2 * seg.secondVotes! ? "medium" : "low"; w = 0.5 * seg.inliers / (seg.rmsFt ** 2 + 0.25); }
     // Cross-referenced matchline STROKES: the perpendicular offset is exact (from
     // the physical line); the parallel is a coarse label estimate segVote couldn't

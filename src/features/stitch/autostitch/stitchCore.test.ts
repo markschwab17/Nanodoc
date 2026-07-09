@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -100,6 +100,24 @@ describe("stitchSheets", () => {
     const m2 = lbl("MATCHLINE (SEE SHEET 1)", 60, 850);
     const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [m2])]);
     expect(res.placements.size).toBe(2); // referenced matchlines still bond
+  });
+});
+
+describe("bandSeamPrior", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 3024, 2160]; // W=840ft H=600ft @ scale 20
+  const shape = (myBase: number): SegFeat[] => Array.from({ length: 14 }, (_, i) => ({ mx: 120 + i * 45, my: myBase + (i % 5) * 12, len: 22 + (i % 7) * 4, ang: (i * 23) % 180 }));
+  const mk = (seg: SegFeat[]) => ({ view: VIEW, scale: 20, seg });
+  it("finds an axis-aligned vertical seam between abutting tiles", () => {
+    // A's bottom-band content (my≈470) matches B's top-band content (my≈70): a
+    // vertical seam, offset dy≈400, dx≈0.
+    const r = bandSeamPrior(mk(shape(470)), mk(shape(70)));
+    expect(r).not.toBeNull();
+    expect(Math.abs(r!.dx)).toBeLessThan(45); // axis-aligned (no horizontal shift)
+    expect(r!.dy).toBeCloseTo(400, 0);
+  });
+  it("returns null when the edge bands don't match", () => {
+    const other = Array.from({ length: 14 }, (_, i) => ({ mx: 200 + i * 50, my: 70, len: 30 + i * 5, ang: (i * 40) % 180 }));
+    expect(bandSeamPrior(mk(shape(470)), mk(other))).toBeNull();
   });
 });
 
