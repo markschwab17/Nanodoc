@@ -1295,14 +1295,19 @@ export function PDFViewer() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || e.repeat) return;
+      if (e.code !== "Space") return;
       const el = document.activeElement as HTMLElement | null;
       if (el) {
         const tag = el.tagName.toLowerCase();
         if (tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable) return;
       }
+      // Suppress the browser's default Space-scroll while Space is the pan
+      // modifier. This MUST run on repeat keydowns too — holding Space fires
+      // repeated keydown events, and skipping them let the native-scrolling
+      // read-mode container scroll downward while held.
+      e.preventDefault();
+      if (e.repeat) return; // only do the state/cursor work once
       isSpacePressed = true;
-      e.preventDefault(); // don't page-scroll on Space while it's the pan modifier
       if (!isDragging) updateCursor();
     };
     const onKeyUp = (e: KeyboardEvent) => {
