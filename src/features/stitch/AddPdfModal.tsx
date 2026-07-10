@@ -130,7 +130,7 @@ export function AddPdfModal({
     [releaseDoc]
   );
 
-  // One probe worker per modal session; terminated on unmount.
+  // One probe worker per component lifetime (the Stitch view keeps this modal mounted across open/close); terminated on unmount.
   useEffect(() => {
     const w = new Worker(new URL("./autostitch/stitchProbe.worker.ts", import.meta.url), { type: "module" });
     w.onmessage = (ev: MessageEvent<ProbeMessage>) => {

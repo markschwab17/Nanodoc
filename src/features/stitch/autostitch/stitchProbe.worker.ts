@@ -16,8 +16,16 @@ async function ensureMupdf() {
   if (!mupdf) mupdf = (await import("mupdf")).default;
 }
 
-self.onmessage = async (e: MessageEvent<ProbeRequest>) => {
-  const { docId, pdfBytes, pageIndices, userScale } = e.data;
+// A persistent worker can receive a new document (rapid "Change file") while a
+// prior probe is still running. Chain each request onto the previous so two
+// autoStitch passes never interleave on the shared mupdf WASM instance, and skip
+// any request already superseded by a newer docId before it starts.
+let latestDocId = 0;
+let queue: Promise<void> = Promise.resolve();
+
+async function handle(req: ProbeRequest) {
+  const { docId, pdfBytes, pageIndices, userScale } = req;
+  if (docId !== latestDocId) return; // superseded before we started — skip
   try {
     await ensureMupdf();
     const doc = mupdf.Document.openDocument(pdfBytes, "application/pdf");
@@ -33,4 +41,9 @@ self.onmessage = async (e: MessageEvent<ProbeRequest>) => {
     const msg: ProbeMessage = { docId, error: String(err) };
     self.postMessage(msg);
   }
+}
+
+self.onmessage = (e: MessageEvent<ProbeRequest>) => {
+  latestDocId = e.data.docId;
+  queue = queue.then(() => handle(e.data));
 };
