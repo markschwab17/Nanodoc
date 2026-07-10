@@ -4,7 +4,7 @@
  * Handles document-level operations: syncing annotations, saving, exporting.
  */
 
-import type { PDFDocument } from "./PDFDocument";
+import { PDFDocument } from "./PDFDocument";
 import type { Annotation } from "./types";
 import { PDFAnnotationOperations } from "./PDFAnnotationOperations";
 import { PDFPageOperations } from "./PDFPageOperations";
@@ -843,6 +843,59 @@ export class PDFDocumentOperations {
   const pdfBuffer = buffer.asUint8Array();
 
   return pdfBuffer;
+  }
+
+  /**
+   * Export a subset of pages as a standalone PDF, with full annotation
+   * fidelity. Pages come out in document order regardless of input order.
+   *
+   * Grafts the pages into a fresh document first (cheap — no full-document
+   * save), then runs the standard saveDocument pipeline on the small subset
+   * with annotation pageNumbers remapped. Reusing saveDocument means stamps,
+   * embedded images, and real AcroForm form fields all carry over — the
+   * per-annotation loop in exportPageAsPDF handles none of those.
+   */
+  async exportPagesAsPDF(
+    document: PDFDocument,
+    pageNumbers: number[],
+    annotations?: Annotation[]
+  ): Promise<Uint8Array> {
+    const sourcePdf = document.getMupdfDocument().asPDF();
+    if (!sourcePdf) {
+      throw new Error("Document is not a PDF");
+    }
+
+    const pageCount = document.getPageCount();
+    const sortedPages = [...new Set(pageNumbers)]
+      .filter((p) => p >= 0 && p < pageCount)
+      .sort((a, b) => a - b);
+    if (sortedPages.length === 0) {
+      throw new Error("No valid pages to export");
+    }
+
+    const newPdf = new this.mupdf.PDFDocument();
+    sortedPages.forEach((sourcePage, targetIndex) => {
+      newPdf.graftPage(targetIndex, sourcePdf, sourcePage);
+    });
+    const subsetBytes = newPdf.saveToBuffer().asUint8Array();
+
+    // Remap annotation page numbers from source indices to subset indices.
+    const indexMap = new Map(sortedPages.map((p, i) => [p, i]));
+    const subsetAnnotations = (annotations ?? [])
+      .filter((ann) => indexMap.has(ann.pageNumber))
+      .map((ann) => ({ ...ann, pageNumber: indexMap.get(ann.pageNumber)! }));
+
+    if (subsetAnnotations.length === 0) {
+      return subsetBytes;
+    }
+
+    const subsetDoc = new PDFDocument(
+      `${document.getId()}_pages_export`,
+      document.getName(),
+      subsetBytes.length
+    );
+    await subsetDoc.loadFromData(subsetBytes, this.mupdf);
+    return this.saveDocument(subsetDoc, subsetAnnotations);
   }
 
 

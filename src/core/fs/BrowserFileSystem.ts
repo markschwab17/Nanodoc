@@ -48,13 +48,36 @@ export class BrowserFileSystem implements FileSystemInterface {
   }
 
   /**
-   * Saves a file by triggering a download in the browser.
+   * Saves a file via a real Save As picker where the browser supports it
+   * (Chromium's File System Access API), falling back to a download.
    */
   async saveFile(data: Uint8Array, name: string): Promise<void> {
     try {
       // Ensure the filename has .pdf extension
       const fileName = name.endsWith('.pdf') ? name : `${name}.pdf`;
-      
+
+      const showSaveFilePicker = (window as any).showSaveFilePicker as
+        | ((opts: any) => Promise<any>)
+        | undefined;
+      if (showSaveFilePicker) {
+        try {
+          const handle = await showSaveFilePicker({
+            suggestedName: fileName,
+            types: [{ description: 'PDF document', accept: { 'application/pdf': ['.pdf'] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(new Blob([data as BlobPart], { type: 'application/pdf' }));
+          await writable.close();
+          return;
+        } catch (pickerError) {
+          // User cancelled the picker — not an error, and no fallback download.
+          if ((pickerError as DOMException)?.name === 'AbortError') return;
+          // Picker unavailable in this context (e.g. cross-origin iframe
+          // without permission) — fall through to the download path.
+          console.warn('showSaveFilePicker failed, falling back to download:', pickerError);
+        }
+      }
+
       // Create a new ArrayBuffer to avoid SharedArrayBuffer issues
       const arrayBuffer = new ArrayBuffer(data.length);
       const view = new Uint8Array(arrayBuffer);

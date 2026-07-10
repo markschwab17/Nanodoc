@@ -538,3 +538,60 @@ describe("page labels: follow page on reorder", () => {
     expect(labels).toEqual([undefined, "THIRD", "FIRST"]);
   });
 });
+
+describe("export selected pages as a new PDF", () => {
+  it("extracts the subset in document order regardless of input order", async () => {
+    const bytes = await buildBasicPdf(5);
+    const doc = new PDFDocument("doc_subset", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+
+    // Deliberately unsorted, with a duplicate.
+    const out = await editor.exportPagesAsPDF(doc, [4, 1, 4]);
+
+    const reopened = mupdf.Document.openDocument(out, "application/pdf");
+    expect(reopened.countPages()).toBe(2);
+    const text0 = reopened.asPDF().loadPage(0).toStructuredText().asText();
+    const text1 = reopened.asPDF().loadPage(1).toStructuredText().asText();
+    expect(text0).toContain("Page 2 body text");
+    expect(text1).toContain("Page 5 body text");
+  });
+
+  it("bakes annotations onto the remapped subset pages", async () => {
+    const bytes = await buildBasicPdf(4);
+    const doc = new PDFDocument("doc_subset_ann", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+
+    // Annotation lives on source page 2; pages 0 and 3 are not exported.
+    const annots = [ann({ type: "text", pageNumber: 2, content: "note on p3" })];
+    const out = await editor.exportPagesAsPDF(doc, [1, 2], annots);
+
+    const reopened = mupdf.Document.openDocument(out, "application/pdf");
+    expect(reopened.countPages()).toBe(2);
+    // Source page 2 became subset page 1 — the annotation must follow it.
+    expect(annotTypesOnPage(out, 0)).toEqual([]);
+    expect(annotTypesOnPage(out, 1)).toContain("FreeText");
+  });
+
+  it("rejects an empty or fully out-of-range selection", async () => {
+    const bytes = await buildBasicPdf(2);
+    const doc = new PDFDocument("doc_subset_bad", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+    await expect(editor.exportPagesAsPDF(doc, [])).rejects.toThrow();
+    await expect(editor.exportPagesAsPDF(doc, [7])).rejects.toThrow();
+  });
+
+  it.skipIf(!hasQpdf)("produces structurally valid output", async () => {
+    const bytes = await buildBasicPdf(3);
+    const doc = new PDFDocument("doc_subset_qpdf", "fixture.pdf", bytes.length);
+    await doc.loadFromData(bytes, mupdf);
+    const editor = new PDFEditor(mupdf);
+    const out = await editor.exportPagesAsPDF(doc, [0, 2], [
+      ann({ type: "text", pageNumber: 0, content: "hello" }),
+    ]);
+    const check = qpdfCheck(out);
+    expect(check.ok, check.output).toBe(true);
+  });
+});

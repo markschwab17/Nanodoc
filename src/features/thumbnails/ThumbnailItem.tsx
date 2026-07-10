@@ -13,7 +13,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PDFDocument } from "@/core/pdf/PDFDocument";
 import type { TiledPageRenderer } from "@/core/pdf/tiles/TiledPageRenderer";
 import { Trash2, RotateCw } from "lucide-react";
-import { PDFEditor } from "@/core/pdf/PDFEditor";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 
 interface ThumbnailItemProps {
@@ -27,7 +26,6 @@ interface ThumbnailItemProps {
   onClick: (e: React.MouseEvent) => void;
   onDelete?: (e: React.MouseEvent) => void;
   onRotate?: (e: React.MouseEvent) => void;
-  onDragStart?: () => void;
   /** Stored label for this page; falls back to the 1-based number when absent. */
   label?: string;
   /** Commit an edited label (empty string clears it). */
@@ -43,7 +41,6 @@ export function ThumbnailItem({
   onClick,
   onDelete,
   onRotate,
-  onDragStart: _onDragStart,
   label,
   onLabelChange,
 }: ThumbnailItemProps) {
@@ -60,7 +57,6 @@ export function ThumbnailItem({
   // trigger a re-paint cleanly: any new arrival increments and re-runs.
   const [paintKey, setPaintKey] = useState(0);
   const [isLandscape, setIsLandscape] = useState<boolean>(false);
-  const { getAnnotations } = usePDFStore();
   const horizontalFlip = usePDFStore((state) =>
     state.getPageHorizontalFlip(document?.getId?.() ?? "", pageNumber),
   );
@@ -123,81 +119,11 @@ export function ThumbnailItem({
   // Use fixed aspect ratios: landscape (4:3) or portrait (3:4)
   const aspectRatio = isLandscape ? 4 / 3 : 3 / 4;
 
-  const handleDragStart = async (e: React.DragEvent) => {
-    // Don't stop propagation - let the parent handle reordering
-    // The parent will set draggedPage for reordering, which won't interfere with export
-    // We prepare for export in the background - if user drags outside, export works
-    // If user drags within carousel, parent's reordering takes precedence
-
-    // Prepare the page as PDF file for export (async, runs in background)
-    preparePageExport(e);
-  };
-
-  const preparePageExport = async (e: React.DragEvent) => {
-    try {
-      // Get all annotations for this page
-      const documentId = document.getId();
-      const allAnnotations = getAnnotations(documentId);
-      const pageAnnotations = allAnnotations.filter(
-        (ann) => ann.pageNumber === pageNumber,
-      );
-
-      // Initialize mupdf and editor
-      const mupdfModule = await import("mupdf");
-      const editor = new PDFEditor(mupdfModule.default);
-
-      // Export the page as PDF
-      const pdfData = await editor.exportPageAsPDF(
-        document,
-        pageNumber,
-        pageAnnotations,
-      );
-
-      // Create a File object from the PDF data
-      const fileName = `${document.getName().replace(".pdf", "")}_page_${pageNumber + 1}.pdf`;
-      const file = new File([pdfData as BlobPart], fileName, {
-        type: "application/pdf",
-      });
-
-      // Set the file in the data transfer
-      e.dataTransfer.effectAllowed = "copy";
-      e.dataTransfer.setData("application/pdf", "");
-      e.dataTransfer.setData("text/plain", fileName);
-      e.dataTransfer.setData("application/x-page-export", "true"); // Mark as page export
-
-      // Use the items API to add the file (for dragging out of browser)
-      if (e.dataTransfer.items) {
-        // Don't clear items - we want to add the file
-        try {
-          e.dataTransfer.items.add(file);
-        } catch (err) {
-          // If items can't be modified, try fallback
-          console.warn(
-            "Could not add file to dataTransfer.items, using fallback:",
-            err,
-          );
-          const blobUrl = URL.createObjectURL(file);
-          e.dataTransfer.setData(
-            "DownloadURL",
-            `application/pdf:${fileName}:${blobUrl}`,
-          );
-        }
-      } else {
-        // Fallback for older browsers
-        const blobUrl = URL.createObjectURL(file);
-        e.dataTransfer.setData(
-          "DownloadURL",
-          `application/pdf:${fileName}:${blobUrl}`,
-        );
-      }
-
-      // Tauri handles file drags via its own event system;
-      // the browser DataTransfer API above still works in the webview.
-    } catch (error) {
-      console.error("Error preparing page for drag-out:", error);
-      // Don't prevent the drag, just log the error
-    }
-  };
+  // Drag handling (reorder within the carousel + drag-out export) lives on
+  // the carousel's wrapper div, which owns the selection state. DataTransfer
+  // only accepts payloads synchronously inside dragstart, so the carousel
+  // attaches a pre-generated export file there — an async export started
+  // here could never make it onto the drag.
 
   return (
     <div
@@ -213,8 +139,6 @@ export function ThumbnailItem({
         height: "auto",
       }}
       onClick={onClick}
-      draggable
-      onDragStart={handleDragStart}
     >
       <canvas
         ref={canvasRef}

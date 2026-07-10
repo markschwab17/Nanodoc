@@ -8,6 +8,8 @@ import { usePDFStore, type SearchMatch, type SearchResultData } from "@/shared/s
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { ThumbnailItem } from "./ThumbnailItem";
+import { buildExportFileName } from "./exportSelection";
+import { ExportPagesDialog } from "./ExportPagesDialog";
 import { BookmarksPanel } from "@/features/bookmarks/BookmarksPanel";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import {
@@ -27,8 +29,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { useEffect, useState, useRef } from "react";
-import { Search, X, ChevronUp, ChevronDown, FileText, RotateCw, FlipVertical, FlipHorizontal, Plus, FilePlus, FileUp, FileIcon, Bookmark } from "lucide-react";
+import { useCallback, useEffect, useState, useRef } from "react";
+import { Search, X, ChevronUp, ChevronDown, FileText, FileOutput, RotateCw, FlipVertical, FlipHorizontal, Plus, FilePlus, FileUp, FileIcon, Bookmark } from "lucide-react";
 import { useClipboard } from "@/shared/hooks/useClipboard";
 import { wrapPageOperation } from "@/shared/stores/undoHelpers";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
@@ -36,6 +38,8 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
+import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
+import { getCtoParent, isCtoOrigin, postToCtoParent } from "@/shared/ctoBridge";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useESignStore } from "@/shared/stores/esignStore";
 
@@ -46,6 +50,7 @@ export function ThumbnailCarousel() {
   const currentDocument = getCurrentDocument();
   const { showThumbnails } = useUIStore();
   const esignMode = useESignStore((s) => s.mode);
+  const ctoContext = useCiviltakeoffContextStore((s) => s.context);
   // Thumbnails read LOD-0 tiles from the SAME renderer the main page view
   // uses. No separate worker, no extra mupdf instance. The registry keeps
   // one TiledPageRenderer per docId and shares it across all consumers.
@@ -89,30 +94,141 @@ export function ThumbnailCarousel() {
   const fileSystem = useFileSystem();
   const { loadPDF } = usePDF();
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  // Row the floating "Export N pages" pill anchors to: the page the user
+  // touched last, falling back to the highest selected index.
+  const [lastInteractedPage, setLastInteractedPage] = useState<number | null>(null);
   
   const searchData = currentDocument ? getSearchResults(currentDocument.getId()) : null;
   const totalMatches = searchData?.matches.length ?? 0;
   const currentResultIndex = currentSearchResult;
   
-  // Track if the last page change was from a click (to preserve selection)
-  const lastClickPageRef = useRef<number | null>(null);
-  
-  // Clear selected pages when current page changes from scrolling (not clicking)
-  // This prevents the ring border from staying on previously selected pages
+  // Anchor for shift-click range selection (last plain/cmd-clicked page).
+  // Selection deliberately survives main-view scrolling so a user can browse
+  // the document while building an export selection; it clears on Escape,
+  // document switch, and page-count changes instead.
+  const selectionAnchorRef = useRef<number | null>(null);
+
+  const clearSelection = useCallback(() => {
+    setSelectedPages(new Set());
+    selectionAnchorRef.current = null;
+  }, []);
+
+  // Clear selection when switching documents or when pages are added/removed
+  // (indices would otherwise point at the wrong pages).
+  const currentDocumentId = currentDocument?.getId() ?? null;
+  const pageCountForSelection = currentDocument?.getPageCount() ?? 0;
   useEffect(() => {
-    // If current page changed and it wasn't from a click, clear selection
-    if (selectedPages.size > 0 && lastClickPageRef.current !== currentPage) {
-      // Small delay to ensure click events have processed
-      const timeoutId = setTimeout(() => {
-        // Only clear if current page is still not the clicked page
-        if (lastClickPageRef.current !== currentPage) {
-          setSelectedPages(new Set());
-          lastClickPageRef.current = null; // Reset after clearing
-        }
-      }, 100);
-      return () => clearTimeout(timeoutId);
+    clearSelection();
+  }, [currentDocumentId, pageCountForSelection, clearSelection]);
+
+  // Pre-generated drag-out payload for the current selection. DataTransfer
+  // only accepts files synchronously inside dragstart, so the export PDF has
+  // to exist before the drag begins — it is (re)built shortly after every
+  // selection change and invalidated by destructive edits (thumbnailVersion)
+  // and annotation changes.
+  const exportCacheRef = useRef<{ key: string; file: File; blobUrl: string } | null>(null);
+  const exportBuildTokenRef = useRef(0);
+  /** Pages/name of the drag last announced to the embedding CTO/Pursuit page. */
+  const announcedDragRef = useRef<{ pages: number[]; fileName: string } | null>(null);
+  /** True between dragstart and dragend of a drag announced to the CTO page. */
+  const ctoDragActiveRef = useRef(false);
+  const annotationsForExport = usePDFStore((s) => s.annotations);
+  const exportCacheKey =
+    currentDocument && selectedPages.size > 0
+      ? `${currentDocumentId}:v${thumbnailVersion}:${Array.from(selectedPages).sort((a, b) => a - b).join(",")}`
+      : null;
+  useEffect(() => {
+    const dropCache = () => {
+      if (exportCacheRef.current) {
+        URL.revokeObjectURL(exportCacheRef.current.blobUrl);
+        exportCacheRef.current = null;
+      }
+    };
+    if (!exportCacheKey || !currentDocument || !editor) {
+      exportBuildTokenRef.current++;
+      dropCache();
+      return;
     }
-  }, [currentPage, selectedPages]);
+    if (exportCacheRef.current?.key === exportCacheKey) return;
+    const token = ++exportBuildTokenRef.current;
+    const pages = Array.from(selectedPages).sort((a, b) => a - b);
+    // Small debounce so shift/cmd-click bursts build once, not per click.
+    const timeoutId = setTimeout(async () => {
+      try {
+        const annotations = getAnnotations(currentDocument.getId());
+        const bytes = await editor.exportPagesAsPDF(currentDocument, pages, annotations);
+        if (token !== exportBuildTokenRef.current) return;
+        const file = new File([bytes as BlobPart], buildExportFileName(currentDocument.getName(), pages), {
+          type: "application/pdf",
+        });
+        dropCache();
+        exportCacheRef.current = { key: exportCacheKey, file, blobUrl: URL.createObjectURL(file) };
+      } catch (error) {
+        console.error("Error preparing selected pages for drag-out:", error);
+      }
+    }, 150);
+    return () => clearTimeout(timeoutId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exportCacheKey, currentDocument, editor, annotationsForExport]);
+
+  // When a thumbnail drag is dropped on the embedding CTO/Pursuit documents
+  // page, the parent posts nanodoc-page-drag-commit with the target folder.
+  // Reply with the export bytes — from the pre-built cache when it's ready,
+  // otherwise built on demand (large plan sets can take seconds to export,
+  // and the user may drag before the debounced build finishes). The parent
+  // runs its own upload pipeline (progress toast + list refresh).
+  useEffect(() => {
+    if (!ctoContext) return;
+    const handler = async (event: MessageEvent) => {
+      if (event.data?.type !== "nanodoc-page-drag-commit") return;
+      if (!isCtoOrigin(event.origin, ctoContext.api_origin)) return;
+      const folderId =
+        typeof event.data.folderId === "string" ? event.data.folderId : null;
+      const source = (event.source as Window | null) ?? getCtoParent();
+      if (!source) return;
+      const announced = announcedDragRef.current;
+      try {
+        let fileName: string;
+        let buffer: ArrayBuffer;
+        const cached = exportCacheRef.current;
+        if (cached && announced && cached.file.name === announced.fileName) {
+          fileName = cached.file.name;
+          buffer = await cached.file.arrayBuffer();
+        } else if (announced && currentDocument && editor) {
+          const bytes = await editor.exportPagesAsPDF(
+            currentDocument,
+            announced.pages,
+            getAnnotations(currentDocument.getId())
+          );
+          fileName = announced.fileName;
+          buffer = (bytes.buffer as ArrayBuffer).slice(
+            bytes.byteOffset,
+            bytes.byteOffset + bytes.byteLength
+          );
+        } else {
+          source.postMessage(
+            { type: "nanodoc-page-export-file", error: "not-ready" },
+            event.origin
+          );
+          return;
+        }
+        source.postMessage(
+          { type: "nanodoc-page-export-file", fileName, folderId, buffer },
+          event.origin,
+          [buffer]
+        );
+      } catch (error) {
+        console.error("Failed to hand exported pages to Pursuit:", error);
+        source.postMessage(
+          { type: "nanodoc-page-export-file", error: "export-failed" },
+          event.origin
+        );
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, [ctoContext, currentDocument, editor, getAnnotations]);
 
   // Add global drop handler to catch drops that might be missed
   useEffect(() => {
@@ -281,7 +397,7 @@ export function ThumbnailCarousel() {
         pageNumbers
       );
       
-      setSelectedPages(new Set());
+      clearSelection();
     } catch (error) {
       console.error("Error deleting pages:", error);
     }
@@ -442,6 +558,11 @@ export function ThumbnailCarousel() {
         setPagesToDelete(pages);
         setShowDeleteDialog(true);
       }
+
+      // Escape clears the thumbnail selection
+      if (e.key === "Escape" && selectedPages.size > 0) {
+        clearSelection();
+      }
     };
 
     // Listen for custom copy/paste events
@@ -454,7 +575,7 @@ export function ThumbnailCarousel() {
       window.removeEventListener("pastePages", handlePastePages);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [selectedPages, currentDocument, currentPage, editor, hasPages, copyPages, pastePages, getAnnotations, documents, setCurrentPage]);
+  }, [selectedPages, currentDocument, currentPage, editor, hasPages, copyPages, pastePages, getAnnotations, documents, setCurrentPage, clearSelection]);
 
   // Debounced search
   useEffect(() => {
@@ -567,9 +688,19 @@ export function ThumbnailCarousel() {
     setCurrentSearchResult(-1);
   };
 
+  // File-manager selection model: click = single select + navigate,
+  // Shift+click = range from the anchor, Cmd/Ctrl+click = toggle one page.
   const handleThumbnailClick = (e: React.MouseEvent, pageNumber: number) => {
+    setLastInteractedPage(pageNumber);
     if (e.shiftKey) {
-      // Multi-select with shift
+      const anchor = selectionAnchorRef.current ?? currentPage;
+      const start = Math.min(anchor, pageNumber);
+      const end = Math.max(anchor, pageNumber);
+      const range = new Set<number>();
+      for (let p = start; p <= end; p++) range.add(p);
+      setSelectedPages(range);
+      // Anchor stays put so successive shift-clicks re-range from it.
+    } else if (e.metaKey || e.ctrlKey) {
       setSelectedPages((prev) => {
         const newSet = new Set(prev);
         if (newSet.has(pageNumber)) {
@@ -579,36 +710,150 @@ export function ThumbnailCarousel() {
         }
         return newSet;
       });
-      lastClickPageRef.current = pageNumber;
+      selectionAnchorRef.current = pageNumber;
     } else {
-      // Single select
       setSelectedPages(new Set([pageNumber]));
-      lastClickPageRef.current = pageNumber;
+      selectionAnchorRef.current = pageNumber;
       setCurrentPage(pageNumber);
     }
   };
 
+  // Which row the floating "Export N pages" pill sits next to (null = hidden).
+  const exportPillPage =
+    selectedPages.size >= 2 && esignMode !== "sign"
+      ? lastInteractedPage !== null && selectedPages.has(lastInteractedPage)
+        ? lastInteractedPage
+        : Math.max(...selectedPages)
+      : null;
+
   const handleDragStart = (e: React.DragEvent, pageNumber: number) => {
     // Always set draggedPage for reordering
     setDraggedPage(pageNumber);
-    
-    // Check if this is a page reorder operation (selected pages or single page)
-    const isPageReorder = selectedPages.size > 0 && selectedPages.has(pageNumber);
-    
-    if (isPageReorder) {
-      // This is a page reorder operation with selected pages
-      const pagesToDrag = Array.from(selectedPages).sort((a, b) => a - b);
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", pagesToDrag.join(","));
-      e.dataTransfer.setData("application/x-pdf-page-reorder", "true");
+
+    const isSelectionDrag = selectedPages.size > 0 && selectedPages.has(pageNumber);
+    const pagesToDrag = isSelectionDrag
+      ? Array.from(selectedPages).sort((a, b) => a - b)
+      : [pageNumber];
+
+    // "move" for internal reorders, "copy" for dragging out to the OS —
+    // the drop target picks.
+    e.dataTransfer.effectAllowed = "copyMove";
+
+    // Attach the pre-generated export PDF via Chromium's DownloadURL so a
+    // desktop/Finder drop downloads a new PDF of the dragged pages. Keep the
+    // payload to DownloadURL alone: a JS-created File added via items.add()
+    // has no OS path backing it, so Chromium serializes it into an EMPTY
+    // file entry (crbug 41145910) that hijacks the OS drop as a file-drag
+    // with nothing in it and suppresses the DownloadURL download; extra
+    // string formats have also historically broken DownloadURL (crbug
+    // 55071). Internal reorders carry no payload at all — they run on the
+    // draggedPage/dragOverIndex component state.
+    const cacheKey = currentDocument
+      ? `${currentDocument.getId()}:v${thumbnailVersion}:${pagesToDrag.join(",")}`
+      : null;
+    const cached = exportCacheRef.current;
+    const exportFileName = currentDocument
+      ? buildExportFileName(currentDocument.getName(), pagesToDrag)
+      : "pages.pdf";
+    if (cacheKey && cached?.key === cacheKey) {
+      e.dataTransfer.setData(
+        "DownloadURL",
+        `application/pdf:${cached.file.name}:${cached.blobUrl}`
+      );
     } else {
-      // Single page reorder - allow both reordering and export
-      // The drag handlers will determine which one based on drop target
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", String(pageNumber));
+      // Export not ready (drag began before the debounced build finished).
+      // Desktop drag-out needs the bytes synchronously so it misses this
+      // drag, but reorders still work and the CTO/Pursuit handshake below
+      // builds the export on demand at drop time.
       e.dataTransfer.setData("application/x-pdf-page-reorder", "true");
     }
+
+    // When embedded in the CTO/Pursuit documents page, announce the drag so
+    // the parent can accept drops on its folder tree. Chrome confines HTML5
+    // drags started in a cross-origin iframe (crbug 251718) — the parent
+    // never receives ANY drag events — so the whole drag is mirrored over
+    // postMessage: screen coordinates stream from the drag/dragend events
+    // (which keep firing on the drag SOURCE even when the pointer is outside
+    // the frame) and the parent hit-tests them against its folder tree.
+    if (currentDocument && ctoContext && getCtoParent()) {
+      announcedDragRef.current = { pages: pagesToDrag, fileName: exportFileName };
+      ctoDragActiveRef.current = true;
+      postToCtoParent(
+        { type: "nanodoc-page-drag-start", fileName: exportFileName },
+        ctoContext.api_origin
+      );
+    }
   };
+
+  // Throttled coordinate stream for the mirrored drag (see handleDragStart).
+  const lastDragMovePostRef = useRef(0);
+  const handleDragMove = (e: React.DragEvent) => {
+    if (!ctoContext || !getCtoParent() || !announcedDragRef.current) return;
+    const now = Date.now();
+    if (now - lastDragMovePostRef.current < 80) return;
+    lastDragMovePostRef.current = now;
+    postToCtoParent(
+      { type: "nanodoc-page-drag-move", screenX: e.screenX, screenY: e.screenY },
+      ctoContext.api_origin
+    );
+  };
+
+  // Inside/outside tracking for the mirrored drag. Chrome freezes the drag
+  // source's coordinates while the pointer is outside the confined iframe,
+  // so position can't drive the parent's live drop indicator. Instead detect
+  // the crossing directly: dragover fires on our window continuously (every
+  // ~350ms even with the mouse held still) while the pointer is INSIDE the
+  // viewer, and stops when it leaves — a stalled heartbeat means "outside".
+  useEffect(() => {
+    if (!ctoContext) return;
+    let outside = false;
+    let lastInsideAt = 0;
+    const post = (type: string) => postToCtoParent({ type }, ctoContext.api_origin);
+    const markInside = () => {
+      lastInsideAt = Date.now();
+      if (ctoDragActiveRef.current && outside) {
+        outside = false;
+        post("nanodoc-page-drag-inside");
+      }
+    };
+    const onWindowDragOver = () => {
+      if (!ctoDragActiveRef.current) return;
+      markInside();
+    };
+    const onWindowDragLeave = (e: DragEvent) => {
+      // relatedTarget null = the drag left the document entirely; instant
+      // signal that beats the heartbeat timeout.
+      if (!ctoDragActiveRef.current || e.relatedTarget !== null || outside) return;
+      outside = true;
+      post("nanodoc-page-drag-outside");
+    };
+    const intervalId = setInterval(() => {
+      if (!ctoDragActiveRef.current || outside) return;
+      if (lastInsideAt === 0) {
+        // First tick after dragstart — start the heartbeat clock so even a
+        // drag that exits before any dragover fires gets detected.
+        lastInsideAt = Date.now();
+        return;
+      }
+      if (Date.now() - lastInsideAt > 500) {
+        outside = true;
+        post("nanodoc-page-drag-outside");
+      }
+    }, 150);
+    const onDragEndReset = () => {
+      outside = false;
+      lastInsideAt = 0;
+    };
+    window.addEventListener("dragover", onWindowDragOver);
+    window.addEventListener("dragleave", onWindowDragLeave);
+    window.addEventListener("dragend", onDragEndReset);
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener("dragover", onWindowDragOver);
+      window.removeEventListener("dragleave", onWindowDragLeave);
+      window.removeEventListener("dragend", onDragEndReset);
+    };
+  }, [ctoContext]);
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
@@ -664,7 +909,23 @@ export function ThumbnailCarousel() {
     setDragOverIndex(null);
   };
 
-  const handleDragEnd = async () => {
+  const handleDragEnd = async (e?: React.DragEvent) => {
+    // Close out any drag announced to the embedding CTO/Pursuit page FIRST —
+    // several branches below return early, and a missed drag-end would leave
+    // the parent treating future drops as page drags. The release coordinates
+    // let the parent resolve which folder (if any) the pointer was over,
+    // since Chrome never delivers the actual drop event cross-origin.
+    if (ctoContext && getCtoParent()) {
+      ctoDragActiveRef.current = false;
+      postToCtoParent(
+        {
+          type: "nanodoc-page-drag-end",
+          screenX: e?.screenX,
+          screenY: e?.screenY,
+        },
+        ctoContext.api_origin
+      );
+    }
     if (draggedPage !== null && dragOverIndex !== null && currentDocument && editor) {
       const pagesToDrag = selectedPages.size > 0 && selectedPages.has(draggedPage)
         ? Array.from(selectedPages).sort((a, b) => a - b)
@@ -687,7 +948,7 @@ export function ThumbnailCarousel() {
       if (targetIndex === minDragged && targetIndex <= maxDragged) {
         setDraggedPage(null);
         setDragOverIndex(null);
-        setSelectedPages(new Set());
+        clearSelection();
         return;
       }
       
@@ -798,8 +1059,8 @@ export function ThumbnailCarousel() {
         targetIndex
       );
       
-      setSelectedPages(new Set());
-      
+      clearSelection();
+
       // Force thumbnail re-render by incrementing reorder version
       // This changes the keys, forcing React to re-render all thumbnails
       setReorderVersion(prev => prev + 1);
@@ -839,7 +1100,7 @@ export function ThumbnailCarousel() {
         (item.kind === "file" && item.type.includes("pdf"))
       );
     
-    if ((hasPdf || isTabDrag || hasTabId) && !draggedPage) {
+    if ((hasPdf || isTabDrag || hasTabId) && draggedPage === null) {
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = "copy";
@@ -1569,7 +1830,7 @@ export function ThumbnailCarousel() {
               const hasFiles = e.dataTransfer.types.includes("Files");
               
               // Always handle tab drags on the container (check both tab-id and tab-document-id)
-              if ((isTabDrag || hasTabId) && !draggedPage) {
+              if ((isTabDrag || hasTabId) && draggedPage === null) {
                 e.preventDefault();
                 e.stopPropagation();
                 e.dataTransfer.dropEffect = "copy";
@@ -1581,7 +1842,7 @@ export function ThumbnailCarousel() {
               
               // Handle PDF file drag over on container
               // Calculate position based on mouse Y position relative to thumbnails
-              if (hasFiles && !draggedPage) {
+              if (hasFiles && draggedPage === null) {
                 e.preventDefault();
                 e.stopPropagation();
                 e.dataTransfer.dropEffect = "copy";
@@ -1659,13 +1920,13 @@ export function ThumbnailCarousel() {
               const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
               
               // Handle tab drags (check both types)
-              if ((isTabDrag || hasTabId) && !draggedPage) {
+              if ((isTabDrag || hasTabId) && draggedPage === null) {
                 handlePDFDrop(e, pageCount, undefined);
                 return;
               }
               
               // Handle PDF file drops
-              if (hasPdf && !draggedPage) {
+              if (hasPdf && draggedPage === null) {
                 handlePDFDrop(e);
                 return;
               }
@@ -1701,16 +1962,31 @@ export function ThumbnailCarousel() {
                 
                 <div
                   draggable
+                  onMouseDown={(e) => {
+                    // File-manager drag semantics: pressing on an unselected
+                    // thumbnail makes it the sole selection before a potential
+                    // drag begins (also starts the export-cache build so a
+                    // quick drag-out has a payload ready).
+                    if (
+                      e.button === 0 &&
+                      !e.shiftKey &&
+                      !e.metaKey &&
+                      !e.ctrlKey &&
+                      !selectedPages.has(i)
+                    ) {
+                      setSelectedPages(new Set([i]));
+                      selectionAnchorRef.current = i;
+                    }
+                  }}
                   onDragStart={(e) => {
-                    // Always handle drag start for page reordering
-                    // ThumbnailItem will check for application/x-pdf-page-reorder and skip export if present
                     handleDragStart(e, i);
                   }}
+                  onDrag={handleDragMove}
                   onDragOver={(e) => {
                     // Check if this is a tab drag first
                     const isTabDrag = e.dataTransfer.types.includes("application/x-tab-document-id");
                     const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
-                    if ((isTabDrag || hasTabId) && !draggedPage) {
+                    if ((isTabDrag || hasTabId) && draggedPage === null) {
                       e.preventDefault();
                       e.stopPropagation();
                       e.dataTransfer.dropEffect = "copy";
@@ -1747,7 +2023,7 @@ export function ThumbnailCarousel() {
                     const hasTabId = e.dataTransfer.types.includes("application/x-tab-id");
                     
                     // Handle tab drags
-                    if ((isTabDrag || hasTabId) && !draggedPage) {
+                    if ((isTabDrag || hasTabId) && draggedPage === null) {
                       e.preventDefault();
                       e.stopPropagation();
                       handlePDFDrop(e, i, e.currentTarget);
@@ -1755,7 +2031,7 @@ export function ThumbnailCarousel() {
                     }
                     
                     // Handle PDF file drops
-                    if (hasPdf && !draggedPage) {
+                    if (hasPdf && draggedPage === null) {
                       e.preventDefault();
                       e.stopPropagation();
                       handlePDFDrop(e, i, e.currentTarget);
@@ -1784,6 +2060,26 @@ export function ThumbnailCarousel() {
                     onLabelChange={esignMode !== "sign" ? handleLabelChange : undefined}
                   />
                 </div>
+                {/* Floating export action for the multi-selection, hugging the
+                    sidebar's right gutter next to the last-touched thumbnail. */}
+                {exportPillPage === i && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowExportDialog(true);
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="absolute right-0 top-1/2 -translate-y-1/2 z-30 flex flex-col items-center gap-0.5 rounded-lg border bg-background/95 px-1.5 py-2 shadow-md hover:bg-accent hover:border-primary/50 transition-colors"
+                    title={`Export ${selectedPages.size} selected pages as a new PDF`}
+                  >
+                    <FileOutput className="h-4 w-4 text-primary" />
+                    <span className="text-[10px] font-medium leading-tight">Export</span>
+                    <span className="text-[10px] text-muted-foreground leading-tight">
+                      {selectedPages.size} pgs
+                    </span>
+                  </button>
+                )}
               </div>
             ))}
             {/* Add Page button beneath last thumbnail (hidden during e-sign signing) */}
@@ -2176,6 +2472,17 @@ export function ThumbnailCarousel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Export Selected Pages */}
+      {currentDocument && editor && (
+        <ExportPagesDialog
+          open={showExportDialog}
+          onOpenChange={setShowExportDialog}
+          document={currentDocument}
+          editor={editor}
+          pages={Array.from(selectedPages)}
+        />
+      )}
     </div>
   );
 }

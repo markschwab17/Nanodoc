@@ -259,6 +259,15 @@ export class PDFEditor {
     return this.documentOps.exportPageAsPDF(document, pageNumber, annotations);
   }
 
+  /** Export a subset of pages (document order, annotations baked) as a new PDF. */
+  async exportPagesAsPDF(
+    document: PDFDocument,
+    pageNumbers: number[],
+    annotations?: Annotation[]
+  ): Promise<Uint8Array> {
+    return this.documentOps.exportPagesAsPDF(document, pageNumbers, annotations);
+  }
+
   async flattenAllAnnotations(
     document: PDFDocument,
     currentPageOnly: boolean = false,
