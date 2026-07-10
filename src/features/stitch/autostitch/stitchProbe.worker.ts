@@ -45,5 +45,8 @@ async function handle(req: ProbeRequest) {
 
 self.onmessage = (e: MessageEvent<ProbeRequest>) => {
   latestDocId = e.data.docId;
-  queue = queue.then(() => handle(e.data));
+  // .catch keeps the chain self-healing: handle() cannot reject today, but a
+  // future edit that let it throw would otherwise poison every later request
+  // (the tail would stay a rejected promise → permanent worker death).
+  queue = queue.then(() => handle(e.data)).catch(() => {});
 };
