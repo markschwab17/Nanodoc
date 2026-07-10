@@ -26,7 +26,7 @@ import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import type { TilePlacement } from "@/features/stitch/autostitch/layout";
+import { layoutPlacements, type TilePlacement } from "@/features/stitch/autostitch/layout";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -537,7 +537,12 @@ export function AddPdfModal({
       let worstResidFt: number;
       if (probe && probeState === "done") {
         const sel = new Set(selected);
-        placements = probe.placements.filter((p) => sel.has(p.pageIndex));
+        // Re-run the (cheap) layout over just the selected sheets so the committed
+        // tiles normalize to THIS selection's top-left (MARGIN), not the whole
+        // document's. The probe laid out all pages, so filtering alone would leave a
+        // partial selection offset off-canvas; the expensive stitch stays cached (poses).
+        const subset = probe.poses.filter((p) => sel.has(p.pageIndex));
+        placements = layoutPlacements(subset, probe.rootFtPerIn);
         rootFtPerIn = probe.rootFtPerIn;
         worstResidFt = probe.worstResidFt;
       } else {

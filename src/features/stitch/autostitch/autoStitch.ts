@@ -3,7 +3,7 @@ import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10. Do not import it yet.
 import { stitchSheets, type SheetInput, type StitchMethod } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
-import { layoutPlacements, type TilePlacement } from "./layout";
+import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
 
 const DEFAULT_SCALE = 20;
 
@@ -18,6 +18,7 @@ export interface AutoStitchResult {
   unplacedCount: number;
   worstResidFt: number;
   method: StitchMethod;
+  poses: PlacedSheetPose[];
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
@@ -62,7 +63,7 @@ export async function autoStitch(
   const used = new Set<number>();
   for (const r of rows) { while (used.has(r.no)) r.no += 10000; used.add(r.no); }
 
-  if (!rows.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none" };
+  if (!rows.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [] };
 
   const rootFtPerIn = rows[0].scale; // == the stitch root sheet's scale (consistent frame)
 
@@ -92,10 +93,8 @@ export async function autoStitch(
     method = res.method;
   }
 
-  const placements = layoutPlacements(
-    rows.map((r) => ({ pageIndex: r.pageIndex, scale: r.scale, sizePt: r.sizePt, posFt: placementsByNo.get(r.no) ?? null })),
-    rootFtPerIn
-  );
+  const poses: PlacedSheetPose[] = rows.map((r) => ({ pageIndex: r.pageIndex, scale: r.scale, sizePt: r.sizePt, posFt: placementsByNo.get(r.no) ?? null }));
+  const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses };
 }

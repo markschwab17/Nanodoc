@@ -3,7 +3,7 @@
  * by both the worker (runtime) and AddPdfModal (types). Kept out of the worker
  * file so `toProbeResult` is unit-testable without spawning a worker.
  */
-import type { TilePlacement } from "./layout";
+import type { TilePlacement, PlacedSheetPose } from "./layout";
 import type { AutoStitchResult } from "./autoStitch";
 import type { StitchMethod } from "./stitchCore";
 
@@ -21,6 +21,7 @@ export interface ProbeResult {
   alignedPageIndices: number[];
   worstResidFt: number;
   rootFtPerIn: number;
+  poses: PlacedSheetPose[];
 }
 
 export type ProbeMessage = ProbeResult | { docId: number; error: string };
@@ -33,5 +34,6 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     alignedPageIndices: res.placements.filter((p) => p.aligned).map((p) => p.pageIndex),
     worstResidFt: res.worstResidFt,
     rootFtPerIn: res.rootFtPerIn,
+    poses: res.poses,
   };
 }

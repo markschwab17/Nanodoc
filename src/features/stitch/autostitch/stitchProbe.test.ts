@@ -10,7 +10,7 @@ describe("toProbeResult", () => {
         { pageIndex: 1, x: 100, y: 0, width: 100, height: 100, aligned: true },
         { pageIndex: 2, x: 0, y: 500, width: 100, height: 100, aligned: false },
       ],
-      rootFtPerIn: 20, alignedCount: 2, unplacedCount: 1, worstResidFt: 0, method: "keymap",
+      rootFtPerIn: 20, alignedCount: 2, unplacedCount: 1, worstResidFt: 0, method: "keymap", poses: [],
     };
     const probe = toProbeResult(res, 7);
     expect(probe.docId).toBe(7);
