@@ -54,6 +54,28 @@ export function invalidateTiledRendererForDoc(docId: string): void {
   }
 }
 
+/**
+ * Push freshly serialized document bytes to the doc's tile renderer after a
+ * structural edit (insert/delete/reorder/rotate pages) and notify mounted
+ * TiledCanvas instances to re-request their viewports. Unlike
+ * invalidateTiledRendererForDoc, this also replaces the bytes the render
+ * workers open the document from — without that, workers keep rendering the
+ * file as it was at load time. No-op when no renderer exists for the doc.
+ */
+export function refreshTiledRendererForDoc(
+  docId: string,
+  pdfBytes: Uint8Array,
+): void {
+  const renderer = cache.get(docId);
+  if (!renderer) return;
+  renderer.refreshDocument(pdfBytes);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("nanodoc:tiles-invalidated", { detail: { docId } }),
+    );
+  }
+}
+
 export function destroyTiledRenderer(docId: string): void {
   const renderer = cache.get(docId);
   if (renderer) {

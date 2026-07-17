@@ -12,7 +12,7 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { normalizeSelectionToRect, validatePDFRect, capCaptureScale } from "./coordinateHelpers";
 import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
 import { useUIStore } from "@/shared/stores/uiStore";
-import { invalidateTiledRendererForDoc } from "@/core/pdf/tiles/tiledRendererRegistry";
+import { syncDocumentRenderers } from "@/shared/stores/undoHelpers";
 
 export const SelectionBoxTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -189,9 +189,11 @@ export const SelectionBoxTool: ToolHandler = {
 
       // Clear caches and force re-render (legacy renderer + tile pyramid —
       // with tiles active the legacy canvas isn't mounted, so without the
-      // tile invalidation the user keeps seeing the un-redacted content).
+      // tile refresh the user keeps seeing the un-redacted content). The
+      // sync also re-serializes the doc so the tile workers render the
+      // erased content instead of their stale load-time snapshot.
       renderer.clearCache();
-      invalidateTiledRendererForDoc(currentDocument.getId());
+      syncDocumentRenderers(currentDocument.getId());
       currentDocument.refreshPageMetadata();
 
       const mupdfDoc = currentDocument.getMupdfDocument();

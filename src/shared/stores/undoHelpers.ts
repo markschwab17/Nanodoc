@@ -7,6 +7,22 @@
 import { usePDFStore } from "./pdfStore";
 import { useUndoRedoStore } from "./undoRedoStore";
 import type { Annotation } from "@/core/pdf/PDFEditor";
+import { refreshTiledRendererForDoc } from "@/core/pdf/tiles/tiledRendererRegistry";
+
+/**
+ * Re-serialize a document's live mupdf state and push the fresh bytes to the
+ * render pipeline. Render workers (tile + legacy) open the PDF from the
+ * document's byte snapshot, so every structural page edit MUST call this or
+ * the workers keep drawing the file as it was at load time — inserted pages
+ * stay blank ("Loading…") because they don't exist in the workers' copy.
+ */
+export function syncDocumentRenderers(documentId: string): void {
+  const pdfStore = usePDFStore.getState();
+  const doc = pdfStore.documents.get(documentId);
+  if (!doc || !doc.isDocumentLoaded()) return;
+  const bytes = doc.refreshPdfData();
+  if (bytes) refreshTiledRendererForDoc(documentId, bytes);
+}
 
 /**
  * Wrap annotation update with undo/redo
@@ -198,6 +214,11 @@ export async function wrapPageOperation(
     (currentDocument as any).refreshPageMetadata();
   }
 
+  // Push the edited document's bytes to the render workers — without this,
+  // tiles/thumbnails keep rendering the pre-edit file (inserted pages would
+  // show as blank "Loading…" placeholders forever).
+  syncDocumentRenderers(documentId);
+
   // Capture after state
   const afterState = {
     annotations: new Map(usePDFStore.getState().annotations),
@@ -224,6 +245,7 @@ export async function wrapPageOperation(
     if (typeof (currentDocument as any).refreshPageMetadata === "function") {
       (currentDocument as any).refreshPageMetadata();
     }
+    syncDocumentRenderers(documentId);
     usePDFStore.setState({ annotations: new Map(afterState.annotations) });
     usePDFStore.setState({ currentPage: afterState.currentPage || 0 });
   };

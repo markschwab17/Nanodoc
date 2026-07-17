@@ -22,9 +22,19 @@ async function ensureMupdf() {
 }
 
 function openDocument(docId: string, data?: Uint8Array) {
-  if (currentDocId === docId && currentDoc) return;
+  // Same doc, no fresh bytes → reuse the open document. When `data` IS
+  // provided for an already-open docId, the main thread is pushing refreshed
+  // bytes after a structural edit — reopen from them.
+  if (currentDocId === docId && currentDoc && !data) return;
   const pdfBytes = data ?? cachedData;
   if (!pdfBytes) throw new Error("No PDF data available for document " + docId);
+  if (currentDoc) {
+    try {
+      currentDoc.destroy();
+    } catch {
+      /* ignore */
+    }
+  }
   currentDoc = mupdf.Document.openDocument(pdfBytes, "application/pdf");
   currentDocId = docId;
   cachedData = pdfBytes;

@@ -60,7 +60,10 @@ function openDocument(
   docId: string,
   data?: Uint8Array | SharedArrayBuffer,
 ) {
-  if (currentDocId === docId && currentDoc) return;
+  // Same doc, no fresh bytes → keep the open document. When `data` IS
+  // provided for an already-open docId, the pool is pushing refreshed bytes
+  // after a structural edit (see WorkerPool.refreshDoc) — reopen from them.
+  if (currentDocId === docId && currentDoc && !data) return;
   dropDisplayLists();
   if (currentDoc) {
     try {

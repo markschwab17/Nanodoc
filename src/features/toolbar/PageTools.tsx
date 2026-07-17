@@ -30,7 +30,7 @@ import { Plus, Layers } from "lucide-react";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
-import { wrapPageOperation } from "@/shared/stores/undoHelpers";
+import { wrapPageOperation, syncDocumentRenderers } from "@/shared/stores/undoHelpers";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { FlattenDialog } from "@/features/export/FlattenDialog";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
@@ -103,9 +103,11 @@ export function PageTools() {
     try {
       const deletedPage = currentPage;
       await editor.deletePages(currentDocument, [currentPage]);
-      
+
       // Refresh document metadata to update page count and page info
       currentDocument.refreshPageMetadata();
+      // Push edited bytes to the render workers (they hold a load-time snapshot)
+      syncDocumentRenderers(currentDocument.getId());
       
       // Mark tab as modified
       const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
@@ -219,7 +221,9 @@ export function PageTools() {
       
       // Refresh document metadata to update page count and page info
       currentDocument.refreshPageMetadata();
-      
+      // Push edited bytes to the render workers (they hold a load-time snapshot)
+      syncDocumentRenderers(currentDocument.getId());
+
       // Force a second refresh after a small delay to ensure thumbnails update
       // This triggers the thumbnail useEffect dependencies to refresh
       setTimeout(() => {

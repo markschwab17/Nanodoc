@@ -175,6 +175,20 @@ export class WorkerPool {
     }
   }
 
+  /**
+   * Forget cached bytes and per-worker doc state for a docId after the
+   * document's content changed (pages inserted/deleted/rotated/etc.). The
+   * next tile request for the doc re-fetches fresh bytes via pdfDataFor and
+   * re-sends them; the worker sees data for an already-open docId and
+   * reopens the document from the new bytes.
+   */
+  refreshDoc(docId: string): void {
+    this.docDataShared.delete(docId);
+    for (const slot of this.slots) {
+      slot?.knownDocIds.delete(docId);
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
     if (this.onVisibilityChange && typeof document !== "undefined") {

@@ -76,6 +76,38 @@ export class PDFDocument {
   }
 
   /**
+   * Re-serialize the live (edited) mupdf document and replace the cached
+   * byte snapshot. Render workers open the document from these bytes, so
+   * every structural edit (insert/delete/reorder/rotate pages, baked-in
+   * content changes) must refresh them or the workers keep rendering the
+   * file as it was at load time. Returns the fresh bytes (a NEW Uint8Array
+   * identity, which byte-identity checks in the renderers rely on), or
+   * null when serialization fails.
+   */
+  refreshPdfData(): Uint8Array | null {
+    if (!this.isLoaded || !this.mupdfDoc) return null;
+    try {
+      const pdf = this.mupdfDoc.asPDF?.() ?? this.mupdfDoc;
+      // Encrypted sources must be saved decrypted — the workers have no
+      // password to re-authenticate with (mirrors the save path).
+      const buffer = this.encrypted
+        ? pdf.saveToBuffer("decrypt")
+        : pdf.saveToBuffer();
+      // Copy out of the mupdf Buffer before destroying it.
+      this.pdfData = buffer.asUint8Array().slice();
+      try {
+        buffer.destroy?.();
+      } catch {
+        /* ignore */
+      }
+      return this.pdfData;
+    } catch (error) {
+      console.error("Failed to refresh PDF data snapshot:", error);
+      return null;
+    }
+  }
+
+  /**
    * Read one page's display dimensions + rotation. mupdf's getBounds()
    * already returns rotated dimensions (it applies the PDF's Rotate field
    * automatically) — do NOT manually swap, that would double-swap.

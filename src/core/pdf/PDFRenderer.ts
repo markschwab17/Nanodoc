@@ -44,6 +44,15 @@ export class PDFRenderer {
     { resolve: (r: RenderedPage) => void; reject: (e: Error) => void; pageNumber: number; scale: number; timer: ReturnType<typeof setTimeout> }
   >();
   private workerDocId: string | null = null;
+  /**
+   * Byte snapshot last sent to the worker. PDFDocument.refreshPdfData()
+   * produces a NEW Uint8Array after structural edits, so a reference
+   * mismatch means the worker's copy is stale and the bytes must be
+   * re-sent (the worker reopens the doc when data arrives).
+   */
+  private workerDocBytes: Uint8Array | null = null;
+  /** Byte snapshot seen by the last renderPage call — cache-staleness guard. */
+  private lastRenderBytes: Uint8Array | null = null;
 
   private getAdaptiveCacheSize(scale: number): number {
     // Desktop: generous cache but still bounded to prevent malloc failures
@@ -172,6 +181,7 @@ export class PDFRenderer {
     }
     this.workerReady = false;
     this.workerDocId = null;
+    this.workerDocBytes = null;
 
     // Reject everything still waiting
     for (const [, pending] of this.pendingRequests) {
@@ -225,6 +235,13 @@ export class PDFRenderer {
     const rotation = options.rotation ?? 0;
     const cacheKey = this.getCacheKey(pageNumber, scale, rotation);
 
+    // A new byte snapshot (refreshPdfData after a structural edit) means
+    // every cached render is stale — drop them before the cache lookup.
+    if (pdfData && this.lastRenderBytes && this.lastRenderBytes !== pdfData) {
+      this.renderCache.clear();
+    }
+    if (pdfData) this.lastRenderBytes = pdfData;
+
     if (this.renderCache.has(cacheKey)) {
       const cached = this.renderCache.get(cacheKey)!;
       this.renderCache.delete(cacheKey);
@@ -268,7 +285,8 @@ export class PDFRenderer {
 
       this.pendingRequests.set(id, { resolve, reject, pageNumber, scale, timer });
 
-      const needsData = this.workerDocId !== docId;
+      const needsData =
+        this.workerDocId !== docId || this.workerDocBytes !== pdfData;
       const msg: WorkerRequest = {
         type: "render",
         id,
@@ -279,7 +297,10 @@ export class PDFRenderer {
         rotation,
       };
       this.worker!.postMessage(msg);
-      if (needsData) this.workerDocId = docId;
+      if (needsData) {
+        this.workerDocId = docId;
+        this.workerDocBytes = pdfData;
+      }
     });
   }
 

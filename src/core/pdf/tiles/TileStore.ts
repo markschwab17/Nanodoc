@@ -237,12 +237,28 @@ class TileStore {
 
   /** Drop all stored tiles for a docId. Called on doc close / invalidate. */
   async invalidateDoc(docId: string): Promise<void> {
-    if (!(await this.ensureInit()) || !this.dir) return;
+    // Drop the in-memory metadata BEFORE the first await: callers treat this
+    // as fire-and-forget, and a tile fetch issued right after must not
+    // hasMeta-hit stale pixels while the OPFS deletions are still pending.
     const toDelete: string[] = [];
     for (const k of this.meta.keys()) {
       if (k.startsWith(`${docId}/`)) toDelete.push(k);
     }
-    for (const k of toDelete) await this.deleteByMetaKey(k);
+    for (const k of toDelete) {
+      const entry = this.meta.get(k);
+      if (entry) {
+        this.meta.delete(k);
+        this.totalBytes -= entry.byteSize;
+      }
+    }
+    if (!(await this.ensureInit()) || !this.dir) return;
+    for (const k of toDelete) {
+      try {
+        await this.dir.removeEntry(k.replace(/\//g, "__"));
+      } catch {
+        // already gone or locked; metadata index is already updated
+      }
+    }
     // Also defensively walk OPFS in case our metadata is stale.
     try {
       // @ts-expect-error directory iteration types

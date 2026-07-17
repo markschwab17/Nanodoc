@@ -32,7 +32,7 @@ import { cn } from "@/lib/utils";
 import { useCallback, useEffect, useState, useRef } from "react";
 import { Search, X, ChevronUp, ChevronDown, FileText, FileOutput, RotateCw, FlipVertical, FlipHorizontal, Plus, FilePlus, FileUp, FileIcon, Bookmark } from "lucide-react";
 import { useClipboard } from "@/shared/hooks/useClipboard";
-import { wrapPageOperation } from "@/shared/stores/undoHelpers";
+import { wrapPageOperation, syncDocumentRenderers } from "@/shared/stores/undoHelpers";
 import { useSpecExtractionStore } from "@/shared/stores/specExtractionStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useTextAnnotationClipboardStore } from "@/shared/stores/textAnnotationClipboardStore";
@@ -40,7 +40,6 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { getCtoParent, isCtoOrigin, postToCtoParent } from "@/shared/ctoBridge";
-import { usePDF } from "@/shared/hooks/usePDF";
 import { useESignStore } from "@/shared/stores/esignStore";
 
 type TabType = "pages" | "search" | "bookmarks";
@@ -92,7 +91,6 @@ export function ThumbnailCarousel() {
   const { showNotification } = useNotificationStore();
   const { hasTextAnnotation } = useTextAnnotationClipboardStore();
   const fileSystem = useFileSystem();
-  const { loadPDF } = usePDF();
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   // Row the floating "Export N pages" pill anchors to: the page the user
@@ -121,6 +119,20 @@ export function ThumbnailCarousel() {
   useEffect(() => {
     clearSelection();
   }, [currentDocumentId, pageCountForSelection, clearSelection]);
+
+  // Re-fetch thumbnails whenever the doc's tiles are invalidated/refreshed —
+  // fired by syncDocumentRenderers after structural edits anywhere in the
+  // app (this sidebar, the toolbar, the main view's rotate controls, …).
+  useEffect(() => {
+    const onInvalidated = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { docId?: string } | undefined;
+      if (detail?.docId && detail.docId === currentDocumentId) {
+        setThumbnailVersion((v) => v + 1);
+      }
+    };
+    window.addEventListener("nanodoc:tiles-invalidated", onInvalidated);
+    return () => window.removeEventListener("nanodoc:tiles-invalidated", onInvalidated);
+  }, [currentDocumentId]);
 
   // Pre-generated drag-out payload for the current selection. DataTransfer
   // only accepts files synchronously inside dragstart, so the export PDF has
@@ -1145,6 +1157,74 @@ export function ThumbnailCarousel() {
     setPdfDragOverIndex(null);
   };
 
+  /**
+   * Merge a PDF (raw bytes) into the current document at insertIndex.
+   * Shared by the sidebar file-drop path and the "Add a PDF…" menu action.
+   * wrapPageOperation refreshes metadata and syncs the render workers.
+   */
+  const insertPdfDataIntoCurrent = async (
+    data: Uint8Array,
+    fileName: string,
+    insertIndex: number
+  ) => {
+    if (!currentDocument || !editor) {
+      console.warn("Cannot insert pages: missing document or editor");
+      return;
+    }
+    const mupdfModule = await import("mupdf");
+    const { PDFDocument: PDFDocumentClass } = await import("@/core/pdf/PDFDocument");
+
+    const tempDocId = `temp_${Date.now()}`;
+    const tempDocument = new PDFDocumentClass(tempDocId, fileName, data.length);
+    await tempDocument.loadFromData(data, mupdfModule.default);
+
+    const sourcePageCount = tempDocument.getPageCount();
+    const sourcePageIndices = Array.from({ length: sourcePageCount }, (_, i) => i);
+    const documentId = currentDocument.getId();
+
+    await wrapPageOperation(
+      async () => {
+        await editor.insertPagesFromDocument(
+          currentDocument,
+          tempDocument,
+          insertIndex,
+          sourcePageIndices
+        );
+
+        // Remap annotations that are after the insertion point
+        const existingAnnotations = getAnnotations(documentId);
+        const remappedAnnotations = existingAnnotations.map((ann) =>
+          ann.pageNumber >= insertIndex
+            ? { ...ann, pageNumber: ann.pageNumber + sourcePageCount }
+            : ann
+        );
+        const pdfStore = usePDFStore.getState();
+        const currentAnnotations = new Map(pdfStore.annotations);
+        currentAnnotations.set(documentId, remappedAnnotations);
+        usePDFStore.setState({ annotations: currentAnnotations });
+
+        // Move to first inserted page
+        setCurrentPage(insertIndex);
+      },
+      "insertPages",
+      documentId,
+      sourcePageIndices,
+      insertIndex,
+      tempDocId
+    );
+
+    // Mark tab as modified
+    const tab = useTabStore.getState().getTabByDocumentId(documentId);
+    if (tab) {
+      useTabStore.getState().setTabModified(tab.id, true);
+    }
+
+    showNotification(
+      `Inserted ${sourcePageCount} page(s) from "${fileName}" at position ${insertIndex + 1}`,
+      "success"
+    );
+  };
+
   const handlePDFDrop = async (e: React.DragEvent, thumbnailIndex?: number, thumbnailElement?: HTMLElement) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1388,118 +1468,8 @@ export function ThumbnailCarousel() {
     }
 
     try {
-      // Load the dropped PDF as a temporary document
       const arrayBuffer = await pdfFile.arrayBuffer();
-      const data = new Uint8Array(arrayBuffer);
-      const mupdfModule = await import("mupdf");
-      
-      // Import PDFDocument class
-      const { PDFDocument: PDFDocumentClass } = await import("@/core/pdf/PDFDocument");
-      
-      // Create temporary document
-      const tempDocId = `temp_${Date.now()}`;
-      const tempDocument = new PDFDocumentClass(tempDocId, pdfFile.name, data.length);
-      await tempDocument.loadFromData(data, mupdfModule.default);
-
-      // Insert all pages from the dropped PDF at the specified location
-      const sourcePageCount = tempDocument.getPageCount();
-      const sourcePageIndices = Array.from({ length: sourcePageCount }, (_, i) => i);
-      const documentId = currentDocument.getId();
-
-      // Wrap with undo/redo
-      await wrapPageOperation(
-        async () => {
-          await editor.insertPagesFromDocument(
-            currentDocument,
-            tempDocument,
-            insertIndex,
-            sourcePageIndices
-          );
-
-          // CRITICAL: Force reload pages in mupdf to clear its internal cache
-          // This ensures the new pages are visible immediately
-          const mupdfDoc = currentDocument.getMupdfDocument();
-          const pdfDoc = mupdfDoc.asPDF();
-          if (pdfDoc) {
-            // Force reload all inserted pages to clear mupdf's internal page cache
-            for (let i = 0; i < sourcePageCount; i++) {
-              try {
-                pdfDoc.loadPage(insertIndex + i);
-              } catch (reloadError) {
-                console.warn(`Could not force reload page ${insertIndex + i} after insertion:`, reloadError);
-              }
-            }
-          }
-
-          // Clear renderer cache to force fresh thumbnail rendering
-          if (renderer) {
-            invalidateThumbnails();
-          }
-
-          // Refresh document metadata to update page count and page info
-          if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
-            (currentDocument as any).refreshPageMetadata();
-          }
-
-          // Remap annotations that are after the insertion point
-          const existingAnnotations = getAnnotations(documentId);
-          const remappedAnnotations = existingAnnotations.map((ann) => {
-            if (ann.pageNumber >= insertIndex) {
-              return {
-                ...ann,
-                pageNumber: ann.pageNumber + sourcePageCount,
-              };
-            }
-            return ann;
-          });
-
-          // Update annotations in store
-          const pdfStore = usePDFStore.getState();
-          const currentAnnotations = new Map(pdfStore.annotations);
-          currentAnnotations.set(documentId, remappedAnnotations);
-          usePDFStore.setState({ annotations: currentAnnotations });
-
-          // Move to first inserted page
-          setCurrentPage(insertIndex);
-        },
-        "insertPages",
-        documentId,
-        sourcePageIndices,
-        insertIndex,
-        tempDocId
-      );
-
-      // Force a second refresh after a small delay to ensure thumbnails update
-      // This triggers the thumbnail useEffect dependencies to refresh
-      setTimeout(() => {
-        if (typeof (currentDocument as any).refreshPageMetadata === 'function') {
-          (currentDocument as any).refreshPageMetadata();
-        }
-        // Force page reload again to ensure cache is cleared
-        const mupdfDoc = currentDocument.getMupdfDocument();
-        const pdfDoc = mupdfDoc?.asPDF();
-        if (pdfDoc) {
-          for (let i = 0; i < sourcePageCount; i++) {
-            try {
-              pdfDoc.loadPage(insertIndex + i);
-            } catch (e) {
-              // Ignore errors on second reload
-            }
-          }
-        }
-        // Clear renderer cache again to ensure fresh thumbnails
-        if (renderer) {
-          invalidateThumbnails();
-        }
-      }, 100);
-
-      // Mark tab as modified
-      const tab = useTabStore.getState().getTabByDocumentId(documentId);
-      if (tab) {
-        useTabStore.getState().setTabModified(tab.id, true);
-      }
-      
-      showNotification(`Inserted ${sourcePageCount} page(s) at position ${insertIndex + 1}`, "success");
+      await insertPdfDataIntoCurrent(new Uint8Array(arrayBuffer), pdfFile.name, insertIndex);
     } catch (error) {
       console.error("Error inserting PDF pages:", error);
       showNotification("Failed to insert PDF pages", "error");
@@ -1674,12 +1644,10 @@ export function ThumbnailCarousel() {
 
       await editor.insertBlankPage(currentDocument, pageCount, w, h);
 
-      const mupdfDoc = currentDocument.getMupdfDocument();
-      const pdfDoc = mupdfDoc.asPDF();
-      if (pdfDoc) try { pdfDoc.loadPage(pageCount); } catch { /* ignore */ }
-
       currentDocument.refreshPageMetadata();
-      setTimeout(() => currentDocument.refreshPageMetadata(), 100);
+      // Ship the edited bytes to the render workers so the new page renders
+      // instead of sitting at "Loading…" (workers hold a load-time snapshot).
+      syncDocumentRenderers(currentDocument.getId());
 
       const tab = useTabStore.getState().getTabByDocumentId(currentDocument.getId());
       if (tab) useTabStore.getState().setTabModified(tab.id, true);
@@ -1740,14 +1708,21 @@ export function ThumbnailCarousel() {
 
   const handleAddPDFFile = async () => {
     setShowAddMenu(false);
+    if (!currentDocument || !editor) return;
     try {
       const result = await fileSystem.openFile();
       if (!result) return;
-      const mupdfModule = await import("mupdf");
-      await loadPDF(result.data, result.name, mupdfModule.default, result.path || null);
+      // Merge into the current document (insert at the end) — this action
+      // lives in the page sidebar, so it edits THIS document rather than
+      // opening the picked file as a separate tab.
+      await insertPdfDataIntoCurrent(
+        result.data,
+        result.name,
+        currentDocument.getPageCount()
+      );
     } catch (error) {
-      console.error("Error opening PDF:", error);
-      showNotification("Failed to open PDF", "error");
+      console.error("Error adding PDF into document:", error);
+      showNotification("Failed to add PDF", "error");
     }
   };
 

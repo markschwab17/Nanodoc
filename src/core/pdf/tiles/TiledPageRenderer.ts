@@ -75,6 +75,13 @@ export class TiledPageRenderer {
    * Shared across persists to avoid per-tile canvas allocation.
    */
   private readbackCanvas: OffscreenCanvas | null = null;
+  /**
+   * Bumped by invalidate(). Tile fetches capture the generation they were
+   * issued under; results from an older generation are discarded on arrival
+   * so an in-flight L2 read or worker render from before an edit can never
+   * repopulate the cache with stale pixels.
+   */
+  private generation = 0;
 
   constructor(opts: TiledPageRendererOptions) {
     this.opts = opts;
@@ -188,6 +195,7 @@ export class TiledPageRenderer {
     this.fetching.add(k);
 
     bumpTilesPending(1);
+    const fetchGeneration = this.generation;
     let settled = false;
     const settle = () => {
       if (settled) return;
@@ -197,7 +205,9 @@ export class TiledPageRenderer {
     };
 
     const handleTile = (tile: RenderedTile) => {
-      if (this.destroyed) {
+      // Drop results issued before the last invalidate() — they were
+      // rendered/persisted from pre-edit document bytes.
+      if (this.destroyed || fetchGeneration !== this.generation) {
         try {
           tile.bitmap.close();
         } catch {}
@@ -218,10 +228,12 @@ export class TiledPageRenderer {
       }
       this.pool.request(key, dims, priority).then(
         (tile) => {
+          const fresh = fetchGeneration === this.generation;
           handleTile(tile);
           settle();
           // Persist to L2 in the background. Best-effort; never blocks.
-          this.persistToL2(tile).catch(() => {});
+          // Skip stale-generation results — never write pre-edit pixels back.
+          if (fresh) this.persistToL2(tile).catch(() => {});
         },
         () => {
           settle();
@@ -457,8 +469,24 @@ export class TiledPageRenderer {
     return this.cache.size();
   }
 
+  /**
+   * Replace the PDF bytes the render workers draw from, then invalidate all
+   * cached tiles. Call after any structural edit to the live document
+   * (insert/delete/reorder/rotate pages) with a freshly serialized snapshot
+   * — invalidate() alone only drops cached pixels; the workers would
+   * re-render from the original load-time bytes, which is why inserted
+   * pages used to stay blank ("Loading…") forever.
+   */
+  refreshDocument(pdfBytes: Uint8Array): void {
+    if (this.destroyed) return;
+    this.opts.pdfBytes = pdfBytes;
+    this.pool.refreshDoc(this.opts.docId);
+    this.invalidate();
+  }
+
   /** Drop all cached tiles for the document (e.g., after edit). */
   invalidate(): void {
+    this.generation++;
     this.cache.invalidateDoc(this.opts.docId);
     this.pool.cancel((k) => k.docId === this.opts.docId);
     // Also drop persisted L2 tiles — after an edit, the rendered pixels

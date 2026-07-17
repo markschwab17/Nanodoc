@@ -9,7 +9,7 @@ import type { Annotation } from "@/core/pdf/PDFEditor";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { normalizeSelectionToRect, validatePDFRect, capCaptureScale } from "./coordinateHelpers";
 import { wrapAnnotationOperation } from "@/shared/stores/undoHelpers";
-import { invalidateTiledRendererForDoc } from "@/core/pdf/tiles/tiledRendererRegistry";
+import { syncDocumentRenderers } from "@/shared/stores/undoHelpers";
 
 export const RedactTool: ToolHandler = {
   handleMouseDown: (e: React.MouseEvent, context: ToolContext) => {
@@ -128,11 +128,13 @@ export const RedactTool: ToolHandler = {
           // 1. Clear renderer cache (image data cache)
           renderer.clearCache();
 
-          // 1b. Invalidate the tile-pyramid caches too — when the tile
-          // renderer is active (default), the legacy canvas below is not
-          // mounted and the user would otherwise keep seeing stale,
-          // un-redacted tiles until the cache happened to evict them.
-          invalidateTiledRendererForDoc(currentDocument.getId());
+          // 1b. Refresh the tile pyramid too — when the tile renderer is
+          // active (default), the legacy canvas below is not mounted and
+          // the user would otherwise keep seeing stale, un-redacted tiles.
+          // The sync re-serializes the doc so the tile WORKERS also see the
+          // redacted content (they render from a byte snapshot, not the
+          // live document).
+          syncDocumentRenderers(currentDocument.getId());
           
           // 2. Force document to refresh its page metadata cache
           // This ensures the PDFDocument object has the latest page information
