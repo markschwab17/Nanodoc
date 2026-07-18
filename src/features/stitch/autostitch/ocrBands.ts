@@ -24,17 +24,21 @@ export function edgeBands(bbox: [number, number, number, number], bandPt = 60): 
 /**
  * Inward edge bands of the PAGE view for OCR (no frame needed): matchline
  * labels on this class of sheet sit within these fractions of the page edges
- * (validated on the reference set at 200 DPI). Top/bottom 8% of height,
- * left/right 6% of width.
+ * (validated on the reference set at 200 DPI). Some sheets (e.g. reference
+ * set sheet 10) inset their plan frame ~9% from the page edges, pushing
+ * matchline labels further inward than a tight band would catch — top/bottom
+ * 15% of height, left/right 12% of width covers that inset frame while
+ * staying inside `parseSheetRefs`'s 18% edge-classification gate, so
+ * recovered refs still classify as edge refs.
  */
 export function pageEdgeBands(view: [number, number, number, number]): BandSpec[] {
   const [x0, y0, x1, y1] = view;
   const W = x1 - x0, H = y1 - y0;
   return [
-    { edge: "top",    clip: [x0, y0, x1, y0 + 0.08 * H] },
-    { edge: "bottom", clip: [x0, y1 - 0.08 * H, x1, y1] },
-    { edge: "left",   clip: [x0, y0, x0 + 0.06 * W, y1] },
-    { edge: "right",  clip: [x1 - 0.06 * W, y0, x1, y1] },
+    { edge: "top",    clip: [x0, y0, x1, y0 + 0.15 * H] },
+    { edge: "bottom", clip: [x0, y1 - 0.15 * H, x1, y1] },
+    { edge: "left",   clip: [x0, y0, x0 + 0.12 * W, y1] },
+    { edge: "right",  clip: [x1 - 0.12 * W, y0, x1, y1] },
   ];
 }
 

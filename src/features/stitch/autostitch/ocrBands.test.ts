@@ -17,10 +17,10 @@ describe("pageEdgeBands", () => {
   test("inward bands at spike-validated fractions", () => {
     const b = pageEdgeBands([0, 0, 1000, 500]);
     const by = Object.fromEntries(b.map((s) => [s.edge, s.clip]));
-    expect(by.top).toEqual([0, 0, 1000, 40]);
-    expect(by.bottom).toEqual([0, 460, 1000, 500]);
-    expect(by.left).toEqual([0, 0, 60, 500]);
-    expect(by.right).toEqual([940, 0, 1000, 500]);
+    expect(by.top).toEqual([0, 0, 1000, 75]);
+    expect(by.bottom).toEqual([0, 425, 1000, 500]);
+    expect(by.left).toEqual([0, 0, 120, 500]);
+    expect(by.right).toEqual([880, 0, 1000, 500]);
   });
 });
 
