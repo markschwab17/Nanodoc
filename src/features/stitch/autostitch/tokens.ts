@@ -109,7 +109,7 @@ export function parseBearings(labels: Label[]): { az: number; ft: number | null;
 }
 
 /** Sheet cross-references at page edges + matchline callouts. */
-export interface SheetRef { text: string; at: Pt; angle: number; sheet: number | null; sheetCode: string | null; matchline: boolean; station: string | null; edge: string; edgeDist: number; }
+export interface SheetRef { text: string; at: Pt; angle: number; sheet: number | null; sheetCode: string | null; matchline: boolean; station: string | null; edge: string; edgeDist: number; strip: "above" | "below" | null; stripSide: "left" | "right" | null; }
 
 export function parseSheetRefs(labels: Label[], view: [number, number, number, number]): SheetRef[] {
   const [x0, y0, x1, y1] = view;
@@ -120,7 +120,8 @@ export function parseSheetRefs(labels: Label[], view: [number, number, number, n
     const mSheet = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)\b/i);
     const mCode = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)/i);
     const mMatch = l.text.match(/MATCH\s*LINE\s*([\d+.]+)?/i);
-    if (!mSheet && !mCode && !mMatch) continue;
+    const mStrip = l.text.match(/SEE[\s_]+(ABOVE|BELOW)[\s_]+(LEFT|RIGHT)/i);
+    if (!mSheet && !mCode && !mMatch && !mStrip) continue;
     const c = center(l);
     // which edge? normalized distance to each border
     const d = { left: (c.x - x0) / W, right: (x1 - c.x) / W, bottom: (c.y - y0) / H, top: (y1 - c.y) / H };
@@ -129,8 +130,10 @@ export function parseSheetRefs(labels: Label[], view: [number, number, number, n
       text: l.text, at: c, angle: l.angle,
       sheet: mSheet ? Number(mSheet[1]) : null,
       sheetCode: (!mSheet && mCode) ? mCode[1].replace(/\s+/g, '') : null,
-      matchline: !!mMatch, station: mMatch && mMatch[1] ? mMatch[1] : null,
+      matchline: !!mMatch || !!mStrip, station: mMatch && mMatch[1] ? mMatch[1] : null,
       edge: edge[1] < 0.18 ? edge[0] : 'interior', edgeDist: edge[1],
+      strip: mStrip ? (mStrip[1].toLowerCase() as "above" | "below") : null,
+      stripSide: mStrip ? (mStrip[2].toLowerCase() as "left" | "right") : null,
     });
   }
   return out;

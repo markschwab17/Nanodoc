@@ -48,3 +48,34 @@ describe("tokens", () => {
     expect(r.edge).toBe("left");
   });
 });
+
+describe("strip refs", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const label = (text: string, x: number, y: number) =>
+    ({ text, x, y, endX: x + 80, endY: y + 8, angle: 0, h: 8, font: null });
+
+  it("SEE BELOW LEFT on the right edge parses as a strip ref", () => {
+    const refs = parseSheetRefs([label("SEE BELOW LEFT", 950, 400)], view);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].strip).toBe("below");
+    expect(refs[0].stripSide).toBe("left");
+    expect(refs[0].matchline).toBe(true);
+    expect(refs[0].edge).toBe("right");
+    expect(refs[0].sheet).toBeNull();
+  });
+  it("SEE ABOVE RIGHT parses symmetrically", () => {
+    const refs = parseSheetRefs([label("SEE ABOVE RIGHT", 5, 400)], view);
+    expect(refs[0].strip).toBe("above");
+    expect(refs[0].stripSide).toBe("right");
+  });
+  it("plain SEE SHEET refs have strip null", () => {
+    const refs = parseSheetRefs([label("SEE SHEET 12", 950, 400)], view);
+    expect(refs[0].strip).toBeNull();
+    expect(refs[0].sheet).toBe(12);
+  });
+  it("underscore-joined OCR output parses (SEE ABOVE_RIGHT)", () => {
+    const refs = parseSheetRefs([label("SEE ABOVE_RIGHT", 5, 400)], view);
+    expect(refs[0].strip).toBe("above");
+    expect(refs[0].stripSide).toBe("right");
+  });
+});
