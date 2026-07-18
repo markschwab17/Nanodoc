@@ -4,9 +4,9 @@ import { capturePage } from "./captureDevice";
 // roadmap. Do not import it yet.
 import { stitchSheets, type SheetInput, type StitchMethod } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
-import { detectFrames, sliceExtract, type Frame } from "./frameDetect";
+import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
-import { edgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
+import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
 import { parseSheetRefs } from "./tokens";
 import type { OcrWord, RawImage } from "./ocrService";
@@ -68,22 +68,22 @@ export async function autoStitch(
     let recovered: Label[] = [];
     try {
       extract = capturePage(mupdf, page);
-      frames = detectFrames(extract);
-      // OCR recovery: only when the text channels are starved AND we have frames.
-      if (opts.ocr && frames.length && !hasEdgeRefs(extract)) {
-        for (const f of frames) {
-          for (const band of edgeBands(f.bbox)) {
-            const { image, scale } = renderBand(mupdf, page, band.clip);
-            if (band.edge === "left" || band.edge === "right") {
-              const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
-              for (const rot of [90, 270] as const) cands.push({ rot, words: await opts.ocr(rotateRaw(image, rot)) });
-              const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
-              const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
-              // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
-              recovered.push(...wordsToLabels(best.words, band, scale, image.width, image.height, best.rot));
-            } else {
-              recovered.push(...wordsToLabels(await opts.ocr(image), band, scale, image.width, image.height, 0));
-            }
+      // OCR recovery: OCR the PAGE-EDGE bands (no frame needed) when the text
+      // channels are starved of edge refs. Strip refs recovered here declare a
+      // two-strip page AND locate the split (see stripFrames) — geometry border
+      // detection is not used (it misfires on dense civil sheets).
+      if (opts.ocr && !hasEdgeRefs(extract)) {
+        for (const band of pageEdgeBands(extract.view)) {
+          const { image, scale } = renderBand(mupdf, page, band.clip);
+          if (band.edge === "left" || band.edge === "right") {
+            const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
+            for (const rot of [90, 270] as const) cands.push({ rot, words: await opts.ocr(rotateRaw(image, rot)) });
+            const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
+            const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
+            // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
+            recovered.push(...wordsToLabels(best.words, band, scale, image.width, image.height, best.rot));
+          } else {
+            recovered.push(...wordsToLabels(await opts.ocr(image), band, scale, image.width, image.height, 0));
           }
         }
         const nb = sheetNoBand(extract.view);
@@ -94,6 +94,11 @@ export async function autoStitch(
       page.destroy?.();
     }
     if (recovered.length) extract = { ...extract, labels: [...extract.labels, ...recovered] };
+
+    // Two-strip detection from strip refs (runs AFTER the OCR merge so recovered
+    // refs count). A matched below/above pair splits the page; otherwise the
+    // page is one whole-page unit.
+    frames = stripFrames([...extract.shxLabels, ...extract.labels], extract.view) ?? [];
 
     // Printed sheet number: OCR > "SHEET n OF m" text > page order.
     if (printedNo == null) {
@@ -114,8 +119,6 @@ export async function autoStitch(
       for (const f of frames.slice(0, 2)) {
         units.push({ pageIndex, frame: f, extract: sliceExtract(extract, f), sizePt: { w, h }, scale, printedNo, key: 0 });
       }
-    } else if (frames.length === 1) {
-      units.push({ pageIndex, frame: frames[0], extract: sliceExtract(extract, frames[0]), sizePt: { w, h }, scale, printedNo, key: 0 });
     } else {
       units.push({ pageIndex, frame: null, extract, sizePt: { w, h }, scale, printedNo, key: 0 });
     }

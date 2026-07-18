@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { edgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergePhrases } from "./ocrBands";
+import { edgeBands, pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergePhrases } from "./ocrBands";
 import type { Label } from "./types";
 
 describe("edgeBands", () => {
@@ -10,6 +10,17 @@ describe("edgeBands", () => {
     expect(by.bottom).toEqual([100, 840, 1100, 960]);
     expect(by.left).toEqual([40, 200, 160, 900]);
     expect(by.right).toEqual([1040, 200, 1160, 900]);
+  });
+});
+
+describe("pageEdgeBands", () => {
+  test("inward bands at spike-validated fractions", () => {
+    const b = pageEdgeBands([0, 0, 1000, 500]);
+    const by = Object.fromEntries(b.map((s) => [s.edge, s.clip]));
+    expect(by.top).toEqual([0, 0, 1000, 40]);
+    expect(by.bottom).toEqual([0, 460, 1000, 500]);
+    expect(by.left).toEqual([0, 0, 60, 500]);
+    expect(by.right).toEqual([940, 0, 1000, 500]);
   });
 });
 

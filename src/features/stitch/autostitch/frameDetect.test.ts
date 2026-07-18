@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { detectFrames, sliceExtract } from "./frameDetect";
+import { detectFrames, sliceExtract, stripFrames } from "./frameDetect";
 import type { Geom, PageExtract } from "./types";
 
 let gid = 0;
@@ -44,6 +44,28 @@ describe("detectFrames", () => {
   test("no frame (notes sheet) returns []", () => {
     const f = detectFrames(page([{ id: "x", pts: [[100, 100], [300, 100]], closed: false }]));
     expect(f).toEqual([]);
+  });
+});
+
+describe("stripFrames", () => {
+  const view: [number, number, number, number] = [0, 0, 2592, 1728];
+  const lbl = (text: string, x: number, y: number) =>
+    ({ text, x, y, endX: x + 80, endY: y + 10, angle: 0, h: 10, font: "ocr" });
+  test("below+above strip refs split the page at their midpoint", () => {
+    const f = stripFrames([lbl("SEE BELOW LEFT", 2500, 400), lbl("SEE ABOVE RIGHT", 10, 1200)], view);
+    expect(f).toHaveLength(2);
+    expect(f![0].bbox).toEqual([0, 0, 2592, 805]);   // midpoint of centers (405, 1205)
+    expect(f![1].bbox).toEqual([0, 805, 2592, 1728]);
+  });
+  test("null without a matched pair", () => {
+    expect(stripFrames([lbl("SEE BELOW LEFT", 2500, 400)], view)).toBeNull();
+    expect(stripFrames([lbl("SEE SHEET 9", 2500, 400)], view)).toBeNull();
+  });
+  test("null when refs are inverted (below under above)", () => {
+    expect(stripFrames([lbl("SEE BELOW LEFT", 2500, 1200), lbl("SEE ABOVE RIGHT", 10, 400)], view)).toBeNull();
+  });
+  test("null when the split would be implausibly near an edge", () => {
+    expect(stripFrames([lbl("SEE BELOW LEFT", 2500, 100), lbl("SEE ABOVE RIGHT", 10, 300)], view)).toBeNull();
   });
 });
 
