@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, test, expect } from "vitest";
 import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
@@ -308,5 +308,80 @@ describe("stitchSheets method", () => {
     const res = stitchSheets([mk("1", 1, []), mk("2", 2, [])], grid);
     expect(res.method).toBe("keymap");
     expect(res.placements.size).toBe(2);
+  });
+});
+
+describe("unit stitching (frames + printed numbers + strip refs)", () => {
+  // Strip-plan chain, all horizontal (west→east) so the test does not depend
+  // on the solver's vertical-axis naming convention:
+  //   unit1 = top strip of printed sheet 2 ("SEE BELOW LEFT" on its right edge)
+  //   unit2 = bottom strip of sheet 2 (continues east; "SEE ABOVE RIGHT" left
+  //           edge, "SEE SHEET 9" right edge)
+  //   unit3 = printed sheet 9 ("SEE SHEET 2" on its left edge)
+  // World layout (feet): unit1 at (0,0); unit2 at (170,10); unit3 at (340,20).
+  // Each adjacent pair shares a distinctive zigzag polyline in its ~30ft overlap.
+  const view: [number, number, number, number] = [0, 0, 720, 480]; // 200x133 ft at scale 20
+  const lbl = (text: string, x: number, y: number) =>
+    ({ text, x, y, endX: x + 60, endY: y + 8, angle: 0, h: 8, font: null, atoms: 3 });
+  const SCALE = 20;
+  const ftToPt = (ft: number) => (ft / SCALE) * 72;
+  const frac = (v: number) => v - Math.floor(v);
+  /**
+   * Irregular polyline with genuinely DISTINCT per-segment (len,angle)
+   * signatures, keyed by `seed` so two zigzags with different seeds share no
+   * signatures. Distinctness matters twice: within one zigzag it keeps segVote's
+   * alias cap (`cand.length > 10`) from skipping a repeated signature, and across
+   * zigzags it stops non-adjacent units (unit1's zA vs unit3's zB) from
+   * alias-bonding. Every dx >= 8ft so no segment is dropped by the minLen floor.
+   */
+  const zig = (worldX0: number, worldY0: number, seed: number): [number, number][] => {
+    const pts: [number, number][] = [];
+    let x = 0, y = 0;
+    for (let i = 0; i < 14; i++) {
+      const t = (i + 1) * seed;
+      x += 8 + frac(Math.sin(t * 12.9898) * 43758.5453) * 14;
+      y += (frac(Math.sin(t * 78.233) * 12543.129) - 0.5) * 44;
+      pts.push([worldX0 + x, worldY0 + y]);
+    }
+    return pts;
+  };
+  /** Materialize a world-ft polyline into a unit whose frame origin sits at (ox, oy) world-ft. */
+  const geomFor = (id: string, world: [number, number][], ox: number, oy: number) => [{
+    id, closed: false,
+    pts: world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]),
+  }];
+  const zA = zig(175, 15, 1);  // in the unit1/unit2 overlap band
+  const zB = zig(345, 25, 2);  // in the unit2/unit3 overlap band
+  const unit1: SheetInput = {
+    id: "p1f0", no: 1, printedNo: 2, pageIndex: 1, siblingKey: 2, scale: SCALE, view,
+    frame: [100, 60, 820, 540],
+    extract: { view, words: [], shxLabels: [],
+      labels: [lbl("SEE BELOW LEFT", 640, 300)],
+      geometry: geomFor("zA1", zA, 0, 0) },
+  };
+  const unit2: SheetInput = {
+    id: "p1f1", no: 2, printedNo: 2, pageIndex: 1, siblingKey: 1, scale: SCALE, view,
+    frame: [100, 620, 820, 1100],
+    extract: { view, words: [], shxLabels: [],
+      labels: [lbl("SEE ABOVE RIGHT", 5, 100), lbl("SEE SHEET 9", 640, 200)],
+      geometry: [...geomFor("zA2", zA, 170, 10), ...geomFor("zB2", zB, 170, 10)] },
+  };
+  const unit3: SheetInput = {
+    id: "p8f0", no: 3, printedNo: 9, pageIndex: 8, scale: SCALE, view,
+    frame: [100, 60, 820, 540],
+    extract: { view, words: [], shxLabels: [],
+      labels: [lbl("SEE SHEET 2", 5, 200)],
+      geometry: geomFor("zB3", zB, 340, 20) },
+  };
+
+  test("strip + numeric refs place the chain west-to-east", () => {
+    const res = stitchSheets([unit1, unit2, unit3]);
+    expect(res.method).toBe("geometric");
+    const p1 = res.placements.get(1)!, p2 = res.placements.get(2)!, p3 = res.placements.get(3)!;
+    expect(p1).toBeDefined(); expect(p2).toBeDefined(); expect(p3).toBeDefined();
+    expect(p2.x - p1.x).toBeGreaterThan(150); expect(p2.x - p1.x).toBeLessThan(190);
+    expect(Math.abs(p2.y - p1.y)).toBeLessThan(30);
+    expect(p3.x - p1.x).toBeGreaterThan(320); expect(p3.x - p1.x).toBeLessThan(360);
+    expect(Math.abs(p3.y - p1.y)).toBeLessThan(40);
   });
 });

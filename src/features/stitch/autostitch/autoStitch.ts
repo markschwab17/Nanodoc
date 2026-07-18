@@ -1,14 +1,15 @@
-import type { PageExtract } from "./types";
+import type { PageExtract, Label } from "./types";
 import { capturePage } from "./captureDevice";
-// NOTE: scale inference (inferScale) is deferred to Task 10. Do not import it yet.
+// NOTE: scale inference (inferScale) is deferred to Task 10 of the original
+// roadmap. Do not import it yet.
 import { stitchSheets, type SheetInput, type StitchMethod } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
+import { detectFrames, sliceExtract, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
 import { edgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
+import { parseSheetRefs } from "./tokens";
 import type { OcrWord, RawImage } from "./ocrService";
-import type { Frame } from "./frameDetect";
-import type { Label } from "./types";
 
 const DEFAULT_SCALE = 20;
 
@@ -31,6 +32,22 @@ export interface AutoStitchResult {
 /** Yield to the event loop so the tab stays responsive between page extractions. */
 const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
 
+/** True when the page's existing text already provides edge refs (no OCR needed). */
+function hasEdgeRefs(extract: PageExtract): boolean {
+  const all = [...extract.shxLabels, ...extract.labels];
+  return parseSheetRefs(all, extract.view).some((r) => r.edge !== "interior");
+}
+
+interface Unit {
+  pageIndex: number;
+  frame: Frame | null;      // null = whole page
+  extract: PageExtract;     // frame-local when frame != null
+  sizePt: { w: number; h: number }; // FULL page size
+  scale: number;
+  printedNo: number;
+  key: number;              // unique numeric key (assigned after uniquify)
+}
+
 export async function autoStitch(
   mupdf: any,
   doc: any,
@@ -38,107 +55,128 @@ export async function autoStitch(
   opts: AutoStitchOptions = {}
 ): Promise<AutoStitchResult> {
   const total = pageIndices.length;
-  const rows: { pageIndex: number; extract: PageExtract; scale: number; sizePt: { w: number; h: number }; no: number }[] = [];
+  const units: Unit[] = [];
+  const pageSize = new Map<number, { w: number; h: number }>();
 
   for (let i = 0; i < pageIndices.length; i++) {
     const pageIndex = pageIndices[i];
     await yieldToMain();
     const page = doc.loadPage(pageIndex);
     let extract: PageExtract;
+    let frames: Frame[] = [];
+    let printedNo: number | null = null;
+    let recovered: Label[] = [];
     try {
       extract = capturePage(mupdf, page);
+      frames = detectFrames(extract);
+      // OCR recovery: only when the text channels are starved AND we have frames.
+      if (opts.ocr && frames.length && !hasEdgeRefs(extract)) {
+        for (const f of frames) {
+          for (const band of edgeBands(f.bbox)) {
+            const { image, scale } = renderBand(mupdf, page, band.clip);
+            if (band.edge === "left" || band.edge === "right") {
+              const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
+              for (const rot of [90, 270] as const) cands.push({ rot, words: await opts.ocr(rotateRaw(image, rot)) });
+              const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
+              const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
+              // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
+              recovered.push(...wordsToLabels(best.words, band, scale, image.width, image.height, best.rot));
+            } else {
+              recovered.push(...wordsToLabels(await opts.ocr(image), band, scale, image.width, image.height, 0));
+            }
+          }
+        }
+        const nb = sheetNoBand(extract.view);
+        const { image } = renderBand(mupdf, page, nb.clip);
+        printedNo = parseSheetNumber(await opts.ocr(image));
+      }
     } finally {
       page.destroy?.();
     }
-    // Scale inference is deferred to Task 10. Until then use a uniform scale
-    // (user-entered or default). Same-scale sets place exactly regardless of the
-    // value (per-sheet scale cancels in points->feet->canvas). Task 10 replaces
-    // this line with per-page inferScale(extract).
-    const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
+    if (recovered.length) extract = { ...extract, labels: [...extract.labels, ...recovered] };
+
+    // Printed sheet number: OCR > "SHEET n OF m" text > page order.
+    if (printedNo == null) {
+      for (const l of [...extract.shxLabels, ...extract.labels]) {
+        const m = l.text.match(/SHEET\s+(?:NO\.?\s*)?(\d+)\s+OF\s+\d+/i);
+        if (m) { printedNo = Number(m[1]); break; }
+      }
+    }
+    if (printedNo == null) printedNo = pageIndex + 1;
+
     const w = extract.view[2] - extract.view[0];
     const h = extract.view[3] - extract.view[1];
-    let no = pageIndex + 1;
-    for (const l of [...extract.shxLabels, ...extract.labels]) {
-      const m = l.text.match(/SHEET\s+(?:NO\.?\s*)?(\d+)\s+OF\s+\d+/i);
-      if (m) { no = Number(m[1]); break; }
+    pageSize.set(pageIndex, { w, h });
+    // Scale inference is deferred; uniform scale (user-entered or default).
+    const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
+
+    if (frames.length >= 2) {
+      for (const f of frames.slice(0, 2)) {
+        units.push({ pageIndex, frame: f, extract: sliceExtract(extract, f), sizePt: { w, h }, scale, printedNo, key: 0 });
+      }
+    } else if (frames.length === 1) {
+      units.push({ pageIndex, frame: frames[0], extract: sliceExtract(extract, frames[0]), sizePt: { w, h }, scale, printedNo, key: 0 });
+    } else {
+      units.push({ pageIndex, frame: null, extract, sizePt: { w, h }, scale, printedNo, key: 0 });
     }
-    rows.push({ pageIndex, extract, scale, sizePt: { w, h }, no });
     opts.onProgress?.(i + 1, total);
   }
 
-  // Unique sheet numbers (printed numbers can collide with synthetic ones).
-  const used = new Set<number>();
-  for (const r of rows) { while (used.has(r.no)) r.no += 10000; used.add(r.no); }
+  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [] };
 
-  if (!rows.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [] };
+  // Unique numeric keys, stable order.
+  units.forEach((u, i) => { u.key = i + 1; });
+  const rootFtPerIn = units[0].scale;
 
-  const rootFtPerIn = rows[0].scale; // == the stitch root sheet's scale (consistent frame)
-
-  let placementsByNo = new Map<number, { x: number; y: number }>();
+  let placementsByKey = new Map<number, { x: number; y: number }>();
   let worstResidFt = 0;
   let method: StitchMethod = "none";
-  if (rows.length >= 2) {
-    const inputs: SheetInput[] = rows.map((r) => ({
-      id: String(r.pageIndex), no: r.no, scale: r.scale, view: r.extract.view, extract: r.extract,
+  if (units.length >= 2) {
+    const byPage = new Map<number, Unit[]>();
+    for (const u of units) (byPage.get(u.pageIndex) || byPage.set(u.pageIndex, []).get(u.pageIndex)!).push(u);
+    const inputs: SheetInput[] = units.map((u) => ({
+      id: `p${u.pageIndex}f${u.frame ? "1" : "0"}k${u.key}`, no: u.key, scale: u.scale,
+      view: u.extract.view, extract: u.extract,
+      printedNo: u.printedNo, pageIndex: u.pageIndex,
+      siblingKey: byPage.get(u.pageIndex)!.find((o) => o.key !== u.key)?.key,
+      frame: u.frame?.bbox,
     }));
-    // Key-map site grid, when present (sheets whose matchlines are unreadable
-    // outlined text): gives the exact tile topology → keyed by sheet `no`.
+    // Key-map site grid (whole-page sets only; stitchSheets ignores it when
+    // any page produced two units). Grid is keyed by unit key here.
     let grid: Map<number, { col: number; row: number }> | undefined;
     try {
-      const byPage = detectKeymapGrid(mupdf, doc, pageIndices);
-      if (byPage) {
+      const byPageGrid = detectKeymapGrid(mupdf, doc, pageIndices);
+      if (byPageGrid) {
         grid = new Map();
-        for (const r of rows) { const g = byPage.get(r.pageIndex); if (g) grid.set(r.no, g); }
+        for (const u of units) { const g = byPageGrid.get(u.pageIndex); if (g) grid.set(u.key, g); }
         if (grid.size < 2) grid = undefined;
       }
     } catch (e) {
       console.warn("[autoStitch] key-map detection failed:", e);
     }
     const res = stitchSheets(inputs, grid);
-    placementsByNo = res.placements;
+    placementsByKey = res.placements;
     worstResidFt = res.worstResidFt;
     method = res.method;
   }
 
-  const poses: PlacedSheetPose[] = rows.map((r) => ({ pageIndex: r.pageIndex, scale: r.scale, sizePt: r.sizePt, posFt: placementsByNo.get(r.no) ?? null }));
+  // Per-unit poses for placed units; ONE whole-page null pose per fully-unplaced page.
+  const poses: PlacedSheetPose[] = [];
+  const pagesEmitted = new Set<number>();
+  for (const u of units) {
+    const pos = placementsByKey.get(u.key) ?? null;
+    if (pos) {
+      poses.push({ pageIndex: u.pageIndex, scale: u.scale, sizePt: u.sizePt, posFt: pos, frame: u.frame?.bbox });
+      pagesEmitted.add(u.pageIndex);
+    }
+  }
+  for (const u of units) {
+    if (pagesEmitted.has(u.pageIndex)) continue;
+    pagesEmitted.add(u.pageIndex);
+    poses.push({ pageIndex: u.pageIndex, scale: u.scale, sizePt: u.sizePt, posFt: null });
+  }
+
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
   return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses };
-}
-
-/**
- * OCR the edge bands of each frame + the title-block cell of one page.
- * Vertical bands are OCR'd at 90 AND 270 and the higher-total-confidence
- * orientation wins (sets differ in which way side text runs). Returns
- * synthetic page-space Labels and the printed sheet number (null unless read).
- */
-export async function recoverLabels(
-  mupdf: any, page: any, frames: Frame[],
-  view: [number, number, number, number],
-  ocr: (image: RawImage) => Promise<OcrWord[]>
-): Promise<{ labels: Label[]; printedNo: number | null }> {
-  const labels: Label[] = [];
-  for (const f of frames) {
-    for (const band of edgeBands(f.bbox)) {
-      const { image, scale } = renderBand(mupdf, page, band.clip);
-      if (band.edge === "left" || band.edge === "right") {
-        const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
-        for (const rot of [90, 270] as const) {
-          const r = rotateRaw(image, rot);
-          cands.push({ rot, words: await ocr(r) });
-        }
-        const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
-        const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
-        // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
-        labels.push(...wordsToLabels(best.words, band, scale, image.width, image.height, best.rot));
-      } else {
-        labels.push(...wordsToLabels(await ocr(image), band, scale, image.width, image.height, 0));
-      }
-    }
-  }
-  const nb = sheetNoBand(view);
-  const { image, scale } = renderBand(mupdf, page, nb.clip);
-  void scale;
-  const printedNo = parseSheetNumber(await ocr(image));
-  return { labels, printedNo };
 }

@@ -211,7 +211,7 @@ export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number
   const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view).filter((r) => r.matchline && r.edge !== "interior");
   const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view).filter((r) => r.matchline && r.edge !== "interior");
   const refs = (r: any, other: any) =>
-    (r.sheet != null && r.sheet === other.no) ||
+    (r.sheet != null && r.sheet === (other.printedNo ?? other.no)) ||
     (r.sheetCode && other.sheetCode && r.sheetCode.toUpperCase() === other.sheetCode.toUpperCase());
   for (const a of refsI) for (const b of refsJ) {
     if (OPP[a.edge] !== b.edge) continue;
@@ -368,7 +368,16 @@ function gaussSolve(A: Float64Array[] | number[][], b: Float64Array): Float64Arr
 
 export type StitchMethod = "keymap" | "geometric" | "none";
 
-export interface SheetInput { id: string; no: number; scale: number; view: [number, number, number, number]; extract: PageExtract; }
+export interface SheetInput {
+  id: string; no: number; scale: number; view: [number, number, number, number]; extract: PageExtract;
+  /** Printed sheet number (title block); both strips of a page share it. Defaults to `no`. */
+  printedNo?: number;
+  /** Key (`no`) of the other frame on the same page, when the page has two. */
+  siblingKey?: number;
+  pageIndex?: number;
+  /** Page-pt bbox of this unit's frame; absent = whole page. */
+  frame?: [number, number, number, number];
+}
 export interface PairReport { i: number; j: number; channel: string | null; conf: string | null; dxFt: number | null; dyFt: number | null; weight: number; residFt: number | null; }
 export interface StitchResult { root: number; placements: Map<number, { x: number; y: number }>; worstResidFt: number; pairs: PairReport[]; method: StitchMethod; }
 
@@ -464,6 +473,7 @@ interface DriverSheet {
   id: string; no: number; scale: number; view: [number, number, number, number];
   raw: { shxLabels: Label[]; labels: Label[]; geometry: Geom[]; view: [number, number, number, number] };
   key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null; segFine?: SegFeat[];
+  printedNo: number; siblingKey?: number; pageIndex?: number;
 }
 
 export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: number; row: number }>): StitchResult {
@@ -484,9 +494,13 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
       id: s.id, no: s.no, scale: s.scale, view: s.view,
       raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
       key: s.no, sheetCode: label.sheetCode,
+      printedNo: s.printedNo ?? s.no, siblingKey: s.siblingKey, pageIndex: s.pageIndex,
     };
   });
   const byNo = new Map(sheets.map((s) => [s.no, s]));
+  // printed sheet number -> units carrying it (both strips of a page share one)
+  const byPrinted = new Map<number, DriverSheet[]>();
+  for (const s of sheets) (byPrinted.get(s.printedNo) || byPrinted.set(s.printedNo, []).get(s.printedNo)!).push(s);
   const keys = sheets.map((s) => s.no);
   // sheet-code -> sheet no, for resolving "SEE SHEET C2.01" cross-references.
   const codeToNo = new Map<string, number>();
@@ -524,7 +538,8 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
   // pin per-pair offsets, but the grid is REGULAR, so we estimate one column and
   // one row spacing from the clean abutting seams and place every sheet at
   // (col·sx, row·sy). This resolves sets whose matchline refs are outlined text.
-  if (grid && grid.size >= 2) {
+  const hasSplitPages = sheets.some((s) => s.siblingKey != null);
+  if (grid && grid.size >= 2 && !hasSplitPages) {
     const byNoG = new Map(sheets.map((s) => [s.no, s]));
     const W = FT(sheets[0].view[2] - sheets[0].view[0], sheets[0].scale);
     const H = FT(sheets[0].view[3] - sheets[0].view[1], sheets[0].scale);
@@ -562,17 +577,31 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
   const EDGE2REL: Record<string, string> = { left: "left", right: "right", top: "above", bottom: "below" };
   const OPPREL: Record<string, string> = { left: "right", right: "left", above: "below", below: "above" };
   const relOf = new Map<string, string>();
+  // Refs are direct adjacency evidence, so this loop also seeds pairKeys.
+  const pairKeys = new Set<string>();
   for (const s of sheets) {
     const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view).filter((r) => r.edge !== "interior");
     for (const r of refs) {
-      // resolve the neighbor: numeric sheet number, else discipline-code -> that page.
-      let target: number | null = null;
-      if (r.sheet != null && byNo.has(r.sheet) && r.sheet !== s.no) target = r.sheet;
-      else if (r.sheetCode) {
+      const targets: DriverSheet[] = [];
+      // A strip ref ("SEE ABOVE/BELOW LEFT/RIGHT") resolves ONLY via siblingKey —
+      // it is the facing frame on the same page, never a numeric/code lookup.
+      if (r.strip && s.siblingKey != null && byNo.has(s.siblingKey)) {
+        targets.push(byNo.get(s.siblingKey)!);
+      } else if (r.sheet != null) {
+        // numeric "SEE SHEET n" -> the printed sheet n, on a DIFFERENT page
+        // (never a same-page sibling; that is what a strip ref resolves). Whole-
+        // page callers leave pageIndex undefined, so treat unknown pages as
+        // distinct — only a KNOWN shared page suppresses the numeric edge.
+        for (const t of byPrinted.get(r.sheet) || [])
+          if (t.no !== s.no && (t.pageIndex == null || s.pageIndex == null || t.pageIndex !== s.pageIndex)) targets.push(t);
+      } else if (r.sheetCode) {
         const t = codeToNo.get(r.sheetCode.toUpperCase());
-        if (t != null && t !== s.no) target = t;
+        if (t != null && t !== s.no && byNo.has(t)) targets.push(byNo.get(t)!);
       }
-      if (target != null && !relOf.has(`${s.no}-${target}`)) relOf.set(`${s.no}-${target}`, EDGE2REL[r.edge]);
+      for (const t of targets) {
+        if (!relOf.has(`${s.no}-${t.no}`)) relOf.set(`${s.no}-${t.no}`, EDGE2REL[r.edge]);
+        pairKeys.add(s.no < t.no ? `${s.no}-${t.no}` : `${t.no}-${s.no}`);
+      }
     }
   }
   const relFor = (ni: number, nj: number): string | null =>
@@ -580,8 +609,6 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
 
   const tv = (si: DriverSheet, sj: DriverSheet) => tokenVote({ tok: si.tok! }, { tok: sj.tok! }, { minInliers: 5 });
 
-  const pairKeys = new Set<string>();
-  for (const k of relOf.keys()) { const [a, b] = k.split("-").map(Number); pairKeys.add(a < b ? `${a}-${b}` : `${b}-${a}`); }
   for (let a = 0; a < sheets.length; a++) for (let b = a + 1; b < sheets.length; b++) {
     const si = sheets[a], sj = sheets[b];
     const span = Math.max(FT(si.view[2] - si.view[0], si.scale), FT(sj.view[2] - sj.view[0], sj.scale)) * 1.4;

@@ -3,6 +3,8 @@ export interface PlacedSheetPose {
   scale: number; // ftPerIn
   sizePt: { w: number; h: number };
   posFt: { x: number; y: number } | null; // null => could not be placed
+  /** Page-pt bbox of the frame this pose anchors; absent = whole page. */
+  frame?: [number, number, number, number];
 }
 export interface TilePlacement {
   pageIndex: number;
