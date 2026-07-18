@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { edgeBands, pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergePhrases } from "./ocrBands";
-import type { Label } from "./types";
+import { edgeBands, pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords } from "./ocrBands";
+import type { OcrWord } from "./ocrService";
 
 describe("edgeBands", () => {
   test("bands straddle the frame edges", () => {
@@ -83,6 +83,25 @@ describe("wordsToLabels", () => {
     const band = { edge: "top" as const, clip: [0, 0, 100, 10] as [number, number, number, number] };
     expect(wordsToLabels([word("junk", 0, 0, 5, 5, 30)], band, 1, 100, 10, 0)).toEqual([]);
   });
+  test("rot-90 side band merges two image-space words BEFORE mapping (regression)", () => {
+    // The real bug: on a rotated side band, mapping first stacks words
+    // VERTICALLY in page space, so a page-space phrase merge never joins them.
+    // Merging in the (horizontal) OCR image joins "SEE"+"BELOW" into one label.
+    const band = { edge: "left" as const, clip: [40, 200, 160, 900] as [number, number, number, number] };
+    // Two words on ONE line of the rotated image (imgW=120, imgH=700, rot=90).
+    const ls = wordsToLabels(
+      [word("SEE", 10, 30, 40, 46), word("BELOW", 46, 30, 90, 46)],
+      band, 1, 120, 700, 90,
+    );
+    expect(ls).toHaveLength(1);
+    expect(ls[0].text).toBe("SEE BELOW");
+    // Union bbox (10,30)-(90,46) maps via inverse CW90 [y, 699 - x]:
+    //   x from y-range [30,46]; y from (699 - x)-range [609,689].
+    expect(ls[0].x).toBeCloseTo(40 + 30);    // 70
+    expect(ls[0].endX).toBeCloseTo(40 + 46); // 86
+    expect(ls[0].y).toBeCloseTo(200 + 609);  // 809
+    expect(ls[0].endY).toBeCloseTo(200 + 689); // 889
+  });
 });
 
 describe("parseSheetNumber", () => {
@@ -98,26 +117,31 @@ describe("parseSheetNumber", () => {
   });
 });
 
-describe("mergePhrases", () => {
-  const L = (text: string, x: number, y: number, endX: number, endY: number): Label =>
-    ({ text, x, y, endX, endY, angle: 0, h: endY - y, font: "ocr" });
-  test("adjacent words on one baseline merge into a phrase", () => {
-    const m = mergePhrases([L("SEE", 100, 50, 130, 60), L("SHEET", 136, 50, 180, 60), L("9", 186, 50, 194, 60)]);
+describe("mergeWords", () => {
+  const W = (text: string, x0: number, y0: number, x1: number, y1: number, confidence = 90): OcrWord =>
+    ({ text, confidence, bbox: { x0, y0, x1, y1 } });
+  test("adjacent words on one line merge into a phrase", () => {
+    const m = mergeWords([W("SEE", 100, 50, 130, 60), W("SHEET", 136, 50, 180, 60), W("9", 186, 50, 194, 60)]);
     expect(m).toHaveLength(1);
     expect(m[0].text).toBe("SEE SHEET 9");
-    expect(m[0].x).toBe(100); expect(m[0].endX).toBe(194);
+    expect(m[0].bbox.x0).toBe(100); expect(m[0].bbox.x1).toBe(194);
   });
   test("words far apart stay separate", () => {
-    const m = mergePhrases([L("SEE", 100, 50, 130, 60), L("WTR", 400, 50, 430, 60)]);
+    const m = mergeWords([W("SEE", 100, 50, 130, 60), W("WTR", 400, 50, 430, 60)]);
     expect(m).toHaveLength(2);
   });
-  test("different baselines stay separate", () => {
-    const m = mergePhrases([L("SEE", 100, 50, 130, 60), L("SHEET", 100, 80, 150, 90)]);
+  test("different lines stay separate", () => {
+    const m = mergeWords([W("SEE", 100, 50, 130, 60), W("SHEET", 100, 80, 150, 90)]);
     expect(m).toHaveLength(2);
   });
-  test("mixed-height words on one baseline merge deterministically", () => {
-    const m = mergePhrases([L("9", 186, 50, 194, 62), L("SEE", 100, 51, 130, 60), L("SHEET", 136, 49, 180, 61)]);
+  test("mixed-height words on one line merge deterministically", () => {
+    const m = mergeWords([W("9", 186, 50, 194, 62), W("SEE", 100, 51, 130, 60), W("SHEET", 136, 49, 180, 61)]);
     expect(m).toHaveLength(1);
     expect(m[0].text).toBe("SEE SHEET 9");
+  });
+  test("merged confidence is the min of the parts", () => {
+    const m = mergeWords([W("SEE", 100, 50, 130, 60, 88), W("BELOW", 136, 50, 190, 60, 61)]);
+    expect(m).toHaveLength(1);
+    expect(m[0].confidence).toBe(61);
   });
 });

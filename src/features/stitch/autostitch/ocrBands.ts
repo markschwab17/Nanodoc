@@ -70,9 +70,14 @@ export function wordsToLabels(
   imgW: number, imgH: number, rot: 0 | 90 | 270, minConf = 60
 ): Label[] {
   const [cx0, cy0] = band.clip;
+  // Merge words into phrases in OCR-IMAGE pixel space, where text is horizontal
+  // by construction (vertical bands are rotated upright BEFORE OCR). Merging in
+  // page space fails for rotated side bands: mapped words stack vertically there,
+  // so a horizontal-baseline merge never joins them ("SEE" above "BELOW").
+  const kept = words.filter((w) => w.confidence >= minConf && w.text.trim());
+  const merged = mergeWords(kept);
   const mapped: Label[] = [];
-  for (const w of words) {
-    if (w.confidence < minConf || !w.text.trim()) continue;
+  for (const w of merged) {
     // corners in the OCR image
     const corners: [number, number][] = [
       [w.bbox.x0, w.bbox.y0], [w.bbox.x1, w.bbox.y0], [w.bbox.x0, w.bbox.y1], [w.bbox.x1, w.bbox.y1],
@@ -89,48 +94,55 @@ export function wordsToLabels(
     const y = cy0 + Math.min(...ys) / scale, endY = cy0 + Math.max(...ys) / scale;
     mapped.push({ text: w.text.trim(), x, y, endX, endY, angle: 0, h: endY - y, font: "ocr" });
   }
-  return mergePhrases(mapped);
+  return mapped;
 }
 
 /**
- * Merge adjacent same-baseline OCR word labels into phrase labels so the ref
- * regexes ("SEE SHEET 9") can match. Words merge when their vertical centers
- * differ by < 0.6x the taller word's height and the horizontal gap is
- * < 1.5x that height. Text joins with single spaces; bbox is the union.
+ * Merge adjacent same-line OCR words into phrase words so the ref regexes
+ * ("SEE SHEET 9", "SEE BELOW LEFT") can match. Operates in OCR-IMAGE pixel
+ * space (text horizontal by construction). Words merge when they share a line
+ * bin and the horizontal gap is < 1.5x the taller box's height (and gap
+ * > -0.5x that height). Text joins with single spaces; bbox is the union;
+ * confidence is the min of the parts.
  */
-export function mergePhrases(labels: Label[]): Label[] {
-  // Cluster into baselines FIRST (1-D scan over y-centers), then sort by
-  // (line, x). A pairwise "same line" test inside a sort comparator is not a
-  // strict weak order (transitivity breaks when heights vary) and corrupts
-  // Array.prototype.sort's contract.
-  const byY = [...labels].sort((a, b) => (a.y + a.endY) - (b.y + b.endY));
-  const lineOf = new Map<Label, number>();
+export function mergeWords(words: OcrWord[]): OcrWord[] {
+  const yc = (w: OcrWord) => (w.bbox.y0 + w.bbox.y1) / 2;
+  const hOf = (w: OcrWord) => w.bbox.y1 - w.bbox.y0;
+  // Cluster into lines FIRST (1-D scan over y-centers), then sort by (line, x0).
+  // A pairwise "same line" test inside a sort comparator is not a strict weak
+  // order (transitivity breaks when heights vary) and corrupts Array#sort.
+  const byY = [...words].sort((a, b) => yc(a) - yc(b));
+  const lineOf = new Map<OcrWord, number>();
   let line = 0;
   for (let i = 0; i < byY.length; i++) {
     if (i > 0) {
       const prev = byY[i - 1], cur = byY[i];
-      const h = Math.max(prev.endY - prev.y, cur.endY - cur.y);
-      if ((cur.y + cur.endY) / 2 - (prev.y + prev.endY) / 2 >= 0.6 * h) line++;
+      const h = Math.max(hOf(prev), hOf(cur));
+      if (yc(cur) - yc(prev) >= 0.6 * h) line++;
     }
     lineOf.set(byY[i], line);
   }
-  const sorted = [...labels].sort((a, b) => (lineOf.get(a)! - lineOf.get(b)!) || (a.x - b.x));
-  const out: Label[] = [];
-  for (const l of sorted) {
+  const sorted = [...words].sort((a, b) => (lineOf.get(a)! - lineOf.get(b)!) || (a.bbox.x0 - b.bbox.x0));
+  const out: OcrWord[] = [];
+  let prevLine = -1; // line of out[out.length - 1] (out holds fresh objects, not map keys)
+  for (const w of sorted) {
     const prev = out[out.length - 1];
-    if (prev) {
-      const h = Math.max(prev.endY - prev.y, l.endY - l.y);
-      const sameLine = Math.abs((prev.y + prev.endY) / 2 - (l.y + l.endY) / 2) < 0.6 * h;
-      const closeGap = l.x - prev.endX < 1.5 * h && l.x - prev.endX > -0.5 * h;
-      if (sameLine && closeGap) {
-        prev.text = `${prev.text} ${l.text}`;
-        prev.x = Math.min(prev.x, l.x); prev.y = Math.min(prev.y, l.y);
-        prev.endX = Math.max(prev.endX, l.endX); prev.endY = Math.max(prev.endY, l.endY);
-        prev.h = prev.endY - prev.y;
+    const wLine = lineOf.get(w)!;
+    if (prev && prevLine === wLine) {
+      const h = Math.max(hOf(prev), hOf(w));
+      const gap = w.bbox.x0 - prev.bbox.x1;
+      if (gap < 1.5 * h && gap > -0.5 * h) {
+        prev.text = `${prev.text} ${w.text}`;
+        prev.bbox = {
+          x0: Math.min(prev.bbox.x0, w.bbox.x0), y0: Math.min(prev.bbox.y0, w.bbox.y0),
+          x1: Math.max(prev.bbox.x1, w.bbox.x1), y1: Math.max(prev.bbox.y1, w.bbox.y1),
+        };
+        prev.confidence = Math.min(prev.confidence, w.confidence);
         continue;
       }
     }
-    out.push({ ...l });
+    out.push({ text: w.text, confidence: w.confidence, bbox: { ...w.bbox } });
+    prevLine = wLine;
   }
   return out;
 }

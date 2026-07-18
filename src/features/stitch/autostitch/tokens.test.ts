@@ -78,4 +78,11 @@ describe("strip refs", () => {
     expect(refs[0].strip).toBe("above");
     expect(refs[0].stripSide).toBe("right");
   });
+  it("side word optional: 'SEE BELOW' alone parses with stripSide null", () => {
+    const refs = parseSheetRefs([label("SEE BELOW", 950, 400)], view);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].strip).toBe("below");
+    expect(refs[0].stripSide).toBeNull();
+    expect(refs[0].matchline).toBe(true);
+  });
 });

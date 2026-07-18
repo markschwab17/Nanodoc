@@ -120,7 +120,7 @@ export function parseSheetRefs(labels: Label[], view: [number, number, number, n
     const mSheet = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)\b/i);
     const mCode = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)/i);
     const mMatch = l.text.match(/MATCH\s*LINE\s*([\d+.]+)?/i);
-    const mStrip = l.text.match(/SEE[\s_]+(ABOVE|BELOW)[\s_]+(LEFT|RIGHT)/i);
+    const mStrip = l.text.match(/SEE[\s_]+(ABOVE|BELOW)(?:[\s_]+(LEFT|RIGHT))?/i);
     if (!mSheet && !mCode && !mMatch && !mStrip) continue;
     const c = center(l);
     // which edge? normalized distance to each border
@@ -133,7 +133,7 @@ export function parseSheetRefs(labels: Label[], view: [number, number, number, n
       matchline: !!mMatch || !!mStrip, station: mMatch && mMatch[1] ? mMatch[1] : null,
       edge: edge[1] < 0.18 ? edge[0] : 'interior', edgeDist: edge[1],
       strip: mStrip ? (mStrip[1].toLowerCase() as "above" | "below") : null,
-      stripSide: mStrip ? (mStrip[2].toLowerCase() as "left" | "right") : null,
+      stripSide: mStrip && mStrip[2] ? (mStrip[2].toLowerCase() as "left" | "right") : null,
     });
   }
   return out;
