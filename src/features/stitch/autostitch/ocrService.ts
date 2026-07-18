@@ -19,31 +19,43 @@ export interface OcrWord {
   bbox: { x0: number; y0: number; x1: number; y1: number }; // px in the recognized image
 }
 
-let workerPromise: Promise<any> | null = null;
+// A tesseract.js scheduler holding two workers: the probe worker fires many
+// band OCR requests over the RPC and (before this) they queued behind one
+// worker. Two workers let concurrent `ocr-req`s genuinely overlap, roughly
+// halving band-OCR wall time on plan-dense sets.
+let schedulerPromise: Promise<any> | null = null;
+const WORKER_COUNT = 2;
 
-async function ensureWorker(): Promise<any> {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const { createWorker, PSM } = await import("tesseract.js");
-      const worker = await createWorker("eng", 1, {
+async function ensureScheduler(): Promise<any> {
+  if (!schedulerPromise) {
+    schedulerPromise = (async () => {
+      const { createScheduler, createWorker, PSM } = await import("tesseract.js");
+      const scheduler = createScheduler();
+      const opts = {
         workerPath: workerUrl,
         corePath: coreUrl,
         langPath: "/ocr",
         gzip: true,
-      });
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-      return worker;
+      };
+      const workers = await Promise.all(
+        Array.from({ length: WORKER_COUNT }, () => createWorker("eng", 1, opts))
+      );
+      for (const worker of workers) {
+        await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+        scheduler.addWorker(worker);
+      }
+      return scheduler;
     })();
     // A failed init must not poison every later call.
-    workerPromise.catch(() => { workerPromise = null; });
+    schedulerPromise.catch(() => { schedulerPromise = null; });
   }
-  return workerPromise;
+  return schedulerPromise;
 }
 
 /** OCR a raw RGBA raster. Returns [] on any failure (OCR is best-effort). */
 export async function recognize(image: RawImage): Promise<OcrWord[]> {
   try {
-    const worker = await ensureWorker();
+    const scheduler = await ensureScheduler();
     // tesseract.js's worker rejects a raw ImageData posted from the main thread
     // ("Error attempting to read image") — it needs a canvas/image-like source.
     // Draw the raster onto an offscreen canvas and hand that to recognize() instead.
@@ -54,7 +66,7 @@ export async function recognize(image: RawImage): Promise<OcrWord[]> {
     canvas.height = image.height;
     const ctx = canvas.getContext("2d")!;
     ctx.putImageData(new ImageData(image.data as unknown as Uint8ClampedArray<ArrayBuffer>, image.width, image.height), 0, 0);
-    const { data } = await worker.recognize(canvas);
+    const { data } = await scheduler.addJob("recognize", canvas);
     const words: OcrWord[] = [];
     for (const w of data.words ?? []) {
       if (!w.text?.trim()) continue;
