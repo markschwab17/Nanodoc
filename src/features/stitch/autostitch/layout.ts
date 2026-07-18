@@ -10,6 +10,8 @@ export interface TilePlacement {
   pageIndex: number;
   x: number; y: number; width: number; height: number;
   aligned: boolean;
+  /** Copied from the pose: the frame this tile shows (mask the rest). */
+  sourceFrame?: [number, number, number, number];
 }
 
 /**
@@ -39,9 +41,11 @@ export function layoutPlacements(
       const si = (P * s.scale) / 72; // == s.scale / rootFtPerIn
       const width = s.sizePt.w * si;
       const height = s.sizePt.h * si;
-      const x = (s.posFt!.x - minX) * P + MARGIN;
-      const y = (s.posFt!.y - minY) * P + MARGIN;
-      out.push({ pageIndex: s.pageIndex, x, y, width, height, aligned: true });
+      const fx = s.frame ? s.frame[0] : 0;
+      const fy = s.frame ? s.frame[1] : 0;
+      const x = (s.posFt!.x - minX) * P + MARGIN - fx * si;
+      const y = (s.posFt!.y - minY) * P + MARGIN - fy * si;
+      out.push({ pageIndex: s.pageIndex, x, y, width, height, aligned: true, sourceFrame: s.frame });
       maxYCanvas = Math.max(maxYCanvas, y + height);
     }
   }
@@ -59,5 +63,23 @@ export function layoutPlacements(
     }
     rowY += maxH + GAP;
   }
+  return out;
+}
+
+/**
+ * Fractional hiddenRegions masking everything OUTSIDE `frame` on a page of
+ * pageW x pageH pts. Full-height side bands + full-width top/bottom bands
+ * (overlapping at corners — harmless for masks). Empty for a full-page frame.
+ */
+export function frameMask(
+  frame: [number, number, number, number], pageW: number, pageH: number
+): { x: number; y: number; w: number; h: number }[] {
+  const [fx0, fy0, fx1, fy1] = frame;
+  const EPS = 1e-3;
+  const out: { x: number; y: number; w: number; h: number }[] = [];
+  if (fy0 / pageH > EPS) out.push({ x: 0, y: 0, w: 1, h: fy0 / pageH });
+  if (1 - fy1 / pageH > EPS) out.push({ x: 0, y: fy1 / pageH, w: 1, h: 1 - fy1 / pageH });
+  if (fx0 / pageW > EPS) out.push({ x: 0, y: 0, w: fx0 / pageW, h: 1 });
+  if (1 - fx1 / pageW > EPS) out.push({ x: fx1 / pageW, y: 0, w: 1 - fx1 / pageW, h: 1 });
   return out;
 }

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { layoutPlacements, type PlacedSheetPose } from "./layout";
+import { describe, it, expect, test } from "vitest";
+import { layoutPlacements, frameMask, type PlacedSheetPose } from "./layout";
 
 describe("layoutPlacements", () => {
   it("keeps the root sheet native size and repositions same-scale sheets", () => {
@@ -38,5 +38,47 @@ describe("layoutPlacements", () => {
     expect(unplaced.aligned).toBe(false);
     expect(unplaced.y).toBeGreaterThan(20 + 800); // below the aligned tile
     expect(unplaced.width).toBeCloseTo(1000, 6); // native size, not rescaled
+  });
+});
+
+describe("frame-anchored layout", () => {
+  test("page origin is offset so the FRAME lands at the solved position", () => {
+    // Two units, same scale: root frame at (0,0)ft, second at (100,0)ft.
+    // Frames are inset 100pt from their page origins → page tiles must sit
+    // 100*si pt left of where a whole-page pose would.
+    const poses = [
+      { pageIndex: 0, scale: 20, sizePt: { w: 720, h: 480 }, posFt: { x: 0, y: 0 }, frame: [100, 50, 700, 450] as [number, number, number, number] },
+      { pageIndex: 1, scale: 20, sizePt: { w: 720, h: 480 }, posFt: { x: 100, y: 0 }, frame: [100, 50, 700, 450] as [number, number, number, number] },
+    ];
+    const out = layoutPlacements(poses, 20, { margin: 0 });
+    // P = 72/20 = 3.6 pt/ft; si = 1
+    expect(out[0].x).toBeCloseTo(-100);       // 0*P - frameX*si
+    expect(out[0].y).toBeCloseTo(-50);
+    expect(out[1].x).toBeCloseTo(100 * 3.6 - 100);
+    expect(out[0].sourceFrame).toEqual([100, 50, 700, 450]);
+  });
+  test("two units of one page yield two placements for that pageIndex", () => {
+    const poses = [
+      { pageIndex: 3, scale: 20, sizePt: { w: 720, h: 480 }, posFt: { x: 0, y: 0 }, frame: [50, 40, 700, 220] as [number, number, number, number] },
+      { pageIndex: 3, scale: 20, sizePt: { w: 720, h: 480 }, posFt: { x: 0, y: 60 }, frame: [50, 260, 700, 440] as [number, number, number, number] },
+    ];
+    const out = layoutPlacements(poses, 20, { margin: 0 });
+    expect(out.filter((p) => p.pageIndex === 3)).toHaveLength(2);
+    expect(out[0].aligned && out[1].aligned).toBe(true);
+  });
+});
+
+describe("frameMask", () => {
+  test("complement of an inset frame is 4 fractional bands", () => {
+    const m = frameMask([100, 50, 700, 450], 720, 480);
+    expect(m).toEqual([
+      { x: 0, y: 0, w: 1, h: 50 / 480 },                    // top
+      { x: 0, y: 450 / 480, w: 1, h: 1 - 450 / 480 },       // bottom
+      { x: 0, y: 0, w: 100 / 720, h: 1 },                   // left
+      { x: 700 / 720, y: 0, w: 1 - 700 / 720, h: 1 },       // right
+    ]);
+  });
+  test("full-page frame yields no masks", () => {
+    expect(frameMask([0, 0, 720, 480], 720, 480)).toEqual([]);
   });
 });
