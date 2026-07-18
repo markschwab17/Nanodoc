@@ -10,10 +10,24 @@
  */
 import { autoStitch } from "./autoStitch";
 import { toProbeResult, type ProbeRequest, type ProbeMessage } from "./stitchProbe";
+import type { OcrWord, RawImage } from "./ocrService";
 
 let mupdf: any = null;
 async function ensureMupdf() {
   if (!mupdf) mupdf = (await import("mupdf")).default;
+}
+
+// ── OCR over RPC to the main thread (tesseract cannot nest here portably) ──
+let ocrSeq = 0;
+const ocrPending = new Map<number, (words: OcrWord[]) => void>();
+const OCR_TIMEOUT_MS = 30_000;
+function ocrViaMain(image: RawImage): Promise<OcrWord[]> {
+  return new Promise((resolve) => {
+    const id = ++ocrSeq;
+    const timer = setTimeout(() => { ocrPending.delete(id); resolve([]); }, OCR_TIMEOUT_MS);
+    ocrPending.set(id, (words) => { clearTimeout(timer); resolve(words); });
+    (self as any).postMessage({ kind: "ocr-req", ocrId: id, image }, [image.data.buffer]);
+  });
 }
 
 // A persistent worker can receive a new document (rapid "Change file") while a
@@ -31,7 +45,7 @@ async function handle(req: ProbeRequest) {
     const doc = mupdf.Document.openDocument(pdfBytes, "application/pdf");
     let res;
     try {
-      res = await autoStitch(mupdf, doc, pageIndices, { userScale });
+      res = await autoStitch(mupdf, doc, pageIndices, { userScale, ocr: ocrViaMain });
     } finally {
       doc.destroy?.();
     }
@@ -43,10 +57,16 @@ async function handle(req: ProbeRequest) {
   }
 }
 
-self.onmessage = (e: MessageEvent<ProbeRequest>) => {
-  latestDocId = e.data.docId;
+self.onmessage = (e: MessageEvent<any>) => {
+  if (e.data && e.data.kind === "ocr-res") {
+    const cb = ocrPending.get(e.data.ocrId);
+    ocrPending.delete(e.data.ocrId);
+    cb?.(e.data.words as OcrWord[]);
+    return;
+  }
+  latestDocId = (e.data as ProbeRequest).docId;
   // .catch keeps the chain self-healing: handle() cannot reject today, but a
   // future edit that let it throw would otherwise poison every later request
   // (the tail would stay a rejected promise → permanent worker death).
-  queue = queue.then(() => handle(e.data)).catch(() => {});
+  queue = queue.then(() => handle(e.data as ProbeRequest)).catch(() => {});
 };

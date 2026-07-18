@@ -23,6 +23,7 @@ import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
 import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
+import { attachOcrRpc, recognize } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
@@ -133,8 +134,10 @@ export function AddPdfModal({
   // One probe worker per component lifetime (the Stitch view keeps this modal mounted across open/close); terminated on unmount.
   useEffect(() => {
     const w = new Worker(new URL("./autostitch/stitchProbe.worker.ts", import.meta.url), { type: "module" });
+    attachOcrRpc(w);
     w.onmessage = (ev: MessageEvent<ProbeMessage>) => {
       const msg = ev.data;
+      if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
       if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
       if ("error" in msg) {
         console.warn("[stitchProbe] failed:", msg.error);
@@ -550,6 +553,7 @@ export function AddPdfModal({
         const result = await autoStitch(mupdf, mupdfDoc, selected, {
           userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
           onProgress: (done, total) => setAddingProgress({ done, total }),
+          ocr: recognize,
         });
         placements = result.placements;
         rootFtPerIn = result.rootFtPerIn;

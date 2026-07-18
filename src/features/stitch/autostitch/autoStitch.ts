@@ -4,12 +4,19 @@ import { capturePage } from "./captureDevice";
 import { stitchSheets, type SheetInput, type StitchMethod } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
+import { edgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
+import { renderBand } from "./bandRender";
+import type { OcrWord, RawImage } from "./ocrService";
+import type { Frame } from "./frameDetect";
+import type { Label } from "./types";
 
 const DEFAULT_SCALE = 20;
 
 export interface AutoStitchOptions {
   userScale?: number | null;
   onProgress?: (done: number, total: number) => void;
+  /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel. */
+  ocr?: (image: RawImage) => Promise<OcrWord[]>;
 }
 export interface AutoStitchResult {
   placements: TilePlacement[];
@@ -97,4 +104,41 @@ export async function autoStitch(
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
   return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses };
+}
+
+/**
+ * OCR the edge bands of each frame + the title-block cell of one page.
+ * Vertical bands are OCR'd at 90 AND 270 and the higher-total-confidence
+ * orientation wins (sets differ in which way side text runs). Returns
+ * synthetic page-space Labels and the printed sheet number (null unless read).
+ */
+export async function recoverLabels(
+  mupdf: any, page: any, frames: Frame[],
+  view: [number, number, number, number],
+  ocr: (image: RawImage) => Promise<OcrWord[]>
+): Promise<{ labels: Label[]; printedNo: number | null }> {
+  const labels: Label[] = [];
+  for (const f of frames) {
+    for (const band of edgeBands(f.bbox)) {
+      const { image, scale } = renderBand(mupdf, page, band.clip);
+      if (band.edge === "left" || band.edge === "right") {
+        const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
+        for (const rot of [90, 270] as const) {
+          const r = rotateRaw(image, rot);
+          cands.push({ rot, words: await ocr(r) });
+        }
+        const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
+        const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
+        // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
+        labels.push(...wordsToLabels(best.words, band, scale, image.width, image.height, best.rot));
+      } else {
+        labels.push(...wordsToLabels(await ocr(image), band, scale, image.width, image.height, 0));
+      }
+    }
+  }
+  const nb = sheetNoBand(view);
+  const { image, scale } = renderBand(mupdf, page, nb.clip);
+  void scale;
+  const printedNo = parseSheetNumber(await ocr(image));
+  return { labels, printedNo };
 }
