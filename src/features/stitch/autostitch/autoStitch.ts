@@ -58,17 +58,12 @@ export async function autoStitch(
   const units: Unit[] = [];
   const pageSize = new Map<number, { w: number; h: number }>();
 
-  // Per-page results collected in the first pass; unit construction is deferred
-  // to a second pass so the full-sheet OCR fallback can run in between (it merges
-  // interior matchline labels that stripFrames and the units must then see).
-  interface PageResult { pageIndex: number; extract: PageExtract; printedNo: number; scale: number; w: number; h: number; }
-  const pageResults: PageResult[] = [];
-
   for (let i = 0; i < pageIndices.length; i++) {
     const pageIndex = pageIndices[i];
     await yieldToMain();
     const page = doc.loadPage(pageIndex);
     let extract: PageExtract;
+    let frames: Frame[] = [];
     let printedNo: number | null = null;
     let recovered: Label[] = [];
     try {
@@ -81,15 +76,12 @@ export async function autoStitch(
         for (const band of pageEdgeBands(extract.view)) {
           const { image, scale } = renderBand(mupdf, page, band.clip);
           if (band.edge === "left" || band.edge === "right") {
-            // Keep BOTH rotations: a readable label can sit in EITHER direction
-            // (mixed-direction text along an edge). wordsToLabels maps each set
-            // through its own rotation; garbage words from the wrong rotation
-            // match no ref regex and are harmless.
-            for (const rot of [90, 270] as const) {
-              const words = await opts.ocr(rotateRaw(image, rot));
-              // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
-              recovered.push(...wordsToLabels(words, band, scale, image.width, image.height, rot));
-            }
+            const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
+            for (const rot of [90, 270] as const) cands.push({ rot, words: await opts.ocr(rotateRaw(image, rot)) });
+            const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
+            const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
+            // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
+            recovered.push(...wordsToLabels(best.words, band, scale, image.width, image.height, best.rot));
           } else {
             recovered.push(...wordsToLabels(await opts.ocr(image), band, scale, image.width, image.height, 0));
           }
@@ -102,6 +94,11 @@ export async function autoStitch(
       page.destroy?.();
     }
     if (recovered.length) extract = { ...extract, labels: [...extract.labels, ...recovered] };
+
+    // Two-strip detection from strip refs (runs AFTER the OCR merge so recovered
+    // refs count). A matched below/above pair splits the page; otherwise the
+    // page is one whole-page unit.
+    frames = stripFrames([...extract.shxLabels, ...extract.labels], extract.view) ?? [];
 
     // Printed sheet number: OCR > "SHEET n OF m" text > page order.
     if (printedNo == null) {
@@ -118,64 +115,6 @@ export async function autoStitch(
     // Scale inference is deferred; uniform scale (user-entered or default).
     const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
 
-    pageResults.push({ pageIndex, extract, printedNo, scale, w, h });
-    opts.onProgress?.(i + 1, total);
-  }
-
-  // ── FULL-SHEET SPARSE OCR FALLBACK ──────────────────────────────────────────
-  // East-side matchline labels sit mid-page (beside a notes column), outside every
-  // edge band, so an east–west pair gets only a one-sided ref: no reciprocal, no
-  // matchline prior, and the windowed segment vote aliases onto repeated building
-  // modules. For each page implicated in a NON-reciprocated edge ref, sparsely OCR
-  // the WHOLE sheet once (100 DPI) to recover interior "SEE SHEET n" matchline
-  // labels wherever they sit. parseSheetRefs tags these edge:"interior"; the
-  // loosened matchline gates in stitchCore let them join the pair graph anyway.
-  if (opts.ocr) {
-    // Directed reference relation over PRINTED numbers, plus each page's out-refs.
-    const directed = new Set<string>(); // `${fromPrinted}->${toPrinted}`
-    const outRefs = new Map<PageResult, Set<number>>();
-    for (const pr of pageResults) {
-      const refs = parseSheetRefs([...pr.extract.shxLabels, ...pr.extract.labels], pr.extract.view)
-        .filter((r) => r.edge !== "interior");
-      const outs = new Set<number>();
-      for (const r of refs) if (r.sheet != null) outs.add(r.sheet);
-      outRefs.set(pr, outs);
-      for (const t of outs) directed.add(`${pr.printedNo}->${t}`);
-    }
-    const needsFallback = (pr: PageResult): boolean => {
-      if (pr.extract.geometry.length < 5000) return false; // skip notes/cover pages
-      const pP = pr.printedNo;
-      const outs = outRefs.get(pr)!;
-      // printed numbers of pages that reference this one
-      const incoming = pageResults.filter((q) => outRefs.get(q)!.has(pP)).map((q) => q.printedNo);
-      if (!outs.size && !incoming.length) return false; // not implicated in any pair
-      for (const t of outs) if (!directed.has(`${t}->${pP}`)) return true;   // out, no reciprocal
-      for (const q of incoming) if (!outs.has(q)) return true;               // in, no reciprocal
-      return false;
-    };
-    const candidates = pageResults.filter(needsFallback).slice(0, 12); // cap runtime
-    for (const pr of candidates) {
-      await yieldToMain();
-      const page = doc.loadPage(pr.pageIndex); // per-page loop destroyed the handle
-      try {
-        const { image, scale } = renderBand(mupdf, page, pr.extract.view, 100);
-        const words = await opts.ocr(image);
-        const found = wordsToLabels(words, { edge: "top", clip: pr.extract.view }, scale, image.width, image.height, 0);
-        if (found.length) pr.extract = { ...pr.extract, labels: [...pr.extract.labels, ...found] };
-      } finally {
-        page.destroy?.();
-      }
-    }
-  }
-
-  // ── UNIT CONSTRUCTION (second pass) ──────────────────────────────────────────
-  // Runs AFTER the fallback merges interior matchline labels so stripFrames and
-  // the units see every recovered ref.
-  for (const pr of pageResults) {
-    const { pageIndex, extract, printedNo, scale, w, h } = pr;
-    // Two-strip detection from strip refs. A matched below/above pair splits the
-    // page; otherwise the page is one whole-page unit.
-    const frames = stripFrames([...extract.shxLabels, ...extract.labels], extract.view) ?? [];
     if (frames.length >= 2) {
       for (const f of frames.slice(0, 2)) {
         units.push({ pageIndex, frame: f, extract: sliceExtract(extract, f), sizePt: { w, h }, scale, printedNo, key: 0 });
@@ -183,6 +122,7 @@ export async function autoStitch(
     } else {
       units.push({ pageIndex, frame: null, extract, sizePt: { w, h }, scale, printedNo, key: 0 });
     }
+    opts.onProgress?.(i + 1, total);
   }
 
   if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [] };
