@@ -82,10 +82,22 @@ export function wordsToLabels(
  * < 1.5x that height. Text joins with single spaces; bbox is the union.
  */
 export function mergePhrases(labels: Label[]): Label[] {
-  const sorted = [...labels].sort((a, b) => {
-    const ya = (a.y + a.endY) / 2, yb = (b.y + b.endY) / 2;
-    return Math.abs(ya - yb) > Math.max(a.endY - a.y, b.endY - b.y) * 0.6 ? ya - yb : a.x - b.x;
-  });
+  // Cluster into baselines FIRST (1-D scan over y-centers), then sort by
+  // (line, x). A pairwise "same line" test inside a sort comparator is not a
+  // strict weak order (transitivity breaks when heights vary) and corrupts
+  // Array.prototype.sort's contract.
+  const byY = [...labels].sort((a, b) => (a.y + a.endY) - (b.y + b.endY));
+  const lineOf = new Map<Label, number>();
+  let line = 0;
+  for (let i = 0; i < byY.length; i++) {
+    if (i > 0) {
+      const prev = byY[i - 1], cur = byY[i];
+      const h = Math.max(prev.endY - prev.y, cur.endY - cur.y);
+      if ((cur.y + cur.endY) / 2 - (prev.y + prev.endY) / 2 >= 0.6 * h) line++;
+    }
+    lineOf.set(byY[i], line);
+  }
+  const sorted = [...labels].sort((a, b) => (lineOf.get(a)! - lineOf.get(b)!) || (a.x - b.x));
   const out: Label[] = [];
   for (const l of sorted) {
     const prev = out[out.length - 1];
@@ -97,7 +109,7 @@ export function mergePhrases(labels: Label[]): Label[] {
         prev.text = `${prev.text} ${l.text}`;
         prev.x = Math.min(prev.x, l.x); prev.y = Math.min(prev.y, l.y);
         prev.endX = Math.max(prev.endX, l.endX); prev.endY = Math.max(prev.endY, l.endY);
-        prev.h = Math.max(prev.h, l.endY - l.y);
+        prev.h = prev.endY - prev.y;
         continue;
       }
     }

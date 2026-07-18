@@ -104,4 +104,9 @@ describe("mergePhrases", () => {
     const m = mergePhrases([L("SEE", 100, 50, 130, 60), L("SHEET", 100, 80, 150, 90)]);
     expect(m).toHaveLength(2);
   });
+  test("mixed-height words on one baseline merge deterministically", () => {
+    const m = mergePhrases([L("9", 186, 50, 194, 62), L("SEE", 100, 51, 130, 60), L("SHEET", 136, 49, 180, 61)]);
+    expect(m).toHaveLength(1);
+    expect(m[0].text).toBe("SEE SHEET 9");
+  });
 });
