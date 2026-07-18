@@ -18,11 +18,12 @@ export interface FeasibilityInput {
   method: StitchMethod;
   alignedPageIndices: number[];
   worstResidFt: number;
-  /** Plan-density page indices. When present, the geometric ratio's denominator
-   *  is the selected plan-like pages (not the whole selection), so selecting all
-   *  pages of a set full of notes/details sheets doesn't read as unstitchable.
-   *  Absent/empty → old behavior (denominator = selectedCount). */
-  planPageIndices?: number[];
+  /** Ref-bearing page indices (pages carrying a usable adjacency signal). When
+   *  present, the geometric ratio's denominator is the selected ref-bearing
+   *  pages (not the whole selection), so selecting all pages of a set full of
+   *  notes/details sheets doesn't read as unstitchable. Absent/empty OR
+   *  empty intersection → old behavior (denominator = selectedCount). */
+  refPageIndices?: number[];
 }
 
 export interface Feasibility {
@@ -38,12 +39,13 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
   const ratio = selectedCount > 0 ? alignedInSelection / selectedCount : 0;
 
   // Geometric denominator: rate the aligned count against the selected pages
-  // that are plan-like, not the whole selection (notes/details sheets can't
-  // align and shouldn't drag the ratio down). Falls back to selectedCount when
-  // planPageIndices is absent or empty (backward compat).
-  const planSet = new Set(probe.planPageIndices ?? []);
-  const selectedPlanCount = selectedPageIndices.reduce((n, i) => n + (planSet.has(i) ? 1 : 0), 0);
-  const geomDenom = selectedPlanCount > 0 ? selectedPlanCount : selectedCount;
+  // that are ref-bearing, not the whole selection (notes/details sheets carry
+  // no adjacency signal, can't align, and shouldn't drag the ratio down). Falls
+  // back to selectedCount when refPageIndices is absent or the intersection with
+  // the selection is empty (backward compat).
+  const refSet = new Set(probe.refPageIndices ?? []);
+  const selectedRefCount = selectedPageIndices.reduce((n, i) => n + (refSet.has(i) ? 1 : 0), 0);
+  const geomDenom = selectedRefCount > 0 ? selectedRefCount : selectedCount;
   const geomRatio = geomDenom > 0 ? alignedInSelection / geomDenom : 0;
 
   let passesGate = false;

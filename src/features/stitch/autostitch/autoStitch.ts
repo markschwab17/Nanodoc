@@ -13,9 +13,11 @@ import type { OcrWord, RawImage } from "./ocrService";
 
 const DEFAULT_SCALE = 20;
 
-/** Drawing-density floor (geometry vector count) separating plan sheets from
- *  cover/notes/details sheets. Plan sheets are worth OCRing / rating against;
- *  low-geometry sheets have no edge refs to recover and only burn OCR calls. */
+/** Drawing-density floor (geometry vector count). Used ONLY to prune the
+ *  reciprocal anchor-search pass (a raster page has zero vector geometry and
+ *  the anchor's segment vote needs vectors, so searching it is wasted). It is
+ *  deliberately NOT a gate on OCR: raster/scanned pages have zero geometry and
+ *  are exactly the pages OCR exists to rescue. */
 export const PLAN_GEOMETRY_MIN = 5000;
 
 export interface AutoStitchOptions {
@@ -32,20 +34,76 @@ export interface AutoStitchResult {
   worstResidFt: number;
   method: StitchMethod;
   poses: PlacedSheetPose[];
-  /** Page indices whose extract met the plan-density floor (PLAN_GEOMETRY_MIN).
-   *  The feasibility gate rates aligned-count against these, not the whole
+  /** Page indices carrying a usable adjacency signal (an edge-band sheet ref,
+   *  discipline code, strip callout, or matchline) AFTER the OCR merge. The
+   *  feasibility gate rates aligned-count against these, not the whole
    *  selection, so selecting all pages of a set with many notes/details sheets
-   *  doesn't read as "unstitchable". */
-  planPageIndices: number[];
+   *  (which carry no adjacency signal and can never align) doesn't read as
+   *  "unstitchable". */
+  refPageIndices: number[];
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
 const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
 
-/** True when the page's existing text already provides edge refs (no OCR needed). */
+/** True when the page carries a usable adjacency signal on an edge band: a sheet
+ *  cross-ref, discipline code, strip callout, or matchline sitting at a page edge
+ *  (not interior). Serves both uses: the OCR gate skips pages that already have
+ *  one (`!hasEdgeRefs`), and the feasibility denominator counts pages that have
+ *  one after the OCR merge (ref-bearing pages). */
 function hasEdgeRefs(extract: PageExtract): boolean {
   const all = [...extract.shxLabels, ...extract.labels];
-  return parseSheetRefs(all, extract.view).some((r) => r.edge !== "interior");
+  return parseSheetRefs(all, extract.view).some(
+    (r) => r.edge !== "interior" && (r.sheet != null || r.sheetCode != null || r.strip != null || r.matchline)
+  );
+}
+
+/**
+ * Resolve each page's printed sheet number, sanity-checking OCR reads and
+ * repairing collisions. Pure (no mupdf / no I/O) so it is unit-testable.
+ *
+ *  - Sanity: an OCR-sourced number that is null, non-integer, or outside
+ *    [1, 2·pageCount] is a misread → fall back to page order (pageIndex+1).
+ *    text/fallback numbers are trusted as given; a null of any source also
+ *    falls back to page order.
+ *  - Collision repair: a resolved number shared by ≥2 pages where at least one
+ *    is still OCR-sourced is almost certainly a misread — reset every
+ *    OCR-sourced page in that group to its page-order fallback (distinct
+ *    pageIndex+1 per page, so the reset group cannot re-collide internally).
+ *
+ * Returns pageIndex → resolved printed number.
+ */
+export function resolvePrintedNos(
+  pages: { pageIndex: number; printedNo: number | null; source: "ocr" | "text" | "fallback" }[],
+  pageCount: number
+): Map<number, number> {
+  const resolved = new Map<number, { no: number; source: "ocr" | "text" | "fallback" }>();
+  for (const p of pages) {
+    let no = p.printedNo;
+    let source = p.source;
+    const validOcr = no != null && Number.isInteger(no) && no >= 1 && no <= pageCount * 2;
+    if (source === "ocr" && !validOcr) { no = null; source = "fallback"; }
+    if (no == null) { no = p.pageIndex + 1; source = "fallback"; }
+    resolved.set(p.pageIndex, { no, source });
+  }
+
+  const byNo = new Map<number, { pageIndex: number; source: "ocr" | "text" | "fallback" }[]>();
+  for (const [pageIndex, r] of resolved) {
+    if (!byNo.has(r.no)) byNo.set(r.no, []);
+    byNo.get(r.no)!.push({ pageIndex, source: r.source });
+  }
+  for (const group of byNo.values()) {
+    if (group.length < 2) continue;
+    if (!group.some((g) => g.source === "ocr")) continue;
+    for (const g of group) {
+      if (g.source !== "ocr") continue;
+      const fallback = g.pageIndex + 1;
+      console.warn(`[autoStitch] printedNo collision on ${resolved.get(g.pageIndex)!.no}: page ${g.pageIndex} was OCR-sourced; resetting to page-order fallback ${fallback}`);
+      resolved.set(g.pageIndex, { no: fallback, source: "fallback" });
+    }
+  }
+
+  return new Map([...resolved].map(([k, v]) => [k, v.no]));
 }
 
 interface Unit {
@@ -81,7 +139,7 @@ export async function autoStitch(
   // capture); unit construction is deferred to pass 3 so the reciprocal-anchor
   // pass (pass 2) can run against the whole set between them.
   const pages: PageRec[] = [];
-  const planPageIndices: number[] = [];
+  const refPageIndices: number[] = [];
   for (let i = 0; i < pageIndices.length; i++) {
     const pageIndex = pageIndices[i];
     await yieldToMain();
@@ -95,11 +153,11 @@ export async function autoStitch(
       // OCR recovery: OCR the PAGE-EDGE bands (no frame needed) when the text
       // channels are starved of edge refs. Strip refs recovered here declare a
       // two-strip page AND locate the split (see stripFrames) — geometry border
-      // detection is not used (it misfires on dense civil sheets).
-      // Density gate: cover/notes/details sheets have no edge refs either, so
-      // they would burn ~9 OCR calls each for nothing. Only plan-density sheets
-      // (matching the anchor pass's floor) are worth OCRing.
-      if (opts.ocr && !hasEdgeRefs(extract) && (extract.geometry?.length ?? 0) >= PLAN_GEOMETRY_MIN) {
+      // detection is not used (it misfires on dense civil sheets). No density
+      // gate here: raster/scanned pages carry zero vector geometry and are
+      // exactly the pages OCR exists to rescue, so gating on geometry would
+      // disable OCR precisely where it is needed.
+      if (opts.ocr && !hasEdgeRefs(extract)) {
         for (const band of pageEdgeBands(extract.view)) {
           const { image, scale: bandScale } = renderBand(mupdf, page, band.clip);
           if (band.edge === "left" || band.edge === "right") {
@@ -115,53 +173,38 @@ export async function autoStitch(
         }
         const nb = sheetNoBand(extract.view);
         const { image } = renderBand(mupdf, page, nb.clip);
-        // Sanity-check the OCR'd number: a misread (e.g. "2"→"22") would
-        // silently misroute byPrinted ref resolution. Accept only an integer in
-        // [1, 2·pageCount]; otherwise discard and fall through to the text scan.
+        // Record the raw OCR read; resolvePrintedNos sanity-checks the range
+        // (a misread like "2"→"22" would otherwise misroute byPrinted resolution).
         const ocrNo = parseSheetNumber(await opts.ocr(image));
-        if (ocrNo != null && Number.isInteger(ocrNo) && ocrNo >= 1 && ocrNo <= pageIndices.length * 2) {
-          printedNo = ocrNo;
-          printedNoSource = "ocr";
-        }
+        if (ocrNo != null) { printedNo = ocrNo; printedNoSource = "ocr"; }
       }
     } finally {
       page.destroy?.();
     }
     if (recovered.length) extract = { ...extract, labels: [...extract.labels, ...recovered] };
 
-    // Printed sheet number: OCR > "SHEET n OF m" text > page order.
+    // Printed sheet number candidate: OCR > "SHEET n OF m" text > page order.
+    // The final number (sanity + collision repair) is resolved below.
     if (printedNo == null) {
       for (const l of [...extract.shxLabels, ...extract.labels]) {
         const m = l.text.match(/SHEET\s+(?:NO\.?\s*)?(\d+)\s+OF\s+\d+/i);
         if (m) { printedNo = Number(m[1]); printedNoSource = "text"; break; }
       }
     }
-    if (printedNo == null) { printedNo = pageIndex + 1; printedNoSource = "fallback"; }
 
-    pages.push({ pageIndex, extract, printedNo, printedNoSource });
-    if ((extract.geometry?.length ?? 0) >= PLAN_GEOMETRY_MIN) planPageIndices.push(pageIndex);
+    pages.push({ pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource });
+    // Ref-bearing after the OCR merge: does the page carry any usable adjacency
+    // signal? This is the feasibility denominator (see refPageIndices).
+    if (hasEdgeRefs(extract)) refPageIndices.push(pageIndex);
     opts.onProgress?.(i + 1, total);
   }
 
-  // ── printedNo collision repair ──────────────────────────────────────────────
-  // Two pages sharing a printedNo where at least one came from OCR is almost
-  // certainly a misread — reset the OCR-sourced one(s) to their page-order
-  // fallback so byPrinted resolution (pass 2) and unit construction don't misroute.
-  {
-    const byNo = new Map<number, PageRec[]>();
-    for (const p of pages) (byNo.get(p.printedNo) || byNo.set(p.printedNo, []).get(p.printedNo)!).push(p);
-    for (const group of byNo.values()) {
-      if (group.length < 2) continue;
-      if (!group.some((p) => p.printedNoSource === "ocr")) continue;
-      for (const p of group) {
-        if (p.printedNoSource !== "ocr") continue;
-        const fallback = p.pageIndex + 1;
-        console.warn(`[autoStitch] printedNo collision on ${p.printedNo}: page ${p.pageIndex} was OCR-sourced; resetting to page-order fallback ${fallback}`);
-        p.printedNo = fallback;
-        p.printedNoSource = "fallback";
-      }
-    }
-  }
+  // Sanity-check OCR reads and repair printedNo collisions, then apply.
+  const resolvedNos = resolvePrintedNos(
+    pages.map((p) => ({ pageIndex: p.pageIndex, printedNo: p.printedNo, source: p.printedNoSource })),
+    pageIndices.length
+  );
+  for (const p of pages) p.printedNo = resolvedNos.get(p.pageIndex)!;
 
   // ── PASS 2: reciprocal interior-matchline anchor search ─────────────────────
   // A one-sided edge ref on page j ("SEE SHEET n" on its left/right edge) has no
@@ -223,6 +266,8 @@ export async function autoStitch(
           if (iPage.pageIndex === jPage.pageIndex) continue;
           // Skip if i ALREADY has a reciprocal edge ref (opposite edge → j's #).
           if (edgeRefsOf(iPage).some((ri) => ri.sheet === jPage.printedNo && ri.edge === OPP[r.edge])) continue;
+          // Prune raster/low-geometry pages here (unlike the OCR gate): the anchor
+          // confirms via a vector segment vote, which a page with no geometry can't feed.
           if ((iPage.extract.geometry?.length ?? 0) < PLAN_GEOMETRY_MIN) continue;
           if (searched >= 10) break outer;
           searched++;
@@ -249,7 +294,7 @@ export async function autoStitch(
     }
   }
 
-  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], planPageIndices };
+  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], refPageIndices };
 
   // Unique numeric keys, stable order.
   units.forEach((u, i) => { u.key = i + 1; });
@@ -322,5 +367,5 @@ export async function autoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, planPageIndices };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices };
 }

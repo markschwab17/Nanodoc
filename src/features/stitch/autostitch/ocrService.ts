@@ -37,14 +37,28 @@ async function ensureScheduler(): Promise<any> {
         langPath: "/ocr",
         gzip: true,
       };
-      const workers = await Promise.all(
-        Array.from({ length: WORKER_COUNT }, () => createWorker("eng", 1, opts))
-      );
-      for (const worker of workers) {
-        await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-        scheduler.addWorker(worker);
+      // Track every successfully created worker so a mid-init failure (a later
+      // createWorker / setParameters / addWorker throwing) can't leak the ones
+      // already spun up — each holds a live Web Worker + wasm instance. Created
+      // sequentially so `created` is exact: a rejection can't leave a sibling
+      // still resolving into the array after the catch runs (as Promise.all could).
+      const created: any[] = [];
+      try {
+        for (let n = 0; n < WORKER_COUNT; n++) {
+          const worker = await createWorker("eng", 1, opts);
+          created.push(worker);
+          await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+          scheduler.addWorker(worker);
+        }
+        return scheduler;
+      } catch (err) {
+        // Best-effort teardown of everything created, then re-throw so the
+        // singleton resets (see the .catch below) and a later call retries clean.
+        for (const worker of created) {
+          try { await worker.terminate(); } catch { /* ignore */ }
+        }
+        throw err;
       }
-      return scheduler;
     })();
     // A failed init must not poison every later call.
     schedulerPromise.catch(() => { schedulerPromise = null; });
