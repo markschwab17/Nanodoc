@@ -20,4 +20,16 @@ describe("toProbeResult", () => {
     expect(probe.worstResidFt).toBe(0);
     expect(probe.placements).toHaveLength(3);
   });
+
+  it("alignedPageIndices dedupes two placed units of one page", () => {
+    const placement = (pageIndex: number) =>
+      ({ pageIndex, x: 0, y: 0, width: 10, height: 10, aligned: true });
+    const res = toProbeResult({
+      placements: [placement(3), placement(3), placement(5)],
+      rootFtPerIn: 20, alignedCount: 3, unplacedCount: 0, worstResidFt: 0.1,
+      method: "geometric",
+      poses: [],
+    } as any, 7);
+    expect(res.alignedPageIndices).toEqual([3, 5]);
+  });
 });

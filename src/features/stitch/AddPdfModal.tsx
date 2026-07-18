@@ -27,7 +27,7 @@ import { attachOcrRpc, recognize } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import { layoutPlacements, type TilePlacement } from "@/features/stitch/autostitch/layout";
+import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -560,17 +560,21 @@ export function AddPdfModal({
         worstResidFt = result.worstResidFt;
       }
 
-      // 3. Build aligned tiles and commit as one undo step.
-      const byPage = new Map(placements.map((p) => [p.pageIndex, p]));
-      const newTiles = selected.map((pageIndex) => {
-        const p = byPage.get(pageIndex);
+      // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
+      //    masked to its own frame) and commit as one undo step.
+      const newTiles = placements.map((p) => {
+        const page = mupdfDoc.loadPage(p.pageIndex);
+        const bounds = page.getBounds();
+        page.destroy?.();
+        const pw = bounds[2] - bounds[0], ph = bounds[3] - bounds[1];
         return {
           sourcePdfBytes: pdfBytes,
-          sourcePageIndex: pageIndex,
+          sourcePageIndex: p.pageIndex,
           sourceFileName: pdfFileName || undefined,
-          x: p?.x ?? MARGIN, y: p?.y ?? MARGIN,
-          width: p?.width ?? 0, height: p?.height ?? 0,
-          imageDataUrl: rasters.get(pageIndex),
+          x: p.x, y: p.y,
+          width: p.width, height: p.height,
+          imageDataUrl: rasters.get(p.pageIndex),
+          hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
         };
       });
       addTiles(newTiles);
@@ -578,7 +582,7 @@ export function AddPdfModal({
       setReferenceScaleFeetPerInch(Number.isFinite(scaleNum) && scaleNum > 0 ? scaleNum : rootFtPerIn);
 
       // 4. Leave unaligned tiles selected so the user can place them manually.
-      const added = useStitchStore.getState().tiles.slice(-selected.length);
+      const added = useStitchStore.getState().tiles.slice(-newTiles.length);
       const alignedSet = new Set(placements.filter((p) => p.aligned).map((p) => p.pageIndex));
       const unalignedIds = added.filter((t) => !alignedSet.has(t.sourcePageIndex)).map((t) => t.id);
       if (unalignedIds.length) setSelectedTileIds(unalignedIds);

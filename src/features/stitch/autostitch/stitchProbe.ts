@@ -31,7 +31,7 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     docId,
     placements: res.placements,
     method: res.method,
-    alignedPageIndices: res.placements.filter((p) => p.aligned).map((p) => p.pageIndex),
+    alignedPageIndices: [...new Set(res.placements.filter((p) => p.aligned).map((p) => p.pageIndex))],
     worstResidFt: res.worstResidFt,
     rootFtPerIn: res.rootFtPerIn,
     poses: res.poses,
