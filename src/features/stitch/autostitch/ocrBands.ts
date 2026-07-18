@@ -10,17 +10,6 @@ import type { OcrWord, RawImage } from "./ocrService";
 
 export interface BandSpec { edge: "top" | "bottom" | "left" | "right"; clip: [number, number, number, number] }
 
-/** Four bands straddling a frame's edges (labels sit ON the border). */
-export function edgeBands(bbox: [number, number, number, number], bandPt = 60): BandSpec[] {
-  const [x0, y0, x1, y1] = bbox;
-  return [
-    { edge: "top",    clip: [x0, y0 - bandPt, x1, y0 + bandPt] },
-    { edge: "bottom", clip: [x0, y1 - bandPt, x1, y1 + bandPt] },
-    { edge: "left",   clip: [x0 - bandPt, y0, x0 + bandPt, y1] },
-    { edge: "right",  clip: [x1 - bandPt, y0, x1 + bandPt, y1] },
-  ];
-}
-
 /**
  * Inward edge bands of the PAGE view for OCR (no frame needed): matchline
  * labels on this class of sheet sit within these fractions of the page edges

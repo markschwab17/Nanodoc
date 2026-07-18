@@ -56,7 +56,6 @@ export async function autoStitch(
 ): Promise<AutoStitchResult> {
   const total = pageIndices.length;
   const units: Unit[] = [];
-  const pageSize = new Map<number, { w: number; h: number }>();
 
   for (let i = 0; i < pageIndices.length; i++) {
     const pageIndex = pageIndices[i];
@@ -111,7 +110,6 @@ export async function autoStitch(
 
     const w = extract.view[2] - extract.view[0];
     const h = extract.view[3] - extract.view[1];
-    pageSize.set(pageIndex, { w, h });
     // Scale inference is deferred; uniform scale (user-entered or default).
     const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
 

@@ -53,12 +53,23 @@
   * {
     @apply border-border;
   }
-  html, body {
+  html {
     @apply m-0 p-0;
+    height: 100%;
+  }
+  body {
+    @apply m-0 p-0;
+    min-height: 100%;
+  }
+  /* Editor-style routes mount <FixedViewport>, which puts this class on
+     <html>: the app fills the viewport exactly and the document never
+     scrolls. Marketing pages keep normal document flow/scrolling. */
+  html.app-fixed-viewport,
+  html.app-fixed-viewport body {
     height: 100%;
     overflow: hidden;
   }
-  #root {
+  html.app-fixed-viewport #root {
     height: 100%;
     min-height: 0;
     overflow: hidden;

@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { createBrowserRouter } from "react-router-dom";
 import { isTauri } from "@/shared/utils/environment";
+import { FixedViewport } from "@/shared/components/FixedViewport";
 import Home from "./pages/Home";
 import Editor from "./pages/Editor";
 
@@ -32,15 +33,27 @@ export const router = createBrowserRouter([
   },
   {
     path: "/view",
-    element: lazyRoute(<CiviltakeoffView />),
+    element: lazyRoute(
+      <FixedViewport>
+        <CiviltakeoffView />
+      </FixedViewport>
+    ),
   },
   {
     path: "/editor",
-    element: <Editor />,
+    element: (
+      <FixedViewport>
+        <Editor />
+      </FixedViewport>
+    ),
   },
   {
     path: "/stitch",
-    element: lazyRoute(<StitchView />),
+    element: lazyRoute(
+      <FixedViewport>
+        <StitchView />
+      </FixedViewport>
+    ),
   },
   {
     path: "/faq",
@@ -71,19 +84,35 @@ export const router = createBrowserRouter([
     ? [
         {
           path: "/dev/tile-smoke",
-          element: lazyRoute(<TileSmokeHarness />),
+          element: lazyRoute(
+            <FixedViewport>
+              <TileSmokeHarness />
+            </FixedViewport>
+          ),
         },
         {
           path: "/dev/tiled-page-smoke",
-          element: lazyRoute(<TiledPageSmokeHarness />),
+          element: lazyRoute(
+            <FixedViewport>
+              <TiledPageSmokeHarness />
+            </FixedViewport>
+          ),
         },
         {
           path: "/dev/autostitch",
-          element: lazyRoute(<AutoStitchSmokeHarness />),
+          element: lazyRoute(
+            <FixedViewport>
+              <AutoStitchSmokeHarness />
+            </FixedViewport>
+          ),
         },
         {
           path: "/dev/cleanup",
-          element: lazyRoute(<CleanupSmokeHarness />),
+          element: lazyRoute(
+            <FixedViewport>
+              <CleanupSmokeHarness />
+            </FixedViewport>
+          ),
         },
       ]
     : []),
@@ -91,5 +120,11 @@ export const router = createBrowserRouter([
 
 // Component that handles routing decision at React render time
 function AppRouter() {
-  return isTauri ? <Editor /> : <Home />;
+  return isTauri ? (
+    <FixedViewport>
+      <Editor />
+    </FixedViewport>
+  ) : (
+    <Home />
+  );
 }

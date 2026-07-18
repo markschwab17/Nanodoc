@@ -1,17 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { edgeBands, pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords } from "./ocrBands";
+import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords } from "./ocrBands";
 import type { OcrWord } from "./ocrService";
-
-describe("edgeBands", () => {
-  test("bands straddle the frame edges", () => {
-    const b = edgeBands([100, 200, 1100, 900], 60);
-    const by = Object.fromEntries(b.map((s) => [s.edge, s.clip]));
-    expect(by.top).toEqual([100, 140, 1100, 260]);    // y: 200±60
-    expect(by.bottom).toEqual([100, 840, 1100, 960]);
-    expect(by.left).toEqual([40, 200, 160, 900]);
-    expect(by.right).toEqual([1040, 200, 1160, 900]);
-  });
-});
 
 describe("pageEdgeBands", () => {
   test("inward bands at spike-validated fractions", () => {
