@@ -149,7 +149,7 @@ export function tokenVote(si: { tok: TokFeat[] }, sj: { tok: TokFeat[] }, { minI
   return { dx: mx, dy: my, inliers: inl.length, rmsFt: rms, tokens: [...new Set(inl.map((d) => d.text))].slice(0, 4) };
 }
 
-export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; sameSta: boolean } | null {
+export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; sameSta: boolean; edge: string } | null {
   // Strip refs ("SEE ABOVE/BELOW …") only pair the two frames of the SAME page
   // (siblings). They must NOT anchor a non-sibling pair — a below/above label
   // pointing at this page's other strip carries no offset info about a different
@@ -165,7 +165,9 @@ export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; same
     for (const b of mj) {
       if (OPP[a.edge] !== b.edge) continue;
       const sameSta = !!(a.station && b.station && a.station === b.station);
-      return { dx: a.xf - b.xf, dy: a.yf - b.yf, sameSta };
+      // `edge` is the matchline edge on sheet i: top/bottom → horizontal matchline
+      // (trustworthy axis = y); left/right → vertical matchline (trustworthy = x).
+      return { dx: a.xf - b.xf, dy: a.yf - b.yf, sameSta, edge: a.edge };
     }
   }
   return null;
@@ -298,7 +300,7 @@ export function windowFor(rel: string, span: number): { x0: number; x1: number; 
 export function solveGlobal(
   keys: number[],
   rootKey: number,
-  constraints: { i: number; j: number; dx: number; dy: number; weight: number }[],
+  constraints: { i: number; j: number; dx: number; dy: number; weight: number; wx?: number; wy?: number }[],
   { huberFt = 2.0, iters = 8 }: { huberFt?: number; iters?: number } = {}
 ): { pos: Map<number, { x: number; y: number }>; resid: any[] } {
   const free = keys.filter((k) => k !== rootKey);
@@ -325,21 +327,29 @@ export function solveGlobal(
     for (let i = 0; i < N; i++) L[i][i] += 1e-9;
     return gaussSolve(L, b);
   };
-  const baseW = (c: any) => c.weight;
-  let x = solveAxis((c) => c.dx, baseW);
-  let y = solveAxis((c) => c.dy, baseW);
+  // Per-axis effective weights: a constraint may carry only its trustworthy axis
+  // (e.g. a horizontal-matchline label pins dy but its dx is garbage → wx: 0).
+  // `weight` is the fallback for an axis whose per-axis override is absent.
+  const wxOf = (c: any) => c.wx ?? c.weight;
+  const wyOf = (c: any) => c.wy ?? c.weight;
+  let x = solveAxis((c) => c.dx, wxOf);
+  let y = solveAxis((c) => c.dy, wyOf);
   const write = () => { for (const k of free) pos.set(k, { x: x[idx.get(k)!], y: y[idx.get(k)!] }); };
   write();
 
-  // IRLS: Huber down-weighting by residual to the current solution
+  // IRLS: Huber down-weighting by residual to the current solution. The residual
+  // is measured only over the axes this constraint actually constrains — a garbage
+  // dx on a y-only constraint must not down-weight its valid dy.
   for (let it = 0; it < iters; it++) {
-    const rw = (c: any) => {
-      const r = residual(c, pos);
+    const rw = (wOf: (c: any) => number) => (c: any) => {
+      const wc = wOf(c);
+      if (wc <= 0) return 0;
+      const r = residualAxis(c, pos, wxOf(c) > 0, wyOf(c) > 0);
       const h = r <= huberFt ? 1 : huberFt / r;
-      return c.weight * h;
+      return wc * h;
     };
-    x = solveAxis((c) => c.dx, rw);
-    y = solveAxis((c) => c.dy, rw);
+    x = solveAxis((c) => c.dx, rw(wxOf));
+    y = solveAxis((c) => c.dy, rw(wyOf));
     write();
   }
   const resid = constraints.map((c) => ({ i: c.i, j: c.j, residFt: residual(c, pos) }));
@@ -349,6 +359,23 @@ export function residual(c: { i: number; j: number; dx: number; dy: number }, po
   const pi = pos.get(c.i), pj = pos.get(c.j);
   if (!pi || !pj) return 0;
   return Math.hypot(pj.x - pi.x - c.dx, pj.y - pi.y - c.dy);
+}
+/**
+ * Axis-aware residual: hypot over only the axes flagged (useX/useY). For a
+ * single-axis constraint the caller passes the loose axis as false so its garbage
+ * offset neither inflates the residual (down-weighting the trustworthy axis) nor
+ * trips outlier rejection. Internal — the exported `residual` is unchanged for
+ * existing callers/tests.
+ */
+function residualAxis(
+  c: { i: number; j: number; dx: number; dy: number }, pos: Map<number, { x: number; y: number }>,
+  useX: boolean, useY: boolean
+): number {
+  const pi = pos.get(c.i), pj = pos.get(c.j);
+  if (!pi || !pj) return 0;
+  const ex = useX ? pj.x - pi.x - c.dx : 0;
+  const ey = useY ? pj.y - pi.y - c.dy : 0;
+  return Math.hypot(ex, ey);
 }
 function gaussSolve(A: Float64Array[] | number[][], b: Float64Array): Float64Array {
   const n = b.length;
@@ -670,7 +697,7 @@ export function stitchSheets(
     }
   }
 
-  const pairs: (PairReport & { _final?: { dx: number; dy: number } })[] = [];
+  const pairs: (PairReport & { _final?: { dx: number; dy: number }; _wx?: number; _wy?: number })[] = [];
   for (const uk of pairKeys) {
     const [ni, nj] = uk.split("-").map(Number);
     const si = byNo.get(ni)!, sj = byNo.get(nj)!;
@@ -705,6 +732,10 @@ export function stitchSheets(
     else if (rel) seg = segVote(si, sj, windowFor(rel, span));
 
     let final: { dx: number; dy: number } | null = null, channel: string | null = null, conf: string | null = null, w = 0;
+    // Per-axis weight overrides (undefined = use `w` for both). Set only on the
+    // matchline-label channels below, where the label pins one axis and its
+    // position ALONG the line (the other axis) is arbitrary.
+    let wx: number | undefined, wy: number | undefined;
     if (anchorSeg) {
       final = anchorSeg; channel = "anchor+segment"; conf = "high";
       w = anchorSeg.inliers / (anchorSeg.rmsFt ** 2 + 0.04);
@@ -712,7 +743,21 @@ export function stitchSheets(
       final = { dx: (tok.dx + seg.dx) / 2, dy: (tok.dy + seg.dy) / 2 }; channel = "token+segment"; conf = "high";
       w = tok.inliers / (tok.rmsFt ** 2 + 0.01) + seg.inliers / (seg.rmsFt ** 2 + 0.04);
     } else if (tok) { final = tok; channel = "token"; conf = "high"; w = tok.inliers / (tok.rmsFt ** 2 + 0.01); }
-    else if (seg && (stroke || prior)) { final = seg; channel = "matchline+segment"; conf = seg.votes! >= 2 * seg.secondVotes! ? "high" : "medium"; w = seg.inliers / (seg.rmsFt ** 2 + 0.09); }
+    else if (seg && (stroke || prior)) {
+      final = seg; channel = "matchline+segment";
+      const decisive = seg.votes! >= 2 * seg.secondVotes!;
+      conf = decisive ? "high" : "medium";
+      w = seg.inliers / (seg.rmsFt ** 2 + 0.09);
+      // Label-prior matchline (NOT a stroke prior): the label pins only the
+      // cross-line axis; its offset ALONG the line is arbitrary, so segVote's
+      // ±60 window around the loose label coord can lock a false basin. Keep BOTH
+      // axes only when segVote decisively confirms them; otherwise trust only the
+      // matchline's perpendicular axis and leave the loose one to the graph.
+      if (prior && !stroke && !decisive) {
+        const horiz = prior.edge === "top" || prior.edge === "bottom";
+        if (horiz) { wx = 0; wy = w; } else { wx = w; wy = 0; }
+      }
+    }
     // Band-seam: axis-aligned edge-band match between two tiles (no readable
     // matchline/tokens). The seam offset is the true adjacency, not the interior.
     else if (seam) { final = { dx: seam.dx, dy: seam.dy }; channel = "seam"; conf = seam.inliers >= 20 ? "high" : "medium"; w = seam.inliers / (seam.rmsFt ** 2 + 0.09); }
@@ -726,23 +771,29 @@ export function stitchSheets(
     // that merely have opposite-edge matchlines pointing at OTHER neighbors must be
     // confirmed by the segment vote above — otherwise they'd bond with a garbage
     // offset (observed resid ~680ft on a 35-sheet street set). No rel + no seg = drop.
-    else if (prior && rel) { final = prior; channel = "matchline-label-only"; conf = "low"; w = 2; }
+    else if (prior && rel) {
+      final = prior; channel = "matchline-label-only"; conf = "low"; w = 2;
+      // Label-only matchline: single-axis always — the label sits ON the line
+      // (perpendicular axis trustworthy) but at an arbitrary point along it.
+      const horiz = prior.edge === "top" || prior.edge === "bottom";
+      if (horiz) { wx = 0; wy = 2; } else { wx = 2; wy = 0; }
+    }
 
     pairs.push({
       i: ni, j: nj, channel, conf,
       dxFt: final ? +final.dx.toFixed(2) : null, dyFt: final ? +final.dy.toFixed(2) : null,
-      weight: +w.toFixed(2), residFt: null, _final: final ?? undefined,
+      weight: +w.toFixed(2), residFt: null, _final: final ?? undefined, _wx: wx, _wy: wy,
     });
   }
 
   let constraints = pairs.filter((r) => r._final && r.weight > 0)
-    .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy, weight: r.weight }));
+    .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy, weight: r.weight, wx: r._wx, wy: r._wy }));
 
   // Connected components over the constraint graph. Place the LARGEST component
   // and root it at that component's most-connected sheet — NOT blindly at
   // sheets[0], which on a real set is often a title/notes/details sheet with no
   // drawing tokens; rooting there leaves the entire real plan cluster unplaced.
-  const placeFrom = (cons: { i: number; j: number; dx: number; dy: number; weight: number }[]) => {
+  const placeFrom = (cons: { i: number; j: number; dx: number; dy: number; weight: number; wx?: number; wy?: number }[]) => {
     const adj = new Map<number, Set<number>>(keys.map((k) => [k, new Set<number>()]));
     for (const c of cons) { adj.get(c.i)!.add(c.j); adj.get(c.j)!.add(c.i); }
     const seen = new Set<number>();
@@ -772,7 +823,10 @@ export function stitchSheets(
   // wrong offset (repeated site features). Drop constraints grossly inconsistent
   // with the solve and re-place, so one bad seam doesn't drag the layout. One pass.
   const OUTLIER_FT = 30;
-  const clean = constraints.filter((c) => !(mainSet.has(c.i) && mainSet.has(c.j)) || residual(c, coarsePos) <= OUTLIER_FT);
+  // Outlier check on the constrained axes only — a single-axis constraint's loose
+  // (zero-weight) axis carries a garbage offset that must not trip rejection.
+  const clean = constraints.filter((c) => !(mainSet.has(c.i) && mainSet.has(c.j))
+    || residualAxis(c, coarsePos, (c.wx ?? c.weight) > 0, (c.wy ?? c.weight) > 0) <= OUTLIER_FT);
   if (clean.length < constraints.length) {
     constraints = clean;
     ({ main, mainSet, rootKey, pos: coarsePos } = placeFrom(constraints));
@@ -809,7 +863,7 @@ export function stitchSheets(
   for (const c of refCons) { const rr = residual(c, pos); if (rr > worst) worst = rr; }
   for (const r of pairs) {
     if (r._final) r.residFt = +residual({ i: r.i, j: r.j, dx: r._final.dx, dy: r._final.dy }, pos).toFixed(3);
-    delete r._final;
+    delete r._final; delete r._wx; delete r._wy;
   }
 
   const placements = new Map<number, { x: number; y: number }>();

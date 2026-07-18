@@ -1,5 +1,5 @@
 import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -101,6 +101,62 @@ describe("stitchSheets", () => {
     const m2 = lbl("MATCHLINE (SEE SHEET 1)", 60, 850);
     const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [m2])]);
     expect(res.placements.size).toBe(2); // referenced matchlines still bond
+  });
+});
+
+describe("solveGlobal per-axis weights", () => {
+  it("a single-axis (wx:0) constraint constrains only its trustworthy axis", () => {
+    // 1-2 pins both axes; 2-3 has a GARBAGE dx (999) but a valid dy (50) and
+    // declares wx:0 so the x pass ignores it. Node 3's x is then unconstrained
+    // (pulls to the tiny anchor, ~0) and must NOT be dragged toward pos2.x+999.
+    const keys = [1, 2, 3];
+    const cons = [
+      { i: 1, j: 2, dx: 100, dy: 0, weight: 10 },
+      { i: 2, j: 3, dx: 999, dy: 50, weight: 10, wx: 0 },
+    ];
+    const { pos } = solveGlobal(keys, 1, cons);
+    const p2 = pos.get(2)!, p3 = pos.get(3)!;
+    expect(p3.y).toBeCloseTo(p2.y + 50, 1); // valid dy propagates
+    expect(Math.abs(p3.x - p2.x)).toBeLessThan(100); // NOT dragged toward 999
+  });
+});
+
+describe("matchline label single-axis integration", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720x480 ft @ 20
+  const lbl = (text: string, x: number, y: number): Label =>
+    ({ text, x, y, endX: x + 30, endY: y, angle: 0, h: 8, font: null });
+  const ftToPt = (ft: number) => (ft / 20) * 72;
+
+  it("keeps only the trustworthy (perpendicular) axis of a horizontal-matchline label pair", () => {
+    // Sheet 1's bottom-of-page frame carries a matchline on its TOP edge; sheet 2's
+    // on its BOTTOM edge — a horizontal matchline (labels pin dy, not dx). The label
+    // x positions differ wildly (100pt vs 2000pt → ~528ft apart) while the TRUE
+    // drawing offset is (dx=30ft, dy=430ft). segVote's ±60 window sits around the
+    // garbage label dx (~-528ft) and misses the true dx, so the loose x axis must be
+    // dropped; only dy (≈430) is trusted. With the OLD 2-D label-only constraint the
+    // solve would lock x into that false basin. dx is underdetermined here (single
+    // pair) → not asserted; only dy is guaranteed.
+    const m1 = lbl("MATCHLINE (SEE SHEET 2)", 100, 1680);  // top edge (y1=1728)
+    const m2 = lbl("MATCHLINE (SEE SHEET 1)", 2000, 132);  // bottom edge (y0=0)
+    // Modest overlap linework (true world offset 30,430) that segVote's wrong
+    // window misses — proves the loose axis can't be pinned from the label prior.
+    const world: [number, number][] = [[60, 440], [95, 470], [130, 435], [170, 465], [120, 450], [200, 475]];
+    const geomAt = (id: string, ox: number, oy: number): Geom =>
+      ({ id, closed: false, pts: world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]) });
+    const mk = (no: number, labels: Label[], g: Geom): SheetInput => ({
+      id: String(no), no, scale: 20, view: VIEW,
+      extract: { view: VIEW, shxLabels: labels, labels, words: labels, geometry: [g] } as PageExtract,
+    });
+    const res = stitchSheets([
+      mk(1, [m1], geomAt("g1", 0, 0)),      // sheet 1 frame origin at world (0,0)
+      mk(2, [m2], geomAt("g2", 30, 430)),   // sheet 2 frame origin at world (30,430)
+    ]);
+    const p1 = res.placements.get(1)!, p2 = res.placements.get(2)!;
+    expect(p1).toBeDefined();
+    expect(p2).toBeDefined();
+    expect(p2.y - p1.y).toBeCloseTo(430, 0); // trustworthy axis correct (±10)
+    const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(pair.channel).toBe("matchline-label-only"); // resolved via the matchline path
   });
 });
 
