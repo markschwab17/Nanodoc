@@ -20,17 +20,19 @@ export default function AutoStitchSmokeHarness() {
     setLog("Loading…");
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
+      const { recognize } = await import("@/features/stitch/autostitch/ocrService");
       const bytes = new Uint8Array(await file.arrayBuffer());
       const doc = mupdf.Document.openDocument(bytes, "application/pdf") as any;
       const count = doc.countPages();
       const indices = Array.from({ length: count }, (_, i) => i);
       const t0 = performance.now();
       const res = await autoStitch(mupdf, doc, indices, {
+        ocr: recognize,
         onProgress: (done, total) => setLog(`Analyzing page ${done}/${total}…`),
       });
       const ms = Math.round(performance.now() - t0);
       const lines = res.placements.map(
-        (p) => `  page ${p.pageIndex}: ${p.aligned ? "ALIGNED" : "unplaced"}  x=${p.x.toFixed(0)} y=${p.y.toFixed(0)} w=${p.width.toFixed(0)} h=${p.height.toFixed(0)}`
+        (p) => `  page ${p.pageIndex}${p.sourceFrame ? ` frame[${p.sourceFrame.map((v) => v.toFixed(0)).join(",")}]` : ""}: ${p.aligned ? "ALIGNED" : "unplaced"}  x=${p.x.toFixed(0)} y=${p.y.toFixed(0)}`
       );
       setLog(
         [
