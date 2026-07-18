@@ -454,7 +454,7 @@ export function bandSeamPrior(si: any, sj: any): { dx: number; dy: number; inlie
     if (!v || v.inliers < 10 || (v.rmsFt ?? 9) >= 1.5) continue;
     const perp = axis === "v" ? Math.abs(v.dx) : Math.abs(v.dy);
     const par = axis === "v" ? Math.abs(v.dy) : Math.abs(v.dx);
-    if (perp > AX || par < 0.5 * dim || par > 1.15 * dim) continue; // axis-aligned + abutting
+    if (perp > AX || par < 0.75 * dim || par > 1.15 * dim) continue; // axis-aligned + truly abutting (≤25% overlap)
     if (!best || v.inliers > best.inliers) best = { dx: v.dx, dy: v.dy, inliers: v.inliers, rmsFt: v.rmsFt ?? 0 };
   }
   return best;

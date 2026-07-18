@@ -49,8 +49,9 @@ describe("stitchSheets", () => {
     // Identical boilerplate (title-block column) at the SAME position on both sheets.
     const boiler = Array.from({ length: 14 }, (_, i) => seg(`b${i}`, 2700, 100 + i * 130, 2700, 100 + i * 130 + 90));
     // Same drawing on both, offset vertically (adjacent tiles); boilerplate identical.
+    // Offset ≥0.75*H (600ft) to satisfy stricter bandSeamPrior floor
     const gA = [...drawing(400, 1650), ...boiler];
-    const gB = [...drawing(400, 250), ...boiler];
+    const gB = [...drawing(400, 0), ...boiler];
     const mk = (no: number, geometry: Geom[]): SheetInput => ({
       id: String(no), no, scale: 20, view: VIEW,
       extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -58,8 +59,8 @@ describe("stitchSheets", () => {
     const res = stitchSheets([mk(1, gA), mk(2, gB)]);
     expect(res.placements.size).toBe(2); // both placed via geometry-only pairing
     const p2 = res.placements.get(2)!;
-    // aligned on the DRAWING offset (~FT(1400)=389ft), NOT the boilerplate self-match at 0
-    expect(Math.abs(p2.y)).toBeGreaterThan(300);
+    // aligned on the DRAWING offset (~FT(1650)=458ft), NOT the boilerplate self-match at 0
+    expect(Math.abs(p2.y)).toBeGreaterThan(400);
     expect(res.worstResidFt).toBeLessThan(1);
   });
 
@@ -108,16 +109,48 @@ describe("bandSeamPrior", () => {
   const shape = (myBase: number): SegFeat[] => Array.from({ length: 14 }, (_, i) => ({ mx: 120 + i * 45, my: myBase + (i % 5) * 12, len: 22 + (i % 7) * 4, ang: (i * 23) % 180 }));
   const mk = (seg: SegFeat[]) => ({ view: VIEW, scale: 20, seg });
   it("finds an axis-aligned vertical seam between abutting tiles", () => {
-    // A's bottom-band content (my≈470) matches B's top-band content (my≈70): a
-    // vertical seam, offset dy≈400, dx≈0.
-    const r = bandSeamPrior(mk(shape(470)), mk(shape(70)));
+    // A's bottom-band content (my≈480) matches B's top-band content (my≈0): a
+    // vertical seam, offset dy≈480, dx≈0. Updated to ≥0.75*H to satisfy new floor.
+    const r = bandSeamPrior(mk(shape(480)), mk(shape(0)));
     expect(r).not.toBeNull();
     expect(Math.abs(r!.dx)).toBeLessThan(45); // axis-aligned (no horizontal shift)
-    expect(r!.dy).toBeCloseTo(400, 0);
+    expect(r!.dy).toBeGreaterThan(450); // ≥0.75*H=450
   });
   it("returns null when the edge bands don't match", () => {
     const other = Array.from({ length: 14 }, (_, i) => ({ mx: 200 + i * 50, my: 70, len: 30 + i * 5, ang: (i * 40) % 180 }));
-    expect(bandSeamPrior(mk(shape(470)), mk(other))).toBeNull();
+    expect(bandSeamPrior(mk(shape(480)), mk(other))).toBeNull();
+  });
+});
+
+describe("bandSeamPrior abutment floor", () => {
+  /** Sheet stub for bandSeamPrior: view + pre-filtered segFeats in FEET. */
+  function seamSheet(segs: { mx: number; my: number; len: number; ang: number }[]) {
+    // 2592x1728pt at 20 ft/in = 720x480 ft
+    return { view: [0, 0, 2592, 1728] as [number, number, number, number], scale: 20, seg: segs };
+  }
+  /** A distinctive L-shaped cluster of ≥10 segments centered at (cx, cy) ft. */
+  function cluster(cx: number, cy: number) {
+    const out = [];
+    for (let i = 0; i < 6; i++) out.push({ mx: cx + i * 3, my: cy, len: 10 + i, ang: 0 });
+    for (let i = 0; i < 6; i++) out.push({ mx: cx, my: cy + i * 3, len: 10 + i, ang: 90 });
+    return out;
+  }
+
+  it("rejects a half-sheet-offset vertical match (PG_SITE false seam)", () => {
+    // A's bottom band content == B's top band content at dy = -240 ft (0.5*H): alias.
+    const a = seamSheet(cluster(360, 470));       // near A's bottom edge (H=480)
+    const b = seamSheet(cluster(360, 470 + 240)); // would vote dy=-240 — but that's off B's sheet;
+    // instead put B's copy in ITS top band so the vote lands at dy = -240:
+    const b2 = seamSheet(cluster(360, 230));      // a.my - b.my = 240 → |dy|=240 = 0.5*H
+    expect(bandSeamPrior(a, b2)).toBeNull();
+    void b;
+  });
+  it("accepts a true abutting vertical seam (~0.85*H)", () => {
+    const a = seamSheet(cluster(360, 470));
+    const b = seamSheet(cluster(360, 62)); // dy = 408 = 0.85*H, within top band
+    const v = bandSeamPrior(a, b);
+    expect(v).not.toBeNull();
+    expect(Math.abs(v!.dy)).toBeGreaterThan(400);
   });
 });
 
