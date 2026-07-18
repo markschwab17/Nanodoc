@@ -44,10 +44,17 @@ async function ensureWorker(): Promise<any> {
 export async function recognize(image: RawImage): Promise<OcrWord[]> {
   try {
     const worker = await ensureWorker();
+    // tesseract.js's worker rejects a raw ImageData posted from the main thread
+    // ("Error attempting to read image") — it needs a canvas/image-like source.
+    // Draw the raster onto an offscreen canvas and hand that to recognize() instead.
     // ImageData requires Uint8ClampedArray<ArrayBuffer>, not <ArrayBufferLike>
     // (the latter could be SharedArrayBuffer-backed) — same cast used in NativeRenderer.ts.
-    const imageData = new ImageData(image.data as unknown as Uint8ClampedArray<ArrayBuffer>, image.width, image.height);
-    const { data } = await worker.recognize(imageData);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.putImageData(new ImageData(image.data as unknown as Uint8ClampedArray<ArrayBuffer>, image.width, image.height), 0, 0);
+    const { data } = await worker.recognize(canvas);
     const words: OcrWord[] = [];
     for (const w of data.words ?? []) {
       if (!w.text?.trim()) continue;
