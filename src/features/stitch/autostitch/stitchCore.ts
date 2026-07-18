@@ -150,14 +150,19 @@ export function tokenVote(si: { tok: TokFeat[] }, sj: { tok: TokFeat[] }, { minI
 }
 
 export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; sameSta: boolean } | null {
+  // Matchline-flagged refs participate regardless of edge: OCR-recovered interior
+  // matchline labels (edge "interior") must still anchor a prior.
   const get = (s: any) => parseSheetRefs(s.raw.shxLabels, s.raw.view)
-    .filter((r) => r.matchline && r.edge !== 'interior')
+    .filter((r) => r.matchline && (r.edge !== 'interior' || r.matchline))
     .map((r) => ({ ...r, xf: FT(r.at.x, s.scale), yf: FT(r.at.y, s.scale) }));
   const mi = get(si), mj = get(sj);
   const OPP: Record<string, string> = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
   for (const a of mi) {
     for (const b of mj) {
-      if (OPP[a.edge] !== b.edge) continue;
+      // When either ref is interior it carries no edge to face-check, so pair it
+      // anyway (first match wins); otherwise require facing (opposite) edges.
+      const eitherInterior = a.edge === 'interior' || b.edge === 'interior';
+      if (!eitherInterior && OPP[a.edge] !== b.edge) continue;
       const sameSta = !!(a.station && b.station && a.station === b.station);
       return { dx: a.xf - b.xf, dy: a.yf - b.yf, sameSta };
     }
@@ -208,15 +213,21 @@ function findEdgeStroke(
  */
 export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number; perp: "x" | "y" } | null {
   const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
-  const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view).filter((r) => r.matchline && r.edge !== "interior");
-  const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view).filter((r) => r.matchline && r.edge !== "interior");
+  // Matchline-flagged refs participate regardless of edge (interior refs come from
+  // the full-sheet OCR fallback).
+  const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view).filter((r) => r.matchline && (r.edge !== "interior" || r.matchline));
+  const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view).filter((r) => r.matchline && (r.edge !== "interior" || r.matchline));
   const refs = (r: any, other: any) =>
     (r.sheet != null && r.sheet === (other.printedNo ?? other.no)) ||
     (r.sheetCode && other.sheetCode && r.sheetCode.toUpperCase() === other.sheetCode.toUpperCase());
   for (const a of refsI) for (const b of refsJ) {
-    if (OPP[a.edge] !== b.edge) continue;
+    const aInt = a.edge === "interior", bInt = b.edge === "interior";
+    if (aInt && bInt) continue;                              // no edge → axis is undetermined
+    if (!aInt && !bInt && OPP[a.edge] !== b.edge) continue;  // both edged → require facing edges
     if (!(refs(a, sj) || refs(b, si))) continue; // only trust cross-referenced matchlines
-    const horiz = a.edge === "top" || a.edge === "bottom";
+    // Axis comes from whichever ref carries an edge (interior has none).
+    const edged = aInt ? b : a;
+    const horiz = edged.edge === "top" || edged.edge === "bottom";
     const axis = horiz ? "h" : "v";
     const as = findEdgeStroke(si.raw.geometry, axis, horiz ? a.at.y : a.at.x, si.raw.view);
     const bs = findEdgeStroke(sj.raw.geometry, axis, horiz ? b.at.y : b.at.x, sj.raw.view);
@@ -580,7 +591,11 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
   // Refs are direct adjacency evidence, so this loop also seeds pairKeys.
   const pairKeys = new Set<string>();
   for (const s of sheets) {
-    const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view).filter((r) => r.edge !== "interior");
+    // Interior refs normally can't fix an adjacency edge, but an OCR-recovered
+    // interior MATCHLINE with a numeric target still names a real neighbour — let
+    // it seed the pair key (its edge/rel is left unset below).
+    const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view)
+      .filter((r) => r.edge !== "interior" || (r.matchline && r.sheet != null));
     for (const r of refs) {
       const targets: DriverSheet[] = [];
       // A strip ref ("SEE ABOVE/BELOW LEFT/RIGHT") resolves ONLY via siblingKey —
@@ -599,7 +614,9 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
         if (t != null && t !== s.no && byNo.has(t)) targets.push(byNo.get(t)!);
       }
       for (const t of targets) {
-        if (!relOf.has(`${s.no}-${t.no}`)) relOf.set(`${s.no}-${t.no}`, EDGE2REL[r.edge]);
+        // EDGE2REL["interior"] is undefined — an interior matchline ref carries no
+        // meaningful rel, so seed only the pair key, not relOf.
+        if (EDGE2REL[r.edge] && !relOf.has(`${s.no}-${t.no}`)) relOf.set(`${s.no}-${t.no}`, EDGE2REL[r.edge]);
         pairKeys.add(s.no < t.no ? `${s.no}-${t.no}` : `${t.no}-${s.no}`);
       }
     }

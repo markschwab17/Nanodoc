@@ -1,5 +1,5 @@
 import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlinePrior, matchlineStrokePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -158,6 +158,35 @@ describe("bandSeamPrior abutment floor", () => {
     const v = bandSeamPrior(a, b);
     expect(v).not.toBeNull();
     expect(Math.abs(v!.dy)).toBeGreaterThan(400);
+  });
+});
+
+describe("interior matchline refs join the pair graph (loosened gates)", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+  const mkSheet = (no: number, labels: Label[]): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW,
+    extract: { view: VIEW, shxLabels: labels, labels, words: labels, geometry: [] } as PageExtract,
+  });
+
+  it("matchlinePrior pairs an interior matchline ref with an opposite-edge ref", () => {
+    // Sheet A: interior matchline (mid-page, beside a notes column) → edge "interior".
+    // Sheet B: matchline near its LEFT edge. With either ref interior the OPP-edge
+    // face-check is skipped, so they pair; the offset is the label-position delta.
+    const A = { no: 1, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCH LINE SEE SHEET 5", 1200, 850)], view: VIEW, geometry: [] } };
+    const B = { no: 2, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCH LINE SEE SHEET 4", 60, 850)], view: VIEW, geometry: [] } };
+    const r = matchlinePrior(A, B);
+    expect(r).not.toBeNull();
+    // A center (1215,850), B center (75,850) in pts → delta in feet at scale 20.
+    expect(r!.dx).toBeCloseTo(((1215 - 75) / 72) * 20, 1);
+    expect(r!.dy).toBeCloseTo(0, 1);
+  });
+
+  it("stitchSheets forms a pair when A's only ref to B is an interior matchline", () => {
+    // Sheet 1's sole ref to sheet 2 is a mid-page ("interior") matchline. The
+    // loosened relOf/pairKeys gate still seeds the i–j pair from it.
+    const m1 = lbl("MATCH LINE SEE SHEET 2", 1200, 850); // interior position
+    const res = stitchSheets([mkSheet(1, [m1]), mkSheet(2, [])]);
+    expect(res.pairs.some((p) => (p.i === 1 && p.j === 2) || (p.i === 2 && p.j === 1))).toBe(true);
   });
 });
 
