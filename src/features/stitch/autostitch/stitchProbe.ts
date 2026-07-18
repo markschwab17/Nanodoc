@@ -22,6 +22,7 @@ export interface ProbeResult {
   worstResidFt: number;
   rootFtPerIn: number;
   poses: PlacedSheetPose[];
+  planPageIndices: number[];
 }
 
 export type ProbeMessage = ProbeResult | { docId: number; error: string };
@@ -35,5 +36,6 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     worstResidFt: res.worstResidFt,
     rootFtPerIn: res.rootFtPerIn,
     poses: res.poses,
+    planPageIndices: res.planPageIndices,
   };
 }

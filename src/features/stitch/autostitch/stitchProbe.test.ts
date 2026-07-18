@@ -11,6 +11,7 @@ describe("toProbeResult", () => {
         { pageIndex: 2, x: 0, y: 500, width: 100, height: 100, aligned: false },
       ],
       rootFtPerIn: 20, alignedCount: 2, unplacedCount: 1, worstResidFt: 0, method: "keymap", poses: [],
+      planPageIndices: [0, 1],
     };
     const probe = toProbeResult(res, 7);
     expect(probe.docId).toBe(7);
@@ -19,6 +20,7 @@ describe("toProbeResult", () => {
     expect(probe.rootFtPerIn).toBe(20);
     expect(probe.worstResidFt).toBe(0);
     expect(probe.placements).toHaveLength(3);
+    expect(probe.planPageIndices).toEqual([0, 1]);
   });
 
   it("alignedPageIndices dedupes two placed units of one page", () => {

@@ -18,6 +18,11 @@ export interface FeasibilityInput {
   method: StitchMethod;
   alignedPageIndices: number[];
   worstResidFt: number;
+  /** Plan-density page indices. When present, the geometric ratio's denominator
+   *  is the selected plan-like pages (not the whole selection), so selecting all
+   *  pages of a set full of notes/details sheets doesn't read as unstitchable.
+   *  Absent/empty → old behavior (denominator = selectedCount). */
+  planPageIndices?: number[];
 }
 
 export interface Feasibility {
@@ -32,10 +37,19 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
   const alignedInSelection = selectedPageIndices.reduce((n, i) => n + (aligned.has(i) ? 1 : 0), 0);
   const ratio = selectedCount > 0 ? alignedInSelection / selectedCount : 0;
 
+  // Geometric denominator: rate the aligned count against the selected pages
+  // that are plan-like, not the whole selection (notes/details sheets can't
+  // align and shouldn't drag the ratio down). Falls back to selectedCount when
+  // planPageIndices is absent or empty (backward compat).
+  const planSet = new Set(probe.planPageIndices ?? []);
+  const selectedPlanCount = selectedPageIndices.reduce((n, i) => n + (planSet.has(i) ? 1 : 0), 0);
+  const geomDenom = selectedPlanCount > 0 ? selectedPlanCount : selectedCount;
+  const geomRatio = geomDenom > 0 ? alignedInSelection / geomDenom : 0;
+
   let passesGate = false;
   if (alignedInSelection >= 2) {
     if (probe.method === "keymap") passesGate = ratio >= KEYMAP_COVERAGE;
-    else if (probe.method === "geometric") passesGate = ratio >= GEOM_RATIO_FLOOR && probe.worstResidFt <= GEOM_RESID_CEIL_FT;
+    else if (probe.method === "geometric") passesGate = geomRatio >= GEOM_RATIO_FLOOR && probe.worstResidFt <= GEOM_RESID_CEIL_FT;
   }
 
   if (!passesGate) return { status: "unstitchable", alignedInSelection, selectedCount };

@@ -71,4 +71,36 @@ describe("deriveFeasibility", () => {
     const f = deriveFeasibility({ method: "none", alignedPageIndices: [0, 1], worstResidFt: 0 }, [0, 1]);
     expect(f.status).toBe("unstitchable");
   });
+
+  const range = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+  it("geometric, rates against plan-like pages: 10 aligned of 11 plan (22 selected) -> partial", () => {
+    // 22 selected, 10 aligned; 11 plan-like (the 10 aligned + 1 more plan page).
+    // Denominator is the plan-like pages, so 10/11 >= 0.5 passes even though
+    // 10/22 would not. Not all 22 placed -> partial.
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: range(10), worstResidFt: 1, planPageIndices: range(11) },
+      range(22)
+    );
+    expect(f.status).toBe("partial");
+    expect(f.alignedInSelection).toBe(10);
+    expect(f.selectedCount).toBe(22);
+  });
+
+  it("geometric, planPageIndices absent -> old whole-selection denominator (10/22 < 0.5)", () => {
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: range(10), worstResidFt: 1 },
+      range(22)
+    );
+    expect(f.status).toBe("unstitchable");
+  });
+
+  it("geometric, plan-like present but aligned ratio below floor (3 of 8 plan) -> unstitchable", () => {
+    // 8 plan-like pages selected, only 3 aligned -> 3/8 = 0.375 < 0.5.
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: [0, 1, 2], worstResidFt: 1, planPageIndices: range(8) },
+      range(10)
+    );
+    expect(f.status).toBe("unstitchable");
+  });
 });

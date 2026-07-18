@@ -32,6 +32,11 @@ export interface AutoStitchResult {
   worstResidFt: number;
   method: StitchMethod;
   poses: PlacedSheetPose[];
+  /** Page indices whose extract met the plan-density floor (PLAN_GEOMETRY_MIN).
+   *  The feasibility gate rates aligned-count against these, not the whole
+   *  selection, so selecting all pages of a set with many notes/details sheets
+   *  doesn't read as "unstitchable". */
+  planPageIndices: number[];
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
@@ -76,6 +81,7 @@ export async function autoStitch(
   // capture); unit construction is deferred to pass 3 so the reciprocal-anchor
   // pass (pass 2) can run against the whole set between them.
   const pages: PageRec[] = [];
+  const planPageIndices: number[] = [];
   for (let i = 0; i < pageIndices.length; i++) {
     const pageIndex = pageIndices[i];
     await yieldToMain();
@@ -133,6 +139,7 @@ export async function autoStitch(
     if (printedNo == null) { printedNo = pageIndex + 1; printedNoSource = "fallback"; }
 
     pages.push({ pageIndex, extract, printedNo, printedNoSource });
+    if ((extract.geometry?.length ?? 0) >= PLAN_GEOMETRY_MIN) planPageIndices.push(pageIndex);
     opts.onProgress?.(i + 1, total);
   }
 
@@ -242,7 +249,7 @@ export async function autoStitch(
     }
   }
 
-  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [] };
+  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], planPageIndices };
 
   // Unique numeric keys, stable order.
   units.forEach((u, i) => { u.key = i + 1; });
@@ -315,5 +322,5 @@ export async function autoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, planPageIndices };
 }
