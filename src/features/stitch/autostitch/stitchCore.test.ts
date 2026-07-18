@@ -137,13 +137,20 @@ describe("bandSeamPrior abutment floor", () => {
   }
 
   it("rejects a half-sheet-offset vertical match (PG_SITE false seam)", () => {
-    // A's bottom band content == B's top band content at dy = -240 ft (0.5*H): alias.
-    const a = seamSheet(cluster(360, 470));       // near A's bottom edge (H=480)
-    const b = seamSheet(cluster(360, 470 + 240)); // would vote dy=-240 — but that's off B's sheet;
-    // instead put B's copy in ITS top band so the vote lands at dy = -240:
-    const b2 = seamSheet(cluster(360, 230));      // a.my - b.my = 240 → |dy|=240 = 0.5*H
-    expect(bandSeamPrior(a, b2)).toBeNull();
-    void b;
+    // A's cluster at my=460 sits fully inside A's bottom band (my>345.6=0.72*H);
+    // B's cluster at my=115 sits fully inside B's top band (my<134.4=0.28*H) —
+    // "fully inside" matters: the cluster helper spans [cy, cy+15], and a cy
+    // too close to the 134.4 boundary clips points out of the band, starving
+    // segVote below its inliers>=10 floor and short-circuiting the trial before
+    // the abutment-floor check ever runs. With both clusters fully banded, all
+    // 12 points vote and the bottom-of-A vs top-of-B trial reaches the
+    // abutment-floor check with dy = 460-115 = 345 ft = 71.9% of the 480ft
+    // sheet height, i.e. an implausible 28.1% claimed overlap. The old 0.5*H
+    // floor (240) would ACCEPT this false seam (345>=240); the new 0.75*H
+    // floor (360) must REJECT it (345<360).
+    const a = seamSheet(cluster(360, 460));
+    const b = seamSheet(cluster(360, 115));
+    expect(bandSeamPrior(a, b)).toBeNull();
   });
   it("accepts a true abutting vertical seam (~0.85*H)", () => {
     const a = seamSheet(cluster(360, 470));
