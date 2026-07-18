@@ -150,8 +150,14 @@ export function tokenVote(si: { tok: TokFeat[] }, sj: { tok: TokFeat[] }, { minI
 }
 
 export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; sameSta: boolean } | null {
+  // Strip refs ("SEE ABOVE/BELOW …") only pair the two frames of the SAME page
+  // (siblings). They must NOT anchor a non-sibling pair — a below/above label
+  // pointing at this page's other strip carries no offset info about a different
+  // sheet, and letting it through pins unrelated sheets on garbage. Keep strip
+  // refs only when the two sheets are siblings; drop them otherwise.
+  const siblings = si.siblingKey === sj.no || sj.siblingKey === si.no;
   const get = (s: any) => parseSheetRefs(s.raw.shxLabels, s.raw.view)
-    .filter((r) => r.matchline && r.edge !== 'interior')
+    .filter((r) => r.matchline && r.edge !== 'interior' && (r.strip == null || siblings))
     .map((r) => ({ ...r, xf: FT(r.at.x, s.scale), yf: FT(r.at.y, s.scale) }));
   const mi = get(si), mj = get(sj);
   const OPP: Record<string, string> = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' };
@@ -476,7 +482,11 @@ interface DriverSheet {
   printedNo: number; siblingKey?: number; pageIndex?: number;
 }
 
-export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: number; row: number }>): StitchResult {
+export function stitchSheets(
+  inputs: SheetInput[],
+  grid?: Map<number, { col: number; row: number }>,
+  anchors?: { i: number; j: number; dx: number }[],
+): StitchResult {
   const sheets: DriverSheet[] = inputs.map((s) => {
     // Channel-agnostic: use BOTH text channels (invisible SHX + visible). Some
     // sets are pure-SHX (Santee), some pure-visible (Rose Hill), some mixed — and
@@ -498,6 +508,16 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
     };
   });
   const byNo = new Map(sheets.map((s) => [s.no, s]));
+  // Reciprocal interior-matchline anchors (keyed by unit `no`), dx in feet with
+  // convention d = posFt_j - posFt_i. `anchorFor` resolves either stored
+  // direction, flipping the sign when the pair is stored as (j,i).
+  const anchorMap = new Map<string, number>();
+  for (const a of anchors ?? []) anchorMap.set(`${a.i}-${a.j}`, a.dx);
+  const anchorFor = (ni: number, nj: number): number | null => {
+    if (anchorMap.has(`${ni}-${nj}`)) return anchorMap.get(`${ni}-${nj}`)!;
+    if (anchorMap.has(`${nj}-${ni}`)) return -anchorMap.get(`${nj}-${ni}`)!;
+    return null;
+  };
   // printed sheet number -> units carrying it (both strips of a page share one)
   const byPrinted = new Map<number, DriverSheet[]>();
   for (const s of sheets) (byPrinted.get(s.printedNo) || byPrinted.set(s.printedNo, []).get(s.printedNo)!).push(s);
@@ -622,6 +642,12 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
     if (matchlinePrior(si, sj)) pairKeys.add(`${si.no}-${sj.no}`);
   }
 
+  // Reciprocal interior-matchline anchors are direct adjacency evidence, so they
+  // seed pair candidates too (before the band-seam orphan pass, so an anchored
+  // sheet is never treated as an unpaired orphan).
+  for (const a of anchors ?? [])
+    if (byNo.has(a.i) && byNo.has(a.j)) pairKeys.add(a.i < a.j ? `${a.i}-${a.j}` : `${a.j}-${a.i}`);
+
   // Band-seam matchline detector for sheets with no token/matchline candidate
   // (matchline refs outlined to vector). bandSeamPrior matches axis-aligned edge
   // BANDS — interior repeats (parking, curbs) can't false-match. Each orphan adopts
@@ -654,6 +680,14 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
     const stroke = matchlineStrokePrior(si, sj);
     const prior = matchlinePrior(si, sj);
     const seam = bandSeamPrior(si, sj);
+    // Reciprocal interior-matchline anchor: the facing "SEE SHEET n" label pair
+    // pins dx to ±17ft, so a ±30ft windowed segment vote resolves the seam in the
+    // TRUE basin (the east-west aliases sit ≥50ft away and fall outside it). This
+    // is tried BEFORE every other channel; on a miss we fall through (a label-only
+    // anchor is never emitted — dy is unknown).
+    const anchorDx = anchorFor(ni, nj);
+    let anchorSeg: Vote | null = null;
+    if (anchorDx != null) anchorSeg = segVote(si, sj, { x0: anchorDx - 30, x1: anchorDx + 30, y0: -span, y1: span });
     // segVote only with a prior window (stroke/matchline/token/reference). Pure-
     // geometry pairs use the band-seam match instead of a full-window vote, which
     // would false-match repeated interior content.
@@ -671,7 +705,10 @@ export function stitchSheets(inputs: SheetInput[], grid?: Map<number, { col: num
     else if (rel) seg = segVote(si, sj, windowFor(rel, span));
 
     let final: { dx: number; dy: number } | null = null, channel: string | null = null, conf: string | null = null, w = 0;
-    if (tok && seg && Math.hypot(tok.dx - seg.dx, tok.dy - seg.dy) < 5) {
+    if (anchorSeg) {
+      final = anchorSeg; channel = "anchor+segment"; conf = "high";
+      w = anchorSeg.inliers / (anchorSeg.rmsFt ** 2 + 0.04);
+    } else if (tok && seg && Math.hypot(tok.dx - seg.dx, tok.dy - seg.dy) < 5) {
       final = { dx: (tok.dx + seg.dx) / 2, dy: (tok.dy + seg.dy) / 2 }; channel = "token+segment"; conf = "high";
       w = tok.inliers / (tok.rmsFt ** 2 + 0.01) + seg.inliers / (seg.rmsFt ** 2 + 0.04);
     } else if (tok) { final = tok; channel = "token"; conf = "high"; w = tok.inliers / (tok.rmsFt ** 2 + 0.01); }

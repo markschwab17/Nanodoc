@@ -1,5 +1,5 @@
 import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -308,6 +308,71 @@ describe("stitchSheets method", () => {
     const res = stitchSheets([mk("1", 1, []), mk("2", 2, [])], grid);
     expect(res.method).toBe("keymap");
     expect(res.placements.size).toBe(2);
+  });
+});
+
+describe("stitchSheets anchor channel", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720x480 ft @ 20
+  const SCALE = 20;
+  const ftToPt = (ft: number) => (ft / SCALE) * 72;
+  const frac = (v: number) => v - Math.floor(v);
+  // A distinctive zigzag in FEET with genuinely distinct per-segment (len,angle)
+  // signatures (24 vertices, every dx>=8ft so no segment is dropped by the minLen
+  // floor). Distinctness keeps segVote's alias cap from skipping repeats.
+  const zigFt = (): [number, number][] => {
+    const pts: [number, number][] = [];
+    let x = 0, y = 0;
+    for (let i = 0; i < 24; i++) {
+      const t = i + 1;
+      x += 8 + frac(Math.sin(t * 12.9898) * 43758.5453) * 14;
+      y += (frac(Math.sin(t * 78.233) * 12543.129) - 0.5) * 44;
+      pts.push([400 + x, 240 + y]);
+    }
+    return pts;
+  };
+  const Z = zigFt();
+  // Materialize Z shifted by (dxFt,dyFt) in local feet, converted to page pts.
+  const shifted = (dxFt: number, dyFt: number, id: string): Geom =>
+    ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]) });
+  const mk = (no: number, geometry: Geom[]): SheetInput => ({
+    id: String(no), no, scale: SCALE, view: VIEW,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+
+  it("resolves the true seam in the anchored basin past a decoy alias", () => {
+    // Sheet 1 carries zigzag Z. Sheet 2 carries a TRUE copy at Z-(500,10) AND a
+    // DECOY copy at Z-(150,10) — the decoy is a full-zigzag alias at dx=150 that a
+    // window-free segment vote could bond on. The ±30ft window around the anchor
+    // (dx=495) admits only the true basin.
+    const g1 = [shifted(0, 0, "z1")];
+    const g2 = [shifted(500, 10, "z2-true"), shifted(150, 10, "z2-decoy")];
+    const res = stitchSheets([mk(1, g1), mk(2, g2)], undefined, [{ i: 1, j: 2, dx: 495 }]);
+    const p1 = res.placements.get(1)!, p2 = res.placements.get(2)!;
+    expect(p1).toBeDefined();
+    expect(p2).toBeDefined();
+    const dx = p2.x - p1.x;
+    expect(dx).toBeGreaterThanOrEqual(470);
+    expect(dx).toBeLessThanOrEqual(530);
+    const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(pair.channel).toBe("anchor+segment");
+  });
+});
+
+describe("matchlinePrior strip exclusion", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+  const mkS = (no: number, labels: Label[], siblingKey?: number) =>
+    ({ no, scale: 20, siblingKey, sheetCode: null, raw: { shxLabels: labels, view: VIEW } });
+
+  it("ignores a strip ref for a non-sibling pair, honors it for the sibling", () => {
+    // A: a strip ref ("SEE BELOW RIGHT") on its right edge. B: a plain MATCHLINE on
+    // its left edge (opposite edge). A strip label points only at A's OWN facing
+    // frame — it must never anchor an unrelated sheet B.
+    const stripA = () => [lbl("SEE BELOW RIGHT", 2450, 850)];
+    const matchB = () => [lbl("MATCHLINE", 60, 850)];
+    // non-siblings → strip ref dropped → no facing pair
+    expect(matchlinePrior(mkS(1, stripA()), mkS(2, matchB()))).toBeNull();
+    // siblings (frames of the same page) → strip ref honored → facing pair
+    expect(matchlinePrior(mkS(1, stripA(), 2), mkS(2, matchB(), 1))).not.toBeNull();
   });
 });
 
