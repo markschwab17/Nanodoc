@@ -1,5 +1,5 @@
 import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, FT, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -411,6 +411,74 @@ describe("stitchSheets anchor channel", () => {
     expect(dx).toBeLessThanOrEqual(530);
     const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
     expect(pair.channel).toBe("anchor+segment");
+  });
+
+  it("resolves a VERTICAL (perp:'y') anchor past a decoy alias", () => {
+    // A top/bottom matchline pins dy: sheet 2 carries a TRUE copy at Z-(10,500)
+    // and a DECOY at Z-(10,150). The perp:'y' anchor (dy=495) windows segVote tight
+    // on y (admits only the dy≈500 basin) and free on x, so the vertical seam
+    // resolves in the true basin — the symmetric counterpart of the horizontal case.
+    const g1 = [shifted(0, 0, "z1")];
+    const g2 = [shifted(10, 500, "z2-true"), shifted(10, 150, "z2-decoy")];
+    const res = stitchSheets([mk(1, g1), mk(2, g2)], undefined, [{ i: 1, j: 2, dy: 495, perp: "y" }]);
+    const p1 = res.placements.get(1)!, p2 = res.placements.get(2)!;
+    expect(p1).toBeDefined();
+    expect(p2).toBeDefined();
+    const dy = p2.y - p1.y;
+    expect(dy).toBeGreaterThanOrEqual(470);
+    expect(dy).toBeLessThanOrEqual(530);
+    const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(pair.channel).toBe("anchor+segment");
+  });
+});
+
+describe("scale-invariance (pt-derived windows)", () => {
+  // The solver's acceptance windows are page-point-derived, so the SAME page
+  // geometry solved at different ft/in scales must yield placements that scale
+  // EXACTLY linearly with the scale — no scale-dependent basin/alias flips.
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+  const frac = (v: number) => v - Math.floor(v);
+  // Zigzag in PAGE POINTS (scale-independent); each segment ≥40pt so it clears the
+  // (now pt-derived, constant 28.8pt) minimum-length floor at every scale.
+  const zigPt = (): [number, number][] => {
+    const pts: [number, number][] = [];
+    let x = 0, y = 0;
+    for (let i = 0; i < 24; i++) {
+      const t = i + 1;
+      x += 40 + frac(Math.sin(t * 12.9898) * 43758.5453) * 40;
+      y += (frac(Math.sin(t * 78.233) * 12543.129) - 0.5) * 80;
+      pts.push([300 + x, 200 + y]);
+    }
+    return pts;
+  };
+  const Zpt = zigPt();
+  const OFFSET_PT = 900; // fixed page-point separation between the two sheets' copies
+  const shiftPt = (dxPt: number, dyPt: number, id: string): Geom =>
+    ({ id, closed: false, pts: Zpt.map(([x, y]): [number, number] => [x - dxPt, y - dyPt]) });
+  const mk = (no: number, scale: number, geometry: Geom[]): SheetInput => ({
+    id: String(no), no, scale, view: VIEW,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+  const run = (scale: number) =>
+    stitchSheets(
+      [mk(1, scale, [shiftPt(0, 0, "z1")]), mk(2, scale, [shiftPt(OFFSET_PT, 40, "z2")])],
+      undefined,
+      [{ i: 1, j: 2, dx: FT(OFFSET_PT - 20, scale) }], // anchor near the true offset, in feet at this scale
+    );
+
+  it("places identically (up to the scale factor) at scale 10 and scale 40", () => {
+    const r10 = run(10), r40 = run(40);
+    const a10 = r10.placements.get(2)!, a40 = r40.placements.get(2)!;
+    expect(a10).toBeDefined();
+    expect(a40).toBeDefined();
+    // scale 40 is 4× scale 10; the placement (world feet) must scale by exactly 4×.
+    expect(a40.x / a10.x).toBeCloseTo(4, 3);
+    expect(a10.x).toBeCloseTo(FT(OFFSET_PT, 10), 0); // ≈ the true page-point offset in feet @10
+    // both channels resolved the same way (identical topology decision)
+    const c10 = r10.pairs.find((p) => p.channel)!.channel;
+    const c40 = r40.pairs.find((p) => p.channel)!.channel;
+    expect(c40).toBe(c10);
+    expect(c10).toBe("anchor+segment");
   });
 });
 

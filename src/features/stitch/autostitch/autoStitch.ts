@@ -2,7 +2,7 @@ import type { PageExtract, Label } from "./types";
 import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10 of the original
 // roadmap. Do not import it yet.
-import { stitchSheets, FT, type SheetInput, type StitchMethod } from "./stitchCore";
+import { stitchSheets, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
 import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
@@ -25,6 +25,9 @@ export interface AutoStitchOptions {
   onProgress?: (done: number, total: number) => void;
   /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel. */
   ocr?: (image: RawImage) => Promise<OcrWord[]>;
+  /** Diagnostic hook: surfaces the raw solver inputs/result (pairs, anchors) for
+   *  the Node stitch-diag harness. Never used in production. */
+  onDebug?: (d: { anchors: StitchAnchor[]; result: StitchResult; inputs: SheetInput[] }) => void;
 }
 export interface AutoStitchResult {
   placements: TilePlacement[];
@@ -120,8 +123,11 @@ interface Unit {
 interface PageRec { pageIndex: number; extract: PageExtract; printedNo: number; printedNoSource: "ocr" | "text" | "fallback"; }
 
 /** Reciprocal-label anchor before unit-key resolution: endpoints keyed by
- *  (pageIndex, label-y); dxFt uses the convention d = posFt_j - posFt_i. */
-interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; dxFt: number; }
+ *  (pageIndex, label-y). `perp` is the axis the facing label pins precisely — "x"
+ *  for a left/right (vertical-matchline) ref, "y" for a top/bottom (horizontal-
+ *  matchline) ref; `dFt` is the offset on that axis, convention d = posFt_j -
+ *  posFt_i (dx when perp "x", dy when perp "y"). */
+interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp: "x" | "y"; dFt: number; }
 
 export async function autoStitch(
   mupdf: any,
@@ -221,32 +227,59 @@ export async function autoStitch(
     const edgeRefsOf = (p: PageRec): SheetRef[] =>
       parseSheetRefs([...p.extract.shxLabels, ...p.extract.labels], p.extract.view)
         .filter((r) => r.edge !== "interior" && r.sheet != null);
-    const OPP: Record<string, string> = { left: "right", right: "left" };
+    const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
     const RE = /SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)/i;
 
-    /** Band-search page i's interior for the reciprocal "SEE SHEET <expected>" label. */
+    /**
+     * Band-search page i's interior for the reciprocal "SEE SHEET <expected>"
+     * label. A left/right ref on j drives a VERTICAL interior band scan on i (side
+     * opposite the ref edge; text is vertical → OCR at rot 90/270) and anchors dx.
+     * A top/bottom ref drives a HORIZONTAL interior band scan (opposite half's
+     * y-range; text is horizontal → no rotation) and anchors dy. Same world-line
+     * reasoning either way: the two facing labels lie on the shared matchline, so
+     * the offset on the perpendicular axis is d = FT(pos_i) - FT(pos_j).
+     */
     const searchReciprocal = async (iPage: PageRec, jPage: PageRec, refJ: SheetRef): Promise<RawAnchor | null> => {
       const [x0, y0, x1, y1] = iPage.extract.view;
-      const W = x1 - x0;
-      // Region = the side of i OPPOSITE the ref's edge. Ref on j's left edge → i is
-      // WEST of j → i's matching label sits near i's EAST matchline (right side).
-      const [rx0, rx1] = refJ.edge === "left"
-        ? [x0 + 0.45 * W, x0 + 0.98 * W]
-        : [x0 + 0.02 * W, x0 + 0.55 * W];
+      const W = x1 - x0, H = y1 - y0;
       const expected = jPage.printedNo;
+      const horiz = refJ.edge === "left" || refJ.edge === "right"; // vertical matchline → pins x
       const page = doc.loadPage(iPage.pageIndex);
       try {
-        for (let bx0 = rx0; bx0 < rx1; bx0 += 120) {
-          const bx1 = Math.min(bx0 + 160, rx1);
-          const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
-          const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-          for (const rot of [90, 270] as const) {
-            const labels = wordsToLabels(await opts.ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
+        if (horiz) {
+          // Region = the side of i OPPOSITE the ref's edge. Ref on j's left edge →
+          // i is WEST of j → i's matching label sits near i's EAST matchline.
+          const [rx0, rx1] = refJ.edge === "left" ? [x0 + 0.45 * W, x0 + 0.98 * W] : [x0 + 0.02 * W, x0 + 0.55 * W];
+          for (let bx0 = rx0; bx0 < rx1; bx0 += 120) {
+            const bx1 = Math.min(bx0 + 160, rx1);
+            const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
+            const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
+            for (const rot of [90, 270] as const) {
+              const labels = wordsToLabels(await opts.ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
+              for (const lab of labels) {
+                const m = lab.text.match(RE);
+                if (m && Number(m[1]) === expected) {
+                  const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
+                  return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x", dFt: FT(cx, scale) - FT(refJ.at.x, scale) };
+                }
+              }
+            }
+          }
+        } else {
+          // Top/bottom ref: horizontal matchline, horizontal text (no rotation).
+          // Ref on j's top edge → i is NORTH of j → i's matching label sits near
+          // i's SOUTH (bottom) interior; ref on j's bottom → search i's top interior.
+          const [ry0, ry1] = refJ.edge === "top" ? [y0 + 0.45 * H, y0 + 0.98 * H] : [y0 + 0.02 * H, y0 + 0.55 * H];
+          for (let by0 = ry0; by0 < ry1; by0 += 120) {
+            const by1 = Math.min(by0 + 160, ry1);
+            const clip: [number, number, number, number] = [x0, by0, x1, by1];
+            const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
+            const labels = wordsToLabels(await opts.ocr!(image), { edge: "top", clip }, bandScale, image.width, image.height, 0);
             for (const lab of labels) {
               const m = lab.text.match(RE);
               if (m && Number(m[1]) === expected) {
-                const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
-                return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, dxFt: FT(cx, scale) - FT(refJ.at.x, scale) };
+                const cy = (lab.y + lab.endY) / 2;
+                return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y", dFt: FT(cy, scale) - FT(refJ.at.y, scale) };
               }
             }
           }
@@ -257,11 +290,39 @@ export async function autoStitch(
       return null;
     };
 
+    // ── MUTUAL facing edge refs: anchor directly, no OCR search ────────────────
+    // When BOTH sheets carry the reciprocal edge label (common for top/bottom
+    // matchlines, which sit at the page edge on both sheets — e.g. p4 top "SEE
+    // SHEET 7" ↔ p7 bottom "SEE SHEET 4"), the two labels lie on the shared
+    // matchline, so they anchor the perpendicular offset outright: dx for a left/
+    // right (vertical-matchline) pair, dy for a top/bottom (horizontal-matchline)
+    // pair. This is the reciprocal signal for pairs the interior OCR search skips
+    // (it skips i when i already has the opposite-edge ref). Each unordered pair is
+    // emitted once (guard jPage < iPage); a coarse label-position dy/dx is enough —
+    // stitchSheets' ±30ft-equivalent windowed segment vote refines it in the true
+    // basin, and a wrong sign simply yields no segment inliers (anchor dropped).
+    for (const jPage of pages) {
+      for (const r of edgeRefsOf(jPage)) {
+        for (const iPage of byPrinted.get(r.sheet!) || []) {
+          if (iPage.pageIndex >= jPage.pageIndex) continue; // emit each unordered pair once
+          const ri = edgeRefsOf(iPage).find((x) => x.sheet === jPage.printedNo && x.edge === OPP[r.edge]);
+          if (!ri) continue;
+          const horiz = r.edge === "left" || r.edge === "right";
+          rawAnchors.push(horiz
+            ? { pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "x", dFt: FT(ri.at.x, scale) - FT(r.at.x, scale) }
+            : { pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "y", dFt: FT(ri.at.y, scale) - FT(r.at.y, scale) });
+        }
+      }
+    }
+
     let searched = 0;
     outer:
     for (const jPage of pages) {
       for (const r of edgeRefsOf(jPage)) {
-        if (r.edge !== "left" && r.edge !== "right") continue;
+        // Every physical edge drives a reciprocal search: left/right pins dx, top/
+        // bottom pins dy. Both are one-sided (the referenced sheet's matching label
+        // sits interior, outside every edge band) and need the targeted interior scan.
+        if (r.edge !== "left" && r.edge !== "right" && r.edge !== "top" && r.edge !== "bottom") continue;
         for (const iPage of byPrinted.get(r.sheet!) || []) {
           if (iPage.pageIndex === jPage.pageIndex) continue;
           // Skip if i ALREADY has a reciprocal edge ref (opposite edge → j's #).
@@ -269,7 +330,7 @@ export async function autoStitch(
           // Prune raster/low-geometry pages here (unlike the OCR gate): the anchor
           // confirms via a vector segment vote, which a page with no geometry can't feed.
           if ((iPage.extract.geometry?.length ?? 0) < PLAN_GEOMETRY_MIN) continue;
-          if (searched >= 10) break outer;
+          if (searched >= 16) break outer;
           searched++;
           const anchor = await searchReciprocal(iPage, jPage, r);
           if (anchor) rawAnchors.push(anchor);
@@ -310,12 +371,13 @@ export async function autoStitch(
     const hit = us.find((u) => u.frame && u.frame.bbox[1] <= y && y <= u.frame.bbox[3]);
     return (hit ?? us[0]).key;
   };
-  const anchors = rawAnchors
-    .map((a) => {
+  const anchors: StitchAnchor[] = rawAnchors
+    .map((a): StitchAnchor | null => {
       const ki = keyForLabel(a.pageI, a.yI), kj = keyForLabel(a.pageJ, a.yJ);
-      return ki != null && kj != null && ki !== kj ? { i: ki, j: kj, dx: a.dxFt } : null;
+      if (ki == null || kj == null || ki === kj) return null;
+      return a.perp === "y" ? { i: ki, j: kj, dy: a.dFt, perp: "y" } : { i: ki, j: kj, dx: a.dFt, perp: "x" };
     })
-    .filter((a): a is { i: number; j: number; dx: number } => a != null);
+    .filter((a): a is StitchAnchor => a != null);
 
   let placementsByKey = new Map<number, { x: number; y: number }>();
   let worstResidFt = 0;
@@ -344,6 +406,7 @@ export async function autoStitch(
       console.warn("[autoStitch] key-map detection failed:", e);
     }
     const res = stitchSheets(inputs, grid, anchors);
+    opts.onDebug?.({ anchors, result: res, inputs });
     placementsByKey = res.placements;
     worstResidFt = res.worstResidFt;
     method = res.method;

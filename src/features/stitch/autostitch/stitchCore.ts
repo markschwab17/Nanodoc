@@ -21,6 +21,39 @@ import type { Label, Geom, PageExtract } from "./types";
 
 export const FT = (pt: number, scale: number): number => (pt / 72) * scale; // pts -> world feet at sheet scale
 
+/**
+ * Basin-selection acceptance windows in PAGE POINTS.
+ *
+ * Label / stroke position uncertainty is a physical page property: a matchline
+ * label sits within a fixed PAGE-POINT distance of its stroke, and a plan's
+ * repeat pitch (lot/parking spacing) is a fixed page-point spacing — neither
+ * depends on the ft/in scale the user types. Expressing acceptance windows in
+ * absolute FEET therefore makes them scale-dependent: at half the scale a
+ * feet-window spans twice the page points and starts admitting the periodic
+ * aliases it was sized to exclude (and vice-versa). We keep the windows in
+ * points and convert to feet at runtime via FT(pt, scale), so the solver makes
+ * the SAME accept/reject decision at any uniform scale.
+ *
+ * Every value equals its former absolute-feet window at scale 20 (the default
+ * and every test fixture: FT(pt,20) = old_ft ⇔ pt = old_ft·3.6), so scale-20
+ * behaviour — and all existing tests — are byte-identical.
+ */
+const WIN_PT = {
+  anchorPerp: 108,   // reciprocal-anchor tight (perp) window   (was ±30 ft @20)
+  strokePar: 72,     // matchline-stroke parallel window  P     (was ±20 ft @20)
+  prior: 216,        // matchline-label prior window            (was ±60 ft @20)
+  token: 108,        // token-prior window                      (was ±30 ft @20)
+  faceMargin: 540,   // facing-edge cross-axis margin           (was 150 ft @20)
+  faceNear: 360,     // facing-edge near bound (below/above)    (was 100 ft @20)
+  faceFar: 720,      // facing-edge parallel spread             (was 200 ft @20)
+  bandAxis: 162,     // band-seam axis-alignment tolerance AX   (was 45 ft @20)
+  voteBin: 5.4,      // segment-vote translation bin            (was 1.5 ft @20)
+  voteLen: 1.8,      // segment-vote length-signature bin       (was 0.5 ft @20)
+  refineWin: 21.6,   // fine-registration search window         (was 6 ft @20)
+  refineBin: 0.9,    // fine-registration translation bin       (was 0.25 ft @20)
+  refineLen: 1.8,    // fine-registration length-signature bin  (was 0.5 ft @20)
+} as const;
+
 export interface TokFeat { text: string; x: number; y: number; }
 export interface SegFeat { mx: number; my: number; len: number; ang: number; }
 export interface Vote { dx: number; dy: number; inliers: number; rmsFt: number; votes?: number; secondVotes?: number; tokens?: string[]; }
@@ -237,10 +270,15 @@ export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number
 }
 
 export function segVote(si: any, sj: any, win: { x0: number; x1: number; y0: number; y1: number }): Vote | null {
+  // Vote/signature bins are page-point-derived (scale-invariant); features are in
+  // feet, so convert at the sheet scale (uniform across a set). Fallback 20 keeps
+  // scale-less stubs — e.g. bandSeamPrior's internal call — at the legacy bins.
+  const scale = si.scale ?? sj.scale ?? 20;
+  const LEN_BIN = FT(WIN_PT.voteLen, scale); // 0.5 ft @20
   const idx = new Map<string, SegFeat[]>();
-  const key = (s: SegFeat) => `${Math.round(s.len / 0.5)}:${Math.round(s.ang / 1.5)}`;
+  const key = (s: SegFeat) => `${Math.round(s.len / LEN_BIN)}:${Math.round(s.ang / 1.5)}`;
   for (const s of sj.seg as SegFeat[]) (idx.get(key(s)) || idx.set(key(s), []).get(key(s))!).push(s);
-  const BIN = 1.5; // ft
+  const BIN = FT(WIN_PT.voteBin, scale); // 1.5 ft @20
   const bins = new Map<string, number>();
   const deltas: { dx: number; dy: number }[] = [];
   for (const a of si.seg as SegFeat[]) {
@@ -278,13 +316,18 @@ export function segVote(si: any, sj: any, win: { x0: number; x1: number; y0: num
   return { dx: mx, dy: my, inliers: inl.length, rmsFt: rms, votes: best.n9, secondVotes: second };
 }
 
-// facing-edge windows in feet
-export function windowFor(rel: string, span: number): { x0: number; x1: number; y0: number; y1: number } {
+// facing-edge windows in feet. The fixed margins are page-point-derived (scale-
+// invariant) — a facing seam's cross-axis wander and minimum along-axis gap are
+// physical page distances; `span` is already a page-width-derived feet bound.
+export function windowFor(rel: string, span: number, scale = 20): { x0: number; x1: number; y0: number; y1: number } {
+  const MARG = FT(WIN_PT.faceMargin, scale); // 150 ft @20 — cross-axis margin
+  const NEAR = FT(WIN_PT.faceNear, scale);   // 100 ft @20 — near bound
+  const FAR = FT(WIN_PT.faceFar, scale);     // 200 ft @20 — parallel spread
   const M: Record<string, { x0: number; x1: number; y0: number; y1: number }> = {
-    right: { x0: 150, x1: span, y0: -150, y1: 150 },
-    left: { x0: -span, x1: -150, y0: -150, y1: 150 },
-    below: { x0: -200, x1: 200, y0: -span, y1: -100 },
-    above: { x0: -200, x1: 200, y0: 100, y1: span },
+    right: { x0: MARG, x1: span, y0: -MARG, y1: MARG },
+    left: { x0: -span, x1: -MARG, y0: -MARG, y1: MARG },
+    below: { x0: -FAR, x1: FAR, y0: -span, y1: -NEAR },
+    above: { x0: -FAR, x1: FAR, y0: NEAR, y1: span },
   };
   return M[rel];
 }
@@ -426,8 +469,16 @@ export interface StitchResult { root: number; placements: Map<number, { x: numbe
  */
 export function refineOffset(
   fineA: SegFeat[], fineB: SegFeat[], d0: { dx: number; dy: number },
-  { window = 6, bin = 0.25, lenTol = 0.5, angTol = 1.5, minInliers = 12 } = {}
+  opts: { window?: number; bin?: number; lenTol?: number; angTol?: number; minInliers?: number; scale?: number } = {}
 ): { dx: number; dy: number; inliers: number; rms: number } | null {
+  // Search window + bins are page-point-derived so a token-poor seam refines to
+  // the SAME sub-foot lock at any scale (defaults reproduce 6/0.25/0.5 ft @20).
+  const scale = opts.scale ?? 20;
+  const window = opts.window ?? FT(WIN_PT.refineWin, scale);
+  const bin = opts.bin ?? FT(WIN_PT.refineBin, scale);
+  const lenTol = opts.lenTol ?? FT(WIN_PT.refineLen, scale);
+  const angTol = opts.angTol ?? 1.5;
+  const minInliers = opts.minInliers ?? 12;
   const idx = new Map<string, SegFeat[]>();
   const key = (s: SegFeat) => `${Math.round(s.len / lenTol)}:${Math.round(s.ang / angTol)}`;
   for (const s of fineB) (idx.get(key(s)) || idx.set(key(s), []).get(key(s))!).push(s);
@@ -475,7 +526,8 @@ export function refineOffset(
  * `s.seg` holds the filtered segFeats. Exported for tests.
  */
 export function bandSeamPrior(si: any, sj: any): { dx: number; dy: number; inliers: number; rmsFt: number } | null {
-  const BAND = 0.28, AX = 45; // edge-band fraction; axis-alignment tolerance (ft)
+  const BAND = 0.28; // edge-band fraction
+  const AX = FT(WIN_PT.bandAxis, si.scale); // axis-alignment tolerance, pt-derived (45 ft @20)
   const Wi = FT(si.view[2] - si.view[0], si.scale), Hi = FT(si.view[3] - si.view[1], si.scale);
   const Wj = FT(sj.view[2] - sj.view[0], sj.scale), Hj = FT(sj.view[3] - sj.view[1], sj.scale);
   const bnd = (seg: SegFeat[], W: number, H: number, which: string) => {
@@ -492,7 +544,7 @@ export function bandSeamPrior(si: any, sj: any): { dx: number; dy: number; inlie
   let best: { dx: number; dy: number; inliers: number; rmsFt: number } | null = null;
   for (const [sa, sb, axis, dim] of trials) {
     if (sa.length < 8 || sb.length < 8) continue;
-    const v = segVote({ seg: sa }, { seg: sb }, win);
+    const v = segVote({ seg: sa, scale: si.scale }, { seg: sb, scale: sj.scale }, win);
     if (!v || v.inliers < 10 || (v.rmsFt ?? 9) >= 1.5) continue;
     const perp = axis === "v" ? Math.abs(v.dx) : Math.abs(v.dy);
     const par = axis === "v" ? Math.abs(v.dy) : Math.abs(v.dx);
@@ -509,10 +561,20 @@ interface DriverSheet {
   printedNo: number; siblingKey?: number; pageIndex?: number;
 }
 
+/**
+ * A reciprocal interior-matchline anchor. `perp` is the axis the facing label
+ * pair pins precisely (a left/right ref pins `x`; a top/bottom ref pins `y`);
+ * the offset on that axis is carried by `dx` (perp "x") or `dy` (perp "y"). The
+ * other axis is free — a tight window on `perp`, wide on the parallel axis, lets
+ * segVote resolve the seam in the true basin past the periodic aliases. `perp`
+ * defaults to "x" so a legacy `{ i, j, dx }` anchor behaves as before.
+ */
+export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y" }
+
 export function stitchSheets(
   inputs: SheetInput[],
   grid?: Map<number, { col: number; row: number }>,
-  anchors?: { i: number; j: number; dx: number }[],
+  anchors?: StitchAnchor[],
 ): StitchResult {
   const sheets: DriverSheet[] = inputs.map((s) => {
     // Channel-agnostic: use BOTH text channels (invisible SHX + visible). Some
@@ -538,11 +600,14 @@ export function stitchSheets(
   // Reciprocal interior-matchline anchors (keyed by unit `no`), dx in feet with
   // convention d = posFt_j - posFt_i. `anchorFor` resolves either stored
   // direction, flipping the sign when the pair is stored as (j,i).
-  const anchorMap = new Map<string, number>();
-  for (const a of anchors ?? []) anchorMap.set(`${a.i}-${a.j}`, a.dx);
-  const anchorFor = (ni: number, nj: number): number | null => {
+  const anchorMap = new Map<string, { d: number; perp: "x" | "y" }>();
+  for (const a of anchors ?? []) {
+    const perp = a.perp ?? "x";
+    anchorMap.set(`${a.i}-${a.j}`, { d: (perp === "y" ? a.dy : a.dx) ?? 0, perp });
+  }
+  const anchorFor = (ni: number, nj: number): { d: number; perp: "x" | "y" } | null => {
     if (anchorMap.has(`${ni}-${nj}`)) return anchorMap.get(`${ni}-${nj}`)!;
-    if (anchorMap.has(`${nj}-${ni}`)) return -anchorMap.get(`${nj}-${ni}`)!;
+    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { d: -a.d, perp: a.perp }; }
     return null;
   };
   // printed sheet number -> units carrying it (both strips of a page share one)
@@ -563,7 +628,10 @@ export function stitchSheets(
     const gfurn = buildGeomFurnitureFilter(sheets, Math.max(3, Math.ceil(0.25 * sheets.length)));
     if (gfurn.size) for (const s of sheets) s.raw.geometry = (s.raw.geometry as Geom[]).filter((g) => !gfurn.isFurniture(g));
   }
-  for (const s of sheets) { s.tok = tokenFeats(s, furn); s.seg = segFeats(s); }
+  // Minimum-length floor is a page property (a short-stroke cutoff in points),
+  // so derive it per-sheet from scale — an absolute-ft floor would drop twice the
+  // linework at half the scale, starving segVote at small scales. 8 ft @20.
+  for (const s of sheets) { s.tok = tokenFeats(s, furn); s.seg = segFeats(s, FT(28.8, s.scale)); }
   // Segment-level boilerplate filter: a segment at the same feet-position on
   // >= min sheets is repeated title-block / notes / legend / key-map geometry.
   // It makes segVote lock onto the identical columns (offset ≈ 0) instead of the
@@ -712,9 +780,20 @@ export function stitchSheets(
     // TRUE basin (the east-west aliases sit ≥50ft away and fall outside it). This
     // is tried BEFORE every other channel; on a miss we fall through (a label-only
     // anchor is never emitted — dy is unknown).
-    const anchorDx = anchorFor(ni, nj);
+    // All acceptance windows below are pt-derived (FT(·, si.scale)) so the same
+    // physical page tolerance is used at any scale — the pair outcome is identical
+    // at scale 10, 20, 40, … instead of admitting different aliases per scale.
+    const anchor = anchorFor(ni, nj);
     let anchorSeg: Vote | null = null;
-    if (anchorDx != null) anchorSeg = segVote(si, sj, { x0: anchorDx - 30, x1: anchorDx + 30, y0: -span, y1: span });
+    if (anchor != null) {
+      // Tight on the anchor's precise (perp) axis, free (±span) on the other, so
+      // segVote lands in the true basin: a left/right ref pins dx (perp "x"), a
+      // top/bottom ref pins dy (perp "y").
+      const AP = FT(WIN_PT.anchorPerp, si.scale); // 30 ft @20
+      anchorSeg = segVote(si, sj, anchor.perp === "y"
+        ? { x0: -span, x1: span, y0: anchor.d - AP, y1: anchor.d + AP }
+        : { x0: anchor.d - AP, x1: anchor.d + AP, y0: -span, y1: span });
+    }
     // segVote only with a prior window (stroke/matchline/token/reference). Pure-
     // geometry pairs use the band-seam match instead of a full-window vote, which
     // would false-match repeated interior content.
@@ -722,14 +801,14 @@ export function stitchSheets(
     if (stroke) {
       // Perp axis is precise (from the stroke) → tight; parallel axis is free →
       // wide, so segVote resolves it even from a small drawing overlap.
-      const P = 20;
+      const P = FT(WIN_PT.strokePar, si.scale); // 20 ft @20
       seg = segVote(si, sj, stroke.perp === "y"
         ? { x0: stroke.dx - span, x1: stroke.dx + span, y0: stroke.dy - P, y1: stroke.dy + P }
         : { x0: stroke.dx - P, x1: stroke.dx + P, y0: stroke.dy - span, y1: stroke.dy + span });
     }
-    else if (prior) seg = segVote(si, sj, { x0: prior.dx - 60, x1: prior.dx + 60, y0: prior.dy - 60, y1: prior.dy + 60 });
-    else if (tok) seg = segVote(si, sj, { x0: tok.dx - 30, x1: tok.dx + 30, y0: tok.dy - 30, y1: tok.dy + 30 });
-    else if (rel) seg = segVote(si, sj, windowFor(rel, span));
+    else if (prior) { const P = FT(WIN_PT.prior, si.scale); seg = segVote(si, sj, { x0: prior.dx - P, x1: prior.dx + P, y0: prior.dy - P, y1: prior.dy + P }); }
+    else if (tok) { const P = FT(WIN_PT.token, si.scale); seg = segVote(si, sj, { x0: tok.dx - P, x1: tok.dx + P, y0: tok.dy - P, y1: tok.dy + P }); }
+    else if (rel) seg = segVote(si, sj, windowFor(rel, span, si.scale));
 
     let final: { dx: number; dy: number } | null = null, channel: string | null = null, conf: string | null = null, w = 0;
     // Per-axis weight overrides (undefined = use `w` for both). Set only on the
@@ -739,6 +818,17 @@ export function stitchSheets(
     if (anchorSeg) {
       final = anchorSeg; channel = "anchor+segment"; conf = "high";
       w = anchorSeg.inliers / (anchorSeg.rmsFt ** 2 + 0.04);
+      // The anchor pins the PERP axis exactly; the FREE (along-matchline) axis is
+      // segVote's wide search and can alias on periodic site content (parking rows,
+      // lots). When that free axis is not decisively resolved (a competing peak
+      // exists), keep the perp axis strong but soften the free one — an aliased
+      // along-line offset must not shear the grid, while the perpendicular row/
+      // column topology stays locked. Decisive registrations are unchanged.
+      const decisive = (anchorSeg.votes ?? 0) >= 2 * (anchorSeg.secondVotes ?? 0);
+      if (!decisive && anchor) {
+        const freeW = w * 0.2;
+        if (anchor.perp === "y") { wy = w; wx = freeW; } else { wx = w; wy = freeW; }
+      }
     } else if (tok && seg && Math.hypot(tok.dx - seg.dx, tok.dy - seg.dy) < 5) {
       final = { dx: (tok.dx + seg.dx) / 2, dy: (tok.dy + seg.dy) / 2 }; channel = "token+segment"; conf = "high";
       w = tok.inliers / (tok.rmsFt ** 2 + 0.01) + seg.inliers / (seg.rmsFt ** 2 + 0.04);
@@ -815,14 +905,18 @@ export function stitchSheets(
       let bestDeg = -1;
       for (const k of main) { const deg = adj.get(k)!.size; if (deg > bestDeg || (deg === bestDeg && k < rootKey)) { bestDeg = deg; rootKey = k; } }
     }
-    return { main, mainSet, rootKey, pos: solveGlobal(keys, rootKey, cons).pos };
+    return { main, mainSet, rootKey, pos: solveGlobal(keys, rootKey, cons, { huberFt: HUBER_FT }).pos };
   };
 
+  // Solve robustness thresholds are physical page distances → pt-derived so the
+  // Huber down-weighting and outlier cut behave identically at any scale.
+  const uScale = sheets[0]?.scale ?? 20;
+  const HUBER_FT = FT(7.2, uScale);  // 2 ft @20
   let { main, mainSet, rootKey, pos: coarsePos } = placeFrom(constraints);
   // Outlier rejection: a geometry match can align two sheets at a plausible-but-
   // wrong offset (repeated site features). Drop constraints grossly inconsistent
   // with the solve and re-place, so one bad seam doesn't drag the layout. One pass.
-  const OUTLIER_FT = 30;
+  const OUTLIER_FT = FT(108, uScale); // 30 ft @20
   // Outlier check on the constrained axes only — a single-axis constraint's loose
   // (zero-weight) axis carries a garbage offset that must not trip rejection.
   const clean = constraints.filter((c) => !(mainSet.has(c.i) && mainSet.has(c.j))
@@ -841,13 +935,13 @@ export function stitchSheets(
   // sheets carry no geometry (refineOffset returns null → constraint unchanged).
   let pos = coarsePos;
   if (mainSet.size >= 2) {
-    for (const s of sheets) if (mainSet.has(s.no) && !s.segFine) s.segFine = segFeats(s, 2);
+    for (const s of sheets) if (mainSet.has(s.no) && !s.segFine) s.segFine = segFeats(s, FT(7.2, s.scale)); // 2 ft @20
     const refinedConstraints = constraints.map((c) => {
       if (!mainSet.has(c.i) || !mainSet.has(c.j)) return c;
       const si = byNo.get(c.i)!, sj = byNo.get(c.j)!;
       const pi = coarsePos.get(c.i)!, pj = coarsePos.get(c.j)!;
-      const r = refineOffset(si.segFine!, sj.segFine!, { dx: pj.x - pi.x, dy: pj.y - pi.y });
-      if (r && r.rms < 1) {
+      const r = refineOffset(si.segFine!, sj.segFine!, { dx: pj.x - pi.x, dy: pj.y - pi.y }, { scale: si.scale });
+      if (r && r.rms < FT(3.6, si.scale)) { // 1 ft @20, pt-derived
         return { i: c.i, j: c.j, dx: r.dx, dy: r.dy, weight: r.inliers / (r.rms ** 2 + 0.01) };
       }
       return c;
