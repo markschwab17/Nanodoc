@@ -48,3 +48,6 @@ src-tauri/target
 
 
 
+
+# Stitch diagnostic harness cache/logs (scripts/stitch-diag.mjs)
+scratch-diag/
