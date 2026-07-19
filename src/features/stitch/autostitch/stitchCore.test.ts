@@ -456,6 +456,45 @@ describe("stitchSheets anchor channel", () => {
     const accPair = acc.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
     expect(accPair.channel).toBe("anchor+segment");
   });
+
+  it("a precise (stroke-refined) anchor emits its perp-axis constraint even when segVote finds nothing", () => {
+    // Sheet 2's linework is far from any plausible seam window (no drawing overlap at
+    // the matchline), so segVote returns null. A LABEL-only anchor would drop out
+    // here — but the physical matchline STROKE is ground truth for the perp axis, so
+    // a precise anchor still emits a single-axis "anchor-stroke" constraint that pins
+    // the perpendicular (x) offset; the along-axis is left to the graph.
+    const STROKE = 500; // in [0.5·W, 1.15·W] = [360, 828] → clears the abutment floor
+    const res = stitchSheets(
+      [mk(1, [shifted(0, 0, "z1")]), mk(2, [shifted(9999, 5000, "z-faraway")])],
+      undefined,
+      [{ i: 1, j: 2, dx: STROKE, perp: "x", precise: true }],
+    );
+    const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(pair.channel).toBe("anchor-stroke");
+    const dx = res.placements.get(2)!.x - res.placements.get(1)!.x;
+    expect(Math.abs(dx - STROKE)).toBeLessThanOrEqual(3);
+  });
+
+  it("a precise anchor overrides a segVote perp that a decoy alias pulled off the true matchline", () => {
+    // The densest linework overlap sits at 490 (segVote's peak — the periodic module
+    // draws the seam content one alias off the true matchline). The matchline STROKE
+    // is at 500. A precise anchor PINS the perp to the 500 stroke (crisp seam); a
+    // plain label anchor follows segVote to the aliased 490 (the visible ghost).
+    const STROKE = 500, LINEWORK = 490; // 10 ft apart, both inside the ±30 ft anchor window
+    const g1 = [shifted(0, 0, "z1")];
+    const g2 = [shifted(LINEWORK, 0, "z-content")];
+    const precise = stitchSheets([mk(1, g1), mk(2, g2)], undefined, [{ i: 1, j: 2, dx: STROKE, perp: "x", precise: true }]);
+    const pp = precise.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(pp.channel).toBe("anchor+segment");
+    expect(pp.dxFt!).toBeGreaterThan(498); // pinned to the 500 stroke
+    expect(pp.dxFt!).toBeLessThan(502);
+    expect(Math.abs((precise.placements.get(2)!.x - precise.placements.get(1)!.x) - STROKE)).toBeLessThanOrEqual(3);
+    // A non-precise (label) anchor at the same nominal offset follows segVote's peak.
+    const label = stitchSheets([mk(1, g1), mk(2, g2)], undefined, [{ i: 1, j: 2, dx: STROKE, perp: "x" }]);
+    const lp = label.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(lp.dxFt!).toBeGreaterThan(487); // aliased toward the 490 linework peak
+    expect(lp.dxFt!).toBeLessThan(493);
+  });
 });
 
 describe("scale-invariance (pt-derived windows)", () => {

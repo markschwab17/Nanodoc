@@ -2,7 +2,7 @@ import type { PageExtract, Label } from "./types";
 import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10 of the original
 // roadmap. Do not import it yet.
-import { stitchSheets, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor } from "./stitchCore";
+import { stitchSheets, findEdgeStroke, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
 import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
@@ -126,8 +126,10 @@ interface PageRec { pageIndex: number; extract: PageExtract; printedNo: number; 
  *  (pageIndex, label-y). `perp` is the axis the facing label pins precisely — "x"
  *  for a left/right (vertical-matchline) ref, "y" for a top/bottom (horizontal-
  *  matchline) ref; `dFt` is the offset on that axis, convention d = posFt_j -
- *  posFt_i (dx when perp "x", dy when perp "y"). */
-interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp: "x" | "y"; dFt: number; }
+ *  posFt_i (dx when perp "x", dy when perp "y"). `precise` marks anchors whose
+ *  `dFt` was replaced by the physical-matchline-STROKE delta (sub-foot), not the
+ *  ±17 ft label-position delta. */
+interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp: "x" | "y"; dFt: number; precise?: boolean; }
 
 export async function autoStitch(
   mupdf: any,
@@ -231,6 +233,27 @@ export async function autoStitch(
     const RE = /SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)/i;
 
     /**
+     * Stroke-refine an anchor's perp offset. Both sheets of a matchline pair DRAW
+     * the shared matchline as a long (usually dashed) stroke; that stroke's cross-
+     * position is EXACT geometry, so `dFt = FT(strokeI) − FT(strokeJ)` pins the
+     * perp axis to sub-foot — unlike the ±17 ft LABEL delta, which lets fine
+     * registration reward the ~45 ft townhouse-module alias and draw the seam
+     * twice (the user-visible ghosting). `crossI`/`crossJ` are the two facing
+     * labels' cross-coordinates in each page's (whole-page) coordinate space —
+     * the same space the label `dFt` is computed in, so the returned delta obeys
+     * the identical d(i→j) = posFt_j − posFt_i convention. Returns null unless a
+     * matchline stroke is found on BOTH sheets near its label (falls back to the
+     * label delta). A vertical matchline (perp "x") scans axis "v" (returns x); a
+     * horizontal matchline (perp "y") scans axis "h" (returns y). */
+    const strokeDelta = (pi: PageRec, crossI: number, pj: PageRec, crossJ: number, perp: "x" | "y"): number | null => {
+      const axis = perp === "x" ? "v" : "h";
+      const si = findEdgeStroke(pi.extract.geometry, axis, crossI, pi.extract.view, 100);
+      const sj = findEdgeStroke(pj.extract.geometry, axis, crossJ, pj.extract.view, 100);
+      if (si == null || sj == null) return null;
+      return FT(si, scale) - FT(sj, scale);
+    };
+
+    /**
      * Band-search page i's interior for the reciprocal "SEE SHEET <expected>"
      * label. A left/right ref on j drives a VERTICAL interior band scan on i (side
      * opposite the ref edge; text is vertical → OCR at rot 90/270) and anchors dx.
@@ -260,7 +283,10 @@ export async function autoStitch(
                 const m = lab.text.match(RE);
                 if (m && Number(m[1]) === expected) {
                   const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
-                  return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x", dFt: FT(cx, scale) - FT(refJ.at.x, scale) };
+                  // i's reciprocal label is INTERIOR (no outer edge → strongest); j's is at refJ.edge.
+                  const sd = strokeDelta(iPage, cx, jPage, refJ.at.x, "x");
+                  return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x",
+                    dFt: sd ?? FT(cx, scale) - FT(refJ.at.x, scale), precise: sd != null };
                 }
               }
             }
@@ -279,7 +305,9 @@ export async function autoStitch(
               const m = lab.text.match(RE);
               if (m && Number(m[1]) === expected) {
                 const cy = (lab.y + lab.endY) / 2;
-                return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y", dFt: FT(cy, scale) - FT(refJ.at.y, scale) };
+                const sd = strokeDelta(iPage, cy, jPage, refJ.at.y, "y");
+                return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
+                  dFt: sd ?? FT(cy, scale) - FT(refJ.at.y, scale), precise: sd != null };
               }
             }
           }
@@ -308,9 +336,15 @@ export async function autoStitch(
           const ri = edgeRefsOf(iPage).find((x) => x.sheet === jPage.printedNo && x.edge === OPP[r.edge]);
           if (!ri) continue;
           const horiz = r.edge === "left" || r.edge === "right";
-          rawAnchors.push(horiz
-            ? { pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "x", dFt: FT(ri.at.x, scale) - FT(r.at.x, scale) }
-            : { pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "y", dFt: FT(ri.at.y, scale) - FT(r.at.y, scale) });
+          if (horiz) {
+            const sd = strokeDelta(iPage, ri.at.x, jPage, r.at.x, "x");
+            rawAnchors.push({ pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "x",
+              dFt: sd ?? FT(ri.at.x, scale) - FT(r.at.x, scale), precise: sd != null });
+          } else {
+            const sd = strokeDelta(iPage, ri.at.y, jPage, r.at.y, "y");
+            rawAnchors.push({ pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "y",
+              dFt: sd ?? FT(ri.at.y, scale) - FT(r.at.y, scale), precise: sd != null });
+          }
         }
       }
     }
@@ -375,7 +409,9 @@ export async function autoStitch(
     .map((a): StitchAnchor | null => {
       const ki = keyForLabel(a.pageI, a.yI), kj = keyForLabel(a.pageJ, a.yJ);
       if (ki == null || kj == null || ki === kj) return null;
-      return a.perp === "y" ? { i: ki, j: kj, dy: a.dFt, perp: "y" } : { i: ki, j: kj, dx: a.dFt, perp: "x" };
+      return a.perp === "y"
+        ? { i: ki, j: kj, dy: a.dFt, perp: "y", precise: a.precise }
+        : { i: ki, j: kj, dx: a.dFt, perp: "x", precise: a.precise };
     })
     .filter((a): a is StitchAnchor => a != null);
 

@@ -110,11 +110,13 @@ function flushCache() { if (cacheDirty) { fs.writeFileSync(CACHE_FILE, JSON.stri
 const mupdfMod = await import("mupdf");
 const mupdf = mupdfMod.default ?? mupdfMod;
 const { autoStitch } = await import("../src/features/stitch/autostitch/autoStitch.ts");
+const { matchlineStrokePrior } = await import("../src/features/stitch/autostitch/stitchCore.ts");
 
 const bytes = fs.readFileSync(PDF);
 console.log(`PDF: ${PDF}  (${(bytes.length / 1e6).toFixed(0)}MB)  pages ${PAGES.map(p => p + 1).join(",")}\n`);
 
 const runs = {};
+let seamFailed = false;
 for (const scale of SCALES) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), "application/pdf");
   let debug = null;
@@ -123,6 +125,7 @@ for (const scale of SCALES) {
   flushCache();
   console.log(`\n========== SCALE ${scale}  (${((Date.now() - t0) / 1000).toFixed(1)}s, ocr ${ocrCalls} calls / ${ocrHits} hits) ==========`);
   reportRun(scale, res, debug);
+  seamReport(scale, res, debug);
   runs[scale] = { res, debug };
 }
 
@@ -131,6 +134,14 @@ if (worker) await worker.terminate();
 
 // topology comparison
 if (SCALES.length >= 2) compareTopology(runs);
+
+// ── SEAM-QUALITY ACCEPTANCE GATE ──────────────────────────────────────────────
+if (seamFailed) {
+  console.log("\n*** SEAM QUALITY FAILED: a placed seam draws >3 ft off its matchline STROKE (DOUBLE-DRAWN / GHOSTED). ***");
+  process.exitCode = 1;
+} else {
+  console.log("\nSEAM QUALITY OK: every stroke-bearing placed seam is within 3 ft of its matchline stroke.");
+}
 
 function keyToPage(inputs, key) {
   const inp = inputs?.find((i) => i.no === key);
@@ -155,6 +166,62 @@ function reportRun(scale, res, debug) {
     const f = po.frame ? `[${po.frame.map(Math.round).join(",")}]` : "";
     console.log(`  p${po.pageIndex + 1}${f}: ${po.posFt ? `(${po.posFt.x.toFixed(0)}, ${po.posFt.y.toFixed(0)})` : "UNPLACED"}`);
   }
+}
+
+// Per-seam quality: for every placed pair on an anchor/matchline/seam channel,
+// compare the SOLVED offset's PERP component against the physical matchline STROKE
+// delta (when a stroke exists on both sheets). A >3 ft gap means the seam settled
+// off the shared matchline — the same content draws twice (the user-visible
+// ghosting). `strokePerp` is the precise anchor's stroke delta when present, else
+// recomputed independently via matchlineStrokePrior. FAILS the diag if any >3 ft.
+function seamReport(scale, res, debug) {
+  const inputs = debug?.inputs;
+  if (!inputs || !debug?.result) return;
+  const placements = debug.result.placements;
+  const anchors = debug.anchors || [];
+  const byNo = new Map(inputs.map((i) => [i.no, i]));
+  // Driver-sheet shape matchlineStrokePrior expects (text = shx ∪ visible, as in
+  // stitchSheets); numeric cross-refs resolve without a sheetCode.
+  const drv = (inp) => ({
+    no: inp.no, scale: inp.scale, printedNo: inp.printedNo ?? inp.no, sheetCode: null,
+    raw: {
+      shxLabels: [...(inp.extract.shxLabels || []), ...(inp.extract.labels || [])],
+      geometry: inp.extract.geometry || [], view: inp.extract.view,
+    },
+  });
+  const anchorFor = (i, j) => {
+    for (const a of anchors) {
+      const d = (a.perp === "y" ? a.dy : a.dx) ?? 0;
+      if (a.i === i && a.j === j) return { perp: a.perp ?? "x", d, precise: !!a.precise };
+      if (a.i === j && a.j === i) return { perp: a.perp ?? "x", d: -d, precise: !!a.precise };
+    }
+    return null;
+  };
+  console.log("SEAM QUALITY (channel | solvedPerp | strokePerp | |diff|):");
+  const pairs = (debug.result.pairs || []).filter((p) => p.channel && /anchor|matchline|seam/.test(p.channel));
+  let reported = 0;
+  for (const p of pairs) {
+    const pi = placements.get(p.i), pj = placements.get(p.j);
+    if (!pi || !pj) continue;
+    let perp = null, strokePerp = null, src = "";
+    // Prefer an INDEPENDENT recompute of the stroke delta from geometry (separate
+    // code path, edge labels) so the check is not circular; fall back to the
+    // precise anchor's d for interior-OCR reciprocal anchors that carry an
+    // interior label matchlineStrokePrior filters out.
+    const sp = matchlineStrokePrior(drv(byNo.get(p.i)), drv(byNo.get(p.j)));
+    if (sp) { perp = sp.perp; strokePerp = perp === "y" ? sp.dy : sp.dx; src = "geom"; }
+    else {
+      const anc = anchorFor(p.i, p.j);
+      if (anc && anc.precise) { perp = anc.perp; strokePerp = anc.d; src = "anchor"; }
+    }
+    if (strokePerp == null) continue; // no matchline stroke on this pair → nothing to check
+    const solvedPerp = perp === "y" ? pj.y - pi.y : pj.x - pi.x;
+    const diff = Math.abs(solvedPerp - strokePerp);
+    reported++;
+    if (diff > 3) seamFailed = true;
+    console.log(`  ${keyToPage(inputs, p.i)} - ${keyToPage(inputs, p.j)}  ${p.channel}  solvedPerp(${perp})=${solvedPerp.toFixed(2)}  strokePerp[${src}]=${strokePerp.toFixed(2)}  |diff|=${diff.toFixed(2)}${diff > 3 ? "  <<< GHOST >3ft" : ""}`);
+  }
+  if (!reported) console.log("  (no stroke-bearing seams placed)");
 }
 
 function compareTopology(runs) {

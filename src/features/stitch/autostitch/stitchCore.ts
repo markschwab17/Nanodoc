@@ -210,10 +210,22 @@ export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; same
  * Locate a matchline STROKE near a label's cross-coord (page pts): axis "h" → a
  * horizontal line, returns its y; "v" → vertical, returns its x. Matchlines are
  * usually DASHED, so we bin collinear segments by cross-coord and sum their
- * spans — the cross-coord whose dashes cover >= minTotalFrac of the perpendicular
- * sheet dimension is the matchline. Returns null if none.
+ * spans — a cross-coord whose dashes cover >= minTotalFrac of the perpendicular
+ * sheet dimension is a matchline-strength line. Returns null if none.
+ *
+ * Several strong lines can sit near the label: the true matchline (a THICK DASHED
+ * line) plus the drawing BORDER and dense title-block/furniture bands, any of which
+ * can span most of the sheet dimension. A plain max-span pick lands on the border
+ * or a furniture band as often as the matchline (verified on real sheets: the
+ * span-2448 line at the very top is the drawing frame, the dense band lower down is
+ * the title block — NEITHER is the matchline), giving a ~11-40 pt inconsistent
+ * cross across abutting sheets. The reliable discriminator is that the "SEE SHEET"
+ * matchline LABEL is drawn ON the matchline, so among matchline-strength lines
+ * (>= minTotalFrac of the perpendicular dimension) the one NEAREST the label's
+ * cross-coord is the matchline. That is the default here; pass minTotalFrac 0 for
+ * the raw strongest-line behaviour.
  */
-function findEdgeStroke(
+export function findEdgeStroke(
   geometry: Geom[], axis: "h" | "v", cross: number,
   view: [number, number, number, number], band = 100, minTotalFrac = 0.3
 ): number | null {
@@ -234,8 +246,18 @@ function findEdgeStroke(
       spans.set(k, (spans.get(k) || 0) + span);
     }
   }
-  let bestKey: number | null = null, bestTot = -1;
-  for (const [k, tot] of spans) if (tot > bestTot) { bestTot = tot; bestKey = k; }
+  // Among lines clearing the matchline-strength floor, the one NEAREST the label is
+  // the matchline (the label sits on it); a mere max-span pick grabs the border/
+  // furniture. When none clears the floor, fall back to the strongest.
+  let nearKey: number | null = null, nearDist = Infinity, bestKey: number | null = null, bestTot = -1;
+  for (const [k, tot] of spans) {
+    if (tot > bestTot) { bestTot = tot; bestKey = k; }
+    if (tot >= minTotalFrac * perpDim) {
+      const d = Math.abs(k * BIN - cross);
+      if (d < nearDist) { nearDist = d; nearKey = k; }
+    }
+  }
+  if (nearKey != null) return nearKey * BIN;
   return bestKey != null && bestTot >= minTotalFrac * perpDim ? bestKey * BIN : null;
 }
 
@@ -580,8 +602,14 @@ interface DriverSheet {
  * other axis is free — a tight window on `perp`, wide on the parallel axis, lets
  * segVote resolve the seam in the true basin past the periodic aliases. `perp`
  * defaults to "x" so a legacy `{ i, j, dx }` anchor behaves as before.
+ *
+ * `precise` marks an anchor whose perp offset came from the two sheets' physical
+ * matchline STROKES (same world line on both), so it is exact to sub-foot rather
+ * than the ±17 ft of a label-position delta. A precise anchor windows segVote
+ * TIGHT (~8 ft) on the perp axis and, when segVote finds no overlap, still emits
+ * its perp-axis constraint outright (the stroke IS ground truth for that axis).
  */
-export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y" }
+export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y"; precise?: boolean }
 
 export function stitchSheets(
   inputs: SheetInput[],
@@ -612,14 +640,14 @@ export function stitchSheets(
   // Reciprocal interior-matchline anchors (keyed by unit `no`), dx in feet with
   // convention d = posFt_j - posFt_i. `anchorFor` resolves either stored
   // direction, flipping the sign when the pair is stored as (j,i).
-  const anchorMap = new Map<string, { d: number; perp: "x" | "y" }>();
+  const anchorMap = new Map<string, { d: number; perp: "x" | "y"; precise: boolean }>();
   for (const a of anchors ?? []) {
     const perp = a.perp ?? "x";
-    anchorMap.set(`${a.i}-${a.j}`, { d: (perp === "y" ? a.dy : a.dx) ?? 0, perp });
+    anchorMap.set(`${a.i}-${a.j}`, { d: (perp === "y" ? a.dy : a.dx) ?? 0, perp, precise: !!a.precise });
   }
-  const anchorFor = (ni: number, nj: number): { d: number; perp: "x" | "y" } | null => {
+  const anchorFor = (ni: number, nj: number): { d: number; perp: "x" | "y"; precise: boolean } | null => {
     if (anchorMap.has(`${ni}-${nj}`)) return anchorMap.get(`${ni}-${nj}`)!;
-    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { d: -a.d, perp: a.perp }; }
+    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { d: -a.d, perp: a.perp, precise: a.precise }; }
     return null;
   };
   // printed sheet number -> units carrying it (both strips of a page share one)
@@ -819,9 +847,16 @@ export function stitchSheets(
     }
     let anchorSeg: Vote | null = null;
     if (anchor != null) {
-      // Tight on the anchor's precise (perp) axis, free (±span) on the other, so
-      // segVote lands in the true basin: a left/right ref pins dx (perp "x"), a
-      // top/bottom ref pins dy (perp "y").
+      // Tight on the anchor's (perp) axis, free (±span) on the other, so segVote
+      // lands in the true basin: a left/right ref pins dx (perp "x"), a top/bottom
+      // ref pins dy (perp "y"). For a STROKE-refined (precise) anchor the perp
+      // component is later OVERRIDDEN with the exact stroke delta (see below), so
+      // segVote's job here is only to lock the ALONG-matchline axis + supply the
+      // inlier weight — hence the window stays at the ±30 ft (pt-derived) basin
+      // width that reliably reaches the vote threshold; a tighter perp band would
+      // only starve segVote of inliers (dropping the pair to a single-axis pin and
+      // leaving the along-axis unconstrained) without improving perp, which the
+      // override already fixes to sub-foot.
       const AP = FT(WIN_PT.anchorPerp, si.scale); // 30 ft @20
       anchorSeg = segVote(si, sj, anchor.perp === "y"
         ? { x0: -span, x1: span, y0: anchor.d - AP, y1: anchor.d + AP }
@@ -862,6 +897,18 @@ export function stitchSheets(
     if (anchorSeg) {
       final = anchorSeg; channel = "anchor+segment"; conf = "high";
       w = anchorSeg.inliers / (anchorSeg.rmsFt ** 2 + 0.04);
+      // PIN the perp axis to the exact matchline STROKE delta. Both sheets draw the
+      // SAME world matchline, so its stroke delta is ground truth to sub-foot — and
+      // critically, segVote's perp is a PERIODIC ALIAS here: the townhouse module
+      // repeats every ~45 ft, so the densest linework overlap sits ~10 ft off the
+      // true seam (verified by rendering: at segVote's offset the two matchlines
+      // draw as two separated dashed lines — the ghosting; at the stroke offset
+      // they merge into one). segVote still supplies the FREE (along-matchline)
+      // axis, where there is no such cross-line alias.
+      if (anchor!.precise) {
+        if (anchor!.perp === "y") final = { dx: anchorSeg.dx, dy: anchor!.d };
+        else final = { dx: anchor!.d, dy: anchorSeg.dy };
+      }
       // The anchor pins the PERP axis exactly; the FREE (along-matchline) axis is
       // segVote's wide search and can alias on periodic site content (parking rows,
       // lots). When that free axis is not decisively resolved (a competing peak
@@ -873,6 +920,16 @@ export function stitchSheets(
         const freeW = w * 0.2;
         if (anchor.perp === "y") { wy = w; wx = freeW; } else { wx = w; wy = freeW; }
       }
+    } else if (anchor != null && anchor.precise) {
+      // Precise stroke anchor but NO segment overlap resolved (token-poor seam,
+      // sparse linework near the matchline): the stroke is still ground truth for
+      // the perp axis, so emit a SINGLE-AXIS constraint on that axis alone — the
+      // parallel axis is left to the graph. Modest weight (~10, comparable to the
+      // matchline-stroke channel) so a decisive drawing lock elsewhere still wins.
+      const W_STROKE = 10;
+      if (anchor.perp === "y") { final = { dx: 0, dy: anchor.d }; wx = 0; wy = W_STROKE; }
+      else { final = { dx: anchor.d, dy: 0 }; wx = W_STROKE; wy = 0; }
+      channel = "anchor-stroke"; conf = "high"; w = W_STROKE;
     } else if (tok && seg && Math.hypot(tok.dx - seg.dx, tok.dy - seg.dy) < 5) {
       final = { dx: (tok.dx + seg.dx) / 2, dy: (tok.dy + seg.dy) / 2 }; channel = "token+segment"; conf = "high";
       w = tok.inliers / (tok.rmsFt ** 2 + 0.01) + seg.inliers / (seg.rmsFt ** 2 + 0.04);
