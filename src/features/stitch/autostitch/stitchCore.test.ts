@@ -430,13 +430,41 @@ describe("stitchSheets anchor channel", () => {
     const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
     expect(pair.channel).toBe("anchor+segment");
   });
+
+  it("rejects an anchor below the abutment floor (0.25×dim), accepts one at 0.8×dim", () => {
+    // Matchline-adjacent units nearly abut, so a perp:'y' anchor's offset must lie
+    // in [0.5·H, 1.15·H] = [240, 552] ft for this 480 ft-tall sheet. An anchor
+    // implying only 0.25·H = 120 ft of separation means ~75% overlap — impossible
+    // for abutting sheets (this is the row 2↔3 collapse regression) — so the anchor
+    // is rejected and the pair carries NO anchor channel. A 0.8·H = 384 ft anchor
+    // is a legitimate near-abutting seam and resolves as "anchor+segment".
+    const H = FT(VIEW[3] - VIEW[1], SCALE); // 480 ft
+    // REJECTED: anchor dy = 0.25·H = 120 ft, below the 240 ft floor.
+    const rej = stitchSheets(
+      [mk(1, [shifted(0, 0, "z1")]), mk(2, [shifted(10, 0.25 * H, "z2")])],
+      undefined,
+      [{ i: 1, j: 2, dy: 0.25 * H, perp: "y" }],
+    );
+    const rejPair = rej.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1));
+    expect(rejPair?.channel ?? null).not.toBe("anchor+segment");
+    // ACCEPTED: anchor dy = 0.8·H = 384 ft, a valid near-abutting seam.
+    const acc = stitchSheets(
+      [mk(1, [shifted(0, 0, "z1")]), mk(2, [shifted(10, 0.8 * H, "z2")])],
+      undefined,
+      [{ i: 1, j: 2, dy: 0.8 * H, perp: "y" }],
+    );
+    const accPair = acc.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(accPair.channel).toBe("anchor+segment");
+  });
 });
 
 describe("scale-invariance (pt-derived windows)", () => {
   // The solver's acceptance windows are page-point-derived, so the SAME page
   // geometry solved at different ft/in scales must yield placements that scale
   // EXACTLY linearly with the scale — no scale-dependent basin/alias flips.
-  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
+  // A 1600pt-wide sheet keeps the OFFSET_PT=900 anchor above the abutment floor
+  // (0.5·1600 = 800 pt): these two copies are a legitimately near-abutting seam.
+  const VIEW: [number, number, number, number] = [0, 0, 1600, 1080];
   const frac = (v: number) => v - Math.floor(v);
   // Zigzag in PAGE POINTS (scale-independent); each segment ≥40pt so it clears the
   // (now pt-derived, constant 28.8pt) minimum-length floor at every scale.

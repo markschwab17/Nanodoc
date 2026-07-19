@@ -319,15 +319,27 @@ export function segVote(si: any, sj: any, win: { x0: number; x1: number; y0: num
 // facing-edge windows in feet. The fixed margins are page-point-derived (scale-
 // invariant) — a facing seam's cross-axis wander and minimum along-axis gap are
 // physical page distances; `span` is already a page-width-derived feet bound.
-export function windowFor(rel: string, span: number, scale = 20): { x0: number; x1: number; y0: number; y1: number } {
+//
+// ABUTMENT FLOOR: `nearFloorFt` raises the ALONG-adjacency near bound (the x near
+// bound for left/right, the y near bound for below/above) so a matchline-adjacent
+// (facing-ref) windowed segVote cannot lock a SUB-ABUTMENT alias. Matchline-
+// adjacent units near-abut, so their perpendicular offset is ≥ ~0.5× the sheet
+// dimension; the caller passes 0.5·min(perp dim) so periodic interior aliases at a
+// fraction of a sheet (e.g. p7↔p10's spurious 116 ft on 480 ft sheets) fall
+// OUTSIDE the window and segVote resolves the TRUE near-abutting basin (~0.8×).
+// The cross-axis margin (perpendicular wander) is NOT floored — only the near
+// bound along the adjacency axis. Default 0 keeps legacy callers byte-identical.
+export function windowFor(rel: string, span: number, scale = 20, nearFloorFt = 0): { x0: number; x1: number; y0: number; y1: number } {
   const MARG = FT(WIN_PT.faceMargin, scale); // 150 ft @20 — cross-axis margin
   const NEAR = FT(WIN_PT.faceNear, scale);   // 100 ft @20 — near bound
   const FAR = FT(WIN_PT.faceFar, scale);     // 200 ft @20 — parallel spread
+  const near = Math.max(NEAR, nearFloorFt);            // below/above along-y near bound
+  const nearX = Math.max(MARG, nearFloorFt);           // left/right along-x near bound
   const M: Record<string, { x0: number; x1: number; y0: number; y1: number }> = {
-    right: { x0: MARG, x1: span, y0: -MARG, y1: MARG },
-    left: { x0: -span, x1: -MARG, y0: -MARG, y1: MARG },
-    below: { x0: -FAR, x1: FAR, y0: -span, y1: -NEAR },
-    above: { x0: -FAR, x1: FAR, y0: NEAR, y1: span },
+    right: { x0: nearX, x1: span, y0: -MARG, y1: MARG },
+    left: { x0: -span, x1: -nearX, y0: -MARG, y1: MARG },
+    below: { x0: -FAR, x1: FAR, y0: -span, y1: -near },
+    above: { x0: -FAR, x1: FAR, y0: near, y1: span },
   };
   return M[rel];
 }
@@ -783,7 +795,28 @@ export function stitchSheets(
     // All acceptance windows below are pt-derived (FT(·, si.scale)) so the same
     // physical page tolerance is used at any scale — the pair outcome is identical
     // at scale 10, 20, 40, … instead of admitting different aliases per scale.
-    const anchor = anchorFor(ni, nj);
+    let anchor = anchorFor(ni, nj);
+    // ABUTMENT FLOOR: matchline-adjacent units are near-abutting by definition, so
+    // the anchor's PERPENDICULAR offset magnitude |d| must lie within a physical
+    // band of the two units' perp dimensions — for a perp-"y" anchor that dim is
+    // the unit HEIGHT (ft), for perp-"x" the WIDTH. We use each unit's OWN view
+    // dims (partial-height strips have smaller heights) and take floor = 0.5·min,
+    // ceiling = 1.15·max of the two units' perp dims: an abutting seam offset is
+    // ~0.7-0.9× the sheet dimension, so <0.5× implies gross overlap (physically
+    // impossible for adjacent sheets — e.g. a bogus reciprocal label pair implying
+    // 78% overlap) and >1.15× implies a gap. |d| uses the stored d(i→j) magnitude
+    // (sign-agnostic). A rejected anchor removes the anchor CHANNEL for this pair
+    // only — no constraint is emitted from it; the pair falls back to the existing
+    // matchline/segment channels below.
+    if (anchor != null) {
+      const perpDim = (s: DriverSheet) => anchor!.perp === "y"
+        ? FT(s.view[3] - s.view[1], s.scale)   // unit height (ft)
+        : FT(s.view[2] - s.view[0], s.scale);  // unit width  (ft)
+      const di = perpDim(si), dj = perpDim(sj);
+      const floor = 0.5 * Math.min(di, dj), ceil = 1.15 * Math.max(di, dj);
+      const mag = Math.abs(anchor.d);
+      if (mag < floor || mag > ceil) anchor = null;
+    }
     let anchorSeg: Vote | null = null;
     if (anchor != null) {
       // Tight on the anchor's precise (perp) axis, free (±span) on the other, so
@@ -808,7 +841,18 @@ export function stitchSheets(
     }
     else if (prior) { const P = FT(WIN_PT.prior, si.scale); seg = segVote(si, sj, { x0: prior.dx - P, x1: prior.dx + P, y0: prior.dy - P, y1: prior.dy + P }); }
     else if (tok) { const P = FT(WIN_PT.token, si.scale); seg = segVote(si, sj, { x0: tok.dx - P, x1: tok.dx + P, y0: tok.dy - P, y1: tok.dy + P }); }
-    else if (rel) seg = segVote(si, sj, windowFor(rel, span, si.scale));
+    else if (rel) {
+      // Abutment floor on the along-adjacency near bound: matchline-adjacent units
+      // near-abut, so require the perpendicular offset ≥ 0.5× the smaller unit's
+      // perp dim (WIDTH for a left/right rel, HEIGHT for above/below) — this pushes
+      // segVote off periodic sub-sheet aliases into the true ~0.8× seam basin.
+      const horiz = rel === "left" || rel === "right";
+      const perp = (s: DriverSheet) => horiz
+        ? FT(s.view[2] - s.view[0], s.scale)   // width
+        : FT(s.view[3] - s.view[1], s.scale);  // height
+      const floor = 0.5 * Math.min(perp(si), perp(sj));
+      seg = segVote(si, sj, windowFor(rel, span, si.scale, floor));
+    }
 
     let final: { dx: number; dy: number } | null = null, channel: string | null = null, conf: string | null = null, w = 0;
     // Per-axis weight overrides (undefined = use `w` for both). Set only on the
