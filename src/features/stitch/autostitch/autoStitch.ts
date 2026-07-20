@@ -2,7 +2,7 @@ import type { PageExtract, Label } from "./types";
 import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10 of the original
 // roadmap. Do not import it yet.
-import { stitchSheets, findEdgeStroke, oneSidedStrokeAnchor, seamCrossings, crossingConsensus, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor, type Crossing } from "./stitchCore";
+import { stitchSheets, findEdgeStroke, oneSidedStrokeAnchor, seamCrossings, crossingConsensus, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor, type Crossing, type SeamReportEntry, type AlignmentVerdict } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
 import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
@@ -44,6 +44,10 @@ export interface AutoStitchResult {
    *  (which carry no adjacency signal and can never align) doesn't read as
    *  "unstitchable". */
   refPageIndices: number[];
+  /** Post-solve per-seam verification (geometric method). Absent for keymap/none. */
+  seamReport?: SeamReportEntry[];
+  /** Cannot-align honesty verdict from the seam report. Absent → old behavior. */
+  alignmentVerdict?: AlignmentVerdict;
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
@@ -518,6 +522,8 @@ export async function autoStitch(
   let placementsByKey = new Map<number, { x: number; y: number }>();
   let worstResidFt = 0;
   let method: StitchMethod = "none";
+  let seamReport: SeamReportEntry[] | undefined;
+  let alignmentVerdict: AlignmentVerdict | undefined;
   if (units.length >= 2) {
     const byPage = new Map<number, Unit[]>();
     for (const u of units) (byPage.get(u.pageIndex) || byPage.set(u.pageIndex, []).get(u.pageIndex)!).push(u);
@@ -546,6 +552,8 @@ export async function autoStitch(
     placementsByKey = res.placements;
     worstResidFt = res.worstResidFt;
     method = res.method;
+    seamReport = res.seamReport;
+    alignmentVerdict = res.alignmentVerdict;
   }
 
   // Per-unit poses for placed units; ONE whole-page null pose per fully-unplaced page.
@@ -566,5 +574,5 @@ export async function autoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict };
 }

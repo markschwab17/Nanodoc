@@ -129,6 +129,7 @@ for (const scale of SCALES) {
   seamReport(scale, res, debug);
   crossReport(scale, res, debug);
   jointReport(scale, res, debug);
+  verdictReport(scale, res, debug);
   runs[scale] = { res, debug };
 }
 
@@ -301,6 +302,33 @@ function jointReport(scale, res, debug) {
       const t3 = s.top3.map((t) => `${t.deltaFt}ft:${t.total}`).join(", ");
       console.log(`  ${keyToPage(inputs, s.unit)}  along(${s.axis})  not-decisive (total=${s.total}/${s.runnerUp} margin=${s.margin}; top3 [${t3}])  ${seams}`);
     }
+  }
+}
+
+// CANNOT-ALIGN VERDICT report: the post-solve per-seam verification classifications
+// (verified / plausible / suspect) and the overall alignmentVerdict the app gates on.
+// This is the honesty gate — on a set whose seams cannot be physically verified the app
+// says so rather than committing a plausible-but-wrong collage.
+function verdictReport(scale, res, debug) {
+  const inputs = debug?.inputs;
+  const report = debug?.result?.seamReport ?? res.seamReport ?? [];
+  const verdict = debug?.result?.alignmentVerdict ?? res.alignmentVerdict ?? "(none)";
+  console.log(`ALIGNMENT VERDICT: ${verdict}`);
+  if (!report.length) { console.log("  (no placed seams to verify)"); return; }
+  const n = report.length;
+  const nVer = report.filter((s) => s.status === "verified").length;
+  const nPlaus = report.filter((s) => s.status === "plausible").length;
+  const nSus = report.filter((s) => s.status === "suspect").length;
+  console.log(`  seams: ${nVer} verified / ${nPlaus} plausible / ${nSus} suspect  (of ${n})`);
+  for (const s of report) {
+    const d = s.detail || {};
+    const bits = [];
+    if (d.perpAxis) bits.push(`perp=${d.perpAxis}`);
+    if (d.perpDeltaFt != null) bits.push(`strokeΔ=${d.perpDeltaFt}ft`);
+    if (d.marginRatio != null) bits.push(`margin=${d.marginRatio}`);
+    if (d.alongDecisive != null) bits.push(`alongDecisive=${d.alongDecisive}`);
+    const tail = d.reason ? `  — ${d.reason}` : "";
+    console.log(`  ${keyToPage(inputs, s.i)} - ${keyToPage(inputs, s.j)}  ${String(s.status).toUpperCase()}  [${d.channel}${bits.length ? " | " + bits.join(" ") : ""}]${tail}`);
   }
 }
 

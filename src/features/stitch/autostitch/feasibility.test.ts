@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveFeasibility } from "./feasibility";
+import { deriveFeasibility, UNVERIFIED_REASON } from "./feasibility";
 
 describe("deriveFeasibility", () => {
   it("keymap, all selected aligned -> confident", () => {
@@ -112,5 +112,60 @@ describe("deriveFeasibility", () => {
       range(10)
     );
     expect(f.status).toBe("unstitchable");
+  });
+
+  // ── cannot-align verdict gate (d) ─────────────────────────────────────────────
+  it("geometric: an 'unverified' verdict blocks auto-align even with a good fit", () => {
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: [0, 1], worstResidFt: 1, alignmentVerdict: "unverified" },
+      [0, 1]
+    );
+    expect(f.status).toBe("unstitchable");
+    expect(f.reason).toBe(UNVERIFIED_REASON);
+  });
+
+  it("geometric: a 'verified' verdict enables auto-align", () => {
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: [0, 1], worstResidFt: 1, alignmentVerdict: "verified" },
+      [0, 1]
+    );
+    expect(f.status).toBe("confident");
+    expect(f.reason).toBeUndefined();
+  });
+
+  it("geometric: a 'partial' verdict still enables auto-align", () => {
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: [0, 1], worstResidFt: 1, alignmentVerdict: "partial" },
+      [0, 1]
+    );
+    expect(f.status).toBe("confident");
+  });
+
+  it("geometric: absent verdict -> backward compat (auto-align enabled, no reason)", () => {
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: [0, 1], worstResidFt: 1 },
+      [0, 1]
+    );
+    expect(f.status).toBe("confident");
+    expect(f.reason).toBeUndefined();
+  });
+
+  it("geometric: unverified AND below the fit floor -> unstitchable with NO verify-reason", () => {
+    // The failure is not specifically the verdict (ratio 2/6 < 0.5 already fails), so
+    // the honest "cannot verify" copy is withheld — it reads as a plain non-tiled set.
+    const f = deriveFeasibility(
+      { method: "geometric", alignedPageIndices: [0, 1], worstResidFt: 1, alignmentVerdict: "unverified" },
+      [0, 1, 2, 3, 4, 5]
+    );
+    expect(f.status).toBe("unstitchable");
+    expect(f.reason).toBeUndefined();
+  });
+
+  it("keymap path is unchanged by the verdict gate", () => {
+    const f = deriveFeasibility(
+      { method: "keymap", alignedPageIndices: [0, 1, 2], worstResidFt: 0, alignmentVerdict: "unverified" },
+      [0, 1, 2]
+    );
+    expect(f.status).toBe("confident");
   });
 });

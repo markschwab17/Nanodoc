@@ -819,11 +819,27 @@ export function AddPdfModal({
             <Button onClick={handleChooseFile}>Choose file</Button>
           </div>
         ) : null}
-        {probeState === "done" && feasibility && feasibility.status !== "unstitchable" && (
-          <p className="text-xs text-muted-foreground text-right px-1">
-            {feasibility.status === "confident"
-              ? "✓ Tiled sheet set detected — will auto-align"
-              : `${feasibility.alignedInSelection} of ${feasibility.selectedCount} will align · the rest are added below to place manually`}
+        {probeState === "done" && feasibility && feasibility.status !== "unstitchable" && (() => {
+          const report = probe?.seamReport ?? [];
+          const nVer = report.filter((s) => s.status === "verified").length;
+          // When the alignment is only PARTIALLY verified, say how many seams checked
+          // out (auto-align stays enabled — the app is honest about the ones it can't
+          // physically confirm).
+          const partialSeams =
+            probe?.alignmentVerdict === "partial" && report.length
+              ? ` · ${nVer} of ${report.length} seams verified`
+              : "";
+          return (
+            <p className="text-xs text-muted-foreground text-right px-1">
+              {feasibility.status === "confident"
+                ? `✓ Tiled sheet set detected — will auto-align${partialSeams}`
+                : `${feasibility.alignedInSelection} of ${feasibility.selectedCount} will align · the rest are added below to place manually${partialSeams}`}
+            </p>
+          );
+        })()}
+        {probeState === "done" && feasibility?.status === "unstitchable" && feasibility.reason && (
+          <p className="text-xs text-amber-600 dark:text-amber-500 text-right px-1">
+            Can't verify alignment for this set — add pages and align manually
           </p>
         )}
         <DialogFooter>
@@ -843,16 +859,24 @@ export function AddPdfModal({
             const tooFew = selectedPages.size < 2;
             const checking = probeState === "running";
             const unstitchable = probeState === "done" && feasibility?.status === "unstitchable";
+            // Reason-aware: a set that LOOKS tiled but whose seams can't be physically
+            // verified gets the honest "can't verify" copy instead of the bare
+            // "unavailable" (which reads as "these aren't tiles at all").
+            const cannotVerify = unstitchable && !!feasibility?.reason;
             const disabled = adding || tooFew || checking || unstitchable;
             const label = adding
               ? "Aligning…"
               : checking
               ? "Checking alignment…"
+              : cannotVerify
+              ? "Can't verify alignment"
               : unstitchable
               ? "Auto-align unavailable"
               : `Add & auto-align ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""}`;
             const title = tooFew
               ? "Select at least 2 pages to auto-align"
+              : cannotVerify
+              ? "Can't verify alignment for this set — add pages and align manually"
               : unstitchable
               ? "These pages don't look like one tiled plan set — add them and align manually"
               : undefined;

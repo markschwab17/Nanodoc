@@ -5,7 +5,7 @@
  */
 import type { TilePlacement, PlacedSheetPose } from "./layout";
 import type { AutoStitchResult } from "./autoStitch";
-import type { StitchMethod } from "./stitchCore";
+import type { StitchMethod, SeamReportEntry, AlignmentVerdict } from "./stitchCore";
 
 export interface ProbeRequest {
   docId: number;
@@ -23,6 +23,10 @@ export interface ProbeResult {
   rootFtPerIn: number;
   poses: PlacedSheetPose[];
   refPageIndices: number[];
+  /** Post-solve per-seam verification (geometric method). Absent for keymap/none. */
+  seamReport?: SeamReportEntry[];
+  /** Cannot-align honesty verdict. Absent → old (pre-gate) behavior. */
+  alignmentVerdict?: AlignmentVerdict;
 }
 
 export type ProbeMessage = ProbeResult | { docId: number; error: string };
@@ -37,5 +41,7 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     rootFtPerIn: res.rootFtPerIn,
     poses: res.poses,
     refPageIndices: res.refPageIndices,
+    seamReport: res.seamReport,
+    alignmentVerdict: res.alignmentVerdict,
   };
 }

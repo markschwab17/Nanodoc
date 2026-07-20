@@ -824,6 +824,98 @@ describe("unit stitching (frames + printed numbers + strip refs)", () => {
   });
 });
 
+describe("stitchSheets seam verification (cannot-align gate)", () => {
+  const lbl2 = (text: string, x: number, y: number): Label =>
+    ({ text, x, y, endX: x + 30, endY: y, angle: 0, h: 8, font: null });
+
+  it("(a) a shared-token set verifies every seam -> verdict 'verified'", () => {
+    const OFF_PT = (300 * 72) / 20;
+    const texts = ["TC347.33", "TC348.10", "FL346.90", "TC349.55", "FL347.10", "TC350.02"];
+    const a = texts.map((t, i) => lbl2(t, 400 + i * 120, 800 + (i % 2) * 60));
+    const b = texts.map((t, i) => lbl2(t, 400 + i * 120 - OFF_PT, 800 + (i % 2) * 60));
+    const mk = (no: number, labels: Label[]): SheetInput => ({
+      id: String(no), no, scale: 20, view: [0, 0, 2592, 1728],
+      extract: { view: [0, 0, 2592, 1728], shxLabels: labels, labels, words: labels, geometry: [] } as PageExtract,
+    });
+    const res = stitchSheets([mk(1, a), mk(2, b)]);
+    expect(res.alignmentVerdict).toBe("verified");
+    expect(res.seamReport!.length).toBeGreaterThanOrEqual(1);
+    expect(res.seamReport!.every((s) => s.status === "verified")).toBe(true);
+  });
+
+  // A dashed VERTICAL matchline at page-x (dashes span most of the height → clears
+  // the matchline-strength floor). Different dash lengths across sheets keep segVote
+  // from matching, so the pair resolves via the precise stroke anchor alone.
+  const VIEW: [number, number, number, number] = [0, 0, 1600, 1080]; // W=444ft @20
+  const vDash = (x: number, tag: string, dashLen: number): Geom[] => {
+    const g: Geom[] = [];
+    for (let y = 100; y < 900; y += 50) g.push({ id: `${tag}${y}`, pts: [[x, y], [x, y + dashLen]], closed: false });
+    return g;
+  };
+  const mkG = (no: number, geometry: Geom[]): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+
+  it("(b) strokes that DISAGREE >3ft at the solved positions -> suspect -> verdict 'unverified'", () => {
+    // Precise perp-x anchor dx=300ft places sheet2 at x=300 (within the abutment
+    // window). Sheet1's facing (right) border is drawn at x=1400, sheet2's facing
+    // (left) at x=200 → at the solved positions the two physical borders sit ~33 ft
+    // apart (FT(1400)=388.9 vs 300+FT(200)=355.6): the independent post-solve
+    // re-check catches the off-line seam (the wrong-line failure this gate exists for).
+    const res = stitchSheets([mkG(1, vDash(1400, "i", 40)), mkG(2, vDash(200, "j", 56))],
+      undefined, [{ i: 1, j: 2, dx: 300, perp: "x", precise: true }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.status).toBe("suspect");
+    expect(seam.detail.perpDeltaFt!).toBeGreaterThan(3);
+    expect(res.alignmentVerdict).toBe("unverified");
+  });
+
+  it("(c) a stroke-coincident seam whose along axis is undetermined -> plausible (not verified)", () => {
+    // Same dx=300 anchor, but sheet1's border sits at x=1280 so BOTH borders land on
+    // the SAME canvas line (FT(1280)=355.6 == 300+FT(200)). The perpendicular is
+    // physically verified, yet the along axis was never decisively resolved (no
+    // segVote/crossing/sibling), so the seam is honestly 'plausible', not 'verified'.
+    const res = stitchSheets([mkG(1, vDash(1280, "i", 40)), mkG(2, vDash(200, "j", 56))],
+      undefined, [{ i: 1, j: 2, dx: 300, perp: "x", precise: true }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.perpDeltaFt!).toBeLessThanOrEqual(3); // perpendicular coincident
+    expect(seam.detail.alongDecisive).toBe(false);
+    expect(seam.status).toBe("plausible");
+    expect(res.alignmentVerdict).toBe("unverified");
+  });
+
+  it("(c2) a segVote-only seam with no matchline strokes -> plausible (unverifiable)", () => {
+    // One-sided "SEE SHEET 2" ref on sheet1's right edge; sheet2 carries no reciprocal
+    // label. The pair bonds via a windowed segment vote on a shared zigzag, but there
+    // is no matchline STROKE to physically verify — so it is 'plausible', not verified.
+    const V: [number, number, number, number] = [0, 0, 2592, 1728]; // 720x480ft @20
+    const ftToPt = (ft: number) => (ft / 20) * 72;
+    const frac = (v: number) => v - Math.floor(v);
+    const zig = (): [number, number][] => {
+      const pts: [number, number][] = []; let x = 0, y = 0;
+      for (let i = 0; i < 16; i++) { const t = i + 1; x += 8 + frac(Math.sin(t * 12.9898) * 43758.5453) * 14; y += (frac(Math.sin(t * 78.233) * 12543.129) - 0.5) * 40; pts.push([500 + x, 240 + y]); }
+      return pts;
+    };
+    const Z = zig();
+    const geomAt = (ox: number, id: string): Geom => ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - ox), y]) });
+    const s1: SheetInput = {
+      id: "1", no: 1, printedNo: 1, scale: 20, view: V,
+      extract: { view: V, shxLabels: [], words: [], labels: [lbl2("MATCHLINE (SEE SHEET 2)", 2450, 850)], geometry: [geomAt(0, "z1")] } as PageExtract,
+    };
+    const s2: SheetInput = {
+      id: "2", no: 2, printedNo: 2, scale: 20, view: V,
+      extract: { view: V, shxLabels: [], words: [], labels: [], geometry: [geomAt(500, "z2")] } as PageExtract,
+    };
+    const res = stitchSheets([s1, s2]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1));
+    expect(seam).toBeDefined();
+    expect(seam!.detail.channel).toBe("segment(windowed)");
+    expect(seam!.status).toBe("plausible");
+    expect(res.alignmentVerdict).toBe("unverified");
+  });
+});
+
 describe("oneSidedStrokeAnchor", () => {
   const view: [number, number, number, number] = [0, 0, 1000, 1000];
   // A full-width DASHED horizontal matchline at cross-y=Y (dashes sum well past the
