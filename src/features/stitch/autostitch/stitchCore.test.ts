@@ -1,5 +1,5 @@
 import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, FT, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, FT, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -494,6 +494,109 @@ describe("stitchSheets anchor channel", () => {
     const lp = label.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
     expect(lp.dxFt!).toBeGreaterThan(487); // aliased toward the 490 linework peak
     expect(lp.dxFt!).toBeLessThan(493);
+  });
+});
+
+describe("seamCrossings + crossingConsensus", () => {
+  // A vertical matchline at x=cross; a horizontal (transverse) segment crosses it.
+  const seg = (id: string, pts: [number, number][]): Geom => ({ id, closed: false, pts });
+
+  it("records a transverse crossing's along-station and excludes parallel linework", () => {
+    // Vertical matchline (axis "v") at x=1000 pt. A horizontal street segment ending
+    // at the line at y=720 pt (world y = FT(720,20)=200 ft) → one crossing at 200 ft.
+    // A near-parallel (vertical) segment along the matchline must NOT register.
+    const geom: Geom[] = [
+      seg("street", [[900, 720], [995, 720]]),      // horizontal, ends 5pt short of the line
+      seg("matchdash", [[1000, 400], [1000, 480]]), // vertical dash ON the matchline (parallel)
+    ];
+    const cr = seamCrossings(geom, "v", 1000, 20);
+    expect(cr.length).toBe(1);
+    expect(cr[0]).toBeCloseTo(200, 0); // FT(720,20)
+  });
+
+  it("collapses one street's coincident linework into a single station", () => {
+    // A street crossing x=1000 is drawn as several near-coincident long lines (two
+    // curbs + centerline) at y≈360 pt (world 100 ft). All are ≥12 ft and land within
+    // the dedup tolerance, so they must vote ONCE, not three times.
+    const lines: Geom[] = [360, 362, 364].map((y, i) =>
+      seg(`d${i}`, [[900, y], [985, y]])); // 85 pt ≈ 23.6 ft each, ends 15 pt short of the line
+    const cr = seamCrossings(lines, "v", 1000, 20);
+    expect(cr.length).toBe(1);
+    expect(cr[0]).toBeCloseTo(100, 0);
+  });
+
+  it("consensus picks the true offset over a periodic decoy 45 ft off", () => {
+    // Six shared crossings at APERIODIC stations give a clean peak at the true along
+    // offset (+20 ft). A periodic decoy (stations 45 ft apart, matching at +65 ft)
+    // makes a competing peak — but with fewer inliers, so the true +20 wins.
+    const TRUE = 20;
+    const trueI = [0, 17, 39, 68, 102, 141];          // aperiodic real stations on sheet i
+    const trueJ = trueI.map((s) => s - TRUE);          // same world features on sheet j
+    const decoyI = [200, 245, 290];                    // periodic decoy (45 ft pitch)
+    const decoyJ = decoyI.map((s) => s - (TRUE + 45)); // matches at +65 ft
+    const c = crossingConsensus([...trueI, ...decoyI], [...trueJ, ...decoyJ], TRUE);
+    expect(c).not.toBeNull();
+    expect(c!.along).toBeCloseTo(TRUE, 0);
+    expect(c!.inliers).toBeGreaterThanOrEqual(5);
+  });
+
+  it("returns null when no peak is decisive vs the runner-up", () => {
+    // Two equal-strength offsets (0 and 30) → no 1.5× dominance → not decisive.
+    const aI = [0, 40, 80], aJ0 = [0, 40, 80], aJ30 = [-30, 10, 50];
+    const c = crossingConsensus([...aI], [...aJ0, ...aJ30], 15);
+    expect(c).toBeNull();
+  });
+
+  it("is scale-invariant: the same consensus at half the scale is exactly halved", () => {
+    const I20 = [0, 17, 39, 68, 102], J20 = I20.map((s) => s - 20);
+    const c20 = crossingConsensus(I20, J20, 20, { window: FT(216, 20), bin: FT(7.2, 20) });
+    const c10 = crossingConsensus(I20.map((s) => s / 2), J20.map((s) => s / 2), 10, { window: FT(216, 10), bin: FT(7.2, 10) });
+    expect(c20).not.toBeNull();
+    expect(c10).not.toBeNull();
+    expect(c10!.along).toBeCloseTo(c20!.along / 2, 1);
+  });
+});
+
+describe("stitchSheets fully-2D-precise (crossing) anchor", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720x480 ft @20
+  const SCALE = 20;
+  const ftToPt = (ft: number) => (ft / SCALE) * 72;
+  const frac = (v: number) => v - Math.floor(v);
+  const zigFt = (): [number, number][] => {
+    const pts: [number, number][] = [];
+    let x = 0, y = 0;
+    for (let i = 0; i < 24; i++) {
+      const t = i + 1;
+      x += 8 + frac(Math.sin(t * 12.9898) * 43758.5453) * 14;
+      y += (frac(Math.sin(t * 78.233) * 12543.129) - 0.5) * 44;
+      pts.push([400 + x, 240 + y]);
+    }
+    return pts;
+  };
+  const Z = zigFt();
+  const shifted = (dxFt: number, dyFt: number, id: string): Geom =>
+    ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]) });
+  const mk = (no: number, geometry: Geom[]): SheetInput => ({
+    id: String(no), no, scale: SCALE, view: VIEW,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+
+  it("pins BOTH axes (perp stroke + crossing along) and survives refine past a nearby decoy", () => {
+    // Fully-2D-precise anchor: perp (x) = 500 ft stroke, along (y) = 30 ft crossing
+    // consensus. Sheet 2 carries the TRUE linework at (500,30) AND a DENSER decoy at
+    // (500,35) — 5 ft off ALONG the matchline, inside refineOffset's ~6 ft window, so
+    // an unexempted refine would pull the along axis to 35. Because the anchor is
+    // fully precise, its constraint is EXEMPT from refine and the along stays at 30.
+    const g1 = [shifted(0, 0, "z1")];
+    const g2 = [shifted(500, 30, "z-true"), shifted(500, 35, "z-decoy-a"), shifted(500, 35, "z-decoy-b")];
+    const res = stitchSheets([mk(1, g1), mk(2, g2)], undefined,
+      [{ i: 1, j: 2, dx: 500, perp: "x", precise: true, along: 30, alongPrecise: true }]);
+    const pair = res.pairs.find((r) => (r.i === 1 && r.j === 2) || (r.i === 2 && r.j === 1))!;
+    expect(pair.channel).toBe("anchor+cross");
+    const dx = res.placements.get(2)!.x - res.placements.get(1)!.x;
+    const dy = res.placements.get(2)!.y - res.placements.get(1)!.y;
+    expect(Math.abs(dx - 500)).toBeLessThanOrEqual(3); // perp pinned to the stroke
+    expect(Math.abs(dy - 30)).toBeLessThanOrEqual(3);  // along pinned to the crossing (not the 35 decoy)
   });
 });
 

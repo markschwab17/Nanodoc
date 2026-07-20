@@ -40,6 +40,7 @@ export const FT = (pt: number, scale: number): number => (pt / 72) * scale; // p
  */
 const WIN_PT = {
   anchorPerp: 108,   // reciprocal-anchor tight (perp) window   (was ±30 ft @20)
+  anchorTight: 28.8, // fully-2D-precise anchor window (±8 ft @20) — both axes known
   strokePar: 72,     // matchline-stroke parallel window  P     (was ±20 ft @20)
   prior: 216,        // matchline-label prior window            (was ±60 ft @20)
   token: 108,        // token-prior window                      (was ±30 ft @20)
@@ -53,6 +54,18 @@ const WIN_PT = {
   refineBin: 0.9,    // fine-registration translation bin       (was 0.25 ft @20)
   refineLen: 1.8,    // fine-registration length-signature bin  (was 0.5 ft @20)
 } as const;
+
+// Perp-axis fallback weight for a fully-2D-precise anchor when no drawing overlap
+// votes an inlier weight (the stroke is exact regardless).
+const W_CROSS = 10;
+// ALONG-axis weight of a fully-2D-precise anchor's crossing-consensus pin. Deliberately
+// MODERATE: the along axis of one seam shares an axis with a NEIGHBOUR seam's PERP
+// (a column seam's along-y is the row seams' perp-y), and the perp strokes are
+// sub-foot ground truth at weight ~600. A low along weight sets the otherwise-free
+// stagger DOF where the crossing consensus is decisive, yet yields to the perp
+// strokes on any over-determined shared-axis conflict, so the seam-quality (perp)
+// guarantee never regresses (≤40/(40+600)·conflict < 3 ft for conflicts up to ~40 ft).
+const W_ALONG = 40;
 
 export interface TokFeat { text: string; x: number; y: number; }
 export interface SegFeat { mx: number; my: number; len: number; ang: number; }
@@ -227,12 +240,14 @@ export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; same
  */
 export function findEdgeStroke(
   geometry: Geom[], axis: "h" | "v", cross: number,
-  view: [number, number, number, number], band = 100, minTotalFrac = 0.3
+  view: [number, number, number, number], band = 100, minTotalFrac = 0.3,
+  extentOut?: { lo: number; hi: number }
 ): number | null {
   const [x0, y0, x1, y1] = view; const W = x1 - x0, H = y1 - y0;
   const perpDim = axis === "h" ? W : H;
   const BIN = 2;
   const spans = new Map<number, number>(); // rounded cross-coord -> summed dash span
+  const ext = new Map<number, { lo: number; hi: number }>(); // dash ALONG-extent per bin
   for (const g of geometry) {
     const pts = g.pts; if (!pts || pts.length < 2) continue;
     const n = pts.length - 1 + (g.closed ? 1 : 0);
@@ -244,6 +259,13 @@ export function findEdgeStroke(
       const span = axis === "h" ? Math.abs(b[0] - a[0]) : Math.abs(b[1] - a[1]);
       const k = Math.round(cc / BIN);
       spans.set(k, (spans.get(k) || 0) + span);
+      // Track the dash extent (min/max along-coord) at this cross-bin — the
+      // matchline's endpoints, reported (not gated) by the diag as a cross-check.
+      const al0 = axis === "h" ? Math.min(a[0], b[0]) : Math.min(a[1], b[1]);
+      const al1 = axis === "h" ? Math.max(a[0], b[0]) : Math.max(a[1], b[1]);
+      const e = ext.get(k);
+      if (e) { if (al0 < e.lo) e.lo = al0; if (al1 > e.hi) e.hi = al1; }
+      else ext.set(k, { lo: al0, hi: al1 });
     }
   }
   // Among lines clearing the matchline-strength floor, the one NEAREST the label is
@@ -257,8 +279,108 @@ export function findEdgeStroke(
       if (d < nearDist) { nearDist = d; nearKey = k; }
     }
   }
-  if (nearKey != null) return nearKey * BIN;
-  return bestKey != null && bestTot >= minTotalFrac * perpDim ? bestKey * BIN : null;
+  const key = nearKey != null ? nearKey : (bestKey != null && bestTot >= minTotalFrac * perpDim ? bestKey : null);
+  if (key == null) return null;
+  if (extentOut) { const e = ext.get(key); if (e) { extentOut.lo = e.lo; extentOut.hi = e.hi; } }
+  return key * BIN;
+}
+
+/**
+ * Along-matchline CROSSINGS: the along-coordinates (world ft) where real linework
+ * (streets, curbs, lot lines) CROSSES the matchline line at cross-coord `cross`
+ * (page pts). Two abutting sheets draw these crossings at the SAME world station,
+ * so pairing them 1-D-registers the ALONG-matchline axis exactly — the axis the
+ * stroke perp cannot pin. axis "h": horizontal matchline (y=cross) → returns
+ * crossing X's; axis "v": vertical matchline (x=cross) → returns crossing Y's.
+ *
+ * Filters: a segment must reach the seam (its nearest endpoint within `band` pt of
+ * the cross line — matchlines sit at a drawing EDGE, so real streets TERMINATE at
+ * the line rather than straddling it; requiring a strict sign-change crossing drops
+ * every one of them on the edge sheet), be ≥ `minLenFt` (text fragments and interior
+ * clutter excluded), and differ from the matchline axis by ≥ `minAngleDeg` (matchline
+ * dashes and collinear borders, which run ALONG the line, carry no crossing station).
+ * The crossing station is the segment's line evaluated at `cross` (interpolated when
+ * the segment straddles, short-extrapolated ≤`band` when it ends at the line); for a
+ * transverse segment the station is stable under that small extrapolation.
+ *
+ * Returns DISTINCT stations (world ft), sorted: one physical street/curb is drawn as
+ * many collinear dashes, all crossing at ≈the same station — emitting each would let
+ * a dense interior sheet flood the 1-D vote with a near-continuum. Stations within
+ * `dedupFt` are collapsed to one, so each physical crossing votes once. Exported for
+ * tests.
+ */
+export function seamCrossings(
+  geometry: Geom[], axis: "h" | "v", cross: number, scale: number,
+  // `band` and the length/dedup floors are PAGE-POINT properties (converted to feet
+  // at the sheet scale), so the SAME segments qualify and the SAME stations emerge at
+  // any uniform scale — a feet-absolute floor would pass different linework per scale
+  // and make the consensus (and thus placement) scale-dependent. 43.2/10.8 pt = 12/3
+  // ft @20, so scale-20 fixtures are unchanged.
+  { band = 40, minLenFt = FT(43.2, scale), minAngleDeg = 30, dedupFt = FT(10.8, scale) }: { band?: number; minLenFt?: number; minAngleDeg?: number; dedupFt?: number } = {}
+): number[] {
+  const raw: number[] = [];
+  for (const g of geometry) {
+    const pts = g.pts; if (!pts || pts.length < 2) continue;
+    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const ca = axis === "h" ? a[1] : a[0]; // cross-coord of the two endpoints
+      const cb = axis === "h" ? b[1] : b[0];
+      if (ca === cb) continue;                        // parallel on the cross axis (no unique crossing)
+      if (Math.min(Math.abs(ca - cross), Math.abs(cb - cross)) > band) continue; // doesn't reach the seam
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy);
+      if (FT(len, scale) < minLenFt) continue;        // drop text fragments / short interior clutter
+      // Angle relative to the matchline axis (0°/180° for "h", 90° for "v").
+      let ang = (Math.atan2(dy, dx) * 180) / Math.PI;
+      ang = ((ang % 180) + 180) % 180;                // 0..180
+      const fromAxis = axis === "h" ? Math.min(ang, 180 - ang) : Math.abs(ang - 90);
+      if (fromAxis < minAngleDeg) continue;           // near-parallel to matchline → exclude
+      const t = (cross - ca) / (cb - ca);             // crossing param (interp or short extrapolation)
+      const along = axis === "h" ? a[0] + t * (b[0] - a[0]) : a[1] + t * (b[1] - a[1]);
+      raw.push(FT(along, scale));
+    }
+  }
+  // Collapse the many dashes of one physical crossing into a single station.
+  raw.sort((x, y) => x - y);
+  const out: number[] = [];
+  for (const v of raw) if (!out.length || v - out[out.length - 1] > dedupFt) out.push(v);
+  return out;
+}
+
+/**
+ * 1-D consensus of along-matchline deltas d = along_i − along_j (world ft) over all
+ * crossing pairs, binned ~2 ft with 3-bin smoothing, restricted to a `window` (±ft)
+ * around `center` (the current label/segVote along estimate) so far-off pairings
+ * can't flood the histogram. Accepts the smoothed peak only if it has ≥ `minInliers`
+ * inliers AND is ≥ `ratio`× the second peak (measured outside ±3 bins). Returns the
+ * inlier-mean along delta (obeying d = posFt_j − posFt_i = along_i − along_j) or
+ * null when no decisive peak. Exported for tests.
+ */
+export function crossingConsensus(
+  alongI: number[], alongJ: number[], center: number,
+  { window = 60, bin = 2, minInliers = 5, ratio = 1.5 }: { window?: number; bin?: number; minInliers?: number; ratio?: number } = {}
+): { along: number; inliers: number; peak: number; second: number } | null {
+  const deltas: number[] = [];
+  for (const ai of alongI) for (const aj of alongJ) {
+    const d = ai - aj;
+    if (Math.abs(d - center) <= window) deltas.push(d);
+  }
+  if (deltas.length < minInliers) return null;
+  const bins = new Map<number, number>();
+  for (const d of deltas) { const k = Math.round(d / bin); bins.set(k, (bins.get(k) || 0) + 1); }
+  const sm = (k: number) => (bins.get(k - 1) || 0) + (bins.get(k) || 0) + (bins.get(k + 1) || 0);
+  let bestK: number | null = null, bestN = -1;
+  for (const [k] of bins) { const nn = sm(k); if (nn > bestN) { bestN = nn; bestK = k; } }
+  if (bestK == null) return null;
+  let second = 0;
+  for (const [k] of bins) { if (Math.abs(k - bestK) <= 3) continue; second = Math.max(second, sm(k)); }
+  const cx = bestK * bin;
+  const inl = deltas.filter((d) => Math.abs(d - cx) <= 1.5 * bin);
+  if (inl.length < minInliers) return null;
+  if (bestN < ratio * second) return null; // not decisive vs the runner-up peak
+  const mean = inl.reduce((s, d) => s + d, 0) / inl.length;
+  return { along: mean, inliers: inl.length, peak: bestN, second };
 }
 
 /**
@@ -608,8 +730,18 @@ interface DriverSheet {
  * than the ±17 ft of a label-position delta. A precise anchor windows segVote
  * TIGHT (~8 ft) on the perp axis and, when segVote finds no overlap, still emits
  * its perp-axis constraint outright (the stroke IS ground truth for that axis).
+ *
+ * `alongPrecise` marks a FULLY 2-D precise anchor: its ALONG-matchline axis was
+ * pinned by seam-crossing registration (linework crossing the shared matchline at
+ * identical world stations on both sheets — see `seamCrossings`/`crossingConsensus`),
+ * carried on the non-perp axis. `along` holds that delta (dx when perp "y", dy when
+ * perp "x"). Such an anchor emits a high-weight TWO-axis constraint (perp from the
+ * stroke, along from the crossing consensus) and is EXEMPT from refineOffset (both
+ * axes are ground truth — fine registration must not pull either back to an alias).
+ * `strokeLoDelta`/`strokeHiDelta` are diag-only cross-checks (matchline dash-extent
+ * endpoint deltas), ignored by the solver.
  */
-export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y"; precise?: boolean }
+export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y"; precise?: boolean; along?: number; alongPrecise?: boolean; strokeLoDelta?: number; strokeHiDelta?: number }
 
 export function stitchSheets(
   inputs: SheetInput[],
@@ -640,14 +772,19 @@ export function stitchSheets(
   // Reciprocal interior-matchline anchors (keyed by unit `no`), dx in feet with
   // convention d = posFt_j - posFt_i. `anchorFor` resolves either stored
   // direction, flipping the sign when the pair is stored as (j,i).
-  const anchorMap = new Map<string, { d: number; perp: "x" | "y"; precise: boolean }>();
+  type AnchorRec = { d: number; perp: "x" | "y"; precise: boolean; along: number | null; alongPrecise: boolean };
+  const anchorMap = new Map<string, AnchorRec>();
   for (const a of anchors ?? []) {
     const perp = a.perp ?? "x";
-    anchorMap.set(`${a.i}-${a.j}`, { d: (perp === "y" ? a.dy : a.dx) ?? 0, perp, precise: !!a.precise });
+    anchorMap.set(`${a.i}-${a.j}`, {
+      d: (perp === "y" ? a.dy : a.dx) ?? 0, perp, precise: !!a.precise,
+      along: a.alongPrecise ? (a.along ?? (perp === "y" ? a.dx : a.dy) ?? 0) : null,
+      alongPrecise: !!a.alongPrecise,
+    });
   }
-  const anchorFor = (ni: number, nj: number): { d: number; perp: "x" | "y"; precise: boolean } | null => {
+  const anchorFor = (ni: number, nj: number): AnchorRec | null => {
     if (anchorMap.has(`${ni}-${nj}`)) return anchorMap.get(`${ni}-${nj}`)!;
-    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { d: -a.d, perp: a.perp, precise: a.precise }; }
+    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { ...a, d: -a.d, along: a.along == null ? null : -a.along }; }
     return null;
   };
   // printed sheet number -> units carrying it (both strips of a page share one)
@@ -805,7 +942,7 @@ export function stitchSheets(
     }
   }
 
-  const pairs: (PairReport & { _final?: { dx: number; dy: number }; _wx?: number; _wy?: number })[] = [];
+  const pairs: (PairReport & { _final?: { dx: number; dy: number }; _wx?: number; _wy?: number; _keep?: boolean; _split?: boolean })[] = [];
   for (const uk of pairKeys) {
     const [ni, nj] = uk.split("-").map(Number);
     const si = byNo.get(ni)!, sj = byNo.get(nj)!;
@@ -844,6 +981,16 @@ export function stitchSheets(
       const floor = 0.5 * Math.min(di, dj), ceil = 1.15 * Math.max(di, dj);
       const mag = Math.abs(anchor.d);
       if (mag < floor || mag > ceil) anchor = null;
+    }
+    // FULLY 2-D PRECISE anchor: the stroke pins the perp axis and seam-crossing
+    // registration pins the along axis (identical world stations of crossing
+    // linework on both sheets). Build the exact 2-axis delta; the wide perp-only
+    // segVote below is skipped for it — a TIGHT ±8 ft window only confirms/weights.
+    let cross2d: { dx: number; dy: number } | null = null;
+    if (anchor != null && anchor.alongPrecise && anchor.along != null) {
+      cross2d = anchor.perp === "y"
+        ? { dx: anchor.along, dy: anchor.d }
+        : { dx: anchor.d, dy: anchor.along };
     }
     let anchorSeg: Vote | null = null;
     if (anchor != null) {
@@ -894,7 +1041,24 @@ export function stitchSheets(
     // matchline-label channels below, where the label pins one axis and its
     // position ALONG the line (the other axis) is arbitrary.
     let wx: number | undefined, wy: number | undefined;
-    if (anchorSeg) {
+    // `keep` exempts the constraint from refineOffset replacement — a fully-precise
+    // (2-axis) anchor is ground truth on BOTH axes, so fine registration must not be
+    // allowed to pull either axis back toward a periodic alias (~6 ft, the refine
+    // window). It survives with its weight intact.
+    let keep = false;
+    if (cross2d) {
+      // Fully-2D-precise anchor: PERP axis = matchline stroke, ALONG axis = seam-
+      // crossing consensus. Emit ONE two-axis constraint with PER-AXIS weights — perp
+      // keeps the strong stroke weight (anchorSeg's inlier weight, exactly as the
+      // precise-anchor path), so the perp seam never regresses; along gets the moderate
+      // W_ALONG so it sets the free stagger DOF but yields to perp strokes on the shared
+      // axis. keep=true exempts BOTH axes from refineOffset (both are ground truth).
+      final = cross2d; channel = "anchor+cross"; conf = "high"; keep = true;
+      const wPerp = anchorSeg ? anchorSeg.inliers / (anchorSeg.rmsFt ** 2 + 0.04) : W_CROSS;
+      w = wPerp;
+      if (anchor!.perp === "y") { wy = wPerp; wx = W_ALONG; } // perp y (row seam) → along = x
+      else { wx = wPerp; wy = W_ALONG; }                      // perp x (col seam) → along = y
+    } else if (anchorSeg) {
       final = anchorSeg; channel = "anchor+segment"; conf = "high";
       w = anchorSeg.inliers / (anchorSeg.rmsFt ** 2 + 0.04);
       // PIN the perp axis to the exact matchline STROKE delta. Both sheets draw the
@@ -973,12 +1137,29 @@ export function stitchSheets(
     pairs.push({
       i: ni, j: nj, channel, conf,
       dxFt: final ? +final.dx.toFixed(2) : null, dyFt: final ? +final.dy.toFixed(2) : null,
-      weight: +w.toFixed(2), residFt: null, _final: final ?? undefined, _wx: wx, _wy: wy,
+      weight: +w.toFixed(2), residFt: null, _final: final ?? undefined, _wx: wx, _wy: wy, _keep: keep,
+      // A matchline anchor's PERP axis (stroke, sub-foot) and ALONG axis (segVote /
+      // crossing, alias-prone) are INDEPENDENT measurements. Emit them as SEPARATE
+      // single-axis constraints so IRLS-Huber judges each axis on its own residual —
+      // otherwise an aliased along inflates the pair's combined residual and Huber
+      // down-weights the EXACT perp with it, letting a neighbour's along-pin drag the
+      // sheet off its perp stroke. The linear solve is unchanged (the Laplacian sums
+      // the per-axis weights identically); only the robust reweighting improves.
+      _split: !!channel && channel.startsWith("anchor"),
     });
   }
 
-  let constraints = pairs.filter((r) => r._final && r.weight > 0)
-    .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy, weight: r.weight, wx: r._wx, wy: r._wy }));
+  let constraints = pairs.filter((r) => r._final && r.weight > 0).flatMap((r) => {
+    const base = { i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy, keep: r._keep };
+    if (r._split) {
+      const wx = r._wx ?? r.weight, wy = r._wy ?? r.weight;
+      const out: { i: number; j: number; dx: number; dy: number; weight: number; wx?: number; wy?: number; keep?: boolean }[] = [];
+      if (wx > 0) out.push({ ...base, weight: wx, wx, wy: 0 }); // perp/along on x only
+      if (wy > 0) out.push({ ...base, weight: wy, wx: 0, wy });  // perp/along on y only
+      if (out.length) return out;
+    }
+    return [{ ...base, weight: r.weight, wx: r._wx, wy: r._wy }];
+  });
 
   // Connected components over the constraint graph. Place the LARGEST component
   // and root it at that component's most-connected sheet — NOT blindly at
@@ -1038,6 +1219,7 @@ export function stitchSheets(
   if (mainSet.size >= 2) {
     for (const s of sheets) if (mainSet.has(s.no) && !s.segFine) s.segFine = segFeats(s, FT(7.2, s.scale)); // 2 ft @20
     const refinedConstraints = constraints.map((c) => {
+      if (c.keep) return c; // fully-precise 2-axis anchor — exempt from refine (both axes are ground truth)
       if (!mainSet.has(c.i) || !mainSet.has(c.j)) return c;
       const si = byNo.get(c.i)!, sj = byNo.get(c.j)!;
       const pi = coarsePos.get(c.i)!, pj = coarsePos.get(c.j)!;

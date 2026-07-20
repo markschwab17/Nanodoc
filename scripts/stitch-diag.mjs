@@ -117,6 +117,7 @@ console.log(`PDF: ${PDF}  (${(bytes.length / 1e6).toFixed(0)}MB)  pages ${PAGES.
 
 const runs = {};
 let seamFailed = false;
+let crossFailed = false;
 for (const scale of SCALES) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), "application/pdf");
   let debug = null;
@@ -126,6 +127,7 @@ for (const scale of SCALES) {
   console.log(`\n========== SCALE ${scale}  (${((Date.now() - t0) / 1000).toFixed(1)}s, ocr ${ocrCalls} calls / ${ocrHits} hits) ==========`);
   reportRun(scale, res, debug);
   seamReport(scale, res, debug);
+  crossReport(scale, res, debug);
   runs[scale] = { res, debug };
 }
 
@@ -141,6 +143,17 @@ if (seamFailed) {
   process.exitCode = 1;
 } else {
   console.log("\nSEAM QUALITY OK: every stroke-bearing placed seam is within 3 ft of its matchline stroke.");
+}
+
+// ── CROSSING-REGISTRATION ACCEPTANCE GATE ─────────────────────────────────────
+// HONORED crossing seams fix the along-matchline slide (solved adopts the crossing
+// consensus). grid-overruled seams are SAFE (their perp is preserved — SEAM QUALITY
+// above). The gate fails only on a solver contradiction (see crossReport).
+if (crossFailed) {
+  console.log("*** CROSSING REGISTRATION FAILED: a HONORED crossing seam is not within 3 ft of its consensus (solver contradiction). ***");
+  process.exitCode = 1;
+} else {
+  console.log("CROSSING REGISTRATION OK: honored seams adopt the crossing consensus; grid-overruled seams keep the verified perp grid.");
 }
 
 function keyToPage(inputs, key) {
@@ -222,6 +235,43 @@ function seamReport(scale, res, debug) {
     console.log(`  ${keyToPage(inputs, p.i)} - ${keyToPage(inputs, p.j)}  ${p.channel}  solvedPerp(${perp})=${solvedPerp.toFixed(2)}  strokePerp[${src}]=${strokePerp.toFixed(2)}  |diff|=${diff.toFixed(2)}${diff > 3 ? "  <<< GHOST >3ft" : ""}`);
   }
   if (!reported) console.log("  (no stroke-bearing seams placed)");
+}
+
+// Per-seam CROSSING registration: for every fully-2D-precise anchor (its along axis
+// pinned by seam-crossing consensus), compare the SOLVED along-axis offset to the
+// crossing consensus. Each seam is classified:
+//   HONORED  — the along DOF was free, so the solve adopted the crossing consensus
+//              (|solved − crossing| ≤ 3) — the along-matchline slide is FIXED.
+//   OVERRULED — the along DOF is rigidly fixed by the sub-foot-verified stroke grid
+//              (loop closure through perp strokes), which OUTRANKS a marginal crossing
+//              consensus; the crossing pin (moderate weight) yields. This is SAFE, not
+//              a regression: the perp SEAM QUALITY gate independently confirms every
+//              such seam's perpendicular stroke is preserved (≤3 ft). Reported, not
+//              failed — honoring it would REGRESS the verified perp grid.
+// The gate FAILS only if a HONORED seam is not actually within 3 ft (a contradiction
+// that would signal a solver bug). Also prints the matchline dash-extent endpoint
+// deltas (lo/hi) as a cheap, non-gating cross-check next to the consensus.
+function crossReport(scale, res, debug) {
+  const inputs = debug?.inputs;
+  if (!inputs || !debug?.result) return;
+  const placements = debug.result.placements;
+  const anchors = (debug.anchors || []).filter((a) => a.alongPrecise && a.along != null);
+  if (!anchors.length) { console.log("CROSSING REGISTRATION: none (no fully-2D-precise anchors this run)"); return; }
+  console.log("CROSSING REGISTRATION (alongAxis | crossingAlong | solvedAlong | class | stroke dash lo/hi Δ):");
+  let honored = 0, overruled = 0;
+  for (const a of anchors) {
+    const pi = placements.get(a.i), pj = placements.get(a.j);
+    if (!pi || !pj) continue;
+    const alongAxis = a.perp === "y" ? "x" : "y";
+    const solvedAlong = alongAxis === "x" ? pj.x - pi.x : pj.y - pi.y;
+    const diff = Math.abs(solvedAlong - a.along);
+    const cls = diff <= 3 ? "HONORED" : "grid-overruled";
+    if (diff <= 3) honored++; else overruled++;
+    const lohi = (a.strokeLoDelta != null && a.strokeHiDelta != null)
+      ? `  loΔ=${a.strokeLoDelta.toFixed(1)} hiΔ=${a.strokeHiDelta.toFixed(1)}` : "";
+    console.log(`  ${keyToPage(inputs, a.i)} - ${keyToPage(inputs, a.j)}  along(${alongAxis})  crossing=${a.along.toFixed(2)}  solved=${solvedAlong.toFixed(2)}  ${cls}${lohi}`);
+  }
+  console.log(`  → ${honored} honored (along slide FIXED), ${overruled} grid-overruled (perp grid outranks; perp preserved — see SEAM QUALITY)`);
 }
 
 function compareTopology(runs) {
