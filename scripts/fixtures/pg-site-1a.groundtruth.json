@@ -1,0 +1,35 @@
+{
+  "description": "AI-in-the-loop visually verified ground-truth placements for ~/Downloads/PG_SITE 1A.pdf (22-page Fontana precise-grading set). Every seam adjudicated by rendering red/blue overlays and confirming matchline-border coincidence plus content continuity across the seam (Claude session 2026-07-20). Use as the regression target for the auto-stitch solver.",
+  "units": "canvas points at rootFtPerIn=20 (3.6 pt = 1 ft), page origins; sheets are 2592x1728 pt",
+  "pageIndexKey": "numeric keys are pageIndex (0-based); s1/s2 are the two strip frames of pageIndex 1 (frames [0,0,2592,646] and [0,646,2592,1728])",
+  "positions": {
+    "2": [120, 65],
+    "3": [1924, 20],
+    "4": [3582, 27],
+    "5": [20, 1413],
+    "6": [1754, 1378],
+    "7": [3054, 1379],
+    "8": [221, 2753],
+    "9": [1957, 2704],
+    "10": [3367, 2665],
+    "s1": [1851, 3974],
+    "s2": [4072, 3449]
+  },
+  "solverDeltasAtVerification": {
+    "note": "corrections applied to the solver output of commit 6dd8024 to reach ground truth, in canvas pt (divide by 3.6 for ft)",
+    "3": [-10, 0], "4": [-18, 0], "5": [0, -10], "6": [-10, -8],
+    "7": [-151, -10], "8": [0, 78], "9": [-6, -40], "10": [181, -53],
+    "s1": [72, -54], "s2": [50, 24]
+  },
+  "verificationCriteria": [
+    "thick dashed matchline borders of adjacent sheets coincide (dashes interleave on one line, SEE SHEET labels flank it)",
+    "streets/curbs/courtyard fences crossing a matchline continue at the same station",
+    "stepped matchline corners (p7-p10 seam) mate corner-to-corner",
+    "strip sibling seam: s2 west border coincides with s1 east border; overlap column content duplicates in register"
+  ],
+  "knownSolverFailuresThisFixtureCatches": [
+    "p7/p10 east-column ~40-50 ft x-misplacement (deep west-border insets defeat nearest-to-label stroke pick)",
+    "p8 ~22 ft y-drift (un-anchored pair redistribution under W_STROKE reweighting)",
+    "strip along-axis: s1 +20 ft, s2 dx from sibling seam (no crossing signal on p9-side border)"
+  ]
+}
