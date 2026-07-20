@@ -1,5 +1,5 @@
 import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, FT, type SheetInput, type SegFeat } from "./stitchCore";
+import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -821,5 +821,45 @@ describe("unit stitching (frames + printed numbers + strip refs)", () => {
     expect(Math.abs(p2.y - p1.y)).toBeLessThan(30);
     expect(p3.x - p1.x).toBeGreaterThan(320); expect(p3.x - p1.x).toBeLessThan(360);
     expect(Math.abs(p3.y - p1.y)).toBeLessThan(40);
+  });
+});
+
+describe("oneSidedStrokeAnchor", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 1000];
+  // A full-width DASHED horizontal matchline at cross-y=Y (dashes sum well past the
+  // matchline-strength floor and span most of the width), plus a couple of vertical
+  // "streets" that terminate at the line (seam crossings).
+  const matchlineH = (Y: number, tag: string): Geom[] => {
+    const g: Geom[] = [];
+    for (let x = 150; x < 950; x += 50) g.push({ id: `${tag}m${x}`, pts: [[x, Y], [x + 32, Y]], closed: false });
+    g.push({ id: `${tag}s1`, pts: [[320, Y], [320, Y + 220]], closed: false }); // street crossing
+    g.push({ id: `${tag}s2`, pts: [[640, Y], [640, Y + 220]], closed: false });
+    return g;
+  };
+
+  it("forms a precise perp anchor from strokes on BOTH sheets with NO reciprocal label", () => {
+    const jGeom = matchlineH(100, "j"); // referrer's matchline near its edge (~ref label)
+    const iGeom = matchlineH(900, "i"); // referenced sheet's matchline in its FAR band
+    const r = oneSidedStrokeAnchor(iGeom, view, jGeom, view, { x: 500, y: 100 }, "bottom", 20);
+    expect(r).not.toBeNull();
+    expect(r!.perp).toBe("y");           // horizontal matchline pins the y axis
+    expect(r!.sjCross).toBeCloseTo(100, 0);
+    expect(r!.siCross).toBeCloseTo(900, 0);
+    // d(i→j) on the perp axis = FT(si) − FT(sj) (both strokes are the same world line).
+    expect(r!.dFt).toBeCloseTo(FT(900, 20) - FT(100, 20), 1);
+    expect(r!.crI.length).toBeGreaterThan(0); // crossing stations carried for the joint sweep
+    expect(r!.crJ.length).toBeGreaterThan(0);
+  });
+
+  it("returns null when the referenced sheet has NO matchline stroke (unchanged behaviour)", () => {
+    const jGeom = matchlineH(100, "j");
+    const r = oneSidedStrokeAnchor([], view, jGeom, view, { x: 500, y: 100 }, "bottom", 20);
+    expect(r).toBeNull();
+  });
+
+  it("returns null when the referrer itself has no stroke near its ref", () => {
+    const iGeom = matchlineH(900, "i");
+    const r = oneSidedStrokeAnchor(iGeom, view, [], view, { x: 500, y: 100 }, "bottom", 20);
+    expect(r).toBeNull();
   });
 });

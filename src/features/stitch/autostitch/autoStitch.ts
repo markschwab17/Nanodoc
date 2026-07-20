@@ -2,7 +2,7 @@ import type { PageExtract, Label } from "./types";
 import { capturePage } from "./captureDevice";
 // NOTE: scale inference (inferScale) is deferred to Task 10 of the original
 // roadmap. Do not import it yet.
-import { stitchSheets, findEdgeStroke, seamCrossings, crossingConsensus, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor, type Crossing } from "./stitchCore";
+import { stitchSheets, findEdgeStroke, oneSidedStrokeAnchor, seamCrossings, crossingConsensus, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor, type Crossing } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
 import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
@@ -255,18 +255,22 @@ export async function autoStitch(
       pj: PageRec, crossJ: number, alongJ: number, perp: "x" | "y",
     ): { perpDelta: number | null; along: number | null; loDelta: number | null; hiDelta: number | null; crI: Crossing[]; crJ: Crossing[] } => {
       const axis = perp === "x" ? "v" : "h";
+      // Rebase each endpoint to its strip's frame-local coordinates (no-op for whole
+      // pages / a top strip): stroke deltas and crossing stations then key to the same
+      // space as the unit's view/placement downstream.
+      const fi = frameLocal(pi, crossI, alongI, perp), fj = frameLocal(pj, crossJ, alongJ, perp);
       const extI = { lo: 0, hi: 0 }, extJ = { lo: 0, hi: 0 };
-      const si = findEdgeStroke(pi.extract.geometry, axis, crossI, pi.extract.view, 100, 0.3, extI);
-      const sj = findEdgeStroke(pj.extract.geometry, axis, crossJ, pj.extract.view, 100, 0.3, extJ);
+      const si = findEdgeStroke(fi.geometry, axis, fi.cross, fi.view, 100, 0.3, extI);
+      const sj = findEdgeStroke(fj.geometry, axis, fj.cross, fj.view, 100, 0.3, extJ);
       if (si == null || sj == null) return { perpDelta: null, along: null, loDelta: null, hiDelta: null, crI: [], crJ: [] };
       const perpDelta = FT(si, scale) - FT(sj, scale);
       // Along-axis seam-crossing consensus, windowed around the label along-delta so
       // far-off pairings can't flood the histogram. Crossings are collected at each
       // sheet's OWN stroke cross-position (si / sj), and carry an orientation signature
       // so crossingConsensus (and the downstream JOINT sweep) can gate street↔street.
-      const center = FT(alongI, scale) - FT(alongJ, scale);
-      const ci = seamCrossings(pi.extract.geometry, axis, si, scale);
-      const cj = seamCrossings(pj.extract.geometry, axis, sj, scale);
+      const center = FT(fi.along, scale) - FT(fj.along, scale);
+      const ci = seamCrossings(fi.geometry, axis, si, scale);
+      const cj = seamCrossings(fj.geometry, axis, sj, scale);
       // Window (±60 ft @20) and bin (2 ft @20) are page-point-derived so the vote
       // makes identical decisions at any scale (values just scale linearly).
       const cons = crossingConsensus(ci, cj, center, { window: FT(216, scale), bin: FT(7.2, scale) });
@@ -275,6 +279,52 @@ export async function autoStitch(
         loDelta: FT(extI.lo, scale) - FT(extJ.lo, scale),
         hiDelta: FT(extI.hi, scale) - FT(extJ.hi, scale),
         crI: ci, crJ: cj,
+      };
+    };
+
+    // Frame-local view of a split-page endpoint. When `p` is a two-strip page and the
+    // label point (x,y) falls in a strip frame, returns that frame's sliceExtract plus
+    // the label's cross/along coords REBASED to the frame origin — so the stroke search
+    // and crossing stations key to the strip's OWN coordinates (view [0,0,w,h]),
+    // matching how the strip UNIT's view and placement are keyed downstream. Whole-page
+    // otherwise (a no-op frame origin (0,0) for a full-page unit or a top strip). This
+    // is the strip-local rebase the prior round flagged as required: seamRegister used
+    // whole-page coords, harmless for a full-width row seam's along-x but wrong once a
+    // strip becomes a floating unit whose posFt is its frame origin.
+    const frameLocal = (p: PageRec, cross: number, along: number, perp: "x" | "y") => {
+      const frames = stripFrames([...p.extract.shxLabels, ...p.extract.labels], p.extract.view) ?? [];
+      const px = perp === "y" ? along : cross, py = perp === "y" ? cross : along;
+      const f = frames.find((fr) => fr.bbox[0] <= px && px <= fr.bbox[2] && fr.bbox[1] <= py && py <= fr.bbox[3]);
+      if (!f) return { geometry: p.extract.geometry, view: p.extract.view, cross, along };
+      const ext = sliceExtract(p.extract, f);
+      const foCross = perp === "y" ? f.bbox[1] : f.bbox[0];
+      const foAlong = perp === "y" ? f.bbox[0] : f.bbox[1];
+      return { geometry: ext.geometry, view: ext.view, cross: cross - foCross, along: along - foAlong };
+    };
+
+    /**
+     * ONE-SIDED stroke anchor fallback. When j references i but the reciprocal OCR
+     * search below recovers NO label on i, both sheets may still DRAW the shared
+     * matchline; `oneSidedStrokeAnchor` (stitchCore) locates j's stroke near its ref and
+     * i's as the matchline border in i's facing outer band. Restricted to refs
+     * originating on a split-page STRIP (jFrame != null) — the units the reciprocal path
+     * cannot anchor — and computed on the strip's FRAME-LOCAL slice so its deltas/
+     * stations key to the strip's coordinates. Keeps whole-page seams untouched.
+     */
+    const oneSidedAnchor = (iPage: PageRec, jPage: PageRec, refJ: SheetRef): RawAnchor | null => {
+      const frames = stripFrames([...jPage.extract.shxLabels, ...jPage.extract.labels], jPage.extract.view) ?? [];
+      const jFrame = frames.find((f) => f.bbox[1] <= refJ.at.y && refJ.at.y <= f.bbox[3] && f.bbox[0] <= refJ.at.x && refJ.at.x <= f.bbox[2]);
+      if (!jFrame) return null; // strip-only
+      const jExtract = sliceExtract(jPage.extract, jFrame);
+      const jAt = { x: refJ.at.x - jFrame.bbox[0], y: refJ.at.y - jFrame.bbox[1] };
+      const r = oneSidedStrokeAnchor(iPage.extract.geometry, iPage.extract.view, jExtract.geometry, jExtract.view, jAt, refJ.edge, scale);
+      if (!r) return null;
+      const [, iy0, , iy1] = iPage.extract.view;
+      return {
+        pageI: iPage.pageIndex, yI: r.perp === "y" ? r.siCross : (iy0 + iy1) / 2,
+        pageJ: jPage.pageIndex, yJ: refJ.at.y,
+        perp: r.perp, dFt: r.dFt, precise: true, along: undefined, alongPrecise: false,
+        loDelta: r.loDelta, hiDelta: r.hiDelta, crI: r.crI, crJ: r.crJ,
       };
     };
 
@@ -292,12 +342,23 @@ export async function autoStitch(
       const W = x1 - x0, H = y1 - y0;
       const expected = jPage.printedNo;
       const horiz = refJ.edge === "left" || refJ.edge === "right"; // vertical matchline → pins x
+      // A ref that ORIGINATES on a split-page STRIP is the case the narrow one-sided
+      // band gets wrong: the strip's neighbour carries its "SEE SHEET n" at the FAR
+      // interior (opposite the half the row-seam geometry assumes — verified on
+      // PG_SITE: p9/p10 carry "SEE SHEET 2" at their SOUTH matchline). For those we scan
+      // i's FULL interior; the expected-number gate + abutment floor keep it safe. Every
+      // other (whole-page) ref keeps the original targeted band so no resolved seam
+      // shifts. Strip anchors also leave the ALONG axis FREE (the per-seam crossing
+      // consensus aliases on the periodic module) for the joint sweep to resolve.
+      const jStripFrames = stripFrames([...jPage.extract.shxLabels, ...jPage.extract.labels], jPage.extract.view) ?? [];
+      const jIsStrip = jStripFrames.some((f) => f.bbox[0] <= refJ.at.x && refJ.at.x <= f.bbox[2] && f.bbox[1] <= refJ.at.y && refJ.at.y <= f.bbox[3]);
       const page = doc.loadPage(iPage.pageIndex);
       try {
         if (horiz) {
-          // Region = the side of i OPPOSITE the ref's edge. Ref on j's left edge →
-          // i is WEST of j → i's matching label sits near i's EAST matchline.
-          const [rx0, rx1] = refJ.edge === "left" ? [x0 + 0.45 * W, x0 + 0.98 * W] : [x0 + 0.02 * W, x0 + 0.55 * W];
+          // Region = the side of i OPPOSITE the ref's edge (whole-page ref), or i's FULL
+          // interior for a strip ref (either side may carry the reciprocal label).
+          const [rx0, rx1] = jIsStrip ? [x0 + 0.02 * W, x0 + 0.98 * W]
+            : refJ.edge === "left" ? [x0 + 0.45 * W, x0 + 0.98 * W] : [x0 + 0.02 * W, x0 + 0.55 * W];
           for (let bx0 = rx0; bx0 < rx1; bx0 += 120) {
             const bx1 = Math.min(bx0 + 160, rx1);
             const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
@@ -312,16 +373,17 @@ export async function autoStitch(
                   const reg = seamRegister(iPage, cx, cy, jPage, refJ.at.x, refJ.at.y, "x");
                   return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x",
                     dFt: reg.perpDelta ?? FT(cx, scale) - FT(refJ.at.x, scale), precise: reg.perpDelta != null,
-                    along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
+                    along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
                 }
               }
             }
           }
         } else {
-          // Top/bottom ref: horizontal matchline, horizontal text (no rotation).
-          // Ref on j's top edge → i is NORTH of j → i's matching label sits near
-          // i's SOUTH (bottom) interior; ref on j's bottom → search i's top interior.
-          const [ry0, ry1] = refJ.edge === "top" ? [y0 + 0.45 * H, y0 + 0.98 * H] : [y0 + 0.02 * H, y0 + 0.55 * H];
+          // Top/bottom ref: horizontal matchline, horizontal text (no rotation). Ref on
+          // j's top edge → i's matching label near i's south interior; bottom → north.
+          // A strip ref scans i's FULL interior (either side may carry the label).
+          const [ry0, ry1] = jIsStrip ? [y0 + 0.02 * H, y0 + 0.98 * H]
+            : refJ.edge === "top" ? [y0 + 0.45 * H, y0 + 0.98 * H] : [y0 + 0.02 * H, y0 + 0.55 * H];
           for (let by0 = ry0; by0 < ry1; by0 += 120) {
             const by1 = Math.min(by0 + 160, ry1);
             const clip: [number, number, number, number] = [x0, by0, x1, by1];
@@ -334,7 +396,7 @@ export async function autoStitch(
                 const reg = seamRegister(iPage, cy, cx, jPage, refJ.at.y, refJ.at.x, "y");
                 return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
                   dFt: reg.perpDelta ?? FT(cy, scale) - FT(refJ.at.y, scale), precise: reg.perpDelta != null,
-                  along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
+                  along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
               }
             }
           }
@@ -342,7 +404,11 @@ export async function autoStitch(
       } finally {
         page.destroy?.();
       }
-      return null;
+      // No reciprocal label recovered on i → fall back to the one-sided STROKE anchor
+      // for a strip ref (both sheets still DRAW the shared matchline; locate i's stroke
+      // by its facing edge band, not by a label). Returns null when i has no such
+      // matchline stroke, leaving behaviour unchanged for non-adjacent references.
+      return oneSidedAnchor(iPage, jPage, refJ);
     };
 
     // ── MUTUAL facing edge refs: anchor directly, no OCR search ────────────────

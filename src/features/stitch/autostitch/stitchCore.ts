@@ -285,6 +285,136 @@ export function findEdgeStroke(
   return key * BIN;
 }
 
+/**
+ * The MATCHLINE-STRENGTH stroke inside a cross-coord BAND, for the ONE-SIDED anchor
+ * case: a sheet that is REFERENCED by a neighbour's edge callout ("SEE SHEET n") but
+ * carries no reciprocal interior label of its own. There is no label to search near
+ * (findEdgeStroke's nearest-to-label rule), so we scan the OPPOSITE-EDGE band (the
+ * side facing the referrer) directly and take the STRONGEST DASHED line.
+ *
+ * `lo`/`hi` bound the cross-coord band (page pts). Bins are summed exactly as in
+ * findEdgeStroke; a candidate must clear `minFrac` of the perpendicular sheet
+ * dimension (matchline strength) AND stay UNDER `maxFrac` — the frac cap drops the
+ * SOLID drawing BORDER (which spans the full dimension in one unbroken stroke, ≈1.0)
+ * so a dashed matchline (many collinear dashes summing to a partial fraction) wins.
+ * Among the qualifying bins the strongest (max summed dash span) is returned: on
+ * these sheets the drawing bleeds to the page edge, so the matchline IS the dominant
+ * long dashed line in the near-edge band, and picking by strength avoids any
+ * dependence on the (aliased) coarse along estimate — the dash-extent overlap with
+ * the referrer's stroke is reported separately as a non-gating corroboration.
+ * `extentOut` receives the picked line's dash extent (min/max along-coord). Returns
+ * the cross-coord (page pts) or null.
+ */
+export interface BandStroke { cross: number; tot: number; frac: number; lo: number; hi: number }
+
+export function bandStrokeCandidates(
+  geometry: Geom[], axis: "h" | "v", lo: number, hi: number,
+  view: [number, number, number, number], minFrac = 0.3, maxFrac = 0.9
+): BandStroke[] {
+  const [x0, y0, x1, y1] = view; const W = x1 - x0, H = y1 - y0;
+  const perpDim = axis === "h" ? W : H;
+  const BIN = 2;
+  const spans = new Map<number, number>();
+  const ext = new Map<number, { lo: number; hi: number }>();
+  for (const g of geometry) {
+    const pts = g.pts; if (!pts || pts.length < 2) continue;
+    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const cc = axis === "h" ? (a[1] + b[1]) / 2 : (a[0] + b[0]) / 2;
+      if (Math.abs((axis === "h" ? b[1] - a[1] : b[0] - a[0])) > 3) continue; // axis-aligned only
+      if (cc < lo || cc > hi) continue;
+      const span = axis === "h" ? Math.abs(b[0] - a[0]) : Math.abs(b[1] - a[1]);
+      const k = Math.round(cc / BIN);
+      spans.set(k, (spans.get(k) || 0) + span);
+      const al0 = axis === "h" ? Math.min(a[0], b[0]) : Math.min(a[1], b[1]);
+      const al1 = axis === "h" ? Math.max(a[0], b[0]) : Math.max(a[1], b[1]);
+      const e = ext.get(k);
+      if (e) { if (al0 < e.lo) e.lo = al0; if (al1 > e.hi) e.hi = al1; }
+      else ext.set(k, { lo: al0, hi: al1 });
+    }
+  }
+  const out: BandStroke[] = [];
+  for (const [k, tot] of spans) {
+    const frac = tot / perpDim;
+    if (frac < minFrac || frac > maxFrac) continue; // matchline strength, but not a solid border
+    const e = ext.get(k)!;
+    out.push({ cross: k * BIN, tot, frac, lo: e.lo, hi: e.hi });
+  }
+  return out.sort((a, b) => b.tot - a.tot);
+}
+
+export function findBandStroke(
+  geometry: Geom[], axis: "h" | "v", lo: number, hi: number,
+  view: [number, number, number, number], minFrac = 0.3, maxFrac = 0.9,
+  extentOut?: { lo: number; hi: number }
+): number | null {
+  const c = bandStrokeCandidates(geometry, axis, lo, hi, view, minFrac, maxFrac)[0];
+  if (!c) return null;
+  if (extentOut) { extentOut.lo = c.lo; extentOut.hi = c.hi; }
+  return c.cross;
+}
+
+/**
+ * ONE-SIDED matchline stroke anchor: a precise perpendicular anchor between a unit j
+ * that REFERENCES a neighbour i ("SEE SHEET n" at j's `refEdge`) and i, when i carries
+ * NO reciprocal label to locate its own copy of the shared matchline. Both sheets still
+ * DRAW the matchline; j's stroke is found near its ref label (like the reciprocal case),
+ * and i's is the drawing's matchline-strength DASHED BORDER in i's opposite-edge outer
+ * band. The band is the side of i FACING j: a ref at j's `bottom`/`left` edge means i
+ * sits on j's high-cross side, so i's shared matchline is at i's far (high-cross) outer
+ * band; `top`/`right` → i's near (low-cross) outer band. The candidate must be a
+ * physical ABUTMENT (perp offset within the two units' near-abutting band — excludes i's
+ * OTHER matchline, ~0 offset) and span most of the drawing (`spanFrac`) so a short
+ * interior line cannot win. Returns a precise perp anchor with crossing stations at both
+ * strokes (for the downstream joint along-sweep); the ALONG axis is left free. Returns
+ * null when no valid i-stroke exists (unchanged, non-anchored behaviour). All geometry is
+ * assumed in the SAME (frame-local when a strip) coordinate space as the caller keys the
+ * units, so the returned deltas/stations need no rebasing.
+ *
+ * NOTE on real dense civil sheets the pure-geometry i-side pick is defeated by periodic
+ * site content (every parking row looks like a matchline); it is reliable only when the
+ * matchline is the distinct outer border (clean sheets / this function's tests). Callers
+ * that have i's reciprocal LABEL available should prefer locating the stroke by the label
+ * (findEdgeStroke near it) — this function is the fallback when no label is recoverable.
+ */
+export function oneSidedStrokeAnchor(
+  iGeom: Geom[], iView: [number, number, number, number],
+  jGeom: Geom[], jView: [number, number, number, number],
+  jRefAt: { x: number; y: number }, refEdge: string, scale: number,
+  { spanFrac = 0.6 }: { spanFrac?: number } = {}
+): { perp: "x" | "y"; dFt: number; crI: Crossing[]; crJ: Crossing[]; loDelta: number; hiDelta: number; siCross: number; sjCross: number } | null {
+  const horiz = refEdge === "left" || refEdge === "right"; // vertical matchline → perp x
+  const axis: "h" | "v" = horiz ? "v" : "h";
+  // j-side stroke near its ref label.
+  const extJ = { lo: 0, hi: 0 };
+  const sj = findEdgeStroke(jGeom, axis, horiz ? jRefAt.x : jRefAt.y, jView, 100, 0.3, extJ);
+  if (sj == null) return null;
+  const [ix0, iy0, ix1, iy1] = iView, [jx0, jy0, jx1, jy1] = jView;
+  const IW = ix1 - ix0, IH = iy1 - iy0;
+  const perpDimI = horiz ? FT(IW, scale) : FT(IH, scale);
+  const perpDimJ = horiz ? FT(jx1 - jx0, scale) : FT(jy1 - jy0, scale);
+  const floor = 0.5 * Math.min(perpDimI, perpDimJ), ceil = 1.15 * Math.max(perpDimI, perpDimJ);
+  const alongDim = axis === "h" ? IW : IH;
+  const c0 = axis === "h" ? iy0 : ix0, c1 = axis === "h" ? iy1 : ix1, dim = c1 - c0;
+  // i sits on j's high-cross side for a bottom/left ref → search i's FAR (high-cross)
+  // outer band; else its NEAR (low-cross) outer band.
+  const far = refEdge === "bottom" || refEdge === "left";
+  const lo = far ? c0 + 0.7 * dim : c0, hi = far ? c1 : c0 + 0.3 * dim;
+  const ftJ = FT(sj, scale);
+  const cands = bandStrokeCandidates(iGeom, axis, lo, hi, iView, 0.12, 0.9)
+    .filter((c) => { const mag = Math.abs(FT(c.cross, scale) - ftJ); return mag >= floor && mag <= ceil && (c.hi - c.lo) >= spanFrac * alongDim; });
+  const pick = cands[0]; // strength-sorted; the border is the dominant wide dashed line
+  if (!pick) return null;
+  return {
+    perp: horiz ? "x" : "y", dFt: FT(pick.cross, scale) - ftJ,
+    crI: seamCrossings(iGeom, axis, pick.cross, scale),
+    crJ: seamCrossings(jGeom, axis, sj, scale),
+    loDelta: FT(pick.lo, scale) - FT(extJ.lo, scale), hiDelta: FT(pick.hi, scale) - FT(extJ.hi, scale),
+    siCross: pick.cross, sjCross: sj,
+  };
+}
+
 /** A single along-matchline crossing: `along` is the world-ft station where the
  *  linework crosses the matchline; `ang` is the crossing segment's absolute
  *  orientation (0..180°), a signature that lets a station pair be gated on
@@ -1125,12 +1255,17 @@ export function stitchSheets(
         if (anchor.perp === "y") { wy = w; wx = freeW; } else { wx = w; wy = freeW; }
       }
     } else if (anchor != null && anchor.precise) {
-      // Precise stroke anchor but NO segment overlap resolved (token-poor seam,
-      // sparse linework near the matchline): the stroke is still ground truth for
-      // the perp axis, so emit a SINGLE-AXIS constraint on that axis alone — the
-      // parallel axis is left to the graph. Modest weight (~10, comparable to the
-      // matchline-stroke channel) so a decisive drawing lock elsewhere still wins.
-      const W_STROKE = 10;
+      // Precise stroke anchor but NO segment overlap resolved (token-poor seam, sparse
+      // linework near the matchline — e.g. a split-page STRIP whose neighbour draws a
+      // margin between its content and its matchline border): the stroke is GROUND TRUTH
+      // for the perp axis, so emit a SINGLE-AXIS constraint on that axis alone (the
+      // parallel axis is left to the graph / joint sweep). Strong weight (matches the
+      // registered-anchor channels) so the physical matchline WINS over a neighbour's
+      // coarse segment guess — critically, it lets a strip pin BOTH its neighbours'
+      // matchlines, correcting their relative offset where a low-confidence segment vote
+      // had them flush. (At the old modest ~10 the ground-truth stroke was overruled and
+      // the seam ghosted.)
+      const W_STROKE = 600;
       if (anchor.perp === "y") { final = { dx: 0, dy: anchor.d }; wx = 0; wy = W_STROKE; }
       else { final = { dx: anchor.d, dy: 0 }; wx = W_STROKE; wy = 0; }
       channel = "anchor-stroke"; conf = "high"; w = W_STROKE;
