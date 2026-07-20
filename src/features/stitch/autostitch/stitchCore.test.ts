@@ -511,7 +511,8 @@ describe("seamCrossings + crossingConsensus", () => {
     ];
     const cr = seamCrossings(geom, "v", 1000, 20);
     expect(cr.length).toBe(1);
-    expect(cr[0]).toBeCloseTo(200, 0); // FT(720,20)
+    expect(cr[0].along).toBeCloseTo(200, 0); // FT(720,20)
+    expect(cr[0].ang).toBeCloseTo(0, 0);     // horizontal street → 0° orientation
   });
 
   it("collapses one street's coincident linework into a single station", () => {
@@ -522,7 +523,7 @@ describe("seamCrossings + crossingConsensus", () => {
       seg(`d${i}`, [[900, y], [985, y]])); // 85 pt ≈ 23.6 ft each, ends 15 pt short of the line
     const cr = seamCrossings(lines, "v", 1000, 20);
     expect(cr.length).toBe(1);
-    expect(cr[0]).toBeCloseTo(100, 0);
+    expect(cr[0].along).toBeCloseTo(100, 0);
   });
 
   it("consensus picks the true offset over a periodic decoy 45 ft off", () => {
@@ -554,6 +555,22 @@ describe("seamCrossings + crossingConsensus", () => {
     expect(c20).not.toBeNull();
     expect(c10).not.toBeNull();
     expect(c10!.along).toBeCloseTo(c20!.along / 2, 1);
+  });
+
+  it("gates station pairs on orientation: a cross-angle decoy is excluded", () => {
+    // Five STREETS (0°) on sheet i. Sheet j carries the true street copies at offset 0
+    // AND a lot-line decoy (90°) at offset −30. Without orientation gating the two
+    // peaks tie (5 vs 5) → indecisive. With gating the cross-angle decoy pairs drop,
+    // so offset 0 wins decisively — a street only registers against a street.
+    const I = [0, 25, 55, 90, 130].map((along) => ({ along, ang: 0 }));
+    const Jtrue = [0, 25, 55, 90, 130].map((along) => ({ along, ang: 0 }));
+    const Jdecoy = [30, 55, 85, 120, 160].map((along) => ({ along, ang: 90 }));
+    // ungated (numbers, no angle) → tie → null
+    expect(crossingConsensus(I.map((c) => c.along), [...Jtrue, ...Jdecoy].map((c) => c.along), 0)).toBeNull();
+    // gated (Crossing objects) → decoy excluded → decisive at 0
+    const g = crossingConsensus(I, [...Jtrue, ...Jdecoy], 0);
+    expect(g).not.toBeNull();
+    expect(g!.along).toBeCloseTo(0, 0);
   });
 });
 
@@ -597,6 +614,68 @@ describe("stitchSheets fully-2D-precise (crossing) anchor", () => {
     const dy = res.placements.get(2)!.y - res.placements.get(1)!.y;
     expect(Math.abs(dx - 500)).toBeLessThanOrEqual(3); // perp pinned to the stroke
     expect(Math.abs(dy - 30)).toBeLessThanOrEqual(3);  // along pinned to the crossing (not the 35 decoy)
+  });
+});
+
+describe("stitchSheets joint along-sweep", () => {
+  // Unit A connects to B AND C through precise-perp ROW seams (perp "y" → along "x").
+  // Each seam alone is periodically ambiguous (its crossing stations align at TWO
+  // candidate along-offsets), so neither seam's individual consensus fired
+  // (alongPrecise stays false). The joint sweep sums crossing matches over BOTH seams
+  // and only accepts an along-offset where BOTH agree.
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720×480 ft @20
+  const SCALE = 20;
+  const H = FT(VIEW[3] - VIEW[1], SCALE); // 480 ft
+  const DY = 0.8 * H;                      // 384 ft — a valid near-abutting row seam
+  const mk = (no: number): SheetInput => ({
+    id: String(no), no, scale: SCALE, view: VIEW,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry: [] } as PageExtract,
+  });
+  const xing = (alongs: number[]) => alongs.map((along) => ({ along, ang: 0 })); // all streets (0°)
+  // A's aperiodic, widely-spaced crossing stations facing B and facing C (different
+  // phase per seam). Wide/aperiodic spacing keeps accidental cross-offset coincidences
+  // sparse so the joint peak stands clear of the runner-up.
+  const A_B = [0, 40, 95, 165, 250], A_C = [0, 50, 115, 200, 300];
+  const off = (base: number[], d: number) => base.map((s) => s + d);
+
+  it("picks the one A-offset that satisfies BOTH ambiguous seams", () => {
+    // Seam A-B matches at along +20 (true) OR −44 (periodic decoy); A-C matches at
+    // +20 (true) OR +48. Only +20 is common → the joint peak (10 matches, both seams)
+    // is decisive (≥1.3× the runner-up) and an along constraint is emitted per seam.
+    const B = xing([...off(A_B, 20), ...off(A_B, -44)]);
+    const C = xing([...off(A_C, 20), ...off(A_C, 48)]);
+    const anchors = [
+      { i: 1, j: 2, dy: DY, perp: "y" as const, precise: true, crossI: xing(A_B), crossJ: B },
+      { i: 1, j: 3, dy: DY, perp: "y" as const, precise: true, crossI: xing(A_C), crossJ: C },
+    ];
+    const res = stitchSheets([mk(1), mk(2), mk(3)], undefined, anchors);
+    const sw = res.jointSweeps!.find((s) => s.unit === 1 && s.axis === "x")!;
+    expect(sw).toBeDefined();
+    expect(sw.accepted).toBe(true);
+    expect(sw.total).toBeGreaterThanOrEqual(8);
+    expect(sw.seams.filter((s) => s.matches >= 2).length).toBeGreaterThanOrEqual(2);
+    expect(Math.abs(sw.shiftFt - 20)).toBeLessThanOrEqual(3); // sweep-step near the true +20
+    // The emitted along constraints pin B and C at the SAME x off A (station convention
+    // d(A→X) = along_A − along_X ≈ −20), consistently for both seams.
+    const pA = res.placements.get(1)!, pB = res.placements.get(2)!, pC = res.placements.get(3)!;
+    expect(pB.x - pA.x).toBeCloseTo(-20, 0);
+    expect(Math.abs((pB.x - pA.x) - (pC.x - pA.x))).toBeLessThanOrEqual(3); // B and C agree
+  });
+
+  it("declines when both seams share the SAME two candidates (jointness can't disambiguate)", () => {
+    // Both seams match at +20 AND −44 → the joint sum peaks EQUALLY at both offsets, so
+    // the sweep is not decisive (best is not ≥1.3× the runner-up) → no constraint, and
+    // the along axis is left as-is (control: jointness genuinely cannot break the tie).
+    const B = xing([...off(A_B, 20), ...off(A_B, -44)]);
+    const C = xing([...off(A_C, 20), ...off(A_C, -44)]);
+    const anchors = [
+      { i: 1, j: 2, dy: DY, perp: "y" as const, precise: true, crossI: xing(A_B), crossJ: B },
+      { i: 1, j: 3, dy: DY, perp: "y" as const, precise: true, crossI: xing(A_C), crossJ: C },
+    ];
+    const res = stitchSheets([mk(1), mk(2), mk(3)], undefined, anchors);
+    const sw = res.jointSweeps!.find((s) => s.unit === 1 && s.axis === "x")!;
+    expect(sw).toBeDefined();
+    expect(sw.accepted).toBe(false);
   });
 });
 

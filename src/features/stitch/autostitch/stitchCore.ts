@@ -285,6 +285,12 @@ export function findEdgeStroke(
   return key * BIN;
 }
 
+/** A single along-matchline crossing: `along` is the world-ft station where the
+ *  linework crosses the matchline; `ang` is the crossing segment's absolute
+ *  orientation (0..180°), a signature that lets a station pair be gated on
+ *  orientation agreement (street↔street, not street↔lot-line). */
+export interface Crossing { along: number; ang: number }
+
 /**
  * Along-matchline CROSSINGS: the along-coordinates (world ft) where real linework
  * (streets, curbs, lot lines) CROSSES the matchline line at cross-coord `cross`
@@ -317,8 +323,8 @@ export function seamCrossings(
   // and make the consensus (and thus placement) scale-dependent. 43.2/10.8 pt = 12/3
   // ft @20, so scale-20 fixtures are unchanged.
   { band = 40, minLenFt = FT(43.2, scale), minAngleDeg = 30, dedupFt = FT(10.8, scale) }: { band?: number; minLenFt?: number; minAngleDeg?: number; dedupFt?: number } = {}
-): number[] {
-  const raw: number[] = [];
+): Crossing[] {
+  const raw: Crossing[] = [];
   for (const g of geometry) {
     const pts = g.pts; if (!pts || pts.length < 2) continue;
     const n = pts.length - 1 + (g.closed ? 1 : 0);
@@ -331,20 +337,23 @@ export function seamCrossings(
       const dx = b[0] - a[0], dy = b[1] - a[1];
       const len = Math.hypot(dx, dy);
       if (FT(len, scale) < minLenFt) continue;        // drop text fragments / short interior clutter
-      // Angle relative to the matchline axis (0°/180° for "h", 90° for "v").
+      // Absolute segment orientation (0..180). Carried on the crossing so a station
+      // pair only matches when the two crossing segments share an ORIENTATION bucket
+      // (a street matches a street, not a lot line running at another angle) — a cheap
+      // signature that sharpens the along-consensus against periodic cross-angle aliases.
       let ang = (Math.atan2(dy, dx) * 180) / Math.PI;
       ang = ((ang % 180) + 180) % 180;                // 0..180
       const fromAxis = axis === "h" ? Math.min(ang, 180 - ang) : Math.abs(ang - 90);
       if (fromAxis < minAngleDeg) continue;           // near-parallel to matchline → exclude
       const t = (cross - ca) / (cb - ca);             // crossing param (interp or short extrapolation)
       const along = axis === "h" ? a[0] + t * (b[0] - a[0]) : a[1] + t * (b[1] - a[1]);
-      raw.push(FT(along, scale));
+      raw.push({ along: FT(along, scale), ang });
     }
   }
   // Collapse the many dashes of one physical crossing into a single station.
-  raw.sort((x, y) => x - y);
-  const out: number[] = [];
-  for (const v of raw) if (!out.length || v - out[out.length - 1] > dedupFt) out.push(v);
+  raw.sort((x, y) => x.along - y.along);
+  const out: Crossing[] = [];
+  for (const v of raw) if (!out.length || v.along - out[out.length - 1].along > dedupFt) out.push(v);
   return out;
 }
 
@@ -358,29 +367,48 @@ export function seamCrossings(
  * null when no decisive peak. Exported for tests.
  */
 export function crossingConsensus(
-  alongI: number[], alongJ: number[], center: number,
-  { window = 60, bin = 2, minInliers = 5, ratio = 1.5 }: { window?: number; bin?: number; minInliers?: number; ratio?: number } = {}
+  alongI: (number | Crossing)[], alongJ: (number | Crossing)[], center: number,
+  { window = 60, bin = 2, minInliers = 5, ratio = 1.5, angTol = 15 }: { window?: number; bin?: number; minInliers?: number; ratio?: number; angTol?: number } = {}
 ): { along: number; inliers: number; peak: number; second: number } | null {
-  const deltas: number[] = [];
-  for (const ai of alongI) for (const aj of alongJ) {
-    const d = ai - aj;
-    if (Math.abs(d - center) <= window) deltas.push(d);
-  }
-  if (deltas.length < minInliers) return null;
-  const bins = new Map<number, number>();
-  for (const d of deltas) { const k = Math.round(d / bin); bins.set(k, (bins.get(k) || 0) + 1); }
-  const sm = (k: number) => (bins.get(k - 1) || 0) + (bins.get(k) || 0) + (bins.get(k + 1) || 0);
-  let bestK: number | null = null, bestN = -1;
-  for (const [k] of bins) { const nn = sm(k); if (nn > bestN) { bestN = nn; bestK = k; } }
-  if (bestK == null) return null;
-  let second = 0;
-  for (const [k] of bins) { if (Math.abs(k - bestK) <= 3) continue; second = Math.max(second, sm(k)); }
-  const cx = bestK * bin;
-  const inl = deltas.filter((d) => Math.abs(d - cx) <= 1.5 * bin);
-  if (inl.length < minInliers) return null;
-  if (bestN < ratio * second) return null; // not decisive vs the runner-up peak
-  const mean = inl.reduce((s, d) => s + d, 0) / inl.length;
-  return { along: mean, inliers: inl.length, peak: bestN, second };
+  // Accept raw numbers (angle-less) or Crossing objects (angle-bearing).
+  const norm = (c: number | Crossing): Crossing => (typeof c === "number" ? { along: c, ang: NaN } : c);
+  const I = alongI.map(norm), J = alongJ.map(norm);
+  const angOk = (a: number, b: number): boolean => {
+    if (Number.isNaN(a) || Number.isNaN(b)) return true;
+    const d = Math.abs(a - b) % 180;
+    return Math.min(d, 180 - d) <= angTol;
+  };
+  // One decisive-consensus pass, optionally ORIENTATION-GATED (a station pair only
+  // votes when the two crossing segments' angles agree within `angTol`).
+  const solve = (gated: boolean) => {
+    const deltas: number[] = [];
+    for (const ci of I) for (const cj of J) {
+      if (gated && !angOk(ci.ang, cj.ang)) continue;
+      const d = ci.along - cj.along;
+      if (Math.abs(d - center) <= window) deltas.push(d);
+    }
+    if (deltas.length < minInliers) return null;
+    const bins = new Map<number, number>();
+    for (const d of deltas) { const k = Math.round(d / bin); bins.set(k, (bins.get(k) || 0) + 1); }
+    const sm = (k: number) => (bins.get(k - 1) || 0) + (bins.get(k) || 0) + (bins.get(k + 1) || 0);
+    let bestK: number | null = null, bestN = -1;
+    for (const [k] of bins) { const nn = sm(k); if (nn > bestN) { bestN = nn; bestK = k; } }
+    if (bestK == null) return null;
+    let second = 0;
+    for (const [k] of bins) { if (Math.abs(k - bestK) <= 3) continue; second = Math.max(second, sm(k)); }
+    const cx = bestK * bin;
+    const inl = deltas.filter((d) => Math.abs(d - cx) <= 1.5 * bin);
+    if (inl.length < minInliers) return null;
+    if (bestN < ratio * second) return null; // not decisive vs the runner-up peak
+    const mean = inl.reduce((s, d) => s + d, 0) / inl.length;
+    return { along: mean, inliers: inl.length, peak: bestN, second };
+  };
+  // Orientation gating is STRICTLY ADDITIVE: prefer the gated consensus (it sharpens
+  // against cross-angle aliases — a street registers only against a street), but fall
+  // back to the ungated one when gating over-prunes real inliers below the decisiveness
+  // gate. So signatures can only ADD a decisive seam or de-alias one, never REMOVE a
+  // consensus the ungated vote already found (which would regress a fixed seam).
+  return solve(true) ?? solve(false);
 }
 
 /**
@@ -611,7 +639,7 @@ export interface SheetInput {
   frame?: [number, number, number, number];
 }
 export interface PairReport { i: number; j: number; channel: string | null; conf: string | null; dxFt: number | null; dyFt: number | null; weight: number; residFt: number | null; }
-export interface StitchResult { root: number; placements: Map<number, { x: number; y: number }>; worstResidFt: number; pairs: PairReport[]; method: StitchMethod; }
+export interface StitchResult { root: number; placements: Map<number, { x: number; y: number }>; worstResidFt: number; pairs: PairReport[]; method: StitchMethod; jointSweeps?: JointSweep[]; }
 
 /**
  * FINE seam registration: the precise translation that best overlays sheet j's
@@ -741,7 +769,19 @@ interface DriverSheet {
  * `strokeLoDelta`/`strokeHiDelta` are diag-only cross-checks (matchline dash-extent
  * endpoint deltas), ignored by the solver.
  */
-export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y"; precise?: boolean; along?: number; alongPrecise?: boolean; strokeLoDelta?: number; strokeHiDelta?: number }
+export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y"; precise?: boolean; along?: number; alongPrecise?: boolean; strokeLoDelta?: number; strokeHiDelta?: number;
+  /** Seam-crossing station sets (world ft + orientation) on unit i / unit j, collected
+   *  at the matchline stroke line. Carried so `stitchSheets` can run the JOINT along-
+   *  sweep across a floating unit's several precise-perp seams (see `jointAlongSweep`). */
+  crossI?: Crossing[]; crossJ?: Crossing[] }
+
+/** One floating-unit joint along-sweep outcome (diag surface — see jointAlongSweep). */
+export interface JointSweep {
+  unit: number; axis: "x" | "y"; accepted: boolean; shiftFt: number;
+  total: number; runnerUp: number; margin: number;
+  seams: { i: number; j: number; matches: number; loDelta?: number; hiDelta?: number }[];
+  top3: { deltaFt: number; total: number }[];
+}
 
 export function stitchSheets(
   inputs: SheetInput[],
@@ -1208,6 +1248,121 @@ export function stitchSheets(
     ({ main, mainSet, rootKey, pos: coarsePos } = placeFrom(constraints));
   }
 
+  // ── JOINT ALONG-SWEEP (module-periodic aliasing) ────────────────────────────
+  // A FLOATING unit connects to several neighbours through precise-perp seams, but
+  // each seam's 1-D crossing consensus is individually ambiguous — the content along
+  // the matchline is the same repeating module (townhouses ~45-50 ft), so a lone
+  // seam's along vote aliases (that is why `alongPrecise` never fired on it). The
+  // module PHASE relative to each neighbour differs, though, so the SUM of crossing-
+  // station matches over ALL the unit's seams peaks UNIQUELY at the true along-offset.
+  // We sweep the unit's along position and, when the joint peak is decisive AND ≥2
+  // seams genuinely contribute (not a single-seam-dominated peak = the old ambiguity),
+  // emit a moderate-weight (W_ALONG) single-axis along constraint for each contributing
+  // seam, refine-exempt. Iterated most-precise-seams-first so a unit fixed by the sweep
+  // hands its neighbours more anchored seams (cap 3 passes).
+  const jointSweeps: JointSweep[] = [];
+  if (mainSet.size >= 2 && (anchors?.length ?? 0)) {
+    // Precise-perp seams with crossing station data, both endpoints placed.
+    type SeamRec = { i: number; j: number; along: "x" | "y"; crI: Crossing[]; crJ: Crossing[]; alongPrecise: boolean; lo?: number; hi?: number };
+    const seamRecs: SeamRec[] = [];
+    for (const a of anchors ?? []) {
+      if (!a.precise || !a.crossI || !a.crossJ) continue;
+      if (!mainSet.has(a.i) || !mainSet.has(a.j)) continue;
+      seamRecs.push({ i: a.i, j: a.j, along: (a.perp ?? "x") === "y" ? "x" : "y", crI: a.crossI, crJ: a.crossJ,
+        alongPrecise: !!a.alongPrecise, lo: a.strokeLoDelta, hi: a.strokeHiDelta });
+    }
+    const tol = FT(7.2, uScale);        // station match tolerance 2 ft @20
+    const R = FT(216, uScale), step = FT(7.2, uScale); // sweep ±60 ft, 2-ft steps @20
+    const angOk = (a: number, b: number) => { if (Number.isNaN(a) || Number.isNaN(b)) return true; const d = Math.abs(a - b) % 180; return Math.min(d, 180 - d) <= 15; };
+    const coord = (p: { x: number; y: number }, ax: "x" | "y") => (ax === "x" ? p.x : p.y);
+    // Candidate (unit,axis) floats: ≥2 precise-perp seams on this axis, ≥1 still
+    // non-precise, and none already decisively along-pinned (skip resolved axes).
+    type Cand = { unit: number; axis: "x" | "y"; seams: SeamRec[] };
+    const cands: Cand[] = [];
+    for (const u of main) for (const axis of ["x", "y"] as const) {
+      const us = seamRecs.filter((s) => (s.i === u || s.j === u) && s.along === axis);
+      if (us.length < 2) continue;
+      if (us.some((s) => s.alongPrecise)) continue;   // already pinned on this axis
+      if (!us.some((s) => !s.alongPrecise)) continue;  // (redundant) needs a non-precise seam
+      cands.push({ unit: u, axis, seams: us });
+    }
+    cands.sort((a, b) => b.seams.length - a.seams.length); // most-precise-seams-first
+    const done = new Set<string>();
+    for (let iter = 0; iter < 3; iter++) {
+      let changed = false;
+      for (const cand of cands) {
+        const ckey = `${cand.unit}-${cand.axis}`;
+        if (done.has(ckey)) continue;
+        const { unit: u, axis, seams } = cand;
+        // Per-seam, orient station sets so `su` is the swept unit's, `sn` the neighbour's.
+        const oriented = seams.map((s) => {
+          const uIsI = s.i === u;
+          return { seam: s, n: uIsI ? s.j : s.i, su: uIsI ? s.crI : s.crJ, sn: uIsI ? s.crJ : s.crI };
+        });
+        // Score every candidate along-shift by total angle-gated station matches.
+        const nSteps = Math.round(R / step);
+        const scored: { delta: number; total: number; per: number[] }[] = [];
+        for (let k = -nSteps; k <= nSteps; k++) {
+          const delta = k * step;
+          const per: number[] = [];
+          let total = 0;
+          for (const o of oriented) {
+            const pu = coord(coarsePos.get(u)!, axis) + delta;
+            const pn = coord(coarsePos.get(o.n)!, axis);
+            let m = 0;
+            for (const cu of o.su) for (const cn of o.sn) {
+              if (!angOk(cu.ang, cn.ang)) continue;
+              if (Math.abs((pu + cu.along) - (pn + cn.along)) <= tol) m++;
+            }
+            per.push(m); total += m;
+          }
+          scored.push({ delta, total, per });
+        }
+        let best = scored[0];
+        for (const s of scored) if (s.total > best.total) best = s;
+        // Runner-up peak OUTSIDE ±2 steps of the best.
+        let runnerUp = 0;
+        for (const s of scored) if (Math.abs(s.delta - best.delta) > 2 * step + 1e-6) runnerUp = Math.max(runnerUp, s.total);
+        const contributing = best.per.filter((m) => m >= 2).length;
+        const top3 = [...scored].sort((a, b) => b.total - a.total).slice(0, 3).map((s) => ({ deltaFt: +s.delta.toFixed(1), total: s.total }));
+        const decisive = best.total >= 8 && best.total >= 1.3 * runnerUp && contributing >= 2;
+        const rec: JointSweep = {
+          unit: u, axis, accepted: decisive, shiftFt: +best.delta.toFixed(2),
+          total: best.total, runnerUp, margin: +(best.total / Math.max(1, runnerUp)).toFixed(2),
+          seams: oriented.map((o, ix) => ({ i: o.seam.i, j: o.seam.j, matches: best.per[ix], loDelta: o.seam.lo, hiDelta: o.seam.hi })),
+          top3,
+        };
+        jointSweeps.push(rec);
+        done.add(ckey);
+        if (!decisive) continue;
+        // Emit a single-axis along constraint for EACH contributing seam at its implied
+        // station-consensus value (d(i→j) = along_i − along_j at the accepted shift).
+        for (let ix = 0; ix < oriented.length; ix++) {
+          if (best.per[ix] < 2) continue;
+          const o = oriented[ix];
+          const pu = coord(coarsePos.get(u)!, axis) + best.delta;
+          const pn = coord(coarsePos.get(o.n)!, axis);
+          const diffs: number[] = [];
+          for (const cu of o.su) for (const cn of o.sn) {
+            if (!angOk(cu.ang, cn.ang)) continue;
+            if (Math.abs((pu + cu.along) - (pn + cn.along)) > tol) continue;
+            // d(i→j) on the along axis = along_i − along_j; orient su/sn back to i/j.
+            diffs.push(o.seam.i === u ? cu.along - cn.along : cn.along - cu.along);
+          }
+          if (!diffs.length) continue;
+          const dval = diffs.reduce((s, v) => s + v, 0) / diffs.length;
+          const base = { i: o.seam.i, j: o.seam.j, keep: true };
+          constraints.push(axis === "x"
+            ? { ...base, dx: dval, dy: 0, weight: W_ALONG, wx: W_ALONG, wy: 0 }
+            : { ...base, dx: 0, dy: dval, weight: W_ALONG, wx: 0, wy: W_ALONG });
+        }
+        ({ main, mainSet, rootKey, pos: coarsePos } = placeFrom(constraints));
+        changed = true;
+      }
+      if (!changed) break;
+    }
+  }
+
   // ── FINE REGISTRATION ──────────────────────────────────────────────────────
   // The coarse solve (anchored by the precise token pairs) lands each seam in the
   // correct basin, but token-poor seams inherit matchline/segment coarseness.
@@ -1246,5 +1401,5 @@ export function stitchSheets(
   const placements = new Map<number, { x: number; y: number }>();
   for (const k of main) placements.set(k, pos.get(k)!);
 
-  return { root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs, method: main.length ? "geometric" : "none" };
+  return { root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs, method: main.length ? "geometric" : "none", jointSweeps };
 }

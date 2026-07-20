@@ -128,6 +128,7 @@ for (const scale of SCALES) {
   reportRun(scale, res, debug);
   seamReport(scale, res, debug);
   crossReport(scale, res, debug);
+  jointReport(scale, res, debug);
   runs[scale] = { res, debug };
 }
 
@@ -272,6 +273,35 @@ function crossReport(scale, res, debug) {
     console.log(`  ${keyToPage(inputs, a.i)} - ${keyToPage(inputs, a.j)}  along(${alongAxis})  crossing=${a.along.toFixed(2)}  solved=${solvedAlong.toFixed(2)}  ${cls}${lohi}`);
   }
   console.log(`  → ${honored} honored (along slide FIXED), ${overruled} grid-overruled (perp grid outranks; perp preserved — see SEAM QUALITY)`);
+}
+
+// JOINT ALONG-SWEEP report: for each formerly-floating unit (≥2 precise-perp seams
+// on one along-axis, all still non-precise), state whether the joint sweep found a
+// decisive along-offset. On acceptance: the along SHIFT, the match total + margin,
+// and which seams contributed (with the matchline dash-extent lo/hi deltas as a
+// non-gating corroboration). On decline: the top-3 candidate deltas + scores, which
+// document WHY (a tie / weak margin on the periodic module).
+function jointReport(scale, res, debug) {
+  const inputs = debug?.inputs;
+  const sweeps = debug?.result?.jointSweeps || [];
+  if (!inputs) return;
+  if (!sweeps.length) {
+    console.log("JOINT SWEEP: no floating unit (no unit has ≥2 precise-perp seams on one along-axis this run)");
+    return;
+  }
+  console.log("JOINT SWEEP (formerly-floating unit | axis | verdict | shift | total/runnerUp margin | seams):");
+  for (const s of sweeps) {
+    const seams = s.seams.map((sm) => {
+      const lohi = (sm.loDelta != null && sm.hiDelta != null) ? ` loΔ=${sm.loDelta.toFixed(1)} hiΔ=${sm.hiDelta.toFixed(1)}` : "";
+      return `${keyToPage(inputs, sm.i)}-${keyToPage(inputs, sm.j)}[m=${sm.matches}${lohi}]`;
+    }).join("  ");
+    if (s.accepted) {
+      console.log(`  ${keyToPage(inputs, s.unit)}  along(${s.axis})  DECISIVE  shift=${s.shiftFt.toFixed(1)}ft  total=${s.total}/${s.runnerUp} margin=${s.margin}  ${seams}`);
+    } else {
+      const t3 = s.top3.map((t) => `${t.deltaFt}ft:${t.total}`).join(", ");
+      console.log(`  ${keyToPage(inputs, s.unit)}  along(${s.axis})  not-decisive (total=${s.total}/${s.runnerUp} margin=${s.margin}; top3 [${t3}])  ${seams}`);
+    }
+  }
 }
 
 function compareTopology(runs) {
