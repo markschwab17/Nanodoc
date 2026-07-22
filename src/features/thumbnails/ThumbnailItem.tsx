@@ -199,8 +199,8 @@ export function ThumbnailItem({
           handler lives on the bar, not the (often 1-char) label text, so short
           labels like "i" are still an easy target. */}
       <div
-        className={`absolute bottom-0 left-0 right-0 bg-black/50 text-white text-sm font-medium text-center py-1.5 rounded-b${editingLabel ? "" : " cursor-text"}`}
-        title={editingLabel ? undefined : "Double-click to rename this page label"}
+        className={`absolute bottom-0 left-0 right-0 bg-black/50 text-white text-xs font-medium text-center py-0.5 px-1 rounded-b${editingLabel ? "" : " cursor-text"}`}
+        title={editingLabel ? undefined : `${label ?? pageNumber + 1} (double-click to rename)`}
         onDoubleClick={(e) => {
           if (editingLabel) return;
           e.stopPropagation();
@@ -225,10 +225,10 @@ export function ThumbnailItem({
               if (e.key === "Enter") { labelEditDoneRef.current = true; onLabelChange?.(pageNumber, draftLabel); setEditingLabel(false); }
               else if (e.key === "Escape") { labelEditDoneRef.current = true; setEditingLabel(false); }
             }}
-            className="w-11/12 bg-white/90 text-black text-center text-sm rounded px-1 outline-none"
+            className="w-11/12 bg-white/90 text-black text-center text-xs rounded px-1 outline-none"
           />
         ) : (
-          <span>{label ?? pageNumber + 1}</span>
+          <span className="block truncate">{label ?? pageNumber + 1}</span>
         )}
       </div>
     </div>
