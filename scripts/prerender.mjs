@@ -31,7 +31,10 @@ function mustReplace(html, regex, replacement, label) {
 }
 
 function applyHead(html, route) {
-  const url = SITE_ORIGIN + (route.path === "/" ? "/" : route.path);
+  // Netlify serves dist/<route>/index.html at the trailing-slash URL and 301s
+  // the bare path to it, so canonicals must use the trailing slash — a
+  // canonical pointing at a redirect is what we are avoiding.
+  const url = SITE_ORIGIN + (route.path === "/" ? "/" : `${route.path}/`);
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
   const title = esc(route.title);
   const desc = esc(route.description);
@@ -94,7 +97,7 @@ for (const route of PRERENDER_ROUTES) {
 const today = new Date().toISOString().slice(0, 10);
 const urls = PRERENDER_ROUTES.filter((r) => !r.noindex)
   .map((r) => {
-    const loc = SITE_ORIGIN + (r.path === "/" ? "/" : r.path);
+    const loc = SITE_ORIGIN + (r.path === "/" ? "/" : `${r.path}/`);
     return `  <url><loc>${loc}</loc><lastmod>${today}</lastmod></url>`;
   })
   .join("\n");
