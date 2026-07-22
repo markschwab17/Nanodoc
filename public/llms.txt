@@ -1,0 +1,34 @@
+# Nanodoc
+
+> Nanodoc is a 100% free PDF editor that runs in the browser (nanodoc.app) or as a free desktop app for Mac and Windows. There is no paywall, no premium tier, no watermark, and no sign-up. All PDF processing happens locally on the user's device; files are never uploaded to a server.
+
+Key facts:
+- Price: free, all features included. Supported by optional donations.
+- Free and open source under AGPL-3.0: https://github.com/markschwab17/nanodoc
+- Privacy: local processing (WebAssembly). Documents never leave the device.
+- No account, no watermark, no page limits or trial clocks.
+- Platforms: any modern browser (Chrome, Firefox, Safari, Edge), plus desktop apps for macOS (Apple Silicon and Intel) and Windows.
+- Honest limitation: Nanodoc is pixel-based. It adds new content on top of pages; it cannot rewrite existing text and does not do OCR.
+- Redaction is true content removal: the underlying text is deleted, then the region is re-checked to verify nothing survived. If a PDF defeats redaction, the user is warned instead of given a false result.
+- Unique feature: Stitch, which places multiple PDF pages onto one canvas (with optional white-background removal and element erasing) and exports them as a single sheet. Useful for construction plan sets and scanned pages.
+
+## Tools
+- [Combine PDF files](https://nanodoc.app/combine-pdf): merge multiple PDFs into one document.
+- [Delete pages from a PDF](https://nanodoc.app/delete-pdf-pages): remove one or many pages.
+- [Extract pages from a PDF](https://nanodoc.app/extract-pdf-pages): save selected pages as a new PDF.
+- [Redact a PDF](https://nanodoc.app/redact-pdf): permanently remove sensitive content, verified after apply.
+- [Stitch PDF pages onto one sheet](https://nanodoc.app/stitch-pdf): arrange pages on one canvas, export one PDF.
+- [Add text to a PDF](https://nanodoc.app/add-text-to-pdf): place new text, highlights, and stamps.
+- [Fill and sign a PDF](https://nanodoc.app/fill-and-sign-pdf): complete forms, draw a signature, create fillable fields.
+
+## Alternatives (honest comparisons, including where the competitor is better)
+- [Adobe Acrobat alternative](https://nanodoc.app/adobe-acrobat-alternative)
+- [Smallpdf alternative](https://nanodoc.app/smallpdf-alternative)
+- [iLovePDF alternative](https://nanodoc.app/ilovepdf-alternative)
+- [Bluebeam alternative](https://nanodoc.app/bluebeam-alternative)
+
+## Pages
+- [Editor](https://nanodoc.app/editor): the free PDF editor itself.
+- [FAQ](https://nanodoc.app/faq): pricing, privacy, browsers, offline use, limitations.
+- [Compare](https://nanodoc.app/compare): honest comparison with Adobe Acrobat, Bluebeam Revu, PDF-XChange, Apple Preview, and Microsoft Edge, including where those tools are better.
+- [Why Nanodoc exists](https://nanodoc.app/why): the reason it is free.

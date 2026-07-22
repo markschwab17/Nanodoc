@@ -15,6 +15,11 @@ export interface UIState {
   normalModeZoomLevel: number; // Separate zoom level for normal mode
   fitMode: "width" | "page" | "custom";
   activeTool: ToolType;
+  /**
+   * One-shot tool requested by a marketing deep link (/editor?tool=redact).
+   * Consumed by the first loadPDF, which would otherwise reset to "select".
+   */
+  pendingDeepLinkTool: ToolType | null;
   viewMode: ViewMode;
   showThumbnails: boolean;
   showToolbar: boolean;
@@ -80,6 +85,7 @@ export interface UIState {
   setZoomLevel: (level: number) => void;
   setFitMode: (mode: "width" | "page" | "custom") => void;
   setActiveTool: (tool: ToolType) => void;
+  setPendingDeepLinkTool: (tool: ToolType | null) => void;
   setViewMode: (mode: ViewMode) => void;
   toggleThumbnails: () => void;
   toggleToolbar: () => void;
@@ -129,6 +135,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   normalModeZoomLevel: 1.0, // Separate zoom level for normal mode
   fitMode: urlState.splitScreenMode ? "width" : "page", // split-screen opens fit width
   activeTool: urlState.splitScreenMode ? "selectText" : "select", // CTO split screen: select-text tool active by default
+  pendingDeepLinkTool: null,
   viewMode: "single",
   showThumbnails: true,
   showToolbar: true,
@@ -191,6 +198,8 @@ export const useUIStore = create<UIState>((set, get) => ({
   setFitMode: (mode) => set({ fitMode: mode }),
 
   setActiveTool: (tool) => set({ activeTool: tool }),
+
+  setPendingDeepLinkTool: (tool) => set({ pendingDeepLinkTool: tool }),
 
   setViewMode: (mode) => set({ viewMode: mode }),
 

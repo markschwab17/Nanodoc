@@ -1,74 +1,24 @@
 import { NavBar } from "@/features/navigation/NavBar";
+import { MarketingFooter } from "@/shared/components/MarketingFooter";
+import { usePageMeta } from "@/shared/hooks/usePageMeta";
 import {
   Accordion,
   AccordionContent,
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import { FAQS } from "./faqData";
 
 function FAQ() {
-  const faqs = [
-    {
-      question: "Is Nanodoc really 100% free?",
-      answer:
-        "Yes! Nanodoc is completely free to use with no paywalls, hidden fees, or premium features. All functionality is available to everyone at no cost.",
-    },
-    {
-      question: "What features are available?",
-      answer:
-        "Nanodoc offers a comprehensive set of PDF editing features including: combining multiple PDFs into one document, stitching PDF pages onto a single canvas (remove white backgrounds or erase SVG elements, then arrange, resize, rotate, and export as one PDF), deleting unwanted pages, extracting specific pages, adding text annotations, highlighting text with customizable colors, and redacting sensitive information. All features are available for free.",
-    },
-    {
-      question: "What is the Stitch PDFs feature?",
-      answer:
-        "Stitch PDFs lets you combine multiple PDF pages onto one canvas and export them as a single PDF. When adding pages, you can remove white backgrounds so only the content (text, lines, graphics) is imported. On the canvas you can also erase individual elements—click on lines, shapes, or SVG-style content to remove them. Drag to position, resize, and rotate each tile, snap to edges, use alignment tools, and optionally crop. When you're done, download the stitched PDF or open it in the editor. It's ideal for building custom layouts (e.g. construction plan sets) or merging scanned pages into one sheet.",
-    },
-    {
-      question: "Is Nanodoc a pixel-based or vector-based PDF editor?",
-      answer:
-        "Nanodoc is a pixel-based PDF editor, not a vector-based editor. This means that the editor works with the rendered image of your PDF pages rather than the underlying vector graphics. While this approach provides excellent compatibility and works with all PDF types, it means that text and graphics are treated as images rather than editable vector objects.",
-    },
-    {
-      question: "How do I use the PDF editor?",
-      answer:
-        "Using Nanodoc is simple! Click the 'Start Editing PDFs Now' button on the home page, then either drag and drop a PDF file into the editor or click 'Browse Files' to select a PDF from your computer. Once your PDF is loaded, you can use the toolbar on the right to access all editing features.",
-    },
-    {
-      question: "What's the difference between the web and desktop versions?",
-      answer:
-        "The web version works directly in your browser—no installation required. It's perfect for quick edits and works on any device with a modern browser. The desktop versions (Mac and Windows) offer the same features with the added convenience of a native application. Both versions are completely free.",
-    },
-    {
-      question: "Which browsers are supported?",
-      answer:
-        "Nanodoc works best in modern browsers including Chrome, Firefox, Safari, and Edge. For the best experience, we recommend using the latest version of your browser. The editor uses WebAssembly for PDF processing, which is supported by all major modern browsers.",
-    },
-    {
-      question: "Is my data private and secure?",
-      answer:
-        "Yes! All PDF processing happens locally in your browser or on your device. Your files are never uploaded to our servers, ensuring complete privacy and security. We don't store, track, or have access to your documents.",
-    },
-    {
-      question: "Can I edit PDFs offline?",
-      answer:
-        "The web version requires an internet connection to load initially, but once loaded, most features work offline. For true offline editing, we recommend downloading the desktop version, which works completely offline after installation.",
-    },
-    {
-      question: "Are there file size limits?",
-      answer:
-        "The web version can handle most PDF files, but very large files (over 100MB) may take longer to process. The desktop version has fewer limitations and can handle larger files more efficiently. If you encounter issues with large files, try the desktop version.",
-    },
-    {
-      question: "How can I support Nanodoc?",
-      answer:
-        "Nanodoc is free to use, but if you find it helpful, you can support the project by making a donation through PayPal. Donations help cover hosting costs and support continued development. You can find the donation button on the home page.",
-    },
-  ];
+  usePageMeta(
+    "Nanodoc FAQ | Free PDF Editor Questions Answered",
+    "Answers about Nanodoc, the free PDF editor: pricing (free, no paywalls), privacy (files never leave your device), watermarks (none), browsers, and offline use.",
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
       <NavBar />
-      
+
       <section className="container mx-auto px-4 py-20">
         <div className="max-w-3xl mx-auto">
           <h1 className="text-4xl md:text-5xl font-bold text-center mb-4">
@@ -77,9 +27,16 @@ function FAQ() {
           <p className="text-xl text-muted-foreground text-center mb-12">
             Everything you need to know about Nanodoc
           </p>
-          
-          <Accordion type="single" collapsible className="w-full">
-            {faqs.map((faq, index) => (
+
+          {/* All items are open by default so every answer is present in the
+              prerendered HTML (collapsed Radix content is unmounted, which
+              would hide it from crawlers). Visitors can still collapse them. */}
+          <Accordion
+            type="multiple"
+            defaultValue={FAQS.map((_, index) => `item-${index}`)}
+            className="w-full"
+          >
+            {FAQS.map((faq, index) => (
               <AccordionItem key={index} value={`item-${index}`}>
                 <AccordionTrigger className="text-left">
                   {faq.question}
@@ -90,11 +47,9 @@ function FAQ() {
               </AccordionItem>
             ))}
           </Accordion>
-          
+
           <div className="mt-12 text-center">
-            <p className="text-muted-foreground mb-4">
-              Still have questions?
-            </p>
+            <p className="text-muted-foreground mb-4">Still have questions?</p>
             <a
               href="mailto:Markschwab@civiltakeoff.ai"
               className="text-primary hover:underline"
@@ -104,9 +59,10 @@ function FAQ() {
           </div>
         </div>
       </section>
+
+      <MarketingFooter />
     </div>
   );
 }
 
 export default FAQ;
-

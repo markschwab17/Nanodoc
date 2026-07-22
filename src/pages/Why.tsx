@@ -1,6 +1,12 @@
 import { NavBar } from "@/features/navigation/NavBar";
+import { MarketingFooter } from "@/shared/components/MarketingFooter";
+import { usePageMeta } from "@/shared/hooks/usePageMeta";
 
 function Why() {
+  usePageMeta(
+    "Why Nanodoc Exists | A Truly Free PDF Editor",
+    "Why Nanodoc is free with no paywalls: PDFs are everyday paperwork, and editing them should not need a subscription. Local processing, private by design.",
+  );
   return (
     <div className="min-h-screen bg-background">
       <NavBar />
@@ -66,14 +72,22 @@ function Why() {
                     </li>
                     <li className="flex items-start">
                       <span className="text-primary mr-2 mt-1">✓</span>
-                      <span><strong>Open source:</strong> Transparent and community-driven development</span>
+                      <span><strong>Open source:</strong> Free software under the AGPL-3.0 license, with the full code on{" "}
+                        <a
+                          href="https://github.com/markschwab17/nanodoc"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline hover:text-foreground"
+                        >
+                          GitHub
+                        </a></span>
                     </li>
                   </ul>
                 </div>
 
                 <p className="text-lg">
                   If you want to support the website, feel free to use the PayPal link below to donate and help keep it going.
-                  Your support helps maintain the project and add new features, but it's completely optional—Nanodoc will always be free.
+                  Your support helps maintain the project and add new features, but it's completely optional. Nanodoc will always be free.
                 </p>
               </div>
 
@@ -102,45 +116,9 @@ function Why() {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="border-t bg-muted/50 mt-20">
-        <div className="container mx-auto px-4 py-8">
-          <div className="flex flex-col md:flex-row justify-between items-center">
-            <div className="flex items-center space-x-2 mb-4 md:mb-0">
-              <img src="/nanodoc-logo.png" alt="Nanodoc" className="h-5 w-5" />
-              <span className="font-semibold">Nanodoc</span>
-            </div>
-            <div className="flex flex-wrap gap-4 justify-center">
-              <a href="/" className="text-sm text-muted-foreground hover:text-foreground">
-                Home
-              </a>
-              <a href="/editor" className="text-sm text-muted-foreground hover:text-foreground">
-                Editor
-              </a>
-              <a href="/faq" className="text-sm text-muted-foreground hover:text-foreground">
-                FAQ
-              </a>
-              <a href="/compare" className="text-sm text-muted-foreground hover:text-foreground">
-                Compare
-              </a>
-            </div>
-          </div>
-          <div className="mt-4 text-center text-sm text-muted-foreground space-y-2">
-            <div>
-              © {new Date().getFullYear()} Nanodoc. 100% Free. No Paywalls.
-            </div>
-            <div className="flex flex-wrap gap-4 justify-center">
-              <a href="/privacy" className="hover:text-foreground">
-                Privacy Statement
-              </a>
-              <span className="text-muted-foreground">•</span>
-              <a href="/terms" className="hover:text-foreground">
-                Terms and Conditions
-              </a>
-            </div>
-          </div>
-        </div>
-      </footer>
+      <div className="mt-20">
+        <MarketingFooter />
+      </div>
     </div>
   );
 }

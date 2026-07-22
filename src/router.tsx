@@ -16,6 +16,28 @@ const Privacy = lazy(() => import("./pages/Privacy"));
 const Terms = lazy(() => import("./pages/Terms"));
 const Why = lazy(() => import("./pages/Why"));
 const Partners = lazy(() => import("./pages/Partners"));
+const TaskPage = lazy(() => import("./pages/tasks/TaskPage"));
+const AlternativePage = lazy(() => import("./pages/alternatives/AlternativePage"));
+
+// Keyword landing pages (see src/pages/tasks/tasks.ts and
+// src/pages/alternatives/alternatives.ts). Listed literally so the content
+// modules stay out of the main bundle; both page components derive the slug
+// from the URL. Keep in sync with the data files and prerender/seo.ts.
+const TASK_ROUTE_SLUGS = [
+  "combine-pdf",
+  "delete-pdf-pages",
+  "extract-pdf-pages",
+  "redact-pdf",
+  "stitch-pdf",
+  "add-text-to-pdf",
+  "fill-and-sign-pdf",
+];
+const ALTERNATIVE_ROUTE_SLUGS = [
+  "adobe-acrobat-alternative",
+  "smallpdf-alternative",
+  "ilovepdf-alternative",
+  "bluebeam-alternative",
+];
 const TileSmokeHarness = lazy(() => import("@/features/dev/TileSmokeHarness"));
 const TiledPageSmokeHarness = lazy(() => import("@/features/dev/TiledPageSmokeHarness"));
 const AutoStitchSmokeHarness = lazy(() => import("@/features/dev/AutoStitchSmokeHarness"));
@@ -79,6 +101,14 @@ export const router = createBrowserRouter([
     path: "/partners",
     element: lazyRoute(<Partners />),
   },
+  ...TASK_ROUTE_SLUGS.map((slug) => ({
+    path: `/${slug}`,
+    element: lazyRoute(<TaskPage />),
+  })),
+  ...ALTERNATIVE_ROUTE_SLUGS.map((slug) => ({
+    path: `/${slug}`,
+    element: lazyRoute(<AlternativePage />),
+  })),
   // Internal smoke-test harnesses — dev builds only.
   ...(import.meta.env.DEV
     ? [

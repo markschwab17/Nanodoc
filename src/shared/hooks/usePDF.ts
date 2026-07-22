@@ -305,8 +305,14 @@ export function usePDF() {
           tabStore.updateTab(tabId, { ctoContext });
         }
 
-        // Set select tool as default when PDF is loaded (in CTO split screen keep current tool so "Select text" stays active)
-        if (!useUIStore.getState().splitScreenMode) {
+        // Set select tool as default when PDF is loaded (in CTO split screen keep
+        // current tool so "Select text" stays active). A marketing deep link
+        // (/editor?tool=redact) instead wins the first load and is then cleared.
+        const pendingDeepLinkTool = useUIStore.getState().pendingDeepLinkTool;
+        if (pendingDeepLinkTool) {
+          setActiveTool(pendingDeepLinkTool);
+          useUIStore.getState().setPendingDeepLinkTool(null);
+        } else if (!useUIStore.getState().splitScreenMode) {
           setActiveTool("select");
         }
         

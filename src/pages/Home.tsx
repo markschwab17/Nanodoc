@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { NavBar } from "@/features/navigation/NavBar";
 import { Button } from "@/components/ui/button";
+import { MarketingFooter } from "@/shared/components/MarketingFooter";
 import { useEffect, useState } from "react";
 import {
   FileText,
@@ -98,47 +99,56 @@ function Home() {
     {
       icon: Combine,
       title: "Combine PDFs",
-      description: "Merge multiple PDF files into one document effortlessly",
+      description: "Merge multiple PDF files into one document",
+      link: "/combine-pdf",
     },
     {
       icon: LayoutGrid,
       title: "Stitch PDFs",
-      description: "Arrange multiple PDF pages on one canvas—remove white backgrounds or erase SVG elements, then resize, rotate, and export as a single PDF",
+      description: "Arrange multiple PDF pages on one canvas. Remove white backgrounds or erase elements, then resize, rotate, and export as a single PDF",
+      link: "/stitch-pdf",
     },
     {
       icon: Trash2,
       title: "Delete Pages",
       description: "Remove unwanted pages from your PDF documents",
+      link: "/delete-pdf-pages",
     },
     {
       icon: FileDown,
       title: "Extract Pages",
       description: "Extract specific pages to create new PDF files",
+      link: "/extract-pdf-pages",
     },
     {
       icon: Type,
       title: "Add Text",
       description: "Add text annotations and comments to your PDFs",
+      link: "/add-text-to-pdf",
     },
     {
       icon: Highlighter,
       title: "Highlights",
       description: "Highlight important sections with customizable colors",
+      link: null,
     },
     {
       icon: Stamp,
       title: "Stamps & Signatures",
       description: "Add text stamps, image stamps, or draw your signature and place them anywhere on the PDF",
+      link: "/fill-and-sign-pdf",
     },
     {
       icon: FileInput,
       title: "Fillable Fields",
-      description: "Create and edit fillable form fields—text boxes, checkboxes, dropdowns—so others can complete forms",
+      description: "Create and edit fillable form fields (text boxes, checkboxes, dropdowns) so others can complete forms",
+      link: "/fill-and-sign-pdf",
     },
     {
       icon: EyeOff,
       title: "Redact Information",
-      description: "Securely redact sensitive information from documents",
+      description: "Permanently remove sensitive content, verified gone after every redaction",
+      link: "/redact-pdf",
     },
   ];
 
@@ -154,12 +164,13 @@ function Home() {
           </h1>
           
           <p className="text-2xl md:text-3xl font-semibold text-primary mb-4">
-            No Paywalls. No Hidden Fees. 100% Free.
+            No paywalls. No watermarks. No sign-up.
           </p>
-          
+
           <p className="text-lg md:text-xl text-muted-foreground mb-12 max-w-2xl mx-auto">
-            A lightweight, easy-to-use PDF editor that works right in your browser. 
-            Combine PDFs, stitch pages, delete or extract pages, add text, highlights, stamps and signatures, fillable fields, and redact information—all completely free.
+            Combine PDFs, delete or extract pages, add text and signatures, redact,
+            and stitch pages onto one sheet. Everything runs in your browser, and
+            your files never leave your device.
           </p>
           
           <Link to="/editor">
@@ -188,19 +199,18 @@ function Home() {
       <section className="container mx-auto px-4 py-20">
         <div className="max-w-6xl mx-auto">
           <h2 className="text-4xl font-bold text-center mb-4">
-            Powerful Features, Simple to Use
+            Nine tools, zero paywalls
           </h2>
           <p className="text-xl text-muted-foreground text-center mb-12">
-            Everything you need to edit PDFs, all in one place
+            Every feature ships free. No premium tier, no trial clock.
           </p>
-          
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {features.map((feature, index) => {
               const Icon = feature.icon;
-              return (
+              const card = (
                 <div
-                  key={index}
-                  className="p-6 rounded-lg border bg-card hover:shadow-lg transition-shadow"
+                  className="p-6 rounded-lg border bg-card hover:shadow-lg transition-shadow h-full"
                 >
                   <div className="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center mb-4">
                     <Icon className="h-6 w-6 text-primary" />
@@ -208,6 +218,13 @@ function Home() {
                   <h3 className="text-xl font-semibold mb-2">{feature.title}</h3>
                   <p className="text-muted-foreground">{feature.description}</p>
                 </div>
+              );
+              return feature.link ? (
+                <Link key={index} to={feature.link} className="block">
+                  {card}
+                </Link>
+              ) : (
+                <div key={index}>{card}</div>
               );
             })}
           </div>
@@ -369,51 +386,7 @@ function Home() {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="border-t bg-muted/50">
-        <div className="container mx-auto px-4 py-8">
-          <div className="flex flex-col md:flex-row justify-between items-center">
-            <div className="flex items-center space-x-2 mb-4 md:mb-0">
-              <img src="/nanodoc-logo.png" alt="Nanodoc" className="h-5 w-5" />
-              <span className="font-semibold">Nanodoc</span>
-            </div>
-            <div className="flex flex-wrap gap-4 justify-center">
-              <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
-                Home
-              </Link>
-              <Link to="/why" className="text-sm text-muted-foreground hover:text-foreground">
-                Why
-              </Link>
-              <Link to="/editor" className="text-sm text-muted-foreground hover:text-foreground">
-                Editor
-              </Link>
-              <Link to="/faq" className="text-sm text-muted-foreground hover:text-foreground">
-                FAQ
-              </Link>
-              <Link to="/compare" className="text-sm text-muted-foreground hover:text-foreground">
-                Compare
-              </Link>
-              <Link to="/partners" className="text-sm text-muted-foreground hover:text-foreground">
-                Partners
-              </Link>
-            </div>
-          </div>
-          <div className="mt-4 text-center text-sm text-muted-foreground space-y-2">
-            <div>
-              © {new Date().getFullYear()} Nanodoc. 100% Free. No Paywalls.
-            </div>
-            <div className="flex flex-wrap gap-4 justify-center">
-              <Link to="/privacy" className="hover:text-foreground">
-                Privacy Statement
-              </Link>
-              <span className="text-muted-foreground">•</span>
-              <Link to="/terms" className="hover:text-foreground">
-                Terms and Conditions
-              </Link>
-            </div>
-          </div>
-        </div>
-      </footer>
+      <MarketingFooter />
     </div>
   );
 }

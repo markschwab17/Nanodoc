@@ -6,7 +6,7 @@ import { useKeyboard } from "@/shared/hooks/useKeyboard";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useRecentFilesStore } from "@/shared/stores/recentFilesStore";
-import { useUIStore } from "@/shared/stores/uiStore";
+import { useUIStore, type ToolType } from "@/shared/stores/uiStore";
 import { PDFViewer } from "@/features/viewer/PDFViewer";
 import { TabBar } from "@/features/tabs/TabBar";
 import { ThumbnailCarousel } from "@/features/thumbnails/ThumbnailCarousel";
@@ -78,6 +78,18 @@ function Editor() {
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(
     () => useUIStore.getState().initialSidebarOpen === false
   );
+
+  // Marketing landing pages deep-link into a tool (e.g. /redact-pdf sends the
+  // visitor to /editor?tool=redact). Applied once on mount; the tool state
+  // simply waits until the first document opens. Unknown values are ignored.
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("tool");
+    const deepLinkable: ToolType[] = ["text", "highlight", "redact", "stamp", "form"];
+    if (requested && (deepLinkable as string[]).includes(requested)) {
+      useUIStore.getState().setActiveTool(requested as ToolType);
+      useUIStore.getState().setPendingDeepLinkTool(requested as ToolType);
+    }
+  }, []);
 
   // Apply CTO URL initial sidebar state when set from CiviltakeoffView after load (clears initialSidebarOpen)
   useEffect(() => {

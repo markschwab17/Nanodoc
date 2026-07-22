@@ -1,4 +1,6 @@
 import { NavBar } from "@/features/navigation/NavBar";
+import { MarketingFooter } from "@/shared/components/MarketingFooter";
+import { usePageMeta } from "@/shared/hooks/usePageMeta";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +56,11 @@ const PDFXChangeLogo = ({ className }: { className?: string }) => (
 );
 
 function Compare() {
+  usePageMeta(
+    "PDF Editor Comparison: Nanodoc vs Adobe, Bluebeam & More",
+    "Honest comparison of PDF editors: Nanodoc, Adobe Acrobat, Bluebeam Revu, PDF-XChange, Apple Preview, and Microsoft Edge. Prices, strengths, and who each fits.",
+  );
+
   const competitors = [
     {
       name: "Windows Native PDF Viewer (Microsoft Edge)",
@@ -105,7 +112,7 @@ function Compare() {
         "Strong integration with CAD and BIM software"
       ],
       bestFor: "Architecture, engineering, and construction professionals who need industry-specific PDF tools",
-      link: "https://www.bluebeam.com/software/revi",
+      link: "https://www.bluebeam.com/software/revu",
       rating: 4.5
     },
     {
@@ -222,6 +229,69 @@ function Compare() {
               <h3 className="font-semibold mb-2">Privacy First</h3>
               <p className="text-sm text-muted-foreground">All processing happens locally</p>
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Honest feature table, Nanodoc included */}
+      <section className="container mx-auto px-4 py-20">
+        <div className="max-w-6xl mx-auto">
+          <h2 className="text-4xl font-bold text-center mb-4">
+            Feature-by-Feature Comparison
+          </h2>
+          <p className="text-xl text-muted-foreground text-center mb-4">
+            Including where Nanodoc is not the right tool
+          </p>
+          <p className="text-muted-foreground text-center mb-12 max-w-3xl mx-auto">
+            Nanodoc is pixel-based, so it cannot rewrite text that is already in a
+            document, and it does not do OCR. If you need those, Acrobat or
+            PDF-XChange are better choices. For everything else below, you should
+            not have to pay.
+          </p>
+
+          <div className="overflow-x-auto rounded-lg border">
+            <table className="w-full text-sm bg-card">
+              <thead>
+                <tr className="border-b bg-muted/50">
+                  <th className="text-left p-4 font-semibold">Feature</th>
+                  <th className="p-4 font-semibold">Nanodoc</th>
+                  <th className="p-4 font-semibold">Edge / Preview</th>
+                  <th className="p-4 font-semibold">Adobe Acrobat</th>
+                  <th className="p-4 font-semibold">Bluebeam Revu</th>
+                  <th className="p-4 font-semibold">PDF-XChange</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ["Price", "Free", "Free (built-in)", "$19.99/mo", "$360/yr", "$59.50 once"],
+                  ["Combine and merge PDFs", "Yes", "Preview only", "Yes", "Yes", "Yes"],
+                  ["Delete / extract pages", "Yes", "Preview only", "Yes", "Yes", "Yes"],
+                  ["Add text, highlights, stamps", "Yes", "Basic", "Yes", "Yes", "Yes"],
+                  ["True redaction (content removed)", "Yes, verified after apply", "No", "Yes", "Yes", "Yes"],
+                  ["Create fillable form fields", "Yes", "No", "Yes", "Yes", "Yes"],
+                  ["Stitch pages onto one sheet", "Yes", "No", "No", "No", "No"],
+                  ["Edit existing text (vector)", "No", "No", "Yes", "Yes", "Yes"],
+                  ["OCR scanned documents", "No", "Preview only", "Yes", "Yes", "Yes"],
+                  ["Works without an account", "Yes", "Yes", "No", "No", "Yes"],
+                  ["Files stay on your device", "Yes", "Yes", "Depends on setup", "Depends on setup", "Yes"],
+                ].map((row, i) => (
+                  <tr key={i} className="border-b last:border-b-0">
+                    {row.map((cell, j) => (
+                      <td
+                        key={j}
+                        className={
+                          j === 0
+                            ? "text-left p-4 font-medium"
+                            : `p-4 text-center ${j === 1 ? "font-semibold text-primary" : "text-muted-foreground"}`
+                        }
+                      >
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -372,6 +442,34 @@ function Compare() {
         </div>
       </section>
 
+      {/* Alternative pages */}
+      <section className="container mx-auto px-4 py-16">
+        <div className="max-w-3xl mx-auto text-center">
+          <h2 className="text-3xl font-bold mb-4">
+            Switching from a specific tool?
+          </h2>
+          <p className="text-lg text-muted-foreground mb-8">
+            Honest breakdowns of what Nanodoc replaces and what it does not.
+          </p>
+          <div className="flex flex-wrap gap-3 justify-center">
+            {[
+              ["adobe-acrobat-alternative", "Adobe Acrobat alternative"],
+              ["smallpdf-alternative", "Smallpdf alternative"],
+              ["ilovepdf-alternative", "iLovePDF alternative"],
+              ["bluebeam-alternative", "Bluebeam alternative"],
+            ].map(([slug, label]) => (
+              <Link
+                key={slug}
+                to={`/${slug}`}
+                className="px-4 py-2 rounded-full border bg-card text-sm hover:border-primary transition-colors"
+              >
+                {label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* Call to Action */}
       <section className="container mx-auto px-4 py-20">
         <div className="max-w-3xl mx-auto text-center">
@@ -397,6 +495,8 @@ function Compare() {
           </p>
         </div>
       </section>
+
+      <MarketingFooter />
     </div>
   );
 }
