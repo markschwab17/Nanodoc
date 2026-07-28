@@ -20,11 +20,26 @@ const DEFAULT_SCALE = 20;
  *  are exactly the pages OCR exists to rescue. */
 export const PLAN_GEOMETRY_MIN = 5000;
 
+/** Thrown by autoStitch when `opts.shouldAbort()` goes true mid-run (the user
+ *  clicked plain "Add pages" and no longer needs the probe). Distinguishable so
+ *  the caller can treat an abort as "skipped", not an error. */
+export class AutoStitchAborted extends Error {
+  constructor() { super("autostitch-aborted"); this.name = "AutoStitchAborted"; }
+}
+
 export interface AutoStitchOptions {
   userScale?: number | null;
   onProgress?: (done: number, total: number) => void;
   /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel. */
   ocr?: (image: RawImage) => Promise<OcrWord[]>;
+  /** Cooperative abort. Consulted at the top of each per-page iteration, before
+   *  every OCR band call, and per pair in the anchor-search pass. When it returns
+   *  true, autoStitch throws AutoStitchAborted at the next checkpoint so a plain
+   *  "Add pages" click stops the probe near-instantly instead of waiting it out. */
+  shouldAbort?: () => boolean;
+  /** Called once, the first time OCR actually runs, so the UI can explain the
+   *  longer wait ("reading outlined text — this can take a few minutes"). */
+  onOcrStart?: () => void;
   /** Diagnostic hook: surfaces the raw solver inputs/result (pairs, anchors) for
    *  the Node stitch-diag harness. Never used in production. */
   onDebug?: (d: { anchors: StitchAnchor[]; result: StitchResult; inputs: SheetInput[] }) => void;
@@ -146,6 +161,21 @@ export async function autoStitch(
   // Scale inference is deferred; uniform scale (user-entered or default).
   const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
 
+  // Cooperative-abort checkpoint. Throwing a distinguishable error lets the
+  // worker report `{aborted:true}` (not an error) when a plain add supersedes the probe.
+  const checkAbort = () => { if (opts.shouldAbort?.()) throw new AutoStitchAborted(); };
+  // Guard every OCR call: abort BEFORE the (slow) recognize, and fire onOcrStart
+  // once so the UI can explain the wait. All OCR below goes through `ocr`.
+  let ocrStarted = false;
+  const rawOcr = opts.ocr;
+  const ocr = rawOcr
+    ? async (image: RawImage): Promise<OcrWord[]> => {
+        checkAbort();
+        if (!ocrStarted) { ocrStarted = true; opts.onOcrStart?.(); }
+        return rawOcr(image);
+      }
+    : undefined;
+
   // ── PASS 1: per-page capture + edge-band OCR recovery ───────────────────────
   // Collect each page's extract + printed number FIRST (page released after
   // capture); unit construction is deferred to pass 3 so the reciprocal-anchor
@@ -153,6 +183,7 @@ export async function autoStitch(
   const pages: PageRec[] = [];
   const refPageIndices: number[] = [];
   for (let i = 0; i < pageIndices.length; i++) {
+    checkAbort(); // top of each per-page iteration
     const pageIndex = pageIndices[i];
     await yieldToMain();
     const page = doc.loadPage(pageIndex);
@@ -169,25 +200,25 @@ export async function autoStitch(
       // gate here: raster/scanned pages carry zero vector geometry and are
       // exactly the pages OCR exists to rescue, so gating on geometry would
       // disable OCR precisely where it is needed.
-      if (opts.ocr && !hasEdgeRefs(extract)) {
+      if (ocr && !hasEdgeRefs(extract)) {
         for (const band of pageEdgeBands(extract.view)) {
           const { image, scale: bandScale } = renderBand(mupdf, page, band.clip);
           if (band.edge === "left" || band.edge === "right") {
             const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
-            for (const rot of [90, 270] as const) cands.push({ rot, words: await opts.ocr(rotateRaw(image, rot)) });
+            for (const rot of [90, 270] as const) cands.push({ rot, words: await ocr(rotateRaw(image, rot)) });
             const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
             const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
             // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
             recovered.push(...wordsToLabels(best.words, band, bandScale, image.width, image.height, best.rot));
           } else {
-            recovered.push(...wordsToLabels(await opts.ocr(image), band, bandScale, image.width, image.height, 0));
+            recovered.push(...wordsToLabels(await ocr(image), band, bandScale, image.width, image.height, 0));
           }
         }
         const nb = sheetNoBand(extract.view);
         const { image } = renderBand(mupdf, page, nb.clip);
         // Record the raw OCR read; resolvePrintedNos sanity-checks the range
         // (a misread like "2"→"22" would otherwise misroute byPrinted resolution).
-        const ocrNo = parseSheetNumber(await opts.ocr(image));
+        const ocrNo = parseSheetNumber(await ocr(image));
         if (ocrNo != null) { printedNo = ocrNo; printedNoSource = "ocr"; }
       }
     } finally {
@@ -227,7 +258,7 @@ export async function autoStitch(
   // label can never anchor. The facing pair pins dx to ±17ft (stitchCore then runs
   // a ±30ft windowed segment vote in the true basin).
   const rawAnchors: RawAnchor[] = [];
-  if (opts.ocr) {
+  if (ocr) {
     const byPrinted = new Map<number, PageRec[]>();
     for (const p of pages) (byPrinted.get(p.printedNo) || byPrinted.set(p.printedNo, []).get(p.printedNo)!).push(p);
     const edgeRefsOf = (p: PageRec): SheetRef[] =>
@@ -368,7 +399,7 @@ export async function autoStitch(
             const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
             for (const rot of [90, 270] as const) {
-              const labels = wordsToLabels(await opts.ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
+              const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
               for (const lab of labels) {
                 const m = lab.text.match(RE);
                 if (m && Number(m[1]) === expected) {
@@ -392,7 +423,7 @@ export async function autoStitch(
             const by1 = Math.min(by0 + 160, ry1);
             const clip: [number, number, number, number] = [x0, by0, x1, by1];
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-            const labels = wordsToLabels(await opts.ocr!(image), { edge: "top", clip }, bandScale, image.width, image.height, 0);
+            const labels = wordsToLabels(await ocr!(image), { edge: "top", clip }, bandScale, image.width, image.height, 0);
             for (const lab of labels) {
               const m = lab.text.match(RE);
               if (m && Number(m[1]) === expected) {
@@ -464,6 +495,7 @@ export async function autoStitch(
           // confirms via a vector segment vote, which a page with no geometry can't feed.
           if ((iPage.extract.geometry?.length ?? 0) < PLAN_GEOMETRY_MIN) continue;
           if (searched >= 16) break outer;
+          checkAbort(); // per pair in the anchor-search pass
           searched++;
           const anchor = await searchReciprocal(iPage, jPage, r);
           if (anchor) rawAnchors.push(anchor);

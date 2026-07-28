@@ -1,5 +1,64 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolvePrintedNos } from "./autoStitch";
+import { resolvePrintedNos, autoStitch, AutoStitchAborted } from "./autoStitch";
+
+// autoStitch's per-page capture and band raster are mupdf-bound; mock them so the
+// abort-checkpoint behaviour is testable without wasm. Pages carry NO edge refs,
+// so the edge-band OCR path runs (exercising the OCR channel + abort inside it).
+vi.mock("./captureDevice", () => ({
+  capturePage: vi.fn(() => ({
+    view: [0, 0, 1000, 800] as [number, number, number, number],
+    shxLabels: [],
+    labels: [],
+    words: [],
+    geometry: [],
+  })),
+}));
+vi.mock("./bandRender", () => ({
+  renderBand: vi.fn(() => ({
+    image: { width: 10, height: 10, data: new Uint8ClampedArray(10 * 10 * 4) },
+    scale: 1,
+  })),
+}));
+
+describe("autoStitch cooperative abort", () => {
+  // The control test runs the full pipeline over fake pages; its key-map/solve
+  // steps log caught warnings on the stub geometry. Keep test output quiet.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("stops between pages: aborting after page 2 throws AutoStitchAborted and does no further page work", async () => {
+    const { capturePage } = await import("./captureDevice");
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    const ocr = vi.fn(async () => []);
+    // Abort once two pages have fully completed (onProgress fires at each page end).
+    let completed = 0;
+    const promise = autoStitch({} as any, fakeDoc as any, [0, 1, 2, 3], {
+      ocr,
+      shouldAbort: () => completed >= 2,
+      onProgress: () => { completed++; },
+    });
+    await expect(promise).rejects.toBeInstanceOf(AutoStitchAborted);
+    // Page 3's checkAbort (top of loop) throws BEFORE capture/OCR — only 2 pages ran.
+    expect(capturePage).toHaveBeenCalledTimes(2);
+    expect(fakeDoc.loadPage).toHaveBeenCalledTimes(2);
+    // The OCR counter is frozen at the page-2 total: no band OCR happens on page 3.
+    const callsAtAbort = ocr.mock.calls.length;
+    await Promise.resolve();
+    expect(ocr.mock.calls.length).toBe(callsAtAbort);
+  });
+
+  it("without shouldAbort, runs every page (control)", async () => {
+    const { capturePage } = await import("./captureDevice");
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    const ocr = vi.fn(async () => []);
+    await autoStitch({} as any, fakeDoc as any, [0, 1, 2], { ocr });
+    expect(capturePage).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("resolvePrintedNos", () => {
   // Collision repair logs a warning; keep test output quiet.

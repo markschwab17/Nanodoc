@@ -29,7 +29,12 @@ export interface ProbeResult {
   alignmentVerdict?: AlignmentVerdict;
 }
 
-export type ProbeMessage = ProbeResult | { docId: number; error: string };
+export type ProbeMessage =
+  | ProbeResult
+  | { docId: number; error: string }
+  /** The probe was aborted mid-run (the user clicked plain "Add pages"). Not an
+   *  error — the modal treats it as a skipped check, no toast. */
+  | { docId: number; aborted: true };
 
 export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult {
   return {

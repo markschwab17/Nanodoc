@@ -109,7 +109,17 @@ export function AddPdfModal({
   /** Monotonic id; a probe reply whose docId != current is stale and ignored. */
   const probeDocIdRef = useRef(0);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
-  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped">("idle");
+  /** True once the probe reports OCR is in play (outlined-text sheets) — used to
+   *  explain the longer wait in the "Checking alignment…" copy. */
+  const [probeOcr, setProbeOcr] = useState(false);
+
+  /** Stop the currently-running probe (plain add, Skip check, close, Change file).
+   *  Posts an abort for the current docId; the worker throws AutoStitchAborted at
+   *  its next checkpoint and replies `{aborted:true}` (no error toast). */
+  const abortProbe = useCallback(() => {
+    probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+  }, []);
 
   const releaseDoc = useCallback(() => {
     try {
@@ -137,8 +147,20 @@ export function AddPdfModal({
     attachOcrRpc(w);
     w.onmessage = (ev: MessageEvent<ProbeMessage>) => {
       const msg = ev.data;
+      // OCR-phase notice: the probe started reading outlined text (slow). ocr-req
+      // frames are handled by attachOcrRpc; both carry a `kind`.
+      if ((ev.data as any)?.kind === "ocrPhase") {
+        if ((ev.data as any).docId === probeDocIdRef.current) setProbeOcr(true);
+        return;
+      }
       if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
       if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
+      if ("aborted" in msg) {
+        // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
+        setProbe(null);
+        setProbeState("skipped");
+        return;
+      }
       if ("error" in msg) {
         console.warn("[stitchProbe] failed:", msg.error);
         setProbe(null);
@@ -205,8 +227,12 @@ export function AddPdfModal({
         // Kick off the background feasibility probe over the WHOLE document.
         // userScale is null: placements are scale-invariant for a uniform set,
         // so the probe outcome is unaffected and we avoid a stale-closure dep.
+        // Stop any probe still running for the previous doc (Change file / new load)
+        // so it can't keep the shared OCR worker busy behind this one.
+        abortProbe();
         const probeDocId = ++probeDocIdRef.current;
         setProbe(null);
+        setProbeOcr(false);
         if (count >= 2) {
           setProbeState("running");
           const req: ProbeRequest = {
@@ -248,7 +274,7 @@ export function AddPdfModal({
         setLoading(false);
       }
     },
-    [releaseDoc]
+    [releaseDoc, abortProbe]
   );
 
   const handleChooseFile = useCallback(async () => {
@@ -271,6 +297,8 @@ export function AddPdfModal({
       setThumbProgress(0);
       setProbe(null);
       setProbeState("idle");
+      setProbeOcr(false);
+      abortProbe(); // stop a probe still running for the just-closed doc
       probeDocIdRef.current++;
       setCtoListening(false);
       setLoadError(null);
@@ -426,6 +454,10 @@ export function AddPdfModal({
 
   const handleAddToCanvas = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
+    // Plain add must never wait on the probe: abort it BEFORE the render loop so
+    // the OCR worker (shared) is freed and this loop isn't starved. The worker
+    // replies {aborted:true} → probeState "skipped" (no toast).
+    abortProbe();
     setAdding(true);
     setLoadError(null);
     const selected = Array.from(selectedPages).sort((a, b) => a - b);
@@ -508,7 +540,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, abortProbe]);
 
   const handleAddAndAutoAlign = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
@@ -842,6 +874,19 @@ export function AddPdfModal({
             Can't verify alignment for this set — add pages and align manually
           </p>
         )}
+        {probeState === "running" && (
+          <p className="text-xs text-muted-foreground text-right px-1">
+            Checking alignment…
+            {probeOcr && " reading outlined text — this can take a few minutes"}
+          </p>
+        )}
+        {/* Skipping the check is honest, not an error: unverified verdict, reason
+            "check skipped" — plain add stays available, auto-align isn't offered. */}
+        {probeState === "skipped" && (
+          <p className="text-xs text-amber-600 dark:text-amber-500 text-right px-1">
+            Alignment check skipped — add pages and align manually
+          </p>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
@@ -858,16 +903,21 @@ export function AddPdfModal({
             // the live pipeline, per handleAddAndAutoAlign's fallback).
             const tooFew = selectedPages.size < 2;
             const checking = probeState === "running";
+            // A skipped check leaves the set unverified — auto-align isn't offered
+            // (same honesty as cannot-verify); the plain add button stays enabled.
+            const skipped = probeState === "skipped";
             const unstitchable = probeState === "done" && feasibility?.status === "unstitchable";
             // Reason-aware: a set that LOOKS tiled but whose seams can't be physically
             // verified gets the honest "can't verify" copy instead of the bare
             // "unavailable" (which reads as "these aren't tiles at all").
             const cannotVerify = unstitchable && !!feasibility?.reason;
-            const disabled = adding || tooFew || checking || unstitchable;
+            const disabled = adding || tooFew || checking || unstitchable || skipped;
             const label = adding
               ? "Aligning…"
               : checking
               ? "Checking alignment…"
+              : skipped
+              ? "Alignment check skipped"
               : cannotVerify
               ? "Can't verify alignment"
               : unstitchable
@@ -875,16 +925,27 @@ export function AddPdfModal({
               : `Add & auto-align ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""}`;
             const title = tooFew
               ? "Select at least 2 pages to auto-align"
+              : skipped
+              ? "Alignment check skipped — add pages and align manually"
               : cannotVerify
               ? "Can't verify alignment for this set — add pages and align manually"
               : unstitchable
               ? "These pages don't look like one tiled plan set — add them and align manually"
               : undefined;
             return (
-              <Button variant="secondary" onClick={handleAddAndAutoAlign} disabled={disabled} title={title}>
-                {checking && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
-                {label}
-              </Button>
+              <>
+                {/* Skip check: abort the probe now and add/align manually instead of
+                    waiting out a slow OCR-heavy check. */}
+                {checking && (
+                  <Button variant="link" size="sm" className="px-1" onClick={abortProbe}>
+                    Skip check
+                  </Button>
+                )}
+                <Button variant="secondary" onClick={handleAddAndAutoAlign} disabled={disabled} title={title}>
+                  {checking && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
+                  {label}
+                </Button>
+              </>
             );
           })()}
         </DialogFooter>

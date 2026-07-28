@@ -8,7 +8,7 @@
  *
  * Mirrors the mupdf-in-worker init pattern of src/core/pdf/tiles/tileRender.worker.ts.
  */
-import { autoStitch } from "./autoStitch";
+import { autoStitch, AutoStitchAborted } from "./autoStitch";
 import { toProbeResult, type ProbeRequest, type ProbeMessage } from "./stitchProbe";
 import type { OcrWord, RawImage } from "./ocrService";
 
@@ -16,6 +16,11 @@ let mupdf: any = null;
 async function ensureMupdf() {
   if (!mupdf) mupdf = (await import("mupdf")).default;
 }
+
+// Cooperative-abort target. A plain "Add pages" click posts {kind:"abort", docId};
+// the running autoStitch for that docId then throws AutoStitchAborted at its next
+// checkpoint. Only the CURRENT probe's docId is tracked (probes are serialized).
+let abortDocId = 0;
 
 // ── OCR over RPC to the main thread (tesseract cannot nest here portably) ──
 let ocrSeq = 0;
@@ -45,14 +50,22 @@ async function handle(req: ProbeRequest) {
     const doc = mupdf.Document.openDocument(pdfBytes, "application/pdf");
     let res;
     try {
-      res = await autoStitch(mupdf, doc, pageIndices, { userScale, ocr: ocrViaMain });
+      res = await autoStitch(mupdf, doc, pageIndices, {
+        userScale,
+        ocr: ocrViaMain,
+        shouldAbort: () => abortDocId === docId,
+        onOcrStart: () => self.postMessage({ kind: "ocrPhase", docId }),
+      });
     } finally {
       doc.destroy?.();
     }
     const msg: ProbeMessage = toProbeResult(res, docId);
     self.postMessage(msg);
   } catch (err) {
-    const msg: ProbeMessage = { docId, error: String(err) };
+    // An abort is not a failure — report it as skipped so the modal shows no toast.
+    const msg: ProbeMessage = err instanceof AutoStitchAborted
+      ? { docId, aborted: true }
+      : { docId, error: String(err) };
     self.postMessage(msg);
   }
 }
@@ -62,6 +75,11 @@ self.onmessage = (e: MessageEvent<any>) => {
     const cb = ocrPending.get(e.data.ocrId);
     ocrPending.delete(e.data.ocrId);
     cb?.(e.data.words as OcrWord[]);
+    return;
+  }
+  if (e.data && e.data.kind === "abort") {
+    // Stop the running (or queued) probe for this docId at its next checkpoint.
+    abortDocId = e.data.docId;
     return;
   }
   latestDocId = (e.data as ProbeRequest).docId;
