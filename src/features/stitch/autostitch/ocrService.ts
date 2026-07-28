@@ -34,6 +34,19 @@ export interface OcrWord {
 
 const OCR_TIMEOUT_MS = 30_000;
 
+// Recognition-job timeout (ms) — bounds `scheduler.addJob("recognize", …)`
+// itself (separate from OCR_TIMEOUT_MS's use for the conversion-worker RPC).
+// Overridable only via __setOcrJobTimeoutMsForTest so production always uses
+// OCR_TIMEOUT_MS; kept as its own mutable binding (rather than exporting
+// OCR_TIMEOUT_MS directly) because ESM named exports are read-only bindings —
+// a test importer cannot reassign them.
+let ocrJobTimeoutMs = OCR_TIMEOUT_MS;
+
+/** Test-only: shorten the recognition-job timeout so hang tests don't wait the real 30s. */
+export function __setOcrJobTimeoutMsForTest(ms: number): void {
+  ocrJobTimeoutMs = ms;
+}
+
 // ── tesseract scheduler (MAIN thread) ──────────────────────────────────────
 // A scheduler holding two workers: the probe fires many band-OCR requests and
 // two workers let concurrent jobs genuinely overlap, roughly halving band-OCR
@@ -41,7 +54,13 @@ const OCR_TIMEOUT_MS = 30_000;
 let schedulerPromise: Promise<any> | null = null;
 const WORKER_COUNT = 2;
 
-async function ensureScheduler(): Promise<any> {
+// Deliberately NOT `async`: it must return the exact `schedulerPromise`
+// object (reference-equal), not a fresh wrapper promise, so callers can later
+// compare it by identity (`schedulerPromise === capturedPromise`) to guard a
+// timeout-triggered recycle against clobbering a newer scheduler. An `async`
+// function always wraps its return value in a new promise, which would break
+// that identity check even though it resolves to the same value.
+function ensureScheduler(): Promise<any> {
   if (!schedulerPromise) {
     schedulerPromise = (async () => {
       const { createScheduler, createWorker, PSM } = await import("tesseract.js");
@@ -158,14 +177,62 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
   return convertOnMainThread(image);
 }
 
-/** OCR a raw RGBA raster. Returns [] on any failure (OCR is best-effort). */
+/**
+ * OCR a raw RGBA raster. Returns [] on any failure (OCR is best-effort).
+ *
+ * Two independent timeouts guard this call:
+ *  - OCR_TIMEOUT_MS bounds the conversion-worker RPC (raster → Blob).
+ *  - ocrJobTimeoutMs (same 30s default, shortenable in tests) bounds the
+ *    `scheduler.addJob("recognize", …)` call itself. Without this, a hung
+ *    tesseract job never settles: the direct auto-align path would spin
+ *    forever, and — worse — the hang permanently pins one of the scheduler's
+ *    WORKER_COUNT slots, so repeated hangs quietly degrade OCR until every
+ *    slot is stuck and OCR is silently dead.
+ *
+ * On a recognition-job timeout we resolve [] for this call AND recycle: the
+ * scheduler is terminated best-effort (fire-and-forget, errors swallowed) and
+ * the lazy singleton is cleared so the next call reinitializes a clean
+ * scheduler. The recycle is guarded by identity — it only runs if the
+ * module's scheduler singleton still refers to the exact scheduler THIS call
+ * timed out on, so a stale timeout firing after a newer scheduler has since
+ * been created (e.g. an earlier hang already recycled and a later call built
+ * a fresh one) can never terminate that newer, healthy scheduler.
+ */
 export async function recognize(image: RawImage): Promise<OcrWord[]> {
   try {
     // Convert (in the worker) and spin up tesseract concurrently. Promise.all
     // attaches handlers to both up front, so if one rejects the other's later
-    // settlement can't become an unhandled rejection.
-    const [scheduler, blob] = await Promise.all([ensureScheduler(), imageToBlob(image)]);
-    const { data } = await scheduler.addJob("recognize", blob);
+    // settlement can't become an unhandled rejection. Capture the scheduler
+    // PROMISE (not just the resolved scheduler) so a later timeout can check,
+    // by identity, whether the module singleton still points at it.
+    const schedPromise = ensureScheduler();
+    const [scheduler, blob] = await Promise.all([schedPromise, imageToBlob(image)]);
+
+    const TIMEOUT = Symbol("ocr-job-timeout");
+    let timer: ReturnType<typeof setTimeout>;
+    // Promise.race attaches a handler to the losing promise too, so if
+    // addJob rejects after the timeout already won, it's still "handled" —
+    // no unhandled-rejection warning.
+    const timeout = new Promise<typeof TIMEOUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMEOUT), ocrJobTimeoutMs);
+    });
+    const result = await Promise.race([scheduler.addJob("recognize", blob), timeout]);
+    clearTimeout(timer!);
+
+    if (result === TIMEOUT) {
+      console.warn("[ocrService] recognize job timed out — recycling scheduler");
+      // Identity guard: only recycle if no one has already replaced the
+      // singleton (see docstring above).
+      if (schedulerPromise === schedPromise) {
+        schedulerPromise = null;
+        try {
+          Promise.resolve(scheduler.terminate()).catch(() => { /* best-effort */ });
+        } catch { /* best-effort */ }
+      }
+      return [];
+    }
+
+    const { data } = result as { data: { words?: any[] } };
     const words: OcrWord[] = [];
     for (const w of data.words ?? []) {
       if (!w.text?.trim()) continue;

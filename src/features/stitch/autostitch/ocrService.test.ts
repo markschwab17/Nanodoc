@@ -20,13 +20,21 @@ const h = vi.hoisted(() => ({
   addJob: async (_cmd: string, blob: any): Promise<any> => ({
     data: { words: [{ text: blob?.__tag ?? "ok", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] },
   }),
+  // Every scheduler createScheduler() hands out, in creation order, so tests
+  // can assert how many schedulers were spun up and whether each was terminated.
+  schedulersCreated: [] as { terminateCalls: number }[],
 }));
 
 vi.mock("tesseract.js", () => ({
-  createScheduler: () => ({
-    addWorker: () => {},
-    addJob: (cmd: string, blob: any) => h.addJob(cmd, blob),
-  }),
+  createScheduler: () => {
+    const record = { terminateCalls: 0 };
+    h.schedulersCreated.push(record);
+    return {
+      addWorker: () => {},
+      addJob: (cmd: string, blob: any) => h.addJob(cmd, blob),
+      terminate: async () => { record.terminateCalls++; },
+    };
+  },
   createWorker: async () => ({ setParameters: async () => {}, terminate: async () => {} }),
   PSM: { SPARSE_TEXT: 10 },
 }));
@@ -60,6 +68,7 @@ beforeEach(() => {
   h.addJob = async (_cmd: string, blob: any) => ({
     data: { words: [{ text: blob?.__tag ?? "ok", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] },
   });
+  h.schedulersCreated.length = 0;
   vi.resetModules();
 });
 
@@ -93,6 +102,88 @@ describe("ocrService.recognize (main-thread tesseract + conversion worker)", () 
     const conv = FakeWorker.instances[0];
     conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("x") });
     await expect(p).resolves.toEqual([]);
+  });
+
+  it("resolves [] and recycles the scheduler when a recognize job hangs (timeout)", async () => {
+    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(20); // shortened-for-test; never resolves for real.
+    h.addJob = () => new Promise(() => { /* hang forever */ });
+
+    const p = recognize(IMG());
+    const conv = FakeWorker.instances[0];
+    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("hang") });
+
+    await expect(p).resolves.toEqual([]);
+    // Recycled: the hung scheduler was terminated and the singleton cleared.
+    expect(h.schedulersCreated.length).toBe(1);
+    expect(h.schedulersCreated[0].terminateCalls).toBe(1);
+
+    // The next call must build a brand-new scheduler (singleton was reset).
+    // The conversion worker is a separate singleton that never hung, so it's
+    // reused (same FakeWorker instance) — its 2nd queued postMessage is this call.
+    h.addJob = async (_cmd: string, blob: any) => ({
+      data: { words: [{ text: blob?.__tag ?? "ok", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] },
+    });
+    const p2 = recognize(IMG());
+    const conv2 = FakeWorker.instances[0];
+    conv2.emit({ ocrId: conv2.posted[1].ocrId, blob: fakeBlob("fresh") });
+    await expect(p2).resolves.toEqual([
+      { text: "fresh", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
+    ]);
+    expect(h.schedulersCreated.length).toBe(2);
+  });
+
+  it("identity guard: a stale timeout does not terminate a newer scheduler", async () => {
+    vi.useFakeTimers();
+    try {
+      const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+      h.addJob = () => new Promise(() => { /* every job in this test hangs */ });
+
+      // The conversion worker is a separate, never-hung singleton — every call
+      // reuses the SAME FakeWorker instance, one queued postMessage each.
+      const conv = () => FakeWorker.instances[0];
+
+      // Call A: long-lived timeout. It shares the ORIGINAL scheduler and will
+      // still be pending when that scheduler gets recycled by someone else.
+      __setOcrJobTimeoutMsForTest(100_000);
+      const pA = recognize(IMG());
+      await vi.advanceTimersByTimeAsync(0);
+      conv().emit({ ocrId: conv().posted[0].ocrId, blob: fakeBlob("a") });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Call B: shares the same (not-yet-recycled) scheduler singleton, but
+      // with a short timeout — it times out first and recycles scheduler #1.
+      __setOcrJobTimeoutMsForTest(10);
+      const pB = recognize(IMG());
+      await vi.advanceTimersByTimeAsync(0);
+      conv().emit({ ocrId: conv().posted[1].ocrId, blob: fakeBlob("b") });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(10); // fire B's timeout
+      await expect(pB).resolves.toEqual([]);
+      expect(h.schedulersCreated.length).toBe(1);
+      expect(h.schedulersCreated[0].terminateCalls).toBe(1); // recycled by B
+
+      // Call C: ensureScheduler() now builds a fresh scheduler #2.
+      __setOcrJobTimeoutMsForTest(100_000);
+      const pC = recognize(IMG());
+      await vi.advanceTimersByTimeAsync(0);
+      conv().emit({ ocrId: conv().posted[2].ocrId, blob: fakeBlob("c") });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.schedulersCreated.length).toBe(2);
+
+      // Fire A's stale 100s timeout (started long before B's recycle). A
+      // captured scheduler #1's promise — by now the singleton points at
+      // scheduler #2, so the identity guard must skip recycling entirely.
+      await vi.advanceTimersByTimeAsync(100_000 - 10);
+      await expect(pA).resolves.toEqual([]);
+      expect(h.schedulersCreated[0].terminateCalls).toBe(1); // unchanged
+      expect(h.schedulersCreated[1].terminateCalls).toBe(0); // #2 untouched
+
+      void pC; // C's own (100s, still pending) hang is irrelevant to this assertion.
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to the main thread (no conversion worker) when OffscreenCanvas is absent", async () => {
