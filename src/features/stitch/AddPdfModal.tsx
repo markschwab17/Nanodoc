@@ -455,8 +455,9 @@ export function AddPdfModal({
   const handleAddToCanvas = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
     // Plain add must never wait on the probe: abort it BEFORE the render loop so
-    // the OCR worker (shared) is freed and this loop isn't starved. The worker
-    // replies {aborted:true} → probeState "skipped" (no toast).
+    // it stops queuing NEW OCR work behind this add. Abort is cooperative — any
+    // OCR job already in flight finishes first — but the probe stops at its next
+    // checkpoint and replies {aborted:true} → probeState "skipped" (no toast).
     abortProbe();
     setAdding(true);
     setLoadError(null);
