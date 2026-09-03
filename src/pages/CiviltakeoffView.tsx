@@ -18,7 +18,6 @@ import { usePDF } from "@/shared/hooks/usePDF";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
-import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useESignStore } from "@/shared/stores/esignStore";
@@ -208,6 +207,8 @@ export default function CiviltakeoffView() {
 
         // Stitch mode: do not load into editor; pass PDF to stitch view and navigate
         if (params.stitch === "1") {
+          // Lazy: the stitch feature (and its stores) must not load on the plain /view boot path.
+          const { useCtoStitchInitialStore } = await import("@/shared/stores/ctoStitchInitialStore");
           useCtoStitchInitialStore.getState().setInitial({ pdfBytes: data, fileName: name });
           navigate("/stitch");
           return;
