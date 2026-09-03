@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEFAULT_SCALE_FT_PER_IN, isUniform, parseScaleInput, resolvePageScale, tileSizeAtReference } from "./pageScales";
+import { DEFAULT_SCALE_FT_PER_IN, isUniform, parseScaleInput, referenceScaleFor, resolvePageScale, tileSizeAtReference } from "./pageScales";
 
 describe("parseScaleInput", () => {
   test("plain numbers and decimals", () => {
@@ -45,5 +45,15 @@ describe("tileSizeAtReference", () => {
   });
   test("same scale keeps native size", () => {
     expect(tileSizeAtReference(612, 792, 20, 20)).toEqual({ width: 612, height: 792 });
+  });
+});
+
+describe("referenceScaleFor", () => {
+  test("the explicit set scale wins when given, even if pages disagree", () => {
+    expect(referenceScaleFor([0, 1], new Map([[1, 40]]), 20)).toBe(20);
+  });
+  test("with no set scale, falls back to the first selected page's own scale", () => {
+    expect(referenceScaleFor([1, 0], new Map([[1, 40]]), null)).toBe(40);
+    expect(referenceScaleFor([0, 1], new Map([[1, 40]]), null)).toBe(DEFAULT_SCALE_FT_PER_IN);
   });
 });

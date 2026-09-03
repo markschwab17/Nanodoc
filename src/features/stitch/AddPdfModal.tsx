@@ -28,7 +28,7 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
-import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
+import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -233,6 +233,7 @@ export function AddPdfModal({
         setMupdfDoc(doc);
         setPageCount(count);
         setSelectedPages(new Set());
+        setPageScaleText(new Map());
         // Kick off the background feasibility probe over the WHOLE document.
         // userScale is null: placements are scale-invariant for a uniform set,
         // so the probe outcome is unaffected and we avoid a stale-closure dep.
@@ -302,6 +303,7 @@ export function AddPdfModal({
       setMupdfDoc(null);
       setPageCount(0);
       setSelectedPages(new Set());
+      setPageScaleText(new Map());
       setThumbnails({});
       setThumbProgress(0);
       setProbe(null);
@@ -486,6 +488,10 @@ export function AddPdfModal({
         scaleFeetPerInch?: number;
       };
       const newTiles: Array<TileData & { x: number; y: number }> = [];
+      // ONE reference scale for the whole commit: the explicit set scale, else the
+      // first selected page's own resolved scale (see referenceScaleFor) — so every
+      // tile in this batch sizes against the same feet-per-inch baseline.
+      const refScale = referenceScaleFor(selected, pageScales, uniformScale);
       // Start below any existing content so a second add doesn't stack
       // perfectly on top of the first batch.
       const existingTiles = useStitchStore.getState().tiles;
@@ -517,10 +523,9 @@ export function AddPdfModal({
         const widthPt = bounds[2] - bounds[0];
         const heightPt = bounds[3] - bounds[1];
         // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt), scaled up
-        // when this page's own scale is coarser than the set's reference scale
+        // when this page's own scale is coarser than the batch's reference scale
         // (mixed-scale sets size and align by feet).
         const pageScale = resolvePageScale(pageIndex, pageScales, uniformScale);
-        const refScale = uniformScale ?? pageScale;
         const { width: tileW, height: tileH } = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
         const rendered = await renderer.renderPage(mupdfDoc, pageIndex, {
           scale: TILE_RENDER_SCALE,
@@ -543,10 +548,9 @@ export function AddPdfModal({
         setAddingProgress({ done: idx + 1, total: selected.length });
       }
       flushRow();
-      const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
-      if (Number.isFinite(scaleNum) && scaleNum > 0) {
-        setReferenceScaleFeetPerInch(scaleNum);
-      }
+      // Plain add always sets the reference scale: this batch's baseline (set scale,
+      // or the first selected page's own scale) becomes the canvas's scale.
+      setReferenceScaleFeetPerInch(refScale);
       addTiles(newTiles);
       onClose();
     } catch (e) {
@@ -555,7 +559,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, abortProbe, pageScales, uniformScale]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, setReferenceScaleFeetPerInch, abortProbe, pageScales, uniformScale]);
 
   const handleAddAndAutoAlign = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
@@ -582,10 +586,14 @@ export function AddPdfModal({
 
       // 2. Placements: prefer the cached probe (skip the second stitch); else
       //    fall back to running the aligner live (probe absent/errored/running).
+      // The probe always ran with a uniform (null) scale, so its cached poses are
+      // only valid when this selection turns out uniform too — a mixed selection
+      // always takes the live path, which is per-page-scale aware.
+      const isUniformSelection = isUniform(selected, pageScales, uniformScale);
       let placements: TilePlacement[];
       let rootFtPerIn: number;
       let worstResidFt: number;
-      if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
+      if (probe && probeState === "done" && isUniformSelection) {
         const sel = new Set(selected);
         // Re-run the (cheap) layout over just the selected sheets so the committed
         // tiles normalize to THIS selection's top-left (MARGIN), not the whole
@@ -596,9 +604,8 @@ export function AddPdfModal({
         rootFtPerIn = probe.rootFtPerIn;
         worstResidFt = probe.worstResidFt;
       } else {
-        const userScaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
         const result = await autoStitch(mupdf, mupdfDoc, selected, {
-          userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
+          userScale: uniformScale,
           pageScales,
           onProgress: (done, total) => setAddingProgress({ done, total }),
           ocr: recognize,
@@ -627,8 +634,12 @@ export function AddPdfModal({
         };
       });
       addTiles(newTiles);
-      const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
-      setReferenceScaleFeetPerInch(Number.isFinite(scaleNum) && scaleNum > 0 ? scaleNum : rootFtPerIn);
+      // Explicit set scale wins outright; otherwise a uniform selection roots on its
+      // one resolved scale (matches the pre-mixed-scale behavior exactly), and a
+      // mixed selection roots on the live engine's rootFtPerIn (already per-page-scale
+      // aware — see autoStitch's units[0].scale).
+      const refScale = referenceScaleFor(selected, pageScales, uniformScale);
+      setReferenceScaleFeetPerInch(uniformScale ?? (isUniformSelection ? refScale : rootFtPerIn));
 
       // 4. Leave unaligned tiles selected so the user can place them manually.
       const added = useStitchStore.getState().tiles.slice(-newTiles.length);
@@ -649,7 +660,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState, pageScales, uniformScale]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState, pageScales, uniformScale]);
 
   const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
@@ -679,6 +690,7 @@ export function AddPdfModal({
                 setMupdfDoc(null);
                 setPageCount(0);
                 setSelectedPages(new Set());
+                setPageScaleText(new Map());
                 setThumbnails({});
                 setLoadError(null);
                 setProbe(null);
@@ -700,6 +712,7 @@ export function AddPdfModal({
                 setMupdfDoc(null);
                 setPageCount(0);
                 setSelectedPages(new Set());
+                setPageScaleText(new Map());
                 setThumbnails({});
                 setLoadError(null);
                 setProbe(null);

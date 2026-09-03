@@ -29,3 +29,11 @@ export function tileSizeAtReference(widthPt: number, heightPt: number, pageScale
   const factor = pageScale / referenceScale;
   return { width: widthPt * factor, height: heightPt * factor };
 }
+
+/** The reference scale for a commit: the explicit set scale when given, else the
+ *  first selected page's own resolved scale (mirrors the live autoStitch engine's
+ *  `rootFtPerIn = units[0].scale` — the first unit's scale roots the composition
+ *  when no uniform scale is entered). */
+export function referenceScaleFor(pageIndices: number[], pageScales: ReadonlyMap<number, number>, uniform: number | null): number {
+  return uniform ?? resolvePageScale(pageIndices[0] ?? 0, pageScales, null);
+}
