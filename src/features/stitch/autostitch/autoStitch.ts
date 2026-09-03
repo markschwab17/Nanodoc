@@ -29,6 +29,8 @@ export class AutoStitchAborted extends Error {
 
 export interface AutoStitchOptions {
   userScale?: number | null;
+  /** Per-page feet-per-inch (mixed-scale sets). Overrides userScale for that page. */
+  pageScales?: ReadonlyMap<number, number>;
   onProgress?: (done: number, total: number) => void;
   /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel. */
   ocr?: (image: RawImage) => Promise<OcrWord[]>;
@@ -158,8 +160,13 @@ export async function autoStitch(
 ): Promise<AutoStitchResult> {
   const total = pageIndices.length;
   const units: Unit[] = [];
-  // Scale inference is deferred; uniform scale (user-entered or default).
-  const scale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
+  // Scale inference is deferred; uniform scale (user-entered or default), with an
+  // optional per-page override for mixed-scale sets.
+  const uniformScale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
+  const scaleOf = (pageIndex: number): number => {
+    const own = opts.pageScales?.get(pageIndex);
+    return own != null && own > 0 ? own : uniformScale;
+  };
 
   // Cooperative-abort checkpoint. Throwing a distinguishable error lets the
   // worker report `{aborted:true}` (not an error) when a plain add supersedes the probe.
@@ -298,21 +305,23 @@ export async function autoStitch(
       const si = findEdgeStroke(fi.geometry, axis, fi.cross, fi.view, 100, 0.3, extI);
       const sj = findEdgeStroke(fj.geometry, axis, fj.cross, fj.view, 100, 0.3, extJ);
       if (si == null || sj == null) return { perpDelta: null, along: null, loDelta: null, hiDelta: null, crI: [], crJ: [] };
-      const perpDelta = FT(si, scale) - FT(sj, scale);
+      const scaleI = scaleOf(pi.pageIndex), scaleJ = scaleOf(pj.pageIndex);
+      const perpDelta = FT(si, scaleI) - FT(sj, scaleJ);
       // Along-axis seam-crossing consensus, windowed around the label along-delta so
       // far-off pairings can't flood the histogram. Crossings are collected at each
       // sheet's OWN stroke cross-position (si / sj), and carry an orientation signature
       // so crossingConsensus (and the downstream JOINT sweep) can gate street↔street.
-      const center = FT(fi.along, scale) - FT(fj.along, scale);
-      const ci = seamCrossings(fi.geometry, axis, si, scale);
-      const cj = seamCrossings(fj.geometry, axis, sj, scale);
+      const center = FT(fi.along, scaleI) - FT(fj.along, scaleJ);
+      const ci = seamCrossings(fi.geometry, axis, si, scaleI);
+      const cj = seamCrossings(fj.geometry, axis, sj, scaleJ);
       // Window (±60 ft @20) and bin (2 ft @20) are page-point-derived so the vote
-      // makes identical decisions at any scale (values just scale linearly).
-      const cons = crossingConsensus(ci, cj, center, { window: FT(216, scale), bin: FT(7.2, scale) });
+      // makes identical decisions at any scale (values just scale linearly). Shared
+      // window/bin use the i-side scale (mixed scales fall back to the live path).
+      const cons = crossingConsensus(ci, cj, center, { window: FT(216, scaleI), bin: FT(7.2, scaleI) });
       return {
         perpDelta, along: cons ? cons.along : null,
-        loDelta: FT(extI.lo, scale) - FT(extJ.lo, scale),
-        hiDelta: FT(extI.hi, scale) - FT(extJ.hi, scale),
+        loDelta: FT(extI.lo, scaleI) - FT(extJ.lo, scaleJ),
+        hiDelta: FT(extI.hi, scaleI) - FT(extJ.hi, scaleJ),
         crI: ci, crJ: cj,
       };
     };
@@ -352,7 +361,7 @@ export async function autoStitch(
       if (!jFrame) return null; // strip-only
       const jExtract = sliceExtract(jPage.extract, jFrame);
       const jAt = { x: refJ.at.x - jFrame.bbox[0], y: refJ.at.y - jFrame.bbox[1] };
-      const r = oneSidedStrokeAnchor(iPage.extract.geometry, iPage.extract.view, jExtract.geometry, jExtract.view, jAt, refJ.edge, scale);
+      const r = oneSidedStrokeAnchor(iPage.extract.geometry, iPage.extract.view, jExtract.geometry, jExtract.view, jAt, refJ.edge, scaleOf(iPage.pageIndex));
       if (!r) return null;
       const [, iy0, , iy1] = iPage.extract.view;
       return {
@@ -407,7 +416,7 @@ export async function autoStitch(
                   // i's reciprocal label is INTERIOR (no outer edge → strongest); j's is at refJ.edge.
                   const reg = seamRegister(iPage, cx, cy, jPage, refJ.at.x, refJ.at.y, "x");
                   return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x",
-                    dFt: reg.perpDelta ?? FT(cx, scale) - FT(refJ.at.x, scale), precise: reg.perpDelta != null,
+                    dFt: reg.perpDelta ?? FT(cx, scaleOf(iPage.pageIndex)) - FT(refJ.at.x, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
                     along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
                 }
               }
@@ -430,7 +439,7 @@ export async function autoStitch(
                 const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
                 const reg = seamRegister(iPage, cy, cx, jPage, refJ.at.y, refJ.at.x, "y");
                 return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
-                  dFt: reg.perpDelta ?? FT(cy, scale) - FT(refJ.at.y, scale), precise: reg.perpDelta != null,
+                  dFt: reg.perpDelta ?? FT(cy, scaleOf(iPage.pageIndex)) - FT(refJ.at.y, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
                   along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
               }
             }
@@ -467,12 +476,12 @@ export async function autoStitch(
           if (horiz) {
             const reg = seamRegister(iPage, ri.at.x, ri.at.y, jPage, r.at.x, r.at.y, "x");
             rawAnchors.push({ pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "x",
-              dFt: reg.perpDelta ?? FT(ri.at.x, scale) - FT(r.at.x, scale), precise: reg.perpDelta != null,
+              dFt: reg.perpDelta ?? FT(ri.at.x, scaleOf(iPage.pageIndex)) - FT(r.at.x, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
               along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ });
           } else {
             const reg = seamRegister(iPage, ri.at.y, ri.at.x, jPage, r.at.y, r.at.x, "y");
             rawAnchors.push({ pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "y",
-              dFt: reg.perpDelta ?? FT(ri.at.y, scale) - FT(r.at.y, scale), precise: reg.perpDelta != null,
+              dFt: reg.perpDelta ?? FT(ri.at.y, scaleOf(iPage.pageIndex)) - FT(r.at.y, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
               along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ });
           }
         }
@@ -513,10 +522,10 @@ export async function autoStitch(
     const h = p.extract.view[3] - p.extract.view[1];
     if (frames.length >= 2) {
       for (const f of frames.slice(0, 2)) {
-        units.push({ pageIndex: p.pageIndex, frame: f, extract: sliceExtract(p.extract, f), sizePt: { w, h }, scale, printedNo: p.printedNo, key: 0 });
+        units.push({ pageIndex: p.pageIndex, frame: f, extract: sliceExtract(p.extract, f), sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0 });
       }
     } else {
-      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale, printedNo: p.printedNo, key: 0 });
+      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0 });
     }
   }
 

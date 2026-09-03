@@ -21,6 +21,8 @@ export interface StitchTile {
   isScaleStamp?: boolean;
   /** Scale bar only: 1" = this many feet (e.g. 20). Used to render stamp at canonical size so bar is exactly 1". */
   scaleStampFeetPerInch?: number;
+  /** This sheet's own scale in feet per inch (mixed-scale sets). Undefined on legacy tiles. */
+  scaleFeetPerInch?: number;
   /** Set to true when content-delete has modified this tile's image. Export will use raster instead of vector source. */
   imageModified?: boolean;
   /** Non-destructive Clean-Composite regions to hide, stored as fractions (0..1) of the tile's width/height. Never bakes into the raster. */

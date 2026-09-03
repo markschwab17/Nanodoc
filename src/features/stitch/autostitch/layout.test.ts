@@ -82,3 +82,19 @@ describe("frameMask", () => {
     expect(frameMask([0, 0, 720, 480], 720, 480)).toEqual([]);
   });
 });
+
+test("a 1\"=40' sheet on a 1\"=20' root is laid out at twice its point size", () => {
+  const placements = layoutPlacements(
+    [
+      { pageIndex: 0, scale: 20, sizePt: { w: 100, h: 50 }, posFt: { x: 0, y: 0 } },
+      { pageIndex: 1, scale: 40, sizePt: { w: 100, h: 50 }, posFt: { x: 100, y: 0 } },
+    ],
+    20,
+    { margin: 0, gap: 0 }
+  );
+  const root = placements.find((p) => p.pageIndex === 0)!;
+  const coarse = placements.find((p) => p.pageIndex === 1)!;
+  expect(root.width).toBe(100);
+  expect(coarse.width).toBe(200);
+  expect(coarse.height).toBe(100);
+});

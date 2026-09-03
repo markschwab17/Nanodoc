@@ -12,6 +12,8 @@ export interface ProbeRequest {
   pdfBytes: Uint8Array;
   pageIndices: number[];
   userScale: number | null;
+  /** Optional per-page feet-per-inch; absent = uniform. */
+  pageScales?: [number, number][];
 }
 
 export interface ProbeResult {

@@ -28,6 +28,7 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
+import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -84,6 +85,14 @@ export function AddPdfModal({
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
   /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
+  /** Per-page scale text, keyed by page index; empty/absent = use the set scale above. */
+  const [pageScaleText, setPageScaleText] = useState<Map<number, string>>(new Map());
+  const pageScales = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const [i, t] of pageScaleText) { const n = parseScaleInput(t); if (n != null) m.set(i, n); }
+    return m;
+  }, [pageScaleText]);
+  const uniformScale = useMemo(() => parseScaleInput(scaleFeetPerInch), [scaleFeetPerInch]);
   const [_ctoListening, setCtoListening] = useState(false);
   /** User-visible error for failed loads/adds (corrupt file, password, etc). */
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -474,6 +483,7 @@ export function AddPdfModal({
         width: number;
         height: number;
         imageDataUrl?: string;
+        scaleFeetPerInch?: number;
       };
       const newTiles: Array<TileData & { x: number; y: number }> = [];
       // Start below any existing content so a second add doesn't stack
@@ -506,9 +516,12 @@ export function AddPdfModal({
         page.destroy?.();
         const widthPt = bounds[2] - bounds[0];
         const heightPt = bounds[3] - bounds[1];
-        // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt) so scale is correct.
-        const tileW = widthPt;
-        const tileH = heightPt;
+        // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt), scaled up
+        // when this page's own scale is coarser than the set's reference scale
+        // (mixed-scale sets size and align by feet).
+        const pageScale = resolvePageScale(pageIndex, pageScales, uniformScale);
+        const refScale = uniformScale ?? pageScale;
+        const { width: tileW, height: tileH } = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
         const rendered = await renderer.renderPage(mupdfDoc, pageIndex, {
           scale: TILE_RENDER_SCALE,
         });
@@ -523,6 +536,7 @@ export function AddPdfModal({
           width: tileW,
           height: tileH,
           imageDataUrl: dataUrl,
+          scaleFeetPerInch: pageScale,
         };
         rowBuffer.push({ tile: tileData, w: tileW, h: tileH });
         if (rowBuffer.length === TILES_PER_ROW) flushRow();
@@ -541,7 +555,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, abortProbe]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, abortProbe, pageScales, uniformScale]);
 
   const handleAddAndAutoAlign = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
@@ -571,7 +585,7 @@ export function AddPdfModal({
       let placements: TilePlacement[];
       let rootFtPerIn: number;
       let worstResidFt: number;
-      if (probe && probeState === "done") {
+      if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
         const sel = new Set(selected);
         // Re-run the (cheap) layout over just the selected sheets so the committed
         // tiles normalize to THIS selection's top-left (MARGIN), not the whole
@@ -585,6 +599,7 @@ export function AddPdfModal({
         const userScaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
         const result = await autoStitch(mupdf, mupdfDoc, selected, {
           userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
+          pageScales,
           onProgress: (done, total) => setAddingProgress({ done, total }),
           ocr: recognize,
         });
@@ -608,6 +623,7 @@ export function AddPdfModal({
           width: p.width, height: p.height,
           imageDataUrl: rasters.get(p.pageIndex),
           hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
+          scaleFeetPerInch: resolvePageScale(p.pageIndex, pageScales, uniformScale),
         };
       });
       addTiles(newTiles);
@@ -633,7 +649,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState, pageScales, uniformScale]);
 
   const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
@@ -842,6 +858,26 @@ export function AddPdfModal({
                     </div>
                   )}
                   <span className="text-xs mt-1">Page {i + 1}</span>
+                  {selectedPages.has(i) && (
+                    <span className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground" onClick={(e) => e.preventDefault()}>
+                      1&quot;=
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        aria-label={`Scale for page ${i + 1}, feet per inch`}
+                        placeholder={String(uniformScale ?? DEFAULT_SCALE_FT_PER_IN)}
+                        value={pageScaleText.get(i) ?? ""}
+                        onChange={(e) => {
+                          const next = new Map(pageScaleText);
+                          if (e.target.value.trim()) next.set(i, e.target.value); else next.delete(i);
+                          setPageScaleText(next);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-10 rounded border border-input bg-background px-1 py-0.5 text-[10px]"
+                      />
+                      ft
+                    </span>
+                  )}
                 </label>
               ))}
             </div>
