@@ -18,10 +18,20 @@ describe("CiviltakeoffView boot path", () => {
     const here = fileURLToPath(import.meta.url);
     const target = path.join(path.dirname(here), "CiviltakeoffView.tsx");
     const src = readFileSync(target, "utf8");
-    const staticImports = src
-      .split("\n")
-      .filter((l) => /^\s*import\s/.test(l))
-      .filter((l) => /features\/stitch|stitchStore|ctoStitchInitialStore/.test(l));
-    expect(staticImports).toEqual([]);
+
+    // Match whole static import/re-export statements, not individual lines — a line-by-line
+    // scan is blind to Prettier-wrapped multi-line imports like
+    //   import {
+    //     useCtoStitchInitialStore,
+    //   } from "@/shared/stores/ctoStitchInitialStore";
+    // where no single line matches both "starts with import" and "mentions the specifier".
+    // Dynamic `import(...)` calls are intentionally not matched (they don't start a line
+    // with the `import`/`export` keyword followed by whitespace before the braces/specifier).
+    const staticImportStatements =
+      src.match(/^\s*(?:import|export)\s[\s\S]*?from\s*["'][^"']+["'];?/gm) ?? [];
+    const stitchImports = staticImportStatements.filter((stmt) =>
+      /features\/stitch|stitchStore|ctoStitchInitialStore/.test(stmt)
+    );
+    expect(stitchImports).toEqual([]);
   });
 });
