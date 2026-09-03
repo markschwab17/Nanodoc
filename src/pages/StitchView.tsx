@@ -17,6 +17,7 @@ import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
 import { useScaleAlignMode } from "@/features/stitch/useScaleAlignMode";
 import { exportStitchToPdf } from "@/features/stitch/stitchExport";
+import { buildStitchManifest } from "@/features/stitch/stitchManifest";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
 import { detectCleanupForTiles } from "@/features/stitch/cleanup/cleanupRun";
 import type { TileProposalUI } from "@/features/stitch/cleanup/CleanupReview";
@@ -592,6 +593,10 @@ export default function StitchView() {
         if (destination === "new_file" && displayName?.trim()) {
           formData.append("display_name", displayName.trim());
         }
+        const manifest = buildStitchManifest();
+        if (destination === "project_page") {
+          formData.append("stitch_manifest", JSON.stringify(manifest));
+        }
         const res = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
           method: "POST",
           body: formData,
@@ -604,7 +609,7 @@ export default function StitchView() {
         if (typeof window !== "undefined" && window.opener) {
           try {
             window.opener.postMessage(
-              { type: "nanodoc-stitch-saved", success: true },
+              { type: "nanodoc-stitch-saved", success: true, destination, manifest },
               ctx.api_origin
             );
           } catch {
