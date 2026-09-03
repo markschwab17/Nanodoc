@@ -37,3 +37,23 @@ export function tileSizeAtReference(widthPt: number, heightPt: number, pageScale
 export function referenceScaleFor(pageIndices: number[], pageScales: ReadonlyMap<number, number>, uniform: number | null): number {
   return uniform ?? resolvePageScale(pageIndices[0] ?? 0, pageScales, null);
 }
+
+/** The baseline used to size a batch being committed to the canvas. Priority:
+ *  1. `typed` — the user explicitly typed a set scale, so it always wins.
+ *  2. `existing` — with nothing typed, a canvas that already has sheets keeps its
+ *     own reference scale (so a second blank-box batch matches feet with what's
+ *     already there instead of re-guessing from the new selection).
+ *  3. otherwise — an empty canvas lets the selection decide (first selected
+ *     page's own resolved scale; see `referenceScaleFor`). */
+export function referenceBaseline(opts: {
+  typed: number | null;
+  existing: number | null;
+  hasTiles: boolean;
+  selection: number[];
+  pageScales: ReadonlyMap<number, number>;
+}): number {
+  const { typed, existing, hasTiles, selection, pageScales } = opts;
+  if (typed != null) return typed;
+  if (hasTiles && existing != null && existing > 0) return existing;
+  return referenceScaleFor(selection, pageScales, null);
+}

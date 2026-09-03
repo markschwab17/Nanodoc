@@ -28,7 +28,7 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
-import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
+import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -83,7 +83,10 @@ export function AddPdfModal({
   /** Progress while adding pages to canvas. */
   const [addingProgress, setAddingProgress] = useState({ done: 0, total: 0 });
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
-  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
+  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). A typed value always wins
+   *  as the commit's reference scale. Empty = don't override: a canvas that already
+   *  has sheets keeps its own reference scale, and only an empty canvas falls back to
+   *  the selection's own resolved scale (see `referenceBaseline`). */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
   /** Per-page scale text, keyed by page index; empty/absent = use the set scale above. */
   const [pageScaleText, setPageScaleText] = useState<Map<number, string>>(new Map());
@@ -488,10 +491,14 @@ export function AddPdfModal({
         scaleFeetPerInch?: number;
       };
       const newTiles: Array<TileData & { x: number; y: number }> = [];
-      // ONE reference scale for the whole commit: the explicit set scale, else the
-      // first selected page's own resolved scale (see referenceScaleFor) — so every
-      // tile in this batch sizes against the same feet-per-inch baseline.
-      const refScale = referenceScaleFor(selected, pageScales, uniformScale);
+      // ONE reference scale for the whole commit: the typed set scale wins; else a
+      // canvas that already has sheets keeps its own reference (so a second blank-box
+      // batch matches feet with what's already there); else the selection decides
+      // (first selected page's own resolved scale — see `referenceBaseline`). Every
+      // tile in this batch sizes against this same feet-per-inch baseline.
+      const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
+      const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+      const refScale = referenceBaseline({ typed: uniformScale, existing: existingRef, hasTiles, selection: selected, pageScales });
       // Start below any existing content so a second add doesn't stack
       // perfectly on top of the first batch.
       const existingTiles = useStitchStore.getState().tiles;
@@ -548,9 +555,10 @@ export function AddPdfModal({
         setAddingProgress({ done: idx + 1, total: selected.length });
       }
       flushRow();
-      // Plain add always sets the reference scale: this batch's baseline (set scale,
-      // or the first selected page's own scale) becomes the canvas's scale.
-      setReferenceScaleFeetPerInch(refScale);
+      // Only write the store when the user typed a scale or the store is unset —
+      // otherwise a blank box on a canvas that already has a reference scale would
+      // silently overwrite a deliberately set canvas scale with a guessed one.
+      if (uniformScale != null || existingRef == null) setReferenceScaleFeetPerInch(refScale);
       addTiles(newTiles);
       onClose();
     } catch (e) {
@@ -633,13 +641,20 @@ export function AddPdfModal({
           scaleFeetPerInch: resolvePageScale(p.pageIndex, pageScales, uniformScale),
         };
       });
+      // Read the pre-commit baseline BEFORE addTiles below so "does the canvas already
+      // have sheets" reflects what was there before this batch, not this batch itself.
+      const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
+      const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
       addTiles(newTiles);
-      // Explicit set scale wins outright; otherwise a uniform selection roots on its
-      // one resolved scale (matches the pre-mixed-scale behavior exactly), and a
-      // mixed selection roots on the live engine's rootFtPerIn (already per-page-scale
-      // aware — see autoStitch's units[0].scale).
+      // Explicit set scale wins outright; else a canvas that already has sheets keeps
+      // its own reference scale (same baseline rule as plain add — see
+      // `referenceBaseline`); else a uniform selection roots on its one resolved scale
+      // (matches the pre-mixed-scale behavior exactly), and a mixed selection roots on
+      // the live engine's rootFtPerIn (already per-page-scale aware — see autoStitch's
+      // units[0].scale).
       const refScale = referenceScaleFor(selected, pageScales, uniformScale);
-      setReferenceScaleFeetPerInch(uniformScale ?? (isUniformSelection ? refScale : rootFtPerIn));
+      const finalRef = uniformScale ?? (hasTiles && existingRef != null && existingRef > 0 ? existingRef : (isUniformSelection ? refScale : rootFtPerIn));
+      if (uniformScale != null || existingRef == null) setReferenceScaleFeetPerInch(finalRef);
 
       // 4. Leave unaligned tiles selected so the user can place them manually.
       const added = useStitchStore.getState().tiles.slice(-newTiles.length);
@@ -881,9 +896,12 @@ export function AddPdfModal({
                         placeholder={String(uniformScale ?? DEFAULT_SCALE_FT_PER_IN)}
                         value={pageScaleText.get(i) ?? ""}
                         onChange={(e) => {
-                          const next = new Map(pageScaleText);
-                          if (e.target.value.trim()) next.set(i, e.target.value); else next.delete(i);
-                          setPageScaleText(next);
+                          const value = e.target.value;
+                          setPageScaleText((prev) => {
+                            const next = new Map(prev);
+                            if (value.trim()) next.set(i, value); else next.delete(i);
+                            return next;
+                          });
                         }}
                         onClick={(e) => e.stopPropagation()}
                         className="w-10 rounded border border-input bg-background px-1 py-0.5 text-[10px]"

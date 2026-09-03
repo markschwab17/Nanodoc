@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEFAULT_SCALE_FT_PER_IN, isUniform, parseScaleInput, referenceScaleFor, resolvePageScale, tileSizeAtReference } from "./pageScales";
+import { DEFAULT_SCALE_FT_PER_IN, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference } from "./pageScales";
 
 describe("parseScaleInput", () => {
   test("plain numbers and decimals", () => {
@@ -55,5 +55,26 @@ describe("referenceScaleFor", () => {
   test("with no set scale, falls back to the first selected page's own scale", () => {
     expect(referenceScaleFor([1, 0], new Map([[1, 40]]), null)).toBe(40);
     expect(referenceScaleFor([0, 1], new Map([[1, 40]]), null)).toBe(DEFAULT_SCALE_FT_PER_IN);
+  });
+});
+
+describe("referenceBaseline", () => {
+  test("the typed value wins even with existing tiles and a disagreeing selection", () => {
+    expect(
+      referenceBaseline({ typed: 20, existing: 40, hasTiles: true, selection: [0, 1], pageScales: new Map([[1, 60]]) })
+    ).toBe(20);
+  });
+  test("the existing reference wins when tiles are already on the canvas and nothing was typed", () => {
+    expect(
+      referenceBaseline({ typed: null, existing: 40, hasTiles: true, selection: [0, 1], pageScales: new Map([[0, 60]]) })
+    ).toBe(40);
+  });
+  test("the selection decides on an empty canvas with nothing typed", () => {
+    expect(
+      referenceBaseline({ typed: null, existing: null, hasTiles: false, selection: [1, 0], pageScales: new Map([[1, 40]]) })
+    ).toBe(40);
+    expect(
+      referenceBaseline({ typed: null, existing: 40, hasTiles: false, selection: [0], pageScales: new Map() })
+    ).toBe(DEFAULT_SCALE_FT_PER_IN);
   });
 });

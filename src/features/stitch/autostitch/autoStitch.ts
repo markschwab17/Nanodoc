@@ -10,8 +10,7 @@ import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber 
 import { renderBand } from "./bandRender";
 import { parseSheetRefs, type SheetRef } from "./tokens";
 import type { OcrWord, RawImage } from "./ocrService";
-
-const DEFAULT_SCALE = 20;
+import { DEFAULT_SCALE_FT_PER_IN as DEFAULT_SCALE } from "../pageScales";
 
 /** Drawing-density floor (geometry vector count). Used ONLY to prune the
  *  reciprocal anchor-search pass (a raster page has zero vector geometry and
@@ -316,7 +315,8 @@ export async function autoStitch(
       const cj = seamCrossings(fj.geometry, axis, sj, scaleJ);
       // Window (±60 ft @20) and bin (2 ft @20) are page-point-derived so the vote
       // makes identical decisions at any scale (values just scale linearly). Shared
-      // window/bin use the i-side scale (mixed scales fall back to the live path).
+      // window/bin use the i-side scale; the cached-probe reuse gate lives in
+      // AddPdfModal (isUniform) — inside autoStitch, this IS the live path.
       const cons = crossingConsensus(ci, cj, center, { window: FT(216, scaleI), bin: FT(7.2, scaleI) });
       return {
         perpDelta, along: cons ? cons.along : null,
@@ -361,6 +361,10 @@ export async function autoStitch(
       if (!jFrame) return null; // strip-only
       const jExtract = sliceExtract(jPage.extract, jFrame);
       const jAt = { x: refJ.at.x - jFrame.bbox[0], y: refJ.at.y - jFrame.bbox[1] };
+      // This channel applies ONE scale (i's) to both sheets — stitchCore itself is
+      // untouched/scale-agnostic. A no-op for uniform sets (i and j share a scale); for a
+      // mixed-scale pair it's a known limitation (Phase 3) since j's geometry is measured
+      // in i's feet-per-inch instead of its own.
       const r = oneSidedStrokeAnchor(iPage.extract.geometry, iPage.extract.view, jExtract.geometry, jExtract.view, jAt, refJ.edge, scaleOf(iPage.pageIndex));
       if (!r) return null;
       const [, iy0, , iy1] = iPage.extract.view;
@@ -533,6 +537,10 @@ export async function autoStitch(
 
   // Unique numeric keys, stable order.
   units.forEach((u, i) => { u.key = i + 1; });
+  // For a mixed-scale set, the reference is the first selected page's own scale.
+  // Callers (AddPdfModal) sort the selection ascending before passing it in as
+  // `pageIndices`, and units are built in that same order, so `units[0]` is always
+  // that same lowest-page-index selection, making this deterministic across runs.
   const rootFtPerIn = units[0].scale;
 
   // Resolve each raw anchor's (pageIndex, labelY) endpoints to unit keys. On a

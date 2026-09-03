@@ -12,7 +12,12 @@ export interface ProbeRequest {
   pdfBytes: Uint8Array;
   pageIndices: number[];
   userScale: number | null;
-  /** Optional per-page feet-per-inch; absent = uniform. */
+  /** Optional per-page feet-per-inch; absent = uniform. AddPdfModal deliberately does NOT
+   *  send this: the probe exists to answer a uniform-scale feasibility question ahead of
+   *  time, and the cached-probe reuse gate (`isUniform` in AddPdfModal) assumes the probe's
+   *  poses were computed uniform. Wiring per-page scales through here would break that
+   *  assumption — a probe run with mixed scales could be reused for a selection whose
+   *  cached poses no longer match a fresh per-page-scale-aware run. */
   pageScales?: [number, number][];
 }
 
