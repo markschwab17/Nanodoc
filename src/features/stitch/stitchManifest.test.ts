@@ -27,9 +27,24 @@ describe("buildStitchManifest", () => {
     expect(m.tiles).toHaveLength(2);
     expect(m.tiles[0]).toMatchObject({ sourceFileName: "plans.pdf", sourcePageIndex: 3, x: 10, y: 20, width: 100, height: 50, rotation: 0, scaleFeetPerInch: 20, hiddenRegions: [] });
     expect(m.tiles[1]).toMatchObject({ sourcePageIndex: 4, rotation: 90, scaleFeetPerInch: 40, hiddenRegions: [{ x: 0.9, y: 0, w: 0.1, h: 1 }] });
-    // no crop: bounds = the content's extent (tile 2 rotated 90° about its centre spans x 160..260, y −30..170)
-    expect(m.exportBounds.x).toBeLessThanOrEqual(10);
-    expect(m.exportBounds.y).toBeLessThanOrEqual(-30);
+    // no crop: bounds = the content's extent (tile 2 rotated 90° about its centre spans x 160..260,
+    // y −30..170); the canvas already starts at x=0, so the min stays 0 there.
+    expect(m.exportBounds.x).toBe(0);
+    expect(m.exportBounds.y).toBeCloseTo(-30, 9);
+  });
+
+  test("expands the no-crop bounds for a scale stamp outside the PDF tiles, mirroring the PDF export", () => {
+    useStitchStore.setState({
+      canvasWidth: 1000, canvasHeight: 800, cropRect: null,
+      referenceScaleFeetPerInch: null, compositionScaleFactor: 1,
+      tiles: [
+        tile({ sourcePageIndex: 0, x: 10, y: 10, width: 100, height: 50 }),
+        tile({ sourcePageIndex: -1, isScaleStamp: true, x: -40, y: 900, width: 50, height: 20 }),
+      ],
+    });
+    const m = buildStitchManifest();
+    expect(m.exportBounds).toEqual({ x: -40, y: 0, w: 1040, h: 920 });
+    expect(m.tiles.map((t) => t.sourcePageIndex)).toEqual([0]);
   });
 
   test("uses the crop rect as the export bounds and drops tiles outside it", () => {

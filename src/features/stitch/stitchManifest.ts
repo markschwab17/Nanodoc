@@ -4,6 +4,9 @@
  * creates from the stitch (Site Sheet spec §4.1) so takeoff drawn on a source sheet can be
  * moved onto the composite by that tile's pose. Coordinates are canvas points, y-down; the
  * exported PDF page is `exportBounds`, so pdfX = x − exportBounds.x, pdfYdown = y − exportBounds.y.
+ * `exportBounds` mirrors exactly how `exportStitchToPdf` (stitchExport.ts) computes its page
+ * bounds — cropRect when set, else the canvas expanded to include EVERY tile (scale stamps
+ * included) — so the manifest always agrees with the PDF page it describes.
  */
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { getTileAABB } from "./stitchGeometry";
@@ -35,7 +38,7 @@ export function buildStitchManifest(): StitchManifest {
   if (cropRect) {
     bounds = { x: cropRect.x, y: cropRect.y, w: cropRect.w, h: cropRect.h };
   } else {
-    const b = contentExportBounds(canvasWidth, canvasHeight, pdfTiles.map(getTileAABB));
+    const b = contentExportBounds(canvasWidth, canvasHeight, tiles.map(getTileAABB));
     bounds = { x: b.cropX, y: b.cropY, w: b.cropW, h: b.cropH };
   }
   const inside = pdfTiles.filter((t) => tileIntersectsCrop(t, bounds.x, bounds.y, bounds.w, bounds.h));
