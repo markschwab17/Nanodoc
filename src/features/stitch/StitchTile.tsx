@@ -13,7 +13,7 @@ import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
 import { computeResizedPose } from "@/features/stitch/stitchGeometry";
-import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
+import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
 import { cssClipPathWithHoles, cssClipToRect } from "./cleanup/clipRegions";
 import { Lock, RotateCw, Unlock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -139,7 +139,10 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
       // Read all needed values from store to avoid stale closures and extra subscriptions
       const store = useStitchStore.getState();
-      const scale = Math.max(MIN_ZOOM, store.zoomLevel);
+      // The ACTUAL zoom, guarded only against a divide-by-zero: the zoom floor is now
+      // dynamic and legitimately goes below MIN_ZOOM, and clamping here would make a drag
+      // move the tile by the wrong distance down there.
+      const scale = Math.max(ABSOLUTE_MIN_ZOOM, store.zoomLevel);
 
       const dragOrResizeX = drag?.type === "single" ? drag.x : drag?.type === "group" ? drag.x : resize?.x ?? 0;
       const dragOrResizeY = drag?.type === "single" ? drag.y : drag?.type === "group" ? drag.y : resize?.y ?? 0;
@@ -410,7 +413,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
       {isSingleSelected && (() => {
         // Controls live inside the zoom-scaled canvas — divide by zoom so they
         // stay a constant size on screen (like the lock button always did).
-        const invZoom = 1 / Math.max(MIN_ZOOM, zoomLevel);
+        const invZoom = 1 / Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
         const hs = HANDLE_SIZE * invZoom;
         const buttonPx = 32 * 0.9 * invZoom;
         const buttonTop = -48 * invZoom;

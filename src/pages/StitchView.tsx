@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStitchStore, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { postToCto } from "@/shared/ctoBridge";
@@ -31,7 +31,8 @@ import { buildStitchManifest } from "@/features/stitch/stitchManifest";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
 import { detectCleanupForTiles } from "@/features/stitch/cleanup/cleanupRun";
 import type { TileProposalUI } from "@/features/stitch/cleanup/CleanupReview";
-import { hitTestTileAtPoint, canvasToTileLocal } from "@/features/stitch/stitchGeometry";
+import { hitTestTileAtPoint, canvasToTileLocal, contentBounds, fitZoomFor } from "@/features/stitch/stitchGeometry";
+import { MAX_ZOOM, RULER_SIZE } from "@/features/stitch/stitchConstants";
 import type { CanvasRect } from "@/features/stitch/imageUtils";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
@@ -93,14 +94,31 @@ export default function StitchView() {
   const prevTileCountRef = useRef(0);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * Zoom-to-fit: pick the zoom at which the whole composition (page rect UNION every tile,
+   * placed sheets outside the page included) fits the viewport, then centre it. It used to
+   * only centre at the CURRENT zoom, which on a plan set spilling off an 8.5×11 default left
+   * most of the sheets off screen with no obvious way back to them.
+   */
   const handleRecenter = useCallback(() => {
     const el = canvasContainerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const { canvasWidth, canvasHeight, zoomLevel, setPanOffset } = useStitchStore.getState();
-    setPanOffset({
-      x: (rect.width - canvasWidth * zoomLevel) / 2,
-      y: (rect.height - canvasHeight * zoomLevel) / 2,
+    if (!(rect.width > 0) || !(rect.height > 0)) return;
+    const state = useStitchStore.getState();
+    const bounds = contentBounds(state.tiles, state.canvasWidth, state.canvasHeight);
+    const zoom = Math.min(
+      MAX_ZOOM,
+      Math.max(selectEffectiveMinZoom(state), fitZoomFor(bounds, rect.width, rect.height))
+    );
+    // Screen position of a canvas point is panOffset + (point + RULER_SIZE) * zoom — the
+    // rulers sit outside the page inside the same scaled layer, so they count.
+    const centerX = bounds.x + bounds.width / 2;
+    const centerY = bounds.y + bounds.height / 2;
+    state.setZoomLevel(zoom);
+    state.setPanOffset({
+      x: rect.width / 2 - (centerX + RULER_SIZE) * zoom,
+      y: rect.height / 2 - (centerY + RULER_SIZE) * zoom,
     });
   }, []);
 
@@ -256,6 +274,11 @@ export default function StitchView() {
         useNotificationStore
           .getState()
           .showNotification(message, result.unalignedIds.length > 0 ? "info" : "success");
+        // A plan commit always re-fits the paper to the sheets it just placed — that is
+        // the whole point of the plan path, and it is what stops a plan set from landing
+        // mostly off an 8.5×11 default. (commitPages already does this when the user has
+        // not chosen a size; this call covers the case where they have. It is idempotent.)
+        useStitchStore.getState().fitCanvasToTiles();
         // Two frames, as on first mount: the tiles must be laid out before
         // recenter can measure the canvas against them.
         requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));

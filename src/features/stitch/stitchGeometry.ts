@@ -4,6 +4,7 @@
  */
 
 import type { StitchTile } from "./stitchTypes";
+import { ABSOLUTE_MIN_ZOOM, FIT_VIEWPORT_MARGIN, MIN_ZOOM } from "./stitchConstants";
 
 /** Canvas point (e.g. from clientToCanvas). */
 export interface CanvasPoint {
@@ -295,4 +296,83 @@ export function getGroupBounds(
     width: maxX - minX,
     height: maxY - minY,
   };
+}
+
+/** A rectangle in canvas space. */
+export interface Bounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Everything the user should be able to see: the canvas page rect UNION every
+ * tile's AABB (rotation included). Tiles routinely sit outside the page — a
+ * plan set auto-aligned onto an 8.5×11 default spills far past it — and a view
+ * that only ever fits the page would hide them.
+ *
+ * Deliberately NOT the same as `contentExportBounds` in stitchExport.ts: this is
+ * about what the viewport shows, export semantics are their own thing.
+ */
+export function contentBounds(
+  tiles: TilePose[],
+  canvasWidth: number,
+  canvasHeight: number
+): Bounds {
+  let minX = 0;
+  let minY = 0;
+  let maxX = canvasWidth;
+  let maxY = canvasHeight;
+  for (const t of tiles) {
+    const aabb = getTileAABB(t);
+    minX = Math.min(minX, aabb.x);
+    minY = Math.min(minY, aabb.y);
+    maxX = Math.max(maxX, aabb.x + aabb.width);
+    maxY = Math.max(maxY, aabb.y + aabb.height);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * The zoom at which `bounds` exactly fits a viewport, leaving `margin` (a
+ * fraction of the viewport, split between the two sides) as slack.
+ *
+ * Returns MIN_ZOOM when there is nothing measurable to fit against — an
+ * unmeasured viewport (width/height 0 before layout) or degenerate bounds — so
+ * callers get the everyday floor rather than 0 or Infinity.
+ */
+export function fitZoomFor(
+  bounds: Bounds,
+  viewportWidth: number,
+  viewportHeight: number,
+  margin: number = FIT_VIEWPORT_MARGIN
+): number {
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) return MIN_ZOOM;
+  if (!(bounds.width > 0) || !(bounds.height > 0)) return MIN_ZOOM;
+  const availableWidth = viewportWidth * (1 - margin);
+  const availableHeight = viewportHeight * (1 - margin);
+  const zoom = Math.min(availableWidth / bounds.width, availableHeight / bounds.height);
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : MIN_ZOOM;
+}
+
+/**
+ * The lower zoom bound the UI should enforce right now.
+ *
+ * MIN_ZOOM (0.25) is fine for a single page, but Mark's complaint was that with
+ * a set of huge plan sheets placed you "cannot zoom far enough out to see all
+ * the pages" — 0.25 is nowhere near enough. So the floor drops to HALF the
+ * fit-the-whole-composition zoom (half, so you can always pull back visibly
+ * further than a plain fit), never rising above MIN_ZOOM and never falling
+ * below ABSOLUTE_MIN_ZOOM.
+ */
+export function effectiveMinZoomFor(
+  bounds: Bounds,
+  viewportWidth: number,
+  viewportHeight: number,
+  margin: number = FIT_VIEWPORT_MARGIN
+): number {
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) return MIN_ZOOM;
+  const fit = fitZoomFor(bounds, viewportWidth, viewportHeight, margin);
+  return Math.min(MIN_ZOOM, Math.max(ABSOLUTE_MIN_ZOOM, fit * 0.5));
 }

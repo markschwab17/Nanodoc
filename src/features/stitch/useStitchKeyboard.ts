@@ -11,7 +11,7 @@
 
 import { useEffect } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
-import { MIN_ZOOM } from "./stitchConstants";
+import { ABSOLUTE_MIN_ZOOM } from "./stitchConstants";
 
 /** Gap (ms) between nudges that starts a new undo step. */
 const NUDGE_BURST_MS = 800;
@@ -67,7 +67,7 @@ export function useStitchKeyboard() {
       ) {
         e.preventDefault();
         e.stopPropagation();
-        const zoom = Math.max(MIN_ZOOM, store.zoomLevel);
+        const zoom = Math.max(ABSOLUTE_MIN_ZOOM, store.zoomLevel);
         const step = e.shiftKey ? 10 / zoom : 1 / zoom;
 
         let dx = 0;

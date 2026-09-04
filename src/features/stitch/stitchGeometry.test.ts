@@ -7,10 +7,14 @@ import { describe, expect, test } from "vitest";
 import {
   canvasToTileLocal,
   computeResizedPose,
+  contentBounds,
+  effectiveMinZoomFor,
+  fitZoomFor,
   getGroupBounds,
   getTileAABB,
   tileLocalToCanvas,
 } from "./stitchGeometry";
+import { ABSOLUTE_MIN_ZOOM, MIN_ZOOM } from "./stitchConstants";
 import type { StitchTile } from "./stitchTypes";
 
 function makeTile(partial: Partial<StitchTile>): StitchTile {
@@ -149,5 +153,82 @@ describe("canvasToTileLocal / tileLocalToCanvas", () => {
       expect(back.u).toBeCloseTo(u, 6);
       expect(back.v).toBeCloseTo(v, 6);
     }
+  });
+});
+
+describe("contentBounds", () => {
+  test("with no tiles it is exactly the canvas rect", () => {
+    expect(contentBounds([], 612, 792)).toEqual({ x: 0, y: 0, width: 612, height: 792 });
+  });
+
+  test("a tile inside the canvas does not shrink the bounds", () => {
+    const inside = makeTile({ x: 100, y: 100, width: 50, height: 50 });
+    expect(contentBounds([inside], 612, 792)).toEqual({ x: 0, y: 0, width: 612, height: 792 });
+  });
+
+  test("tiles outside the canvas extend it in both directions", () => {
+    const left = makeTile({ x: -200, y: -50, width: 100, height: 100 });
+    const right = makeTile({ x: 900, y: 1000, width: 100, height: 100 });
+    expect(contentBounds([left, right], 612, 792)).toEqual({
+      x: -200,
+      y: -50,
+      width: 1200, // -200 → 1000
+      height: 1150, // -50 → 1100
+    });
+  });
+
+  test("rotation counts: the union uses the rotated AABB", () => {
+    // 100x50 at (0,0) rotated 90° about its centre (50,25) occupies x∈[25,75], y∈[-0,50]
+    const rotated = makeTile({ x: 0, y: 0, width: 100, height: 50, rotation: 90 });
+    const aabb = getTileAABB(rotated);
+    const bounds = contentBounds([rotated], 10, 10);
+    expect(bounds.y).toBeCloseTo(Math.min(0, aabb.y), 6);
+    expect(bounds.height).toBeCloseTo(Math.max(10, aabb.y + aabb.height) - bounds.y, 6);
+  });
+});
+
+describe("fitZoomFor", () => {
+  test("landscape content in a square viewport is limited by width", () => {
+    // 1000x100 into 500x500 with 5% slack → 475/1000
+    expect(fitZoomFor({ x: 0, y: 0, width: 1000, height: 100 }, 500, 500)).toBeCloseTo(0.475, 6);
+  });
+
+  test("portrait content in a square viewport is limited by height", () => {
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 1000 }, 500, 500)).toBeCloseTo(0.475, 6);
+  });
+
+  test("the margin is slack on the viewport, not the content", () => {
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 200, 200, 0)).toBeCloseTo(2, 6);
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 200, 200, 0.5)).toBeCloseTo(1, 6);
+  });
+
+  test("an unmeasured viewport or degenerate bounds falls back to MIN_ZOOM", () => {
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 0, 0)).toBe(MIN_ZOOM);
+    expect(fitZoomFor({ x: 0, y: 0, width: 0, height: 0 }, 500, 500)).toBe(MIN_ZOOM);
+  });
+});
+
+describe("effectiveMinZoomFor", () => {
+  test("small content never raises the floor above MIN_ZOOM", () => {
+    // A tiny composition fits at zoom 4.75; half of that is still way above MIN_ZOOM.
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 500, 500)).toBe(MIN_ZOOM);
+  });
+
+  test("big content drops the floor to half the fit zoom", () => {
+    // 10000x10000 into 500x500 → fit 0.0475, half = 0.02375 (above the absolute floor).
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 10000, height: 10000 }, 500, 500)).toBeCloseTo(
+      0.02375,
+      6
+    );
+  });
+
+  test("never below ABSOLUTE_MIN_ZOOM, however huge the composition", () => {
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 5e6, height: 5e6 }, 500, 500)).toBe(
+      ABSOLUTE_MIN_ZOOM
+    );
+  });
+
+  test("an unmeasured viewport keeps the everyday floor", () => {
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 10000, height: 10000 }, 0, 0)).toBe(MIN_ZOOM);
   });
 });

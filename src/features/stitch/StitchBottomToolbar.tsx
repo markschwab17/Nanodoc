@@ -15,9 +15,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Eye, EyeOff, Focus, Lock, Magnet, Unlock, ZoomIn, ZoomOut } from "lucide-react";
-import { useStitchStore, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
 import { useShallow } from "zustand/react/shallow";
 import { MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "./stitchConstants";
+
+/** Sentinel value for the canvas-size Select's fit-to-content entry (not a preset). */
+const FIT_TO_SHEETS_VALUE = "fit-to-sheets";
 
 export interface StitchBottomToolbarProps {
   onRecenter?: () => void;
@@ -106,6 +109,13 @@ function CoordInput({
   );
 }
 
+/** Zoom readout. Rounds to a whole percent, except deep zoom-outs where that would
+ *  read as "0%" — the dynamic floor goes as low as 2%, and 1 decimal keeps it honest. */
+function formatZoomPercent(zoom: number): string {
+  const pct = zoom * 100;
+  return `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+}
+
 /** Format a pt value: show up to 2 decimals, but trim trailing zeros. */
 function formatPt(v: number): string {
   // Round to 2 decimals to avoid floating-point noise
@@ -126,6 +136,7 @@ export function StitchBottomToolbar({
     canvasWidth,
     canvasHeight,
     setCanvasSize,
+    fitCanvasToTiles,
     setZoomLevel,
     zoomLevel,
     snapToEdges,
@@ -140,6 +151,7 @@ export function StitchBottomToolbar({
       canvasWidth: s.canvasWidth,
       canvasHeight: s.canvasHeight,
       setCanvasSize: s.setCanvasSize,
+      fitCanvasToTiles: s.fitCanvasToTiles,
       setZoomLevel: s.setZoomLevel,
       zoomLevel: s.zoomLevel,
       snapToEdges: s.snapToEdges,
@@ -151,6 +163,8 @@ export function StitchBottomToolbar({
       updateTiles: s.updateTiles,
     }))
   );
+  // Same floor the wheel handler and recenter use — see selectEffectiveMinZoom.
+  const effectiveMinZoom = useStitchStore(selectEffectiveMinZoom);
 
   const hasSelection = selectedTileIds.length > 0;
   const allSelectedLocked =
@@ -203,6 +217,13 @@ export function StitchBottomToolbar({
       : undefined;
 
   const handleCanvasSizeChange = (value: string) => {
+    if (value === FIT_TO_SHEETS_VALUE) {
+      // Sizes the page for the user, so it deliberately does NOT count as the user
+      // choosing a size — a later commit is still free to re-fit.
+      fitCanvasToTiles();
+      onRecenter?.();
+      return;
+    }
     const [presetKey, orient] = value.split("-");
     const preset = CANVAS_PRESETS.find(
       (p) => `${p.width}x${p.height}` === presetKey
@@ -225,6 +246,9 @@ export function StitchBottomToolbar({
               <SelectValue placeholder="Size" />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={FIT_TO_SHEETS_VALUE} disabled={tiles.length === 0}>
+                Fit to sheets
+              </SelectItem>
               {CANVAS_PRESETS.flatMap((p) => [
                 <SelectItem key={`${p.width}x${p.height}-portrait`} value={`${p.width}x${p.height}-portrait`}>
                   {p.label} Portrait
@@ -243,19 +267,29 @@ export function StitchBottomToolbar({
             size="icon"
             className="h-6 w-6"
             title="Zoom out"
-            onClick={() => setZoomLevel(Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP))}
+            onClick={() => {
+              // Below MIN_ZOOM the linear 0.25 step would jump straight to the floor, so
+              // step multiplicatively down there instead. Both paths clamp to the dynamic
+              // floor, which is how you get out far enough to see every placed sheet.
+              const linear = zoomLevel - ZOOM_STEP;
+              const next = linear >= MIN_ZOOM ? linear : zoomLevel / 1.5;
+              setZoomLevel(Math.max(effectiveMinZoom, next));
+            }}
           >
             <ZoomOut className="h-3 w-3" />
           </Button>
-          <span className="text-xs tabular-nums w-8 text-center" title="Zoom level">
-            {Math.round(zoomLevel * 100)}%
+          <span className="text-xs tabular-nums w-11 text-center" title="Zoom level">
+            {formatZoomPercent(zoomLevel)}
           </span>
           <Button
             variant="ghost"
             size="icon"
             className="h-6 w-6"
             title="Zoom in"
-            onClick={() => setZoomLevel(Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP))}
+            onClick={() => {
+              const next = zoomLevel < MIN_ZOOM ? zoomLevel * 1.5 : zoomLevel + ZOOM_STEP;
+              setZoomLevel(Math.min(MAX_ZOOM, next));
+            }}
           >
             <ZoomIn className="h-3 w-3" />
           </Button>

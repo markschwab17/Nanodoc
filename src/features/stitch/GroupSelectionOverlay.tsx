@@ -9,7 +9,7 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getGroupBounds } from "./stitchGeometry";
-import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "./stitchConstants";
+import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS } from "./stitchConstants";
 
 function angleDeg(clientX: number, clientY: number, centerX: number, centerY: number): number {
   return Math.atan2(clientY - centerY, clientX - centerX) * (180 / Math.PI);
@@ -58,7 +58,9 @@ export function GroupSelectionOverlay() {
     centerY: number;
   } | null>(null);
 
-  const scale = Math.max(MIN_ZOOM, zoomLevel);
+  // Actual zoom (see StitchTile): MIN_ZOOM is no longer the floor, so clamping to it would
+  // scale group drags/handles wrong once the user is zoomed further out than 25%.
+  const scale = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
 
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {

@@ -14,6 +14,19 @@ export const CANVAS_PRESETS = [
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 50;
 export const ZOOM_STEP = 0.25;
+/** Hard floor for the DYNAMIC zoom-out limit. MIN_ZOOM is the everyday floor; when the
+ *  composition is larger than the page the floor drops toward this so the whole thing can
+ *  still be seen, but never past it (below ~2% nothing is legible and the tiles cost more
+ *  to draw than they are worth). */
+export const ABSOLUTE_MIN_ZOOM = 0.02;
+/** Slack left around the content when fitting it to the viewport (5% of the viewport, so
+ *  2.5% a side) — a fit that touches the edges reads as clipped. */
+export const FIT_VIEWPORT_MARGIN = 0.05;
+/** Paper margin (pt) left on each side when the canvas is fitted to the sheets. 36 pt = 0.5". */
+export const FIT_MARGIN_PT = 36;
+/** Width of the canvas rulers (pt, in canvas space). The canvas content is inset by this
+ *  inside the pan/zoom container, so anything converting canvas ↔ screen must account for it. */
+export const RULER_SIZE = 24;
 
 /** Scale composition: min/max factor and step for slider and +/- buttons. */
 export const MIN_SCALE = 0.05;

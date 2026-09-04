@@ -126,6 +126,18 @@ type TileData = {
 /** Render the selected pages and flow them into a grid below whatever is
  *  already on the canvas. Throws on render failure; the caller owns the error
  *  copy. */
+/**
+ * After tiles land: if the user has never picked a canvas size themselves, the page is still
+ * the 8.5×11 default — far too small for construction plan sheets, which is exactly what made
+ * a fresh stitch session look like a stamp-sized page under a wall of drawings. Grow the paper
+ * to wrap what was just placed. A size the user chose is left alone.
+ */
+function fitCanvasIfUntouched(): void {
+  const store = useStitchStore.getState();
+  if (store.canvasSizeTouched) return;
+  store.fitCanvasToTiles();
+}
+
 export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> {
   const { doc, pdfBytes, fileName, selected, pageScales, uniformScale, removeWhiteBackground, renderer, onProgress, shouldAbort } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
@@ -194,6 +206,7 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
   // silently overwrite a deliberately set canvas scale with a guessed one.
   if (uniformScale != null || existingRef == null) useStitchStore.getState().setReferenceScaleFeetPerInch(refScale);
   useStitchStore.getState().addTiles(newTiles);
+  fitCanvasIfUntouched();
   return { added: newTiles.length, unalignedIds: [], message: null };
 }
 
@@ -276,6 +289,7 @@ export async function commitAutoAlign(
   // Last checkpoint before anything is written: past here the commit lands.
   checkAbort();
   useStitchStore.getState().addTiles(newTiles);
+  fitCanvasIfUntouched();
   const refScale = referenceScaleFor(selected, pageScales, uniformScale);
   const { value: finalRef, write } = finalReferenceScale({
     uniformScale, existingRef, hasTiles, isUniformSelection, refScale, rootFtPerIn,

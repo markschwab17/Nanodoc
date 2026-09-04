@@ -5,8 +5,8 @@
 
 import { create } from "zustand";
 import type { StitchTile, CropRect, RelocatedRegion, StitchUndoSnapshot } from "@/features/stitch/stitchTypes";
-import { CANVAS_PRESETS, UNDO_MAX_SIZE } from "@/features/stitch/stitchConstants";
-import { getTileAABB } from "@/features/stitch/stitchGeometry";
+import { CANVAS_PRESETS, FIT_MARGIN_PT, UNDO_MAX_SIZE } from "@/features/stitch/stitchConstants";
+import { contentBounds, effectiveMinZoomFor, getTileAABB } from "@/features/stitch/stitchGeometry";
 
 export type { StitchTile, CropRect, RelocatedRegion, StitchUndoSnapshot };
 export { CANVAS_PRESETS };
@@ -30,6 +30,14 @@ function snapshotState(state: {
 interface StitchState {
   canvasWidth: number;
   canvasHeight: number;
+  /** True once the USER has chosen a canvas size themselves. While false the canvas is still
+   *  the untouched default and commits are free to resize it to fit the sheets. */
+  canvasSizeTouched: boolean;
+  /** Live size (CSS px) of the pan/zoom viewport, reported by StitchCanvas. 0 until measured.
+   *  Lives here rather than in a ref so the zoom floor is one store selector every consumer
+   *  reads — the wheel handler, the toolbar buttons and recenter must agree. */
+  viewportWidth: number;
+  viewportHeight: number;
   tiles: StitchTile[];
   panOffset: { x: number; y: number };
   zoomLevel: number;
@@ -46,7 +54,13 @@ interface StitchState {
   compositionScaleFactor: number;
   undoStack: StitchUndoSnapshot[];
   redoStack: StitchUndoSnapshot[];
-  setCanvasSize: (width: number, height: number) => void;
+  /** Set the page size. Marks the canvas as user-touched unless told otherwise (the
+   *  fit-to-sheets path sizes the canvas FOR the user and must not count as a choice). */
+  setCanvasSize: (width: number, height: number, options?: { touched?: boolean }) => void;
+  setViewportSize: (width: number, height: number) => void;
+  /** Grow the page so it covers every tile with FIT_MARGIN_PT of paper around them.
+   *  See the implementation for what it does about tiles at negative coordinates. */
+  fitCanvasToTiles: () => void;
   addTiles: (tiles: Omit<StitchTile, "id">[]) => void;
   updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified" | "hiddenRegions" | "relocatedRegions">>) => void;
   /** Apply patches to multiple tiles in one update (one undo step). */
@@ -118,6 +132,9 @@ function pushUndoAndSet(
 export const useStitchStore = create<StitchState>((set, get) => ({
   canvasWidth: defaultSize.width,
   canvasHeight: defaultSize.height,
+  canvasSizeTouched: false,
+  viewportWidth: 0,
+  viewportHeight: 0,
   tiles: [],
   panOffset: { x: 0, y: 0 },
   zoomLevel: 1,
@@ -130,8 +147,77 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
-  setCanvasSize: (width, height) =>
-    pushUndoAndSet(set, get, { canvasWidth: width, canvasHeight: height }),
+  setCanvasSize: (width, height, options) =>
+    pushUndoAndSet(set, get, {
+      canvasWidth: width,
+      canvasHeight: height,
+      canvasSizeTouched: options?.touched ?? true,
+    }),
+
+  // A pure measurement of the DOM, not document state: no undo snapshot, and a no-op write
+  // is skipped so a ResizeObserver firing with the same size doesn't re-render the tree.
+  setViewportSize: (width, height) =>
+    set((state) =>
+      state.viewportWidth === width && state.viewportHeight === height
+        ? state
+        : { viewportWidth: width, viewportHeight: height }
+    ),
+
+  /**
+   * Size the page to the sheets: FIT_MARGIN_PT of paper on every side of the tiles' union
+   * AABB, never smaller than the 8.5×11 default.
+   *
+   * The page rect is always drawn from (0, 0) — that is also how export treats it — so a
+   * canvas alone cannot cover tiles at negative coordinates, and auto-align routinely
+   * produces them. Rather than teach the page an origin, this SHIFTS every tile by
+   * (−minX + margin, −minY + margin) when the content starts left of / above the margin,
+   * then sizes the page to the shifted bounds. The composition is unchanged relatively;
+   * only its offset from the paper origin moves. Tiles + canvas size + cropRect all move in
+   * ONE undoable step, so a single undo puts everything back.
+   */
+  fitCanvasToTiles: () =>
+    set((state) => {
+      if (state.tiles.length === 0) return state;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const t of state.tiles) {
+        const aabb = getTileAABB(t);
+        minX = Math.min(minX, aabb.x);
+        minY = Math.min(minY, aabb.y);
+        maxX = Math.max(maxX, aabb.x + aabb.width);
+        maxY = Math.max(maxY, aabb.y + aabb.height);
+      }
+      if (!Number.isFinite(minX) || !Number.isFinite(minY)) return state;
+
+      const dx = minX < FIT_MARGIN_PT ? FIT_MARGIN_PT - minX : 0;
+      const dy = minY < FIT_MARGIN_PT ? FIT_MARGIN_PT - minY : 0;
+      const canvasWidth = Math.max(defaultSize.width, maxX + dx + FIT_MARGIN_PT);
+      const canvasHeight = Math.max(defaultSize.height, maxY + dy + FIT_MARGIN_PT);
+
+      const unchanged =
+        dx === 0 &&
+        dy === 0 &&
+        canvasWidth === state.canvasWidth &&
+        canvasHeight === state.canvasHeight;
+      if (unchanged) return state;
+
+      const snap = snapshotState(state);
+      const tiles =
+        dx === 0 && dy === 0
+          ? state.tiles
+          : state.tiles.map((t) => ({ ...t, x: t.x + dx, y: t.y + dy }));
+      const cropRect =
+        state.cropRect && (dx !== 0 || dy !== 0)
+          ? { ...state.cropRect, x: state.cropRect.x + dx, y: state.cropRect.y + dy }
+          : state.cropRect;
+      return {
+        tiles,
+        cropRect,
+        canvasWidth,
+        canvasHeight,
+        undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
+        redoStack: [],
+      };
+    }),
 
   addTiles: (newTiles) =>
     set((state) => {
@@ -428,6 +514,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
     set({
       canvasWidth: defaultSize.width,
       canvasHeight: defaultSize.height,
+      canvasSizeTouched: false,
       tiles: [],
       panOffset: { x: 0, y: 0 },
       zoomLevel: 1,
@@ -441,3 +528,24 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       redoStack: [],
     }),
 }));
+
+/**
+ * The zoom floor every user-facing zoom-out must clamp to — the wheel handler, the toolbar's
+ * zoom-out button and zoom-to-fit recenter. ONE definition on purpose: when they disagreed,
+ * one of them would refuse to go where the others could.
+ *
+ * Derived, not stored, so it tracks the tiles and the viewport with no extra bookkeeping.
+ */
+export function selectEffectiveMinZoom(state: {
+  tiles: StitchTile[];
+  canvasWidth: number;
+  canvasHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}): number {
+  return effectiveMinZoomFor(
+    contentBounds(state.tiles, state.canvasWidth, state.canvasHeight),
+    state.viewportWidth,
+    state.viewportHeight
+  );
+}

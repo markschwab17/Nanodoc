@@ -6,14 +6,13 @@
 import { memo, useRef, useEffect, useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2 } from "lucide-react";
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom } from "@/shared/stores/stitchStore";
 import { StitchTile } from "./StitchTile";
 import { GroupSelectionOverlay } from "./GroupSelectionOverlay";
 import type { CanvasRect } from "./imageUtils";
 import { useStitchPanZoom } from "./useStitchPanZoom";
-import { MIN_ERASE_SIZE, MIN_ZOOM, PT_PER_INCH, STROKE_POINT_MIN_DIST } from "./stitchConstants";
+import { ABSOLUTE_MIN_ZOOM, MIN_ERASE_SIZE, PT_PER_INCH, RULER_SIZE, STROKE_POINT_MIN_DIST } from "./stitchConstants";
 
-const RULER_SIZE = 24;
 const PT_PER_HALF_INCH = PT_PER_INCH / 2;
 
 function rulerLabel(inches: number): string {
@@ -239,7 +238,10 @@ export function StitchCanvas({
   const setPanOffset = useStitchStore((s) => s.setPanOffset);
   const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
 
-  const { panOffsetRef, zoomLevelRef } = useStitchPanZoom(containerRef);
+  // Read fresh on each wheel event rather than captured: the floor moves as tiles are
+  // placed and as the viewport resizes.
+  const getMinZoom = useCallback(() => selectEffectiveMinZoom(useStitchStore.getState()), []);
+  const { panOffsetRef, zoomLevelRef } = useStitchPanZoom(containerRef, getMinZoom);
 
   const [isSpacePan, setIsSpacePan] = useState(false);
   const isSpacePanRef = useRef(false);
@@ -278,7 +280,12 @@ export function StitchCanvas({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () => setContainerRect(el.getBoundingClientRect());
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      setContainerRect(rect);
+      // The zoom floor and zoom-to-fit are both derived from this — see selectEffectiveMinZoom.
+      useStitchStore.getState().setViewportSize(rect.width, rect.height);
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
@@ -451,9 +458,9 @@ export function StitchCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      // Belt-and-braces against Windows/Linux middle-click autoscroll: that is armed on
-      // `mousedown`, and preventing the pointerdown default does not reliably suppress it.
       onMouseDown={(e) => {
+        // Belt-and-braces against Windows/Linux middle-click autoscroll: that is armed on
+        // `mousedown`, and preventing the pointerdown default does not reliably suppress it.
         if (e.button === 1) e.preventDefault();
       }}
       onPointerLeave={() => {
@@ -764,16 +771,20 @@ export function StitchCanvas({
           >
             {/* Markers and lines in overlay (screen) space so they stay visible outside the canvas clip */}
             {(pointAlignPoints.some((p) => p != null) || scaleAlignPoints.some((p) => p != null)) && (() => {
-              const zoom = Math.max(MIN_ZOOM, zoomLevel);
+              // Markers are positioned with the REAL zoom (clamping it would slide them off
+              // the tiles they mark once you are below MIN_ZOOM, which the dynamic floor now
+              // allows); only their drawn SIZE gets a floor so they stay clickable.
+              const zoom = zoomLevel;
+              const markerZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
               const toOverlay = (p: { x: number; y: number }) => ({
                 x: panOffset.x + (p.x + RULER_SIZE) * zoom,
                 y: panOffset.y + (p.y + RULER_SIZE) * zoom,
               });
               const pts = pointAlignMode ? pointAlignPoints : scaleAlignPoints;
               // Scale with zoom; use larger minimums so markers stay visible when zoomed out
-              const markerR = Math.max(10, 8 * zoom);
-              const markerStroke = Math.max(2, 2.5 * zoom);
-              const dashLen = Math.max(4, 5 * zoom);
+              const markerR = Math.max(10, 8 * markerZoom);
+              const markerStroke = Math.max(2, 2.5 * markerZoom);
+              const dashLen = Math.max(4, 5 * markerZoom);
               return (
                 <svg
                   className="absolute left-0 top-0 w-full h-full pointer-events-none"
@@ -803,7 +814,7 @@ export function StitchCanvas({
                               textAnchor="middle"
                               dominantBaseline="central"
                               fill="hsl(var(--primary-foreground))"
-                              fontSize={Math.max(14, 12 * zoom)}
+                              fontSize={Math.max(14, 12 * markerZoom)}
                               fontWeight="bold"
                             >
                               {i + 1}
