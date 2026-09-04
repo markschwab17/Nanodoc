@@ -16,7 +16,15 @@ import { ABSOLUTE_MIN_ZOOM } from "./stitchConstants";
 /** Gap (ms) between nudges that starts a new undo step. */
 const NUDGE_BURST_MS = 800;
 
-function isTypingTarget(): boolean {
+/**
+ * Is the user typing into something?
+ *
+ * The one copy of this test. Every keyboard owner in stitch — this hook, the align
+ * mode, the view's own select-all — has to make the same judgement, and three
+ * slightly different copies of it is how a shortcut ends up eating a keystroke inside
+ * a filename field.
+ */
+export function isTypingTarget(): boolean {
   const target = document.activeElement as HTMLElement | null;
   return (
     target?.tagName === "INPUT" ||

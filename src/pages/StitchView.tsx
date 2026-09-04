@@ -25,7 +25,7 @@ import { shutdownOcr } from "@/features/stitch/autostitch/ocrService";
 import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
+import { isTypingTarget, useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
 import { useScaleAlignMode } from "@/features/stitch/useScaleAlignMode";
@@ -580,12 +580,7 @@ export default function StitchView() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
-        const target = document.activeElement as HTMLElement | null;
-        const inInput =
-          target?.tagName === "INPUT" ||
-          target?.tagName === "TEXTAREA" ||
-          target?.isContentEditable === true;
-        if (inInput) return;
+        if (isTypingTarget()) return;
         // Select-all would drop the mode's own selection (the sheet being moved) and
         // switch tools out from under it.
         if (alignNeighbourActiveRef.current) return;

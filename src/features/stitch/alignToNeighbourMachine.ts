@@ -142,6 +142,25 @@ export function alignClickableTiles<T extends { id: string }>(
   }
 }
 
+/**
+ * What a pointer press should dispatch.
+ *
+ * `scoped` is the hit against the sheets this step accepts; `unscoped` is the hit
+ * against ALL of them. A press that misses the scoped set but lands on some other
+ * sheet is a wrong-sheet click, not a click into space — dispatching it as a click
+ * makes the machine refuse it by name ("Not that sheet — …"), which is the whole
+ * point of having refusals. Only a press that hits nothing at all is a miss.
+ */
+export type AlignPointerEvent = Extract<AlignEvent, { type: "click" } | { type: "miss" }>;
+
+export function alignPointerEvent(
+  scoped: { tileId: string; point: CanvasPoint } | null,
+  unscoped: { tileId: string; point: CanvasPoint } | null
+): AlignPointerEvent {
+  const hit = scoped ?? unscoped;
+  return hit ? { type: "click", tileId: hit.tileId, point: hit.point } : { type: "miss" };
+}
+
 const withPoint = (
   points: AlignMachine["points"],
   index: 0 | 1 | 2 | 3,

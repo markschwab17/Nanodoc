@@ -4,6 +4,7 @@ import {
   ALIGN_STEP_HINTS,
   IDLE_ALIGN,
   alignClickableTiles,
+  alignPointerEvent,
   alignHint,
   isLockedForAlign,
   loupeActive,
@@ -118,6 +119,28 @@ describe("alignToNeighbour state machine", () => {
     const refusedB2 = reduceAlign(atB2, click("a", 4, 4));
     expect(refusedB2.refusal?.reason).toBe("wrong-sheet");
     expect(refusedB2.apply).toBeUndefined();
+  });
+
+  it("turns a press onto the wrong sheet into a refusable click, not a miss", () => {
+    const scoped = { tileId: "a", point: P(1, 1) };
+    const other = { tileId: "b", point: P(5, 5) };
+    // The step's own sheet was hit: that is the click.
+    expect(alignPointerEvent(scoped, other)).toEqual({ type: "click", tileId: "a", point: P(1, 1) });
+    // It missed the step's sheets but landed on another one — a WRONG SHEET, which the
+    // machine then refuses by name rather than reporting as empty canvas.
+    expect(alignPointerEvent(null, other)).toEqual({ type: "click", tileId: "b", point: P(5, 5) });
+    // Nothing under the cursor at all.
+    expect(alignPointerEvent(null, null)).toEqual({ type: "miss" });
+  });
+
+  it("refuses that wrong-sheet press with the sheet wording, not the empty wording", () => {
+    const state = run([enter, click("a", 0, 0)]).state;
+    const event = alignPointerEvent(null, { tileId: "b", point: P(5, 5) });
+    const refused = reduceAlign(state, event);
+    expect(refused.refusal).toEqual({
+      reason: "wrong-sheet",
+      message: `Not that sheet — ${ALIGN_STEP_HINTS.A1}`,
+    });
   });
 
   it("says so when a click lands on no sheet at all", () => {

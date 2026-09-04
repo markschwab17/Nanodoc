@@ -291,6 +291,10 @@ describe("the earned Auto-align copy", () => {
     expect(autoAlignUnavailableNote("unverified")).toBe(
       "Auto-align isn't available for these sheets — the seams couldn't be verified",
     );
+    // Not a verdict about the drawings: one solve takes one document.
+    expect(autoAlignUnavailableNote("mixed_sources")).toBe(
+      "Auto-align isn't available for these sheets — these sheets come from two different PDFs",
+    );
   });
 
   it("the tooltip keeps the fuller sentence the short reason drops", () => {

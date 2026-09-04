@@ -811,6 +811,12 @@ export interface SheetInput {
   /** The sheet's own discipline code, when the CALLER already knows it (CTO's sheet
    *  identity). Overrides the title-block read, which OCR never feeds. */
   sheetCode?: string | null;
+  /** Set when this page HAD a code and `resolveSheetCodes` took it away because
+   *  another page claimed it too. A null `sheetCode` normally means "nobody has told
+   *  us yet", and the per-unit title-block read below is allowed to answer — but a
+   *  code that was dropped for a collision must never come back that way: it names
+   *  two sheets, and re-deriving it hands one of them an arbitrary callout. */
+  sheetCodeDropped?: boolean;
   /** The unit's ruled DRAWING frame in its OWN coordinates (see
    *  `frameDetect.detectDrawingFrame`), when one was detected. Edge-vs-interior
    *  classification is measured against it so a matchline callout on the drawing's
@@ -1035,6 +1041,58 @@ export interface JointSweep {
   top3: { deltaFt: number; total: number }[];
 }
 
+/**
+ * The code a unit will actually answer to.
+ *
+ * `sheetCode` is what `resolveSheetCodes` decided for the PAGE; `labelCode` is this
+ * unit's own title-block read, which is a fair second look for a page nothing has
+ * named — a two-strip sheet's strip-local read can carry a code the page-level read
+ * missed. It is NOT a second chance for a code that was dropped as ambiguous: that
+ * drop is a finding that the code names two sheets, and re-deriving it here is how a
+ * callout ended up anchored to an arbitrary one of them.
+ */
+export function effectiveSheetCode(
+  s: { sheetCode?: string | null; sheetCodeDropped?: boolean },
+  labelCode: string | null,
+): string | null {
+  if (s.sheetCodeDropped) return null;
+  return s.sheetCode ?? labelCode;
+}
+
+/**
+ * code → sheet no, for resolving "SEE SHEET C2.01" cross-references.
+ *
+ * A code claimed by two different PAGES identifies neither, and the map used to be
+ * built last-write-wins, which silently pointed every callout at whichever page came
+ * last. Both claimants lose it instead. Two units of the SAME page (a two-strip sheet)
+ * share one code legitimately, so claims are counted per page, not per unit.
+ */
+export function buildCodeToNo(
+  sheets: readonly { no: number; pageIndex?: number; sheetCode?: string | null }[],
+  warn: (msg: string) => void = (m) => console.warn(m),
+): Map<string, number> {
+  const claimants = new Map<string, Set<number>>();
+  for (const s of sheets) {
+    if (!s.sheetCode) continue;
+    const code = normCode(s.sheetCode);
+    (claimants.get(code) ?? claimants.set(code, new Set()).get(code)!).add(s.pageIndex ?? s.no);
+  }
+  const codeToNo = new Map<string, number>();
+  for (const s of sheets) {
+    if (!s.sheetCode) continue;
+    const code = normCode(s.sheetCode);
+    if ((claimants.get(code)?.size ?? 0) > 1) continue;
+    codeToNo.set(code, s.no);
+  }
+  for (const [code, pages] of claimants) {
+    if (pages.size < 2) continue;
+    warn(
+      `[stitchSheets] sheet code "${code}" is claimed by pages ${[...pages].sort((a, b) => a - b).join(", ")} — no callout will resolve through it`,
+    );
+  }
+  return codeToNo;
+}
+
 export function stitchSheets(
   inputs: SheetInput[],
   grid?: Map<number, { col: number; row: number }>,
@@ -1056,7 +1114,7 @@ export function stitchSheets(
     return {
       id: s.id, no: s.no, scale: s.scale, view: s.view,
       raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
-      key: s.no, sheetCode: s.sheetCode ?? label.sheetCode, drawingFrame: s.drawingFrame ?? null,
+      key: s.no, sheetCode: effectiveSheetCode(s, label.sheetCode), drawingFrame: s.drawingFrame ?? null,
       role: s.role ?? "tile",
       printedNo: s.printedNo ?? s.no, siblingKey: s.siblingKey, pageIndex: s.pageIndex,
     };
@@ -1088,8 +1146,7 @@ export function stitchSheets(
   for (const s of sheets) (byPrinted.get(s.printedNo) || byPrinted.set(s.printedNo, []).get(s.printedNo)!).push(s);
   const keys = sheets.map((s) => s.no);
   // sheet-code -> sheet no, for resolving "SEE SHEET C2.01" cross-references.
-  const codeToNo = new Map<string, number>();
-  for (const s of sheets) if (s.sheetCode) codeToNo.set(normCode(s.sheetCode), s.no);
+  const codeToNo = buildCodeToNo(sheets);
 
   const FURN_MIN = Math.max(2, Math.min(3, sheets.length));
   const furn = buildFurnitureFilter(sheets, FURN_MIN);

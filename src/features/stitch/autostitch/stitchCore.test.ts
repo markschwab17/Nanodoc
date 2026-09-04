@@ -1,5 +1,5 @@
-import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
+import { describe, it, test, expect, vi } from "vitest";
+import { tokenVote, stitchSheets, effectiveSheetCode, buildCodeToNo, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
 import { makeGeom } from "./types";
 import type { Label, PageExtract, Geom } from "./types";
 
@@ -1230,5 +1230,68 @@ describe("along-axis anchoring", () => {
     const res = stitchSheets([mk(1), mk(2)], undefined, [cross(1, 2)]);
     expect(res.alongAnchored).toEqual([0, 1]);
     expect(res.worstAlongUncertaintyFt).toBe(0);
+  });
+});
+
+describe("sheet codes reaching the driver", () => {
+  it("does not re-derive a code that was dropped for a collision", () => {
+    // resolveSheetCodes found "A1" on two pages and took it from both. The unit's own
+    // title-block read still says A1 — and handing it back is exactly the bug: one
+    // "SEE SHEET A1" would then anchor an arbitrary one of the two.
+    expect(effectiveSheetCode({ sheetCode: null, sheetCodeDropped: true }, "A1")).toBeNull();
+  });
+
+  it("still lets a page nothing has named take its own title-block read", () => {
+    // Not the same case: no decision was made about this page, so its strip-local
+    // read is new information rather than a resurrection.
+    expect(effectiveSheetCode({ sheetCode: null }, "C2.01")).toBe("C2.01");
+    expect(effectiveSheetCode({ sheetCode: null, sheetCodeDropped: false }, "C2.01")).toBe("C2.01");
+  });
+
+  it("prefers the resolved code over the unit's own read", () => {
+    expect(effectiveSheetCode({ sheetCode: "CD102" }, "A1")).toBe("CD102");
+  });
+
+  it("resolves a callout only to a code ONE page claims", () => {
+    const warn = vi.fn();
+    const map = buildCodeToNo(
+      [
+        { no: 1, pageIndex: 0, sheetCode: "C2.01" },
+        { no: 2, pageIndex: 1, sheetCode: "C2.02" },
+      ],
+      warn,
+    );
+    // `normCode` folds case, spaces and hyphens — dots are part of the code.
+    expect(map.get("C2.01")).toBe(1);
+    expect(map.get("C2.02")).toBe(2);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("drops a code two PAGES claim rather than picking the last one, and says so", () => {
+    const warn = vi.fn();
+    const map = buildCodeToNo(
+      [
+        { no: 1, pageIndex: 0, sheetCode: "A1" },
+        { no: 2, pageIndex: 1, sheetCode: "A-1" }, // same code, different separator
+        { no: 3, pageIndex: 2, sheetCode: "C3" },
+      ],
+      warn,
+    );
+    expect(map.has("A1")).toBe(false);
+    expect(map.get("C3")).toBe(3);
+    expect(warn.mock.calls.join(" ")).toContain('sheet code "A1" is claimed by pages 0, 1');
+  });
+
+  it("keeps a code the two STRIPS of one page share — that is one sheet, not two", () => {
+    const warn = vi.fn();
+    const map = buildCodeToNo(
+      [
+        { no: 1, pageIndex: 4, sheetCode: "C5.00" },
+        { no: 2, pageIndex: 4, sheetCode: "C5.00" },
+      ],
+      warn,
+    );
+    expect(map.has("C5.00")).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

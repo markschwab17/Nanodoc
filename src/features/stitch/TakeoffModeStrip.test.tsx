@@ -84,6 +84,13 @@ describe("TakeoffModeStrip auto-align offer", () => {
     );
   });
 
+  it("prints the two-PDF reason rather than leaving the strip blank", () => {
+    const text = render(offer({ status: "unavailable", reason: "mixed_sources" }));
+    expect(text).toContain(
+      "Auto-align isn't available for these sheets — these sheets come from two different PDFs",
+    );
+  });
+
   it("shows the fuller along-axis sentence as VISIBLE text, not only a tooltip", () => {
     // A fact only a hover reveals is a fact most people never see, and this is the one
     // the short reason drops: the sheets DO meet the line, they just slide along it.

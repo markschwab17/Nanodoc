@@ -445,7 +445,7 @@ describe("resolveSheetCodes — a supplied code has to be corroborated", () => {
       page(0, { ctoCode: "CD102", ownTokens: ["CD102", "G-007"] }),
       page(1, { ownTokens: ["G-007"] }),
     ], warn);
-    expect(out.get(0)).toBe("CD102");
+    expect(out.codes.get(0)).toBe("CD102");
   });
 
   it("a token every sheet carries is NOT corroboration", () => {
@@ -457,14 +457,14 @@ describe("resolveSheetCodes — a supplied code has to be corroborated", () => {
       page(0, { ctoCode: "A1", ownTokens: ["A1", "B1", "B2", "B3"] }),
       page(1, { ctoCode: "B3", ownTokens: ["A1", "A3", "B1", "B3", "C1"] }),
     ], (m) => msgs.push(m));
-    expect(out.size).toBe(0);
+    expect(out.codes.size).toBe(0);
     expect(msgs.join(" ")).toContain('ignoring supplied sheet code "A1"');
     expect(msgs.join(" ")).toContain('ignoring supplied sheet code "B3"');
   });
 
   it("trusts a supplied code its own title block agrees with", () => {
     const out = resolveSheetCodes([page(0, { ctoCode: "CD-102", titleCode: "CD102", ownTokens: [] })], warn);
-    expect(out.get(0)).toBe("CD102");
+    expect(out.codes.get(0)).toBe("CD102");
   });
 
   it("trusts a supplied code another selected sheet points at", () => {
@@ -474,7 +474,7 @@ describe("resolveSheetCodes — a supplied code has to be corroborated", () => {
       page(0, { ctoCode: "CD102" }),
       page(1, { titleCode: "CD103", refTargets: ["CD-102"] }),
     ], warn);
-    expect(out.get(0)).toBe("CD102");
+    expect(out.codes.get(0)).toBe("CD102");
   });
 
   it("IGNORES a supplied code nothing on the drawings agrees with, and says so", () => {
@@ -483,30 +483,41 @@ describe("resolveSheetCodes — a supplied code has to be corroborated", () => {
     // anchors the wrong pair.
     const msgs: string[] = [];
     const out = resolveSheetCodes([page(0, { ctoCode: "B3", titleCode: "CD103", ownTokens: ["CD103"] })], (m) => msgs.push(m));
-    expect(out.get(0)).toBe("CD103"); // falls back to what the sheet says
+    expect(out.codes.get(0)).toBe("CD103"); // falls back to what the sheet says
     expect(msgs.join(" ")).toContain('ignoring supplied sheet code "B3"');
   });
 
   it("falls back to nothing when the sheet says nothing either", () => {
     const out = resolveSheetCodes([page(0, { ctoCode: "B3" })], warn);
-    expect(out.has(0)).toBe(false);
+    expect(out.codes.has(0)).toBe(false);
   });
 
   it("compares separator-insensitively", () => {
-    expect(resolveSheetCodes([page(0, { ctoCode: "CD-102", ownTokens: ["CD 102"] })], warn).get(0)).toBe("CD102");
+    expect(resolveSheetCodes([page(0, { ctoCode: "CD-102", ownTokens: ["CD 102"] })], warn).codes.get(0)).toBe("CD102");
   });
 
-  it("drops a code two pages both claim", () => {
+  it("drops a code two pages both claim, and REPORTS the drop", () => {
     // The Coast Guard pair: the title-block picker returns "A1" for BOTH sheets. One
     // callout resolving through it would anchor two different pages.
     const msgs: string[] = [];
     const out = resolveSheetCodes([page(0, { titleCode: "A1" }), page(1, { titleCode: "A1" })], (m) => msgs.push(m));
-    expect(out.size).toBe(0);
+    expect(out.codes.size).toBe(0);
     expect(msgs.join(" ")).toContain("claimed by pages 0, 1");
+    // The drop has to be CARRIED, not just performed: a page whose code was dropped
+    // must never have it re-derived from its own title block further down.
+    expect([...out.dropped].sort()).toEqual([0, 1]);
+  });
+
+  it("does not mark a merely uncorroborated code as dropped", () => {
+    // Different outcome, different meaning: this page simply has no code yet, and a
+    // strip-local title-block read downstream is allowed to find one.
+    const out = resolveSheetCodes([page(0, { ctoCode: "B3" })], warn);
+    expect(out.codes.has(0)).toBe(false);
+    expect(out.dropped.size).toBe(0);
   });
 
   it("leaves distinct codes alone", () => {
     const out = resolveSheetCodes([page(0, { titleCode: "C-1" }), page(1, { titleCode: "C-2" })], warn);
-    expect([...out.values()].sort()).toEqual(["C1", "C2"]);
+    expect([...out.codes.values()].sort()).toEqual(["C1", "C2"]);
   });
 });

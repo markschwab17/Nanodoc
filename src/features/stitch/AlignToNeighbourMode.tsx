@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { ABSOLUTE_MIN_ZOOM, RULER_SIZE } from "./stitchConstants";
 import { hitTestTileAtPoint, tileLocalToCanvas, type CanvasPoint } from "./stitchGeometry";
+import { alignPointerEvent } from "./alignToNeighbourMachine";
 import { AlignLoupe } from "./AlignLoupe";
 import { useLoupeRender } from "./useLoupeRender";
 import type { AlignToNeighbour } from "./useAlignToNeighbour";
@@ -62,15 +63,20 @@ export function AlignToNeighbourMode({
   const [hoverTileId, setHoverTileId] = useState<string | null>(null);
   const [cursor, setCursor] = useState<CanvasPoint | null>(null);
 
+  // Keyed on the SESSION, not on the four point steps: a session aligns one neighbour
+  // after another, and tearing the worker, the open documents and the captured
+  // geometry down between moves meant paying for all of it again on the next sheet.
+  // It all goes when the mode exits (or the overlay unmounts).
   const loupe = useLoupeRender({
-    active: align.showLoupe,
+    active: align.active,
     zoom: zoomLevel,
     snapEnabled: align.snapToLines,
   });
 
   const { track, clear: clearLoupe, resolveClick } = loupe;
 
-  // Leaving the point-click steps takes the magnifier (and its document) with it.
+  // The magnifier itself is per-step: between moves there is nothing to magnify, so
+  // the view is dropped (the documents and grids behind it stay).
   useEffect(() => {
     if (!align.showLoupe) clearLoupe();
   }, [align.showLoupe, clearLoupe]);
@@ -131,17 +137,25 @@ export function AlignToNeighbourMode({
       e.preventDefault();
       e.stopPropagation();
       const coords = clientToCanvas(e.clientX, e.clientY);
-      const hit = coords ? hitTestTileAtPoint(coords, clickable, true) : null;
-      if (!hit) {
-        // Empty canvas, or a sheet this step will not take: say so rather than
-        // swallowing the click silently.
+      const scoped = coords ? hitTestTileAtPoint(coords, clickable, true) : null;
+      // A press that missed the step's own sheets may still have landed on another
+      // one: that is a WRONG SHEET, and it must be refused by name rather than read as
+      // a click into empty space.
+      const unscoped = coords && !scoped ? hitTestTileAtPoint(coords, tiles, true) : null;
+      const event = alignPointerEvent(
+        scoped ? { tileId: scoped.tile.id, point: scoped.point } : null,
+        unscoped ? { tileId: unscoped.tile.id, point: unscoped.point } : null
+      );
+      if (event.type === "miss") {
         align.miss();
         return;
       }
-      const point = align.showLoupe ? resolveClick(hit.tile, hit.point) : hit.point;
-      align.click(hit.tile.id, point);
+      // Only a click the step will actually take gets snapped — a refusal records
+      // nothing, so there is nothing to snap.
+      const point = scoped && align.showLoupe ? resolveClick(scoped.tile, event.point) : event.point;
+      align.click(event.tileId, point);
     },
-    [align, beginPan, clickable, clientToCanvas, resolveClick]
+    [align, beginPan, clickable, clientToCanvas, resolveClick, tiles]
   );
 
   const markerZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);

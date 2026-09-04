@@ -23,6 +23,12 @@ export interface TilePose {
   width: number;
   height: number;
   rotation: number;
+  /** Everything the replace would DISCARD that is not a placement: clean-up regions,
+   *  relocations, and an erase-modified raster override. A commit rebuilds each tile
+   *  from the source page, so an edit made while the check ran would vanish without
+   *  trace when the offer was taken. Compared as one string — this is a "has anything
+   *  changed" test, not a diff. */
+  edits: string;
 }
 
 export interface CanvasProbeSet {
@@ -43,8 +49,41 @@ export interface CanvasProbeSet {
 
 const isSheet = (t: StitchTile) => t.sourcePageIndex >= 0 && !t.isScaleStamp;
 
+/**
+ * Do the canvas's sheets come from more than one source PDF?
+ *
+ * `canvasProbeSet` returns null for such a canvas — one solve cannot span two
+ * documents — and null on its own is indistinguishable from "not enough sheets to
+ * bother", which left the strip silent with no explanation. This names the case so the
+ * strip can say it. Identity, matching `canvasProbeSet`: two loads of the same file
+ * are two documents as far as the solver is concerned.
+ */
+export function hasMixedSources(tiles: readonly StitchTile[]): boolean {
+  const sheets = tiles.filter(isSheet);
+  if (sheets.length < 2) return false;
+  const first = sheets[0].sourcePdfBytes;
+  return !sheets.every((t) => t.sourcePdfBytes === first);
+}
+
 export function poseOf(t: StitchTile): TilePose {
-  return { x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0 };
+  return {
+    x: t.x,
+    y: t.y,
+    width: t.width,
+    height: t.height,
+    rotation: t.rotation ?? 0,
+    edits: editSignature(t),
+  };
+}
+
+/** The non-placement edits a replace would throw away, as one comparable string. */
+function editSignature(t: StitchTile): string {
+  const hidden = (t.hiddenRegions ?? []).map((r) => `${r.x},${r.y},${r.w},${r.h}`).join("|");
+  const moved = (t.relocatedRegions ?? [])
+    .map((r) => `${r.rect.x},${r.rect.y},${r.rect.w},${r.rect.h},${r.dx},${r.dy}`)
+    .join("|");
+  // The URL identity is enough: content-delete swaps in a NEW object URL every time.
+  return `${hidden}/${moved}/${t.imageDataUrl ?? ""}`;
 }
 
 /**
@@ -93,10 +132,12 @@ export function canvasProbeSet(tiles: readonly StitchTile[]): CanvasProbeSet | n
 /**
  * Has the canvas changed under the offer since the check?
  *
- * True when a checked tile was deleted or moved/resized/rotated, or when a sheet has
- * been added that the check never saw. Any of those makes the probe's absolute
- * placements the wrong answer: applying them would undo the user's own work, resurrect
- * a sheet they deleted, or leave a new sheet out of the composite.
+ * True when a checked tile was deleted, moved/resized/rotated, or EDITED (a clean-up
+ * region hidden or relocated, content erased), or when a sheet has been added that the
+ * check never saw. Any of those makes the probe's absolute placements the wrong
+ * answer: applying them would undo the user's own work, resurrect a sheet they
+ * deleted, drop an edit the replace cannot rebuild, or leave a new sheet out of the
+ * composite.
  */
 export function movedSinceCheck(set: CanvasProbeSet, tiles: readonly StitchTile[]): boolean {
   const sheets = tiles.filter(isSheet);
@@ -110,7 +151,10 @@ export function movedSinceCheck(set: CanvasProbeSet, tiles: readonly StitchTile[
       now.y !== was.y ||
       now.width !== was.width ||
       now.height !== was.height ||
-      now.rotation !== was.rotation
+      now.rotation !== was.rotation ||
+      // Not a placement, but just as destructive to lose: a clean-up region, a
+      // relocation, or an erase applied while the check was running.
+      now.edits !== was.edits
     ) {
       return true;
     }

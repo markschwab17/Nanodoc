@@ -148,12 +148,20 @@ export const AUTO_ALIGN_CHECKING = "Checking whether these sheets can be auto-al
  *  back anything they deleted — say so and offer the check again rather than choose. */
 export const AUTO_ALIGN_MOVED = "Sheets were moved since the check — re-check to auto-align";
 
-export type AutoAlignUnavailableReason = "no_refs" | "no_matchline" | "unverified";
+export type AutoAlignUnavailableReason =
+  | "no_refs"
+  | "no_matchline"
+  | "unverified"
+  | "mixed_sources";
 
 export const AUTO_ALIGN_UNAVAILABLE_REASONS: Record<AutoAlignUnavailableReason, string> = {
   no_refs: "no sheet numbers or matchline callouts were found",
   no_matchline: "they don't share a matchline",
   unverified: "the seams couldn't be verified",
+  // Not a verdict about the drawings at all: one solve takes one document, so a canvas
+  // built from two PDFs is never probed. Saying so beats the silence that was there
+  // before, which read as "the feature is broken".
+  mixed_sources: "these sheets come from two different PDFs",
 };
 
 /** The primary action's label. `n` is the number of sheets the run would CLAIM —

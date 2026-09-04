@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { computeAlignToNeighbour, seamMissFt, type CanvasPoint } from "./stitchGeometry";
 import { compositionFeetPerInch } from "./pageScales";
+import { isTypingTarget } from "./useStitchKeyboard";
 import {
   IDLE_ALIGN,
   alignClickableTiles,
@@ -149,14 +150,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     if (!active) return;
     const onKeyDown = (e: KeyboardEvent) => {
       // Never steal the keys from a field — Esc closes a popover, Enter submits.
-      const target = document.activeElement as HTMLElement | null;
-      if (
-        target?.tagName === "INPUT" ||
-        target?.tagName === "TEXTAREA" ||
-        target?.isContentEditable === true
-      ) {
-        return;
-      }
+      if (isTypingTarget()) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();

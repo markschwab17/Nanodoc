@@ -17,7 +17,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import type { CaptureMessage, CaptureRequest } from "./geometryCapture.worker";
+import { createCaptureWorkerClient, type CaptureWorkerClient } from "./captureWorkerClient";
+import type { CaptureRequest } from "./geometryCapture.worker";
 import {
   canvasToPagePoint,
   findSnapPoint,
@@ -91,6 +92,9 @@ export interface LoupeRender {
 }
 
 export function useLoupeRender(opts: {
+  /** The MODE is open. Documents, the capture worker and the snap grids live exactly
+   *  this long — not just while the magnifier is on screen, so moving to the next
+   *  sheet in the same session does not re-open and re-capture everything. */
   active: boolean;
   zoom: number;
   snapEnabled: boolean;
@@ -108,9 +112,8 @@ export function useLoupeRender(opts: {
   /** Bumped by `release`. A document opened by an `ensureDoc` that was in flight when
    *  the mode exited belongs to a dead generation: it is destroyed, never registered. */
   const genRef = useRef(0);
-  const workerRef = useRef<Worker | null>(null);
+  const clientRef = useRef<CaptureWorkerClient | null>(null);
   const captureSeqRef = useRef(0);
-  const capturePendingRef = useRef(new Map<number, (msg: CaptureMessage) => void>());
   const nextDocIdRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Monotonic; a crop that finishes after the cursor moved is thrown away. */
@@ -129,9 +132,8 @@ export function useLoupeRender(opts: {
     timerRef.current = null;
     tokenRef.current++;
     genRef.current++;
-    workerRef.current?.terminate();
-    workerRef.current = null;
-    capturePendingRef.current.clear();
+    clientRef.current?.dispose();
+    clientRef.current = null;
     for (const entry of docsRef.current.values()) {
       try {
         entry.renderer.dispose();
@@ -213,18 +215,14 @@ export function useLoupeRender(opts: {
     return size;
   }, []);
 
-  /** The capture worker, spawned on first use and terminated with the mode. */
-  const ensureWorker = useCallback((): Worker => {
-    if (workerRef.current) return workerRef.current;
-    const w = new Worker(new URL("./geometryCapture.worker.ts", import.meta.url), { type: "module" });
-    w.onmessage = (ev: MessageEvent<CaptureMessage>) => {
-      const done = capturePendingRef.current.get(ev.data.id);
-      if (!done) return;
-      capturePendingRef.current.delete(ev.data.id);
-      done(ev.data);
-    };
-    workerRef.current = w;
-    return w;
+  /** The capture worker client, created on first use and disposed with the mode. */
+  const ensureClient = useCallback((): CaptureWorkerClient => {
+    if (!clientRef.current) {
+      clientRef.current = createCaptureWorkerClient(
+        () => new Worker(new URL("./geometryCapture.worker.ts", import.meta.url), { type: "module" })
+      );
+    }
+    return clientRef.current;
   }, []);
 
   /**
@@ -235,18 +233,29 @@ export function useLoupeRender(opts: {
    * uses the geometry-only capture path (no glyphs, no reconstruction) and builds the
    * snap grid there too, so what crosses to the main thread is a set of transferred
    * buffers and no work at all.
+   *
+   * A worker that cannot start, or dies, resolves every capture to null: snapping goes
+   * quiet and the crop — the loupe's actual job — is untouched.
    */
   const ensureSnapIndex = useCallback(
     (entry: DocEntry, pageIndex: number, bytes: Uint8Array) => {
       if (entry.snap.has(pageIndex) || entry.capturing.has(pageIndex)) return;
+      const client = ensureClient();
+      if (client.dead) return;
       entry.capturing.add(pageIndex);
       const gen = genRef.current;
-      const id = ++captureSeqRef.current;
-      const worker = ensureWorker();
-      capturePendingRef.current.set(id, (msg) => {
+      const request: CaptureRequest = {
+        type: "capture",
+        id: ++captureSeqRef.current,
+        docId: entry.docId,
+        data: entry.sentToWorker ? undefined : bytes,
+        pageIndex,
+      };
+      entry.sentToWorker = true;
+      client.capture(request, (index) => {
         if (!aliveRef.current || gen !== genRef.current) return;
         entry.capturing.delete(pageIndex);
-        entry.snap.set(pageIndex, msg.type === "geometry" ? msg.index : null);
+        entry.snap.set(pageIndex, index);
         // Keep the cache small: the oldest page's grid goes once we hold five.
         while (entry.snap.size > SNAP_CACHE_PAGES) {
           const oldest = entry.snap.keys().next().value;
@@ -254,17 +263,8 @@ export function useLoupeRender(opts: {
           entry.snap.delete(oldest);
         }
       });
-      const request: CaptureRequest = {
-        type: "capture",
-        id,
-        docId: entry.docId,
-        data: entry.sentToWorker ? undefined : bytes,
-        pageIndex,
-      };
-      entry.sentToWorker = true;
-      worker.postMessage(request);
     },
-    [ensureWorker]
+    [ensureClient]
   );
 
   /** The snap for a cursor, using only what is already captured (never blocks). */

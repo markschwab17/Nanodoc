@@ -5,7 +5,7 @@
  * the grid; miss a change and taking the offer silently throws away the user's work.
  */
 import { describe, it, expect } from "vitest";
-import { canvasProbeSet, movedSinceCheck } from "./earnedAutoAlignSet";
+import { canvasProbeSet, hasMixedSources, movedSinceCheck } from "./earnedAutoAlignSet";
 import type { StitchTile } from "./stitchTypes";
 
 const BYTES_A = new Uint8Array([1, 2, 3]);
@@ -120,5 +120,69 @@ describe("movedSinceCheck", () => {
 
   it("a swapped-in tile with a new id is stale even at the same position", () => {
     expect(movedSinceCheck(set, [tiles[0], { ...tiles[1], id: "b2" }])).toBe(true);
+  });
+});
+
+describe("hasMixedSources", () => {
+  it("names the canvas one solve cannot span", () => {
+    expect(
+      hasMixedSources([tile({ id: "a" }), tile({ id: "b", sourcePdfBytes: BYTES_B })])
+    ).toBe(true);
+  });
+
+  it("is false for one document, however many sheets", () => {
+    expect(hasMixedSources([tile({ id: "a" }), tile({ id: "b" }), tile({ id: "c" })])).toBe(false);
+  });
+
+  it("is false when there are not two sheets to compare", () => {
+    expect(hasMixedSources([tile({ id: "a" })])).toBe(false);
+    expect(hasMixedSources([])).toBe(false);
+  });
+
+  it("ignores scale stamps, which have no document of their own", () => {
+    expect(
+      hasMixedSources([
+        tile({ id: "a" }),
+        tile({ id: "b" }),
+        tile({ id: "stamp", isScaleStamp: true, sourcePdfBytes: BYTES_B, sourcePageIndex: -1 }),
+      ])
+    ).toBe(false);
+  });
+});
+
+describe("movedSinceCheck: edits, not just placements", () => {
+  const checked = [tile({ id: "a" }), tile({ id: "b", x: 200 })];
+  const set = canvasProbeSet(checked)!;
+
+  it("a clean-up region hidden during the check is stale — the replace would drop it", () => {
+    const edited = [{ ...checked[0], hiddenRegions: [{ x: 0, y: 0, w: 0.2, h: 0.1 }] }, checked[1]];
+    expect(movedSinceCheck(set, edited)).toBe(true);
+  });
+
+  it("a relocated region is stale", () => {
+    const edited = [
+      { ...checked[0], relocatedRegions: [{ rect: { x: 0, y: 0, w: 0.1, h: 0.1 }, dx: 0.05, dy: 0 }] },
+      checked[1],
+    ];
+    expect(movedSinceCheck(set, edited)).toBe(true);
+  });
+
+  it("an erase override (imageDataUrl) is stale", () => {
+    const edited = [{ ...checked[0], imageDataUrl: "blob:erased", imageModified: true }, checked[1]];
+    expect(movedSinceCheck(set, edited)).toBe(true);
+  });
+
+  it("re-creating the same regions is NOT stale — this is a change test, not identity", () => {
+    const withRegions = [
+      { ...checked[0], hiddenRegions: [{ x: 0, y: 0, w: 0.2, h: 0.1 }] },
+      checked[1],
+    ];
+    const sameAgain = canvasProbeSet(withRegions)!;
+    expect(
+      movedSinceCheck(sameAgain, [
+        { ...checked[0], hiddenRegions: [{ x: 0, y: 0, w: 0.2, h: 0.1 }] },
+        checked[1],
+      ])
+    ).toBe(false);
   });
 });

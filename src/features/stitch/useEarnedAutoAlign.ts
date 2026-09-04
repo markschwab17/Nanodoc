@@ -38,7 +38,7 @@ import type { ProbeMessage, ProbeRequest, ProbeResult } from "./autostitch/stitc
 import { commitAutoAlign, type CommitResult } from "./commitPages";
 import { AutoStitchAborted } from "./autostitch/autoStitch";
 import type { AutoAlignUnavailableReason } from "./addToProjectCopy";
-import { canvasProbeSet, movedSinceCheck, type CanvasProbeSet } from "./earnedAutoAlignSet";
+import { canvasProbeSet, hasMixedSources, movedSinceCheck, type CanvasProbeSet } from "./earnedAutoAlignSet";
 
 /** Session knowledge the canvas cannot supply. Remembered between checks. */
 export interface EarnedAutoAlignContext {
@@ -176,6 +176,24 @@ export function useEarnedAutoAlign(
     };
   }, []);
 
+  /**
+   * An undo can put the canvas back exactly as the probe saw it — the usual way out of
+   * a stale offer is Ctrl+Z, not a re-check — and the probe's answer is valid again the
+   * moment the poses match. So while the offer is withdrawn, watch the store and take
+   * it back up rather than making the user pay for a second check that would return
+   * the same result.
+   */
+  useEffect(() => {
+    if (status !== "stale") return;
+    const recover = () => {
+      const set = setRef.current;
+      if (!set || !probeRef.current) return;
+      if (!movedSinceCheck(set, useStitchStore.getState().tiles)) setStatus("offer");
+    };
+    recover();
+    return useStitchStore.subscribe(recover);
+  }, [status]);
+
   /** Stop whatever is running and make any reply still in flight stale. */
   const stop = useCallback(() => {
     workerRef.current?.postMessage({ kind: "abort", docId: docIdRef.current });
@@ -203,9 +221,22 @@ export function useEarnedAutoAlign(
       // The WHOLE canvas, so the offer places one composite. Null means there is
       // nothing honest to check (fewer than two sheets, or two source PDFs one solve
       // cannot span); say nothing rather than offer half an answer.
-      const set = canvasProbeSet(useStitchStore.getState().tiles);
+      const tiles = useStitchStore.getState().tiles;
+      const set = canvasProbeSet(tiles);
       setRef.current = set;
-      if (!set) { setStatus("idle"); return; }
+      if (!set) {
+        // Null has two meanings and only one of them is "nothing to say". A canvas
+        // built from two PDFs is a real answer the user can act on (align them one
+        // document at a time), so it gets the note rather than silence.
+        if (hasMixedSources(tiles)) {
+          setReason("mixed_sources");
+          setDetail(undefined);
+          setStatus("unavailable");
+        } else {
+          setStatus("idle");
+        }
+        return;
+      }
       setStatus("checking");
       const req: ProbeRequest = {
         docId: docIdRef.current,

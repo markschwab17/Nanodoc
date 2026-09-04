@@ -224,8 +224,22 @@ export type PrintedNoSource = "text" | "cto" | "ocr" | "fallback";
  * picker — and leaving it in place lets one callout anchor two different pages.
  * Both claimants lose it, exactly as a colliding printed number does.
  *
- * Pure, and exported for tests. Returns pageIndex → code (absent = no code).
+ * The two outcomes are NOT the same thing downstream, so both are returned. A page
+ * with no code may still pick one up later from its own (strip-local) title-block read
+ * — that is a fair second look. A page whose code was DROPPED FOR A COLLISION must
+ * never get it back that way: the drop is a decision that the code identifies neither
+ * sheet, and re-deriving it hands one arbitrary page a callout meant for two.
+ *
+ * Pure, and exported for tests.
  */
+export interface SheetCodeResolution {
+  /** pageIndex → code (absent = this page has no usable code). */
+  codes: Map<number, string>;
+  /** Pages whose code was dropped because another page claimed it too. Their code
+   *  must not be re-derived anywhere downstream. */
+  dropped: Set<number>;
+}
+
 export function resolveSheetCodes(
   pages: {
     pageIndex: number;
@@ -239,7 +253,7 @@ export function resolveSheetCodes(
     refTargets: readonly string[];
   }[],
   warn: (msg: string) => void = (m) => console.warn(m),
-): Map<number, string> {
+): SheetCodeResolution {
   const namedByAnother = new Set<string>();
   for (const p of pages) for (const t of p.refTargets) if (t) namedByAnother.add(normCode(t));
   // How many pages carry each code token: a token on more than one sheet is the
@@ -265,12 +279,13 @@ export function resolveSheetCodes(
   }
   const holders = new Map<string, number[]>();
   for (const [pageIndex, code] of chosen) (holders.get(code) ?? holders.set(code, []).get(code)!).push(pageIndex);
+  const dropped = new Set<number>();
   for (const [code, pgs] of holders) {
     if (pgs.length < 2) continue;
     warn(`[autoStitch] sheet code "${code}" is claimed by pages ${pgs.join(", ")} — dropping it from all of them`);
-    for (const pageIndex of pgs) chosen.delete(pageIndex);
+    for (const pageIndex of pgs) { chosen.delete(pageIndex); dropped.add(pageIndex); }
   }
-  return chosen;
+  return { codes: chosen, dropped };
 }
 
 interface Unit {
@@ -285,6 +300,7 @@ interface Unit {
   drawingFrame: [number, number, number, number] | null;
   role: SheetRole;
   sheetCode: string | null;
+  sheetCodeDropped: boolean;
 }
 
 /** Per-page record collected in pass 1 (extract + printed number). */
@@ -296,6 +312,10 @@ interface PageRec {
    *  been corroborated, else the title-block read — and null when neither survives
    *  (see `resolveSheetCodes`). */
   sheetCode: string | null;
+  /** True when this page HAD a code and it was dropped because another page claimed
+   *  it too. Carried all the way to `stitchSheets` so its per-unit title-block read
+   *  cannot quietly hand the code back. */
+  sheetCodeDropped: boolean;
   /** The page's ruled DRAWING frame when one was detected — every edge rule (OCR
    *  band clips, edge-vs-interior classification) is measured against it. Null on a
    *  sheet drawn edge to edge. */
@@ -445,7 +465,7 @@ export async function autoStitch(
 
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
-      title, statedFtPerIn, role: "tile", ctoCode, sheetCode: null,
+      title, statedFtPerIn, role: "tile", ctoCode, sheetCode: null, sheetCodeDropped: false,
       pageLabel: pageLabel ?? { sheetCode: null, discipline: null, title: null, sheetNo: null, sheetOf: null, confidence: "none", source: "none" },
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
@@ -467,7 +487,7 @@ export async function autoStitch(
   // often the only place a sheet's real code survives — without "CADD" or "C5000"
   // matching.
   const CODE_TOKEN_RE = /(?<![A-Z])[A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?(?![A-Z0-9])/gi;
-  const codes = resolveSheetCodes(pages.map((p) => {
+  const { codes, dropped: codesDropped } = resolveSheetCodes(pages.map((p) => {
     const text = [...p.extract.shxLabels, ...p.extract.labels];
     const ownTokens: string[] = [];
     for (const l of text) for (const m of l.text.matchAll(CODE_TOKEN_RE)) ownTokens.push(m[0]);
@@ -475,7 +495,10 @@ export async function autoStitch(
       .map((r) => r.sheetCode).filter((c): c is string => c != null);
     return { pageIndex: p.pageIndex, ctoCode: p.ctoCode, titleCode: p.pageLabel.sheetCode, ownTokens, refTargets };
   }));
-  for (const p of pages) p.sheetCode = codes.get(p.pageIndex) ?? null;
+  for (const p of pages) {
+    p.sheetCode = codes.get(p.pageIndex) ?? null;
+    p.sheetCodeDropped = codesDropped.has(p.pageIndex);
+  }
 
   // ── SHEET ROLE + SCALE-NOTE CROSS-CHECK ─────────────────────────────────────
   // Which pages are TILES. An overall/key plan covers the tiles' ground at a
@@ -823,10 +846,10 @@ export async function autoStitch(
         // A strip's extract is frame-LOCAL, so its drawing frame is recomputed in
         // those coordinates rather than inherited from the page.
         const ex = sliceExtract(p.extract, f);
-        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role, sheetCode: p.sheetCode });
+        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role, sheetCode: p.sheetCode, sheetCodeDropped: p.sheetCodeDropped });
       }
     } else {
-      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role, sheetCode: p.sheetCode });
+      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role, sheetCode: p.sheetCode, sheetCodeDropped: p.sheetCodeDropped });
     }
   }
 
@@ -882,7 +905,7 @@ export async function autoStitch(
       view: u.extract.view, extract: u.extract,
       printedNo: u.printedNo, pageIndex: u.pageIndex,
       siblingKey: byPage.get(u.pageIndex)!.find((o) => o.key !== u.key)?.key,
-      frame: u.frame?.bbox, drawingFrame: u.drawingFrame, role: u.role, sheetCode: u.sheetCode,
+      frame: u.frame?.bbox, drawingFrame: u.drawingFrame, role: u.role, sheetCode: u.sheetCode, sheetCodeDropped: u.sheetCodeDropped,
     }));
     // Key-map site grid (whole-page sets only; stitchSheets ignores it when
     // any page produced two units). Grid is keyed by unit key here.

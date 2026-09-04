@@ -262,6 +262,77 @@ describe("useEarnedAutoAlign", () => {
     expect(posted.at(-1)!.pageIndices).toEqual([0, 1]); // the deleted page is gone for good
   });
 
+  it("names the two-PDF canvas instead of going silent", () => {
+    // One solve takes one document, so this canvas is never probed — but silence read
+    // as "the feature is broken", so the strip gets a reason it can print.
+    useStitchStore.setState({
+      tiles: [
+        tile({ id: "a", sourcePageIndex: 0 }),
+        tile({ id: "b", sourcePageIndex: 0, sourcePdfBytes: new Uint8Array([9, 9]) }),
+      ],
+    });
+    mount();
+    act(() => hook.check());
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("mixed_sources");
+    expect(posted.filter((p) => !p.kind)).toHaveLength(0);
+  });
+
+  it("REFUSES to apply the offer when a sheet was EDITED since the check", async () => {
+    // Not a move: a clean-up region hidden while the probe ran. The replace rebuilds
+    // every tile from the source page, so applying it would silently drop the edit.
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    act(() => {
+      const tiles = useStitchStore.getState().tiles.map((t) =>
+        t.id === "t1" ? { ...t, hiddenRegions: [{ x: 0, y: 0, w: 0.2, h: 0.1 }] } : t,
+      );
+      useStitchStore.setState({ tiles });
+    });
+    await act(async () => { await hook.run(); });
+    expect(commitAutoAlign).not.toHaveBeenCalled();
+    expect(hook.status).toBe("stale");
+  });
+
+  it("an erase override also makes the offer stale", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    act(() => {
+      const tiles = useStitchStore.getState().tiles.map((t) =>
+        t.id === "t0" ? { ...t, imageDataUrl: "blob:erased", imageModified: true } : t,
+      );
+      useStitchStore.setState({ tiles });
+    });
+    await act(async () => { await hook.run(); });
+    expect(commitAutoAlign).not.toHaveBeenCalled();
+    expect(hook.status).toBe("stale");
+  });
+
+  it("undoing back to the checked canvas takes the offer back up", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    const before = useStitchStore.getState().tiles;
+    act(() => {
+      useStitchStore.setState({
+        tiles: before.map((t) => (t.id === "t1" ? { ...t, x: t.x + 40 } : t)),
+      });
+    });
+    await act(async () => { await hook.run(); });
+    expect(hook.status).toBe("stale");
+    // Ctrl+Z — the canvas is exactly what the probe looked at, so its answer stands.
+    act(() => { useStitchStore.setState({ tiles: before }); });
+    expect(hook.status).toBe("offer");
+    // …and it is a real offer, not a label: running it now commits.
+    await act(async () => { await hook.run(); });
+    expect(commitAutoAlign).toHaveBeenCalledTimes(1);
+  });
+
   it("cancel asks the commit to stop and leaves the offer standing", async () => {
     seedCanvas([0, 1]);
     mount();
