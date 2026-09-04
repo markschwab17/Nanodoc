@@ -250,6 +250,9 @@ export default function StitchView() {
           selected: parsed.pageIndices,
           pageScales: parsed.pageScales,
           uniformScale: parsed.uniformScale,
+          // Sheet identity CTO already resolved (the plan labels). Free, and it is
+          // exactly what the aligner otherwise has to OCR out of a title block.
+          pageCodes: parsed.pageCodes,
           // The Add PDF modal's own default, so a plan-driven open and a
           // hand-picked one produce identical tiles.
           removeWhiteBackground: true,

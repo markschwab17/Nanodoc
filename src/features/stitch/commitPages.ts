@@ -53,6 +53,9 @@ export interface CommitInput {
   pageScales: Map<number, number>;
   /** The typed set scale, or null when the user left the field empty. */
   uniformScale: number | null;
+  /** Sheet identity the caller already knows, per page (CTO's plan labels). Fed
+   *  straight to `autoStitch`; ignored by a plain add. */
+  pageCodes?: Map<number, string>;
   removeWhiteBackground: boolean;
   renderer: PDFRenderer;
   onProgress?: (done: number, total: number) => void;
@@ -217,7 +220,7 @@ export async function commitAutoAlign(
   input: CommitInput & { cached?: { placements: TilePlacement[]; rootFtPerIn: number; worstResidFt: number } | null }
 ): Promise<CommitResult> {
   const {
-    mupdf, doc, pdfBytes, fileName, selected, pageScales, uniformScale,
+    mupdf, doc, pdfBytes, fileName, selected, pageScales, uniformScale, pageCodes,
     removeWhiteBackground, renderer, onProgress, ocr, cached, shouldAbort,
   } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
@@ -255,6 +258,7 @@ export async function commitAutoAlign(
     const result = await autoStitch(mupdf, doc, selected, {
       userScale: uniformScale,
       pageScales,
+      pageCodes,
       onProgress,
       ocr,
       shouldAbort,

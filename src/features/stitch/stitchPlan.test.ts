@@ -106,3 +106,39 @@ describe("parseStitchPlan", () => {
     expect(parsed?.pageIndices).toEqual([0]);
   });
 });
+
+describe("parseStitchPlan — sheet codes from the labels", () => {
+  const plan = (labels: unknown[]) => ({
+    version: 1, mode: "auto",
+    entries: labels.map((label) => ({ scaleFeetPerInch: 20, label })),
+  });
+
+  it("takes the leading sheet code of each label", () => {
+    const p = parseStitchPlan(plan(["C5.00 — GRADING PLAN", "C-5.01 GRADING PLAN", "C 502 PLAN"]), 3)!;
+    expect([...p.pageCodes]).toEqual([[0, "C5.00"], [1, "C-5.01"], [2, "C502"]]);
+  });
+
+  it("takes a bare printed number", () => {
+    const p = parseStitchPlan(plan(["6", "7 GRADING"]), 2)!;
+    expect([...p.pageCodes]).toEqual([[0, "6"], [1, "7"]]);
+  });
+
+  it("ignores a label that does not START with a code", () => {
+    const p = parseStitchPlan(plan(["GRADING PLAN", "PLAN SHEET 6", "2ND FLOOR PLAN"]), 3)!;
+    expect(p.pageCodes.size).toBe(0);
+  });
+
+  it("a missing, empty or non-string label is simply a page with no known identity", () => {
+    const p = parseStitchPlan({
+      version: 1, mode: "auto",
+      entries: [{ scaleFeetPerInch: 20 }, { scaleFeetPerInch: 20, label: "" }, { scaleFeetPerInch: 20, label: 42 }],
+    }, 3)!;
+    expect(p).not.toBeNull();
+    expect(p.pageCodes.size).toBe(0);
+  });
+
+  it("upper-cases so it compares with a title-block code", () => {
+    const p = parseStitchPlan(plan(["c5.00 grading plan"]), 1)!;
+    expect(p.pageCodes.get(0)).toBe("C5.00");
+  });
+});

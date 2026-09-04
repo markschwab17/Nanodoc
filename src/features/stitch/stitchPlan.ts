@@ -34,10 +34,31 @@ export interface ParsedStitchPlan {
   /** The single scale shared by every page in `pageIndices`, else null — so a
    *  mixed set takes `autoStitch`'s per-page-scale-aware path. */
   uniformScale: number | null;
+  /** Sheet identity CTO already knows: the leading sheet code or number of each
+   *  entry's `label` (CTO sends the sheet title, e.g. "C5.00 — GRADING PLAN").
+   *  Pages whose label carries no such token are absent. Zero-cost — CTO ran its
+   *  extraction on these pages already — and it is the identity the aligner
+   *  otherwise has to recover by OCR-ing a title block (the investigation's
+   *  failure B, the single largest cause of a set aligning nothing). */
+  pageCodes: Map<number, string>;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The leading sheet code or number of a CTO label: "C5.00 — GRADING PLAN" → "C5.00",
+ * "6" → "6", "GRADING PLAN" → null. Separators are stripped and the token upper-cased
+ * so it compares with a title-block code however either side punctuated it. Anything
+ * that is not a code at the START of the label is ignored — the label is a title, and
+ * a number buried in it is not this sheet's identity.
+ */
+const LABEL_CODE_RE = /^\s*([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?|\d{1,3})\b/i;
+function readLabelCode(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const m = v.match(LABEL_CODE_RE);
+  return m ? m[1].replace(/\s+/g, "").toUpperCase() : null;
 }
 
 /** A usable feet-per-inch, or null for "this page has no scale" — which covers
@@ -70,12 +91,17 @@ export function parseStitchPlan(raw: unknown, pageCount: number): ParsedStitchPl
 
   const pageIndices: number[] = [];
   const pageScales = new Map<number, number>();
+  const pageCodes = new Map<number, string>();
   for (let i = 0; i < count; i++) {
     const entry = entries[i];
     if (!isRecord(entry)) return null;
     const scale = readScale(entry.scaleFeetPerInch);
     pageIndices.push(i);
     if (scale != null) pageScales.set(i, scale);
+    // Read as LENIENTLY as the scale: a label that is missing, empty or carries no
+    // code is simply a page whose identity CTO does not know.
+    const code = readLabelCode(entry.label);
+    if (code) pageCodes.set(i, code);
   }
 
   // Uniform only when EVERY committed page carries the same scale — a page with
@@ -87,5 +113,5 @@ export function parseStitchPlan(raw: unknown, pageCount: number): ParsedStitchPl
     if (pageIndices.every((i) => pageScales.get(i) === first)) uniformScale = first;
   }
 
-  return { mode, pageIndices, pageScales, uniformScale };
+  return { mode, pageIndices, pageScales, uniformScale, pageCodes };
 }

@@ -276,3 +276,72 @@ describe("sheet roles and scale warnings in the result", () => {
     expect(res.scaleWarnings).toEqual([]);
   });
 });
+
+describe("sheet identity supplied by the caller (the CTO hand-off)", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 1000, 800];
+  const lab = (text: string, cx: number, cy: number, w = 120, h = 12) =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
+  // No title-block code of its own: exactly the outlined-text case where
+  // extractPageLabel finds nothing and the aligner has to OCR the title cell.
+  const codeless = (refText: string, refAt: [number, number]) => ({
+    view: VIEW, words: [], geometry: [], shxLabels: [], labels: [lab(refText, refAt[0], refAt[1])],
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const run = async (pages: { view: [number, number, number, number]; words: unknown[]; geometry: unknown[]; shxLabels: unknown[]; labels: unknown[] }[], pageCodes?: Map<number, string>) => {
+    const { capturePage } = await import("./captureDevice");
+    let n = 0;
+    (capturePage as any).mockImplementation(() => pages[n++]);
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    let debug: any = null;
+    await autoStitch({} as any, fakeDoc as any, pages.map((_, i) => i), {
+      ocr: async () => [], userScale: 20, pageCodes, onDebug: (d) => { debug = d; },
+    });
+    return debug;
+  };
+
+  it("a supplied discipline code resolves the code refs the sheets carry", async () => {
+    const pages = [
+      codeless("MATCH LINE SEE SHEET C-302", [910, 400]),
+      codeless("MATCH LINE SEE SHEET C-301", [90, 400]),
+    ];
+    expect((await run(pages)).anchors).toHaveLength(0); // no identity -> nothing resolves
+    const debug = await run(pages, new Map([[0, "C-301"], [1, "C-302"]]));
+    expect(debug.anchors).toHaveLength(1);
+  });
+
+  it("a supplied bare number becomes the printed number", async () => {
+    const pages = [
+      codeless("MATCH LINE SEE SHEET 6", [910, 400]),
+      codeless("MATCH LINE SEE SHEET 5", [90, 400]),
+    ];
+    // Page order would make these sheets 1 and 2, so "SEE SHEET 6" resolves to nothing.
+    expect((await run(pages)).anchors).toHaveLength(0);
+    const debug = await run(pages, new Map([[0, "5"], [1, "6"]]));
+    expect(debug.anchors).toHaveLength(1);
+    expect(debug.inputs.map((i: any) => i.printedNo)).toEqual([5, 6]);
+  });
+
+  it("the PDF's own 'SHEET n OF m' text outranks the supplied number", async () => {
+    const pages = [
+      { ...codeless("MATCH LINE SEE SHEET 6", [910, 400]), shxLabels: [lab("SHEET 5 OF 30", 500, 700)] },
+      { ...codeless("MATCH LINE SEE SHEET 5", [90, 400]), shxLabels: [lab("SHEET 6 OF 30", 500, 700)] },
+    ];
+    const debug = await run(pages, new Map([[0, "11"], [1, "12"]]));
+    expect(debug.inputs.map((i: any) => i.printedNo)).toEqual([5, 6]);
+  });
+
+  it("a supplied number is trusted as given, outside the OCR sanity range", async () => {
+    // Two pages committed out of a 30-sheet set are legitimately sheets 21 and 22 —
+    // the [1, 2*pageCount] rule that catches an OCR misread must not apply here.
+    const pages = [codeless("MATCH LINE SEE SHEET 22", [910, 400]), codeless("MATCH LINE SEE SHEET 21", [90, 400])];
+    const debug = await run(pages, new Map([[0, "21"], [1, "22"]]));
+    expect(debug.inputs.map((i: any) => i.printedNo)).toEqual([21, 22]);
+    expect(debug.anchors).toHaveLength(1);
+  });
+});

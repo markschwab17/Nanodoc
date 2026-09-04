@@ -809,6 +809,9 @@ export interface SheetInput {
    *  rather than abutting them, and a notes/index/details sheet shares no ground
    *  with anything. Absent ⇒ treated as a tile, i.e. unchanged behaviour. */
   role?: SheetRole;
+  /** The sheet's own discipline code, when the CALLER already knows it (CTO's sheet
+   *  identity). Overrides the title-block read, which OCR never feeds. */
+  sheetCode?: string | null;
   /** The unit's ruled DRAWING frame in its OWN coordinates (see
    *  `frameDetect.detectDrawingFrame`), when one was detected. Edge-vs-interior
    *  classification is measured against it so a matchline callout on the drawing's
@@ -1030,7 +1033,7 @@ export function stitchSheets(
     return {
       id: s.id, no: s.no, scale: s.scale, view: s.view,
       raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
-      key: s.no, sheetCode: label.sheetCode, drawingFrame: s.drawingFrame ?? null,
+      key: s.no, sheetCode: s.sheetCode ?? label.sheetCode, drawingFrame: s.drawingFrame ?? null,
       role: s.role ?? "tile",
       printedNo: s.printedNo ?? s.no, siblingKey: s.siblingKey, pageIndex: s.pageIndex,
     };

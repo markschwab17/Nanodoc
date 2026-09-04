@@ -31,6 +31,12 @@ export interface AutoStitchOptions {
   userScale?: number | null;
   /** Per-page feet-per-inch (mixed-scale sets). Overrides userScale for that page. */
   pageScales?: ReadonlyMap<number, number>;
+  /** Sheet identity the CALLER already knows, per page: a discipline code ("C5.00")
+   *  or a bare printed number ("6"). CTO derives these from the sheet titles its
+   *  extraction wrote, so they cost nothing and they are exactly what the OCR title-
+   *  cell pass is trying to recover. Trusted ABOVE OCR and BELOW the PDF's own
+   *  "SHEET n OF m" text. */
+  pageCodes?: ReadonlyMap<number, string>;
   onProgress?: (done: number, total: number) => void;
   /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel. */
   ocr?: (image: RawImage) => Promise<OcrWord[]>;
@@ -95,8 +101,9 @@ function hasEdgeRefs(extract: PageExtract, frame?: [number, number, number, numb
  *
  *  - Sanity: an OCR-sourced number that is null, non-integer, or outside
  *    [1, 2·pageCount] is a misread → fall back to page order (pageIndex+1).
- *    text/fallback numbers are trusted as given; a null of any source also
- *    falls back to page order.
+ *    text/cto/fallback numbers are trusted as given (the range is an OCR-misread
+ *    guard, and a 2-page commit out of a 30-sheet set is legitimately numbered 5
+ *    and 6); a null of any source also falls back to page order.
  *  - Collision repair: a resolved number shared by ≥2 pages where at least one
  *    is still OCR-sourced is almost certainly a misread — reset every
  *    OCR-sourced page in that group to its page-order fallback (distinct
@@ -105,20 +112,24 @@ function hasEdgeRefs(extract: PageExtract, frame?: [number, number, number, numb
  * Returns pageIndex → resolved printed number.
  */
 export function resolvePrintedNos(
-  pages: { pageIndex: number; printedNo: number | null; source: "ocr" | "text" | "fallback" }[],
+  pages: { pageIndex: number; printedNo: number | null; source: PrintedNoSource }[],
   pageCount: number
 ): Map<number, number> {
-  const resolved = new Map<number, { no: number; source: "ocr" | "text" | "fallback" }>();
+  const resolved = new Map<number, { no: number; source: PrintedNoSource }>();
   for (const p of pages) {
     let no = p.printedNo;
     let source = p.source;
+    // The [1, 2*pageCount] rule is an OCR-MISREAD guard and applies to OCR only. A
+    // number the PDF states, or one the caller supplies from its own extraction, is
+    // trusted as given: committing two pages out of a 30-sheet set legitimately
+    // yields printed numbers 5 and 6, which this range would throw away.
     const validOcr = no != null && Number.isInteger(no) && no >= 1 && no <= pageCount * 2;
     if (source === "ocr" && !validOcr) { no = null; source = "fallback"; }
     if (no == null) { no = p.pageIndex + 1; source = "fallback"; }
     resolved.set(p.pageIndex, { no, source });
   }
 
-  const byNo = new Map<number, { pageIndex: number; source: "ocr" | "text" | "fallback" }[]>();
+  const byNo = new Map<number, { pageIndex: number; source: PrintedNoSource }[]>();
   for (const [pageIndex, r] of resolved) {
     if (!byNo.has(r.no)) byNo.set(r.no, []);
     byNo.get(r.no)!.push({ pageIndex, source: r.source });
@@ -137,6 +148,10 @@ export function resolvePrintedNos(
   return new Map([...resolved].map(([k, v]) => [k, v.no]));
 }
 
+/** Where a page's printed number came from, best first: the PDF's own text, the
+ *  caller (CTO's sheet identity), OCR of the title cell, then page order. */
+export type PrintedNoSource = "text" | "cto" | "ocr" | "fallback";
+
 interface Unit {
   pageIndex: number;
   frame: Frame | null;      // null = whole page
@@ -148,11 +163,14 @@ interface Unit {
   /** Ruled drawing frame in the UNIT's own coordinates (recomputed per strip). */
   drawingFrame: [number, number, number, number] | null;
   role: SheetRole;
+  sheetCode: string | null;
 }
 
 /** Per-page record collected in pass 1 (extract + printed number). */
 interface PageRec {
-  pageIndex: number; extract: PageExtract; printedNo: number; printedNoSource: "ocr" | "text" | "fallback";
+  pageIndex: number; extract: PageExtract; printedNo: number; printedNoSource: PrintedNoSource;
+  /** Discipline code supplied by the caller for this page, if any. */
+  ctoCode: string | null;
   /** The page's ruled DRAWING frame when one was detected — every edge rule (OCR
    *  band clips, edge-vs-interior classification) is measured against it. Null on a
    *  sheet drawn edge to edge. */
@@ -221,8 +239,7 @@ export async function autoStitch(
     await yieldToMain();
     const page = doc.loadPage(pageIndex);
     let extract: PageExtract;
-    let printedNo: number | null = null;
-    let printedNoSource: "ocr" | "text" | "fallback" = "fallback";
+    let ocrNo: number | null = null;
     let recovered: Label[] = [];
     let drawingFrame: [number, number, number, number] | null = null;
     let title: string | null = null;
@@ -269,26 +286,37 @@ export async function autoStitch(
         const { image } = renderBand(mupdf, page, nb.clip);
         // Record the raw OCR read; resolvePrintedNos sanity-checks the range
         // (a misread like "2"→"22" would otherwise misroute byPrinted resolution).
-        const ocrNo = parseSheetNumber(await ocr(image));
-        if (ocrNo != null) { printedNo = ocrNo; printedNoSource = "ocr"; }
+        ocrNo = parseSheetNumber(await ocr(image));
       }
     } finally {
       page.destroy?.();
     }
     if (recovered.length) extract = { ...extract, labels: [...extract.labels, ...recovered] };
 
-    // Printed sheet number candidate: OCR > "SHEET n OF m" text > page order.
-    // The final number (sanity + collision repair) is resolved below.
-    if (printedNo == null) {
-      for (const l of [...extract.shxLabels, ...extract.labels]) {
-        const m = l.text.match(/SHEET\s+(?:NO\.?\s*)?(\d+)\s+OF\s+\d+/i);
-        if (m) { printedNo = Number(m[1]); printedNoSource = "text"; break; }
-      }
+    // Printed sheet number candidate, best source first: the PDF's own
+    // "SHEET n OF m" text > the caller's sheet identity > OCR of the title cell >
+    // page order. The PDF's text is what the sheet literally says; the caller's
+    // identity was read once, off-line, from the same title block; OCR of a
+    // rasterised band is the last resort. (This is the CTO hand-off: a code like
+    // "C5.00" is not a printed NUMBER, so it feeds `sheetCode` instead — see below.)
+    // The final number (sanity + collision repair) is resolved after the loop.
+    let textNo: number | null = null;
+    for (const l of [...extract.shxLabels, ...extract.labels]) {
+      const m = l.text.match(/SHEET\s+(?:NO\.?\s*)?(\d+)\s+OF\s+\d+/i);
+      if (m) { textNo = Number(m[1]); break; }
     }
+    const ctoRaw = opts.pageCodes?.get(pageIndex) ?? null;
+    const ctoNo = ctoRaw != null && /^\d{1,3}$/.test(ctoRaw) ? Number(ctoRaw) : null;
+    const ctoCode = ctoRaw != null && ctoNo == null ? ctoRaw : null;
+    let printedNo: number | null = null;
+    let printedNoSource: PrintedNoSource = "fallback";
+    if (textNo != null) { printedNo = textNo; printedNoSource = "text"; }
+    else if (ctoNo != null) { printedNo = ctoNo; printedNoSource = "cto"; }
+    else if (ocrNo != null) { printedNo = ocrNo; printedNoSource = "ocr"; }
 
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
-      title, statedFtPerIn, role: "tile",
+      title, statedFtPerIn, role: "tile", ctoCode,
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
@@ -357,7 +385,8 @@ export async function autoStitch(
     const codeOf = new Map<number, string | null>();
     const byCode = new Map<string, PageRec[]>();
     for (const p of pages) {
-      const code = extractPageLabel({ labels: p.extract.labels, shxLabels: p.extract.shxLabels, view: p.extract.view }).sheetCode;
+      const code = p.ctoCode
+        ?? extractPageLabel({ labels: p.extract.labels, shxLabels: p.extract.shxLabels, view: p.extract.view }).sheetCode;
       const n = code ? normCode(code) : null;
       codeOf.set(p.pageIndex, n);
       if (n) (byCode.get(n) || byCode.set(n, []).get(n)!).push(p);
@@ -650,10 +679,10 @@ export async function autoStitch(
         // A strip's extract is frame-LOCAL, so its drawing frame is recomputed in
         // those coordinates rather than inherited from the page.
         const ex = sliceExtract(p.extract, f);
-        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role });
+        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role, sheetCode: p.ctoCode });
       }
     } else {
-      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role });
+      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role, sheetCode: p.ctoCode });
     }
   }
 
@@ -706,7 +735,7 @@ export async function autoStitch(
       view: u.extract.view, extract: u.extract,
       printedNo: u.printedNo, pageIndex: u.pageIndex,
       siblingKey: byPage.get(u.pageIndex)!.find((o) => o.key !== u.key)?.key,
-      frame: u.frame?.bbox, drawingFrame: u.drawingFrame, role: u.role,
+      frame: u.frame?.bbox, drawingFrame: u.drawingFrame, role: u.role, sheetCode: u.sheetCode,
     }));
     // Key-map site grid (whole-page sets only; stitchSheets ignores it when
     // any page produced two units). Grid is keyed by unit key here.
