@@ -79,13 +79,21 @@ function hashImage(image) {
   return h.digest("hex");
 }
 
-let worker = null;
-async function ensureWorker() {
-  if (worker) return worker;
-  const { createWorker, PSM } = await import("tesseract.js");
-  worker = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
-  await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-  return worker;
+// Memoised as a PROMISE, not as the resolved worker: autoStitch issues a whole
+// page's band reads at once, so an `if (worker) return worker` guard that only
+// publishes after its awaits lets every concurrent caller boot its OWN tesseract
+// worker — and only the last one is ever terminated, so the orphans keep the event
+// loop alive and the script never exits.
+let workerPromise = null;
+function ensureWorker() {
+  if (workerPromise) return workerPromise;
+  workerPromise = (async () => {
+    const { createWorker, PSM } = await import("tesseract.js");
+    const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
+    await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+    return w;
+  })();
+  return workerPromise;
 }
 
 async function ocr(image) {
@@ -134,7 +142,7 @@ for (const scale of SCALES) {
 }
 
 flushCache();
-if (worker) await worker.terminate();
+if (workerPromise) await (await workerPromise).terminate();
 
 // topology comparison
 if (SCALES.length >= 2) compareTopology(runs);

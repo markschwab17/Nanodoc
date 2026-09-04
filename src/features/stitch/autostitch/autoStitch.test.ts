@@ -58,6 +58,69 @@ describe("autoStitch cooperative abort", () => {
     await autoStitch({} as any, fakeDoc as any, [0, 1, 2], { ocr });
     expect(capturePage).toHaveBeenCalledTimes(3);
   });
+
+  it("hands every read ONE abort signal for the run, and trips it when the run aborts", async () => {
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    const signals: (AbortSignal | undefined)[] = [];
+    let loaded = 0;
+    const ocr = vi.fn(async (_img: any, o?: { signal?: AbortSignal }) => { signals.push(o?.signal); return []; });
+    const promise = autoStitch({} as any, fakeDoc as any, [0, 1, 2, 3], {
+      ocr,
+      shouldAbort: () => loaded >= 2,
+      onProgress: () => { loaded++; },
+    });
+    await expect(promise).rejects.toBeInstanceOf(AutoStitchAborted);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(new Set(signals).size).toBe(1);   // one signal, shared by every read
+    // Aborting is what pulls the reads still QUEUED in the pool: without it they
+    // would each be OCR'd in full for a run that has already given up.
+    expect(signals[0]?.aborted).toBe(true);
+  });
+});
+
+describe("autoStitch concurrent OCR", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // The stub page is 1000x800 with no geometry, so `pageEdgeBands` yields the four
+  // page bands: top + bottom (one read each) + left + right (two rotations each) +
+  // the sheet-number band = seven reads per page.
+  const READS_PER_PAGE = 7;
+
+  it("issues a page's reads in one burst, overlaps the next page, and stops at two pages", async () => {
+    const { capturePage } = await import("./captureDevice");
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    let outstanding = 0, peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const ocr = vi.fn(async () => {
+      outstanding++;
+      peak = Math.max(peak, outstanding);
+      await gate;
+      outstanding--;
+      return [];
+    });
+
+    const run = autoStitch({} as any, fakeDoc as any, [0, 1, 2, 3], { ocr });
+    // Long enough for extraction to run as far ahead as it is allowed to.
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Two pages' worth in flight, seven reads each: the whole page goes at once
+    // (sequentially this was 1), and page 2 was extracted without waiting for
+    // page 1's answers. And no further: backpressure holds extraction at two
+    // pages so a long selection cannot pile every band raster into the queue.
+    expect(peak).toBe(2 * READS_PER_PAGE);
+    expect(capturePage).toHaveBeenCalledTimes(2);
+
+    release();
+    await run;
+    expect(ocr).toHaveBeenCalledTimes(4 * READS_PER_PAGE);
+    expect(capturePage).toHaveBeenCalledTimes(4);
+  });
 });
 
 describe("resolvePrintedNos", () => {

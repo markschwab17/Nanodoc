@@ -95,24 +95,36 @@ function hashImage(image) {
 }
 const OCR_POOL_SIZE = 3;
 const OCR_JOB_TIMEOUT_MS = 20_000;
-let pool = null, NO_RESULT = null;
-async function ensurePool() {
-  if (pool) return pool;
-  const { createOcrPool, OCR_NO_RESULT } = await import("../src/features/stitch/autostitch/ocrPool.ts");
-  const { createWorker, PSM } = await import("tesseract.js");
-  NO_RESULT = OCR_NO_RESULT;
-  pool = createOcrPool({
-    size: OCR_POOL_SIZE,
-    createWorker: async () => {
-      const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
-      try { await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT }); }
-      catch (err) { try { await w.terminate(); } catch { /* ignore */ } throw err; }
-      return w;
-    },
-    timeoutMs: () => OCR_JOB_TIMEOUT_MS,
-    onTimeout: () => console.warn("[stitch-eval] OCR job timed out — retiring that worker"),
-  });
-  return pool;
+let poolPromise = null, NO_RESULT = null;
+/**
+ * The pool, memoised as a PROMISE rather than as the resolved object.
+ *
+ * `if (pool) return pool` would be a check-then-await race: autoStitch issues a
+ * whole page's band reads at once, so every one of them enters here before the
+ * first `await import(...)` has resolved, every one builds its OWN pool with its
+ * own three tesseract workers, and only the last assignment is ever terminated.
+ * The orphaned worker threads then keep the event loop alive and the harness never
+ * exits — the run itself finishes and prints, and the process just hangs.
+ */
+function ensurePool() {
+  if (poolPromise) return poolPromise;
+  poolPromise = (async () => {
+    const { createOcrPool, OCR_NO_RESULT } = await import("../src/features/stitch/autostitch/ocrPool.ts");
+    const { createWorker, PSM } = await import("tesseract.js");
+    NO_RESULT = OCR_NO_RESULT;
+    return createOcrPool({
+      size: OCR_POOL_SIZE,
+      createWorker: async () => {
+        const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
+        try { await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT }); }
+        catch (err) { try { await w.terminate(); } catch { /* ignore */ } throw err; }
+        return w;
+      },
+      timeoutMs: () => OCR_JOB_TIMEOUT_MS,
+      onTimeout: () => console.warn("[stitch-eval] OCR job timed out — retiring that worker"),
+    });
+  })();
+  return poolPromise;
 }
 async function ocr(image) {
   const key = hashImage(image);
@@ -308,7 +320,7 @@ for (const set of sets) {
   rows.push(row);
 }
 flushCache();
-if (pool) await pool.terminate();
+if (poolPromise) await (await poolPromise).terminate();
 
 if (AS_JSON) {
   console.log(JSON.stringify({ manifest: MANIFEST, rows }, null, 2));

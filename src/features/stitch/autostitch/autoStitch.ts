@@ -6,7 +6,7 @@ import { stitchSheets, findEdgeStroke, oneSidedStrokeAnchor, seamCrossings, cros
 import { detectKeymapGrid } from "./keymap";
 import { sliceExtract, stripFrames, detectDrawingFrame, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
-import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
+import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, type BandSpec } from "./ocrBands";
 import { renderBand } from "./bandRender";
 import { parseSheetRefs, parseScaleNotes, refSheetNumber, refSheetCode, normCode, type SheetRef } from "./tokens";
 import { extractPageLabel, classifySheetRole, type SheetRole, type PageLabelResult } from "./pageLabels";
@@ -38,8 +38,11 @@ export interface AutoStitchOptions {
    *  "SHEET n OF m" text. */
   pageCodes?: ReadonlyMap<number, string>;
   onProgress?: (done: number, total: number) => void;
-  /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel. */
-  ocr?: (image: RawImage) => Promise<OcrWord[]>;
+  /** OCR callback (main thread: ocrService.recognize; worker: the RPC shim). Absent → no OCR channel.
+   *  `signal` is the run's cooperative abort pushed down into the OCR transport: band
+   *  reads are issued in a burst, so most are still QUEUED when an abort lands and a
+   *  queued pool job has no deadline of its own. */
+  ocr?: (image: RawImage, opts?: { signal?: AbortSignal }) => Promise<OcrWord[]>;
   /** Cooperative abort. Consulted at the top of each per-page iteration, before
    *  every OCR band call, and per pair in the anchor-search pass. When it returns
    *  true, autoStitch throws AutoStitchAborted at the next checkpoint so a plain
@@ -344,6 +347,84 @@ interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp
    *  matchline rather than re-picking each band's strongest line (failure J). */
   strokeI?: number; strokeJ?: number; }
 
+/** One page's edge-band OCR recovery: synthetic labels, and the title-cell number. */
+interface PageOcrRead { recovered: Label[]; ocrNo: number | null }
+
+/** One band's reads. `rots` is [0] for a horizontal band and [90, 270] for a side
+ *  band (both rotations are OCR'd and the better one wins); `words[k]` is the read
+ *  at `rots[k]`. `w`/`h` are the PRE-rotation raster dims wordsToLabels needs. */
+interface BandRead {
+  band: BandSpec; scale: number; w: number; h: number;
+  rots: (0 | 90 | 270)[]; words: Promise<OcrWord[]>[];
+}
+
+/** Confidence mass above the 50-point floor — the side-band rotation tie-break. */
+const rotScore = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
+
+/**
+ * Render every OCR band of ONE page and issue ALL of its reads at once.
+ *
+ * Two shapes matter here.
+ *
+ * RENDERING IS SYNCHRONOUS and finished before this returns, because the caller
+ * destroys the mupdf page the moment it does (`renderBand` needs the live page).
+ * Only the reads are deferred, so a page's rasters are handed straight to the OCR
+ * transport and never retained here: what survives the burst is the transport's
+ * copy (a PNG blob / a transferred buffer), not the RGBA band.
+ *
+ * THE READS ARE CONCURRENT but consumed in exactly the sequential order: bands in
+ * `pageEdgeBands` order, each side band's rotation pick unchanged (higher
+ * confidence score wins, tie → the first of [90, 270], which `Array#sort`'s
+ * stability guarantees), sheet-number band last. `Promise.all` preserves order, so
+ * running the pool flat out cannot change which read wins.
+ */
+function readPageOcr(
+  mupdf: any,
+  page: any,
+  view: [number, number, number, number],
+  drawingFrame: [number, number, number, number] | null,
+  ocr: (image: RawImage) => Promise<OcrWord[]>,
+): Promise<PageOcrRead> {
+  const reads: BandRead[] = [];
+  for (const band of pageEdgeBands(view, drawingFrame)) {
+    const { image, scale } = renderBand(mupdf, page, band.clip);
+    const w = image.width, h = image.height;
+    if (band.edge === "left" || band.edge === "right") {
+      // The rotated copies go straight into `ocr` and are never bound to a local:
+      // the side band's own raster is dead the moment both rotations exist.
+      reads.push({ band, scale, w, h, rots: [90, 270], words: [ocr(rotateRaw(image, 90)), ocr(rotateRaw(image, 270))] });
+    } else {
+      reads.push({ band, scale, w, h, rots: [0], words: [ocr(image)] });
+    }
+  }
+  // Issued with the bands, consumed after them. resolvePrintedNos sanity-checks
+  // the range (a misread like "2"→"22" would misroute byPrinted resolution).
+  const sheetNo = ocr(renderBand(mupdf, page, sheetNoBand(view).clip).image);
+  // Nothing above is awaited yet, so mark every read handled: if one rejects while
+  // the caller is waiting on a sibling, the rejection must not surface as an
+  // unhandled promise. The real awaits below still see it.
+  for (const r of reads) for (const p of r.words) p.catch(() => { /* surfaced below */ });
+  sheetNo.catch(() => { /* surfaced below */ });
+
+  return (async () => {
+    const perBand = await Promise.all(reads.map((r) => Promise.all(r.words)));
+    const recovered: Label[] = [];
+    for (let i = 0; i < reads.length; i++) {
+      const r = reads[i];
+      const got = perBand[i];
+      // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
+      if (r.rots.length === 1) {
+        recovered.push(...wordsToLabels(got[0], r.band, r.scale, r.w, r.h, r.rots[0]));
+      } else {
+        const cands = r.rots.map((rot, k) => ({ rot, words: got[k] }));
+        const best = cands.sort((a, b) => rotScore(b.words) - rotScore(a.words))[0];
+        recovered.push(...wordsToLabels(best.words, r.band, r.scale, r.w, r.h, best.rot));
+      }
+    }
+    return { recovered, ocrNo: parseSheetNumber(await sheetNo) };
+  })();
+}
+
 export async function autoStitch(
   mupdf: any,
   doc: any,
@@ -362,7 +443,18 @@ export async function autoStitch(
 
   // Cooperative-abort checkpoint. Throwing a distinguishable error lets the
   // worker report `{aborted:true}` (not an error) when a plain add supersedes the probe.
-  const checkAbort = () => { if (opts.shouldAbort?.()) throw new AutoStitchAborted(); };
+  //
+  // The controller carries the SAME abort down into the OCR transport. It matters
+  // now that reads are issued in a burst: most of a page's bands are still sitting
+  // in the pool's QUEUE when an abort lands, and a queued job has no deadline of
+  // its own — unsignalled, every one of them would be OCR'd in full for a run that
+  // has already given up.
+  const ocrAbort = typeof AbortController === "function" ? new AbortController() : null;
+  const checkAbort = () => {
+    if (!opts.shouldAbort?.()) return;
+    ocrAbort?.abort();
+    throw new AutoStitchAborted();
+  };
   // Guard every OCR call: abort BEFORE the (slow) recognize, and fire onOcrStart
   // once so the UI can explain the wait. All OCR below goes through `ocr`.
   let ocrStarted = false;
@@ -371,7 +463,7 @@ export async function autoStitch(
     ? async (image: RawImage): Promise<OcrWord[]> => {
         checkAbort();
         if (!ocrStarted) { ocrStarted = true; opts.onOcrStart?.(); }
-        return rawOcr(image);
+        return rawOcr(image, ocrAbort ? { signal: ocrAbort.signal } : undefined);
       }
     : undefined;
 
@@ -379,16 +471,39 @@ export async function autoStitch(
   // Collect each page's extract + printed number FIRST (page released after
   // capture); unit construction is deferred to pass 3 so the reciprocal-anchor
   // pass (pass 2) can run against the whole set between them.
-  const pages: PageRec[] = [];
-  const refPageIndices: number[] = [];
+  //
+  // Pass 1 is itself in two steps. The EXTRACT step below walks the pages in order
+  // on the single mupdf document (mupdf is not re-entrant, so that stays strictly
+  // sequential), rasters each page's OCR bands while the page is alive, fires all
+  // of its reads at once and moves on WITHOUT waiting for them. The RESOLVE step
+  // that follows consumes those reads in page order, before anything downstream
+  // reads `recovered`/`ocrNo`/`printedNo`. Net effect: the OCR pool is kept fed
+  // both within a page (its ~7 band reads overlap) and across pages (page i+1 is
+  // being extracted while page i is still being read).
+  const pending: {
+    pageIndex: number; extract: PageExtract;
+    drawingFrame: [number, number, number, number] | null;
+    title: string | null; statedFtPerIn: number | null; pageLabel: PageLabelResult;
+    /** null when this page took the no-OCR path (its text channels had edge refs). */
+    ocrRead: Promise<PageOcrRead> | null;
+  }[] = [];
+  // Backpressure. Extraction is far cheaper than OCR, so left alone it would run
+  // the whole selection ahead of the reads and pile every page's band rasters into
+  // the pool's queue at once. Two pages in flight is enough to keep every pool
+  // worker busy across a page boundary (one page alone already queues ~7 reads)
+  // while bounding what is outstanding to the page being read plus the one being
+  // extracted.
+  const OCR_PAGES_IN_FLIGHT = 2;
+  const inFlight: Promise<PageOcrRead>[] = [];
+
   for (let i = 0; i < pageIndices.length; i++) {
     checkAbort(); // top of each per-page iteration
+    while (inFlight.length >= OCR_PAGES_IN_FLIGHT) await inFlight.shift();
     const pageIndex = pageIndices[i];
     await yieldToMain();
     const page = doc.loadPage(pageIndex);
     let extract: PageExtract;
-    let ocrNo: number | null = null;
-    let recovered: Label[] = [];
+    let ocrRead: Promise<PageOcrRead> | null = null;
     let drawingFrame: [number, number, number, number] | null = null;
     let title: string | null = null;
     let statedFtPerIn: number | null = null;
@@ -418,29 +533,43 @@ export async function autoStitch(
       // exactly the pages OCR exists to rescue, so gating on geometry would
       // disable OCR precisely where it is needed.
       if (ocr && !hasEdgeRefs(extract, drawingFrame)) {
-        for (const band of pageEdgeBands(extract.view, drawingFrame)) {
-          const { image, scale: bandScale } = renderBand(mupdf, page, band.clip);
-          if (band.edge === "left" || band.edge === "right") {
-            const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
-            for (const rot of [90, 270] as const) cands.push({ rot, words: await ocr(rotateRaw(image, rot)) });
-            const score = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
-            const best = cands.sort((a, b) => score(b.words) - score(a.words))[0];
-            // wordsToLabels wants PRE-rotation raster dims (it inverts the rotation itself)
-            recovered.push(...wordsToLabels(best.words, band, bandScale, image.width, image.height, best.rot));
-          } else {
-            recovered.push(...wordsToLabels(await ocr(image), band, bandScale, image.width, image.height, 0));
-          }
-        }
-        const nb = sheetNoBand(extract.view);
-        const { image } = renderBand(mupdf, page, nb.clip);
-        // Record the raw OCR read; resolvePrintedNos sanity-checks the range
-        // (a misread like "2"→"22" would otherwise misroute byPrinted resolution).
-        ocrNo = parseSheetNumber(await ocr(image));
+        // Rasters every band NOW (the page dies in the `finally` below) and issues
+        // every read at once; the answers are consumed in the resolve step.
+        ocrRead = readPageOcr(mupdf, page, extract.view, drawingFrame, ocr);
       }
     } finally {
       page.destroy?.();
     }
-    if (recovered.length) extract = { ...extract, labels: [...extract.labels, ...recovered] };
+    if (ocrRead) {
+      // Marked handled here too: the resolve step below is the real await, but a
+      // rejection between now and then (an abort on an earlier page) must not
+      // surface as an unhandled promise.
+      ocrRead.catch(() => { /* surfaced by the resolve step */ });
+      inFlight.push(ocrRead);
+    }
+    pending.push({
+      pageIndex, extract, drawingFrame, title, statedFtPerIn, ocrRead,
+      pageLabel: pageLabel ?? { sheetCode: null, discipline: null, title: null, sheetNo: null, sheetOf: null, confidence: "none", source: "none" },
+    });
+    // Progress counts pages EXTRACTED. Backpressure keeps that within
+    // OCR_PAGES_IN_FLIGHT pages of pages finished, and the bar was always ahead of
+    // the run as a whole anyway (the solve still follows the last page).
+    opts.onProgress?.(i + 1, total);
+  }
+
+  // ── PASS 1, RESOLVE: consume each page's OCR reads, in page order ────────────
+  const pages: PageRec[] = [];
+  const refPageIndices: number[] = [];
+  for (const p of pending) {
+    checkAbort(); // …so an abort during the read burst drops the jobs still queued
+    const { pageIndex, drawingFrame } = p;
+    let extract = p.extract;
+    let ocrNo: number | null = null;
+    if (p.ocrRead) {
+      const read = await p.ocrRead;
+      ocrNo = read.ocrNo;
+      if (read.recovered.length) extract = { ...extract, labels: [...extract.labels, ...read.recovered] };
+    }
 
     // Printed sheet number candidate, best source first: the PDF's own
     // "SHEET n OF m" text > the caller's sheet identity > OCR of the title cell >
@@ -465,13 +594,12 @@ export async function autoStitch(
 
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
-      title, statedFtPerIn, role: "tile", ctoCode, sheetCode: null, sheetCodeDropped: false,
-      pageLabel: pageLabel ?? { sheetCode: null, discipline: null, title: null, sheetNo: null, sheetOf: null, confidence: "none", source: "none" },
+      title: p.title, statedFtPerIn: p.statedFtPerIn, role: "tile", ctoCode,
+      sheetCode: null, sheetCodeDropped: false, pageLabel: p.pageLabel,
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
     if (hasEdgeRefs(extract, drawingFrame)) refPageIndices.push(pageIndex);
-    opts.onProgress?.(i + 1, total);
   }
 
   // Sanity-check OCR reads and repair printedNo collisions, then apply.

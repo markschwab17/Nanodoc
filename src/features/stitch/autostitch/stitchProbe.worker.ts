@@ -23,20 +23,48 @@ async function ensureMupdf() {
 let abortDocId = 0;
 
 // ── OCR over RPC to the main thread (tesseract cannot nest here portably) ──
+// SEVERAL requests are outstanding at once: autoStitch issues a whole page's band
+// reads in one burst and keeps the next page's burst in flight behind it. That is
+// exactly why the pending map is keyed by ocrId — replies may land in any order,
+// and each one settles only its own call.
 let ocrSeq = 0;
 const ocrPending = new Map<number, (words: OcrWord[]) => void>();
-const OCR_TIMEOUT_MS = 30_000;
+// Per-RPC backstop. Deliberately LONGER than the main-thread pool's own 20s
+// per-job budget (ocrService's OCR_JOB_TIMEOUT_MS) so the pool's answer — [], after
+// it has retired the one tesseract worker that hung — always arrives first; this
+// fires only if the reply itself goes missing.
+const OCR_TIMEOUT_MS = 25_000;
 // Counts every RPC autoStitch makes through its `ocr` callback for the CURRENT
 // probe — reset at the top of `handle()` so a persistent worker's later probes
 // don't accumulate a prior run's count.
 let ocrCallCount = 0;
-function ocrViaMain(image: RawImage): Promise<OcrWord[]> {
+function ocrViaMain(image: RawImage, opts?: { signal?: AbortSignal }): Promise<OcrWord[]> {
   ocrCallCount++;
   return new Promise((resolve) => {
+    const signal = opts?.signal;
+    if (signal?.aborted) { resolve([]); return; }
     const id = ++ocrSeq;
-    const timer = setTimeout(() => { ocrPending.delete(id); resolve([]); }, OCR_TIMEOUT_MS);
-    ocrPending.set(id, (words) => { clearTimeout(timer); resolve(words); });
+    let settled = false;
+    const finish = (words: OcrWord[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ocrPending.delete(id);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(words);
+    };
+    const timer = setTimeout(() => finish([]), OCR_TIMEOUT_MS);
+    // Forwarding the abort is what actually stops the work. An aborted read is
+    // usually still QUEUED in the main thread's pool, and a queued job has no
+    // deadline of its own — resolving [] here alone would leave the pool grinding
+    // through a whole abandoned probe's worth of crops.
+    const onAbort = () => {
+      (self as any).postMessage({ kind: "ocr-abort", ocrId: id });
+      finish([]);
+    };
+    ocrPending.set(id, finish);
     (self as any).postMessage({ kind: "ocr-req", ocrId: id, image }, [image.data.buffer]);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

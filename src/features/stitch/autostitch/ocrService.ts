@@ -269,12 +269,32 @@ export async function shutdownOcr(): Promise<void> {
  * main-thread OCR pool) independently, so replies stay paired to their probe
  * ocrId even when they complete out of order. Failures answer with [] so the
  * probe worker never hangs.
+ *
+ * `{kind:"ocr-abort", ocrId}` cancels one outstanding request. The probe sends it
+ * when its run is aborted, and it has to reach the POOL rather than merely be
+ * ignored on arrival: the probe issues a whole page of band reads at once, so an
+ * abandoned run leaves dozens of jobs sitting in the pool's queue — and a queued
+ * job has no deadline of its own. Aborting drops the queued ones outright.
  */
 export function attachOcrRpc(probeWorker: Worker): void {
+  const outstanding = new Map<number, AbortController>();
   probeWorker.addEventListener("message", async (e: MessageEvent<any>) => {
     const d = e.data;
+    if (d && d.kind === "ocr-abort") {
+      const ctrl = outstanding.get(d.ocrId);
+      outstanding.delete(d.ocrId);
+      ctrl?.abort();
+      return;
+    }
     if (!d || d.kind !== "ocr-req") return;
-    const words = await recognize(d.image as RawImage);
+    const ctrl = new AbortController();
+    outstanding.set(d.ocrId, ctrl);
+    let words: OcrWord[];
+    try {
+      words = await recognize(d.image as RawImage, { signal: ctrl.signal });
+    } finally {
+      outstanding.delete(d.ocrId);
+    }
     probeWorker.postMessage({ kind: "ocr-res", ocrId: d.ocrId, words });
   });
 }
