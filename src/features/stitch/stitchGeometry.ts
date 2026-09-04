@@ -129,6 +129,75 @@ export function computeTwoPointAlignment(
 }
 
 /**
+ * "Align to neighbour": the moving tile's two clicked points are carried onto the two
+ * points clicked on the fixed sheet.
+ *
+ * Same two-point maths as `computeTwoPointAlignment` (the moving tile is the target and
+ * the fixed sheet's points are the reference), with ONE addition: when `matchScale` is
+ * on the tile is also scaled uniformly so the two distances match. Scale is a real
+ * decision — a sheet plotted at a different scale must be resized, a sheet plotted at
+ * the same scale must NOT be — so it is a toggle, off by default, and with it off this
+ * returns exactly what `computeTwoPointAlignment` returns plus the unchanged size.
+ *
+ * Derivation: the tile maps local (u,v) to canvas as
+ *   canvas = centre + R·(s·(u - w0/2), s·(v - h0/2))
+ * with s the uniform scale (1 when `matchScale` is off) — the rotation is unchanged by
+ * a uniform scale, so R comes from the two directions exactly as before, and the centre
+ * falls out of pinning the first point.
+ */
+export function computeAlignToNeighbour(
+  movingTile: TilePose,
+  movingPointsCanvas: [CanvasPoint, CanvasPoint],
+  fixedPointsCanvas: [CanvasPoint, CanvasPoint],
+  matchScale = false
+): { x: number; y: number; width: number; height: number; rotation: number } {
+  const w0 = movingTile.width;
+  const h0 = movingTile.height;
+  const unchanged = {
+    x: movingTile.x,
+    y: movingTile.y,
+    width: w0,
+    height: h0,
+    rotation: movingTile.rotation ?? 0,
+  };
+
+  const local1 = canvasToTileLocal(movingPointsCanvas[0], movingTile);
+  const local2 = canvasToTileLocal(movingPointsCanvas[1], movingTile);
+  if (!local1 || !local2) return unchanged;
+  const du = local2.u - local1.u;
+  const dv = local2.v - local1.v;
+  const localLen = Math.hypot(du, dv);
+  const [B1, B2] = fixedPointsCanvas;
+  const refLen = Math.hypot(B2.x - B1.x, B2.y - B1.y);
+  // Two coincident clicks say nothing about rotation or scale — leave the tile alone
+  // rather than divide by zero and fling it off the canvas.
+  if (localLen <= 0 || refLen <= 0) return unchanged;
+
+  const scale = matchScale ? refLen / localLen : 1;
+  const R_rad = Math.atan2(B2.y - B1.y, B2.x - B1.x) - Math.atan2(dv, du);
+  let R_deg = (R_rad * 180) / Math.PI;
+  R_deg = ((R_deg % 360) + 360) % 360;
+  if (R_deg > 180) R_deg -= 360;
+
+  const width = w0 * scale;
+  const height = h0 * scale;
+  const cos = Math.cos(R_rad);
+  const sin = Math.sin(R_rad);
+  const relU = (local1.u - w0 / 2) * scale;
+  const relV = (local1.v - h0 / 2) * scale;
+  const centerX = B1.x - (relU * cos - relV * sin);
+  const centerY = B1.y - (relU * sin + relV * cos);
+
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+    rotation: R_deg,
+  };
+}
+
+/**
  * Distance between two canvas points.
  */
 export function distance(a: CanvasPoint, b: CanvasPoint): number {

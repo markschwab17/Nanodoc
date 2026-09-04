@@ -383,6 +383,67 @@ export class PDFRenderer {
   }
 
   /**
+   * Render ONE RECTANGLE of a page at an arbitrary dpi — the align loupe's crop.
+   *
+   * `toPixmap` always rasterises the whole (transformed) page, which at 300 dpi on a
+   * 36x24 in sheet is a 10800x7200 pixmap — 311 MB for a 220 px magnifier. So this
+   * goes through a Pixmap sized to the crop plus a DrawDevice: mupdf clips to the
+   * pixmap's bbox, and the matrix (from `planCropRender`) both scales to the dpi and
+   * translates the crop's centre onto the pixmap's centre, so only the crop is drawn.
+   *
+   * NEVER cached: the loupe asks for a different crop every time the cursor moves, and
+   * a cache of 300 dpi crops is exactly what the memory budget forbids. The caller owns
+   * the returned ImageData — draw it and drop it.
+   */
+  async renderPageCrop(
+    document: any,
+    pageNumber: number,
+    plan: {
+      matrix: [number, number, number, number, number, number];
+      bbox: [number, number, number, number];
+    }
+  ): Promise<ImageData> {
+    let page: any = null;
+    let pixmap: any = null;
+    let device: any = null;
+    try {
+      page = document.loadPage(pageNumber);
+      pixmap = new this.mupdf.Pixmap(this.mupdf.ColorSpace.DeviceRGB, plan.bbox, false);
+      pixmap.clear(255);
+      device = new this.mupdf.DrawDevice(this.mupdf.Matrix.identity, pixmap);
+      page.run(device, plan.matrix);
+      device.close();
+
+      const width = pixmap.getWidth();
+      const height = pixmap.getHeight();
+      const pixels = pixmap.getPixels();
+      const components = pixmap.getNumberOfComponents();
+      const imageData = new ImageData(width, height);
+      const data = imageData.data;
+      const numPixels = width * height;
+      if (components === 4) {
+        data.set(pixels.subarray(0, numPixels * 4));
+      } else if (components === 3) {
+        for (let i = 0; i < numPixels; i++) {
+          const s = i * 3;
+          const d = i * 4;
+          data[d] = pixels[s];
+          data[d + 1] = pixels[s + 1];
+          data[d + 2] = pixels[s + 2];
+          data[d + 3] = 255;
+        }
+      } else {
+        throw new Error(`Unsupported color components: ${components}`);
+      }
+      return imageData;
+    } finally {
+      device?.destroy?.();
+      pixmap?.destroy?.();
+      page?.destroy?.();
+    }
+  }
+
+  /**
    * Render a PDF page to data URL (for thumbnails) — always main thread
    */
   async renderPageToDataURL(

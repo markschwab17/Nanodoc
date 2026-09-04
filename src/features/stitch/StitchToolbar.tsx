@@ -11,6 +11,7 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   CheckSquare,
+  Combine,
   Crosshair,
   Crop,
   Download,
@@ -60,6 +61,11 @@ export interface StitchToolbarProps {
   onDownloadForTraining?: () => void;
   isExportingTraining?: boolean;
   cropRect: { x: number; y: number; w: number; h: number } | null;
+  /** "Align to neighbour": the revamped manual align (pick the moving sheet, then two
+   *  points each side). In takeoff mode it REPLACES the old two-point entry; outside it
+   *  it sits beside it until the old one is retired. */
+  alignNeighbourMode: boolean;
+  onAlignNeighbourModeChange: (active: boolean) => void;
   pointAlignMode: boolean;
   canEnterPointAlign: boolean;
   onPointAlignModeChange: (active: boolean) => void;
@@ -150,6 +156,8 @@ export function StitchToolbar({
   onDownloadForTraining,
   isExportingTraining,
   cropRect,
+  alignNeighbourMode,
+  onAlignNeighbourModeChange,
   pointAlignMode,
   canEnterPointAlign,
   onPointAlignModeChange,
@@ -342,7 +350,7 @@ export function StitchToolbar({
   // but hasn't interacted with any tool for 15 seconds
   const [showHelpNudge, setShowHelpNudge] = useState(false);
   const nudgeDismissedRef = useRef(false);
-  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || hasSelection || Boolean(cleanupActive);
+  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || alignNeighbourMode || hasSelection || Boolean(cleanupActive);
 
   useEffect(() => {
     // Don't show if: no tiles, user already interacted, nudge was dismissed, or tour is running
@@ -402,7 +410,7 @@ export function StitchToolbar({
         <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-1.5" role="group" aria-label="Tools" data-tour="stitch-tools">
           <IconButtonWithTooltip
-            variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode ? "default" : "outline"}
+            variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode && !alignNeighbourMode ? "default" : "outline"}
             title="Select and move tiles (Ctrl+A: select all)"
             label="Select"
             onClick={onSelectToolActivate}
@@ -472,6 +480,17 @@ export function StitchToolbar({
         </div>
         <div className="flex items-center gap-0.5" data-tour="stitch-align-tools">
         <IconButtonWithTooltip
+          variant={alignNeighbourMode ? "secondary" : "outline"}
+          title="Align to neighbour: pick the sheet you want to move, then click two points on it and the two matching points on the sheet it joins."
+          label="Align to neighbour"
+          tooltipDescription={"Pick the sheet you want to MOVE — every other sheet locks and dims.\nThen click two points on it and the two matching points on the fixed sheet.\nA magnifier follows the cursor so you can hit the line, not near it."}
+          disabled={!hasTiles && !alignNeighbourMode}
+          onClick={() => onAlignNeighbourModeChange(!alignNeighbourMode)}
+        >
+          <Combine className="h-3.5 w-3.5 shrink-0" />
+        </IconButtonWithTooltip>
+        {!takeoffMode && (
+        <IconButtonWithTooltip
           variant={pointAlignMode ? "secondary" : "outline"}
           title={canEnterPointAlign
             ? "One PDF is locked as reference. Align another PDF to it by selecting two point pairs (ref point 1 → target point 1, then ref point 2 → target point 2)."
@@ -492,6 +511,7 @@ export function StitchToolbar({
         >
           <Crosshair className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
+        )}
         <IconButtonWithTooltip
           variant={scaleAlignMode ? "secondary" : "outline"}
           title={canEnterScaleAlign

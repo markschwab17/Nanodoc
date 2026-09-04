@@ -29,6 +29,7 @@ import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
 import { useScaleAlignMode } from "@/features/stitch/useScaleAlignMode";
+import { useAlignToNeighbour } from "@/features/stitch/useAlignToNeighbour";
 import { exportStitchToPdf } from "@/features/stitch/stitchExport";
 import { buildStitchManifest } from "@/features/stitch/stitchManifest";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
@@ -194,6 +195,9 @@ export default function StitchView() {
    *  renders (and hands it to the solver) and throws AutoStitchAborted. */
   const planAbortRef = useRef(false);
 
+  /** Per-seam quality from the LAST auto-align run (T0's seam report), by page pair. */
+  const lastSeamsRef = useRef<CommitResult["seams"]>(undefined);
+
   /**
    * What an auto-align run — the earned button's, or the Add PDF modal's — leaves
    * behind: the strip's "needs placing" count and the coach mark's explanation of WHY
@@ -202,6 +206,9 @@ export default function StitchView() {
   const handleAlignResult = useCallback(
     (result: CommitResult) => {
       setUnplacedCount(result.unalignedIds.length);
+      // Kept for "Align to neighbour": after a hand alignment we can say what the last
+      // auto-align run measured across that pair's seam, when it had anything to say.
+      lastSeamsRef.current = result.seams;
       // Nothing to explain when the run was clean AND nothing was held back — the mark
       // would then be pure noise on a successful align. Page numbers are 1-based.
       const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
@@ -238,6 +245,32 @@ export default function StitchView() {
     onError: (message) => useNotificationStore.getState().showNotification(message, "error"),
   });
   const earnedCheck = earned.check;
+
+  /**
+   * The seam figure shown after a manual align: the residual T0's seam report measured
+   * for exactly this pair of sheets. Absent (and then the line is simply not shown)
+   * whenever no auto-align run has covered the pair — a hand-placed pair has never been
+   * measured, and inventing a number for it would be the dishonesty T0 removed.
+   */
+  const seamResidualFt = useCallback((movingTileId: string, fixedTileId: string): number | null => {
+    const seams = lastSeamsRef.current;
+    if (!seams?.length) return null;
+    const tiles = useStitchStore.getState().tiles;
+    const a = tiles.find((t) => t.id === movingTileId)?.sourcePageIndex;
+    const b = tiles.find((t) => t.id === fixedTileId)?.sourcePageIndex;
+    if (a == null || b == null || a < 0 || b < 0) return null;
+    const seam = seams.find(
+      (s) =>
+        (s.pageIndexes[0] === a && s.pageIndexes[1] === b) ||
+        (s.pageIndexes[0] === b && s.pageIndexes[1] === a),
+    );
+    const value = seam?.residFt ?? seam?.perpDeltaFt;
+    return value == null || !Number.isFinite(value) ? null : value;
+  }, []);
+
+  /** The revamped manual align. Owns its own overlay, loupe and keyboard. */
+  const alignNeighbour = useAlignToNeighbour({ seamResidualFt });
+  const alignNeighbourExit = alignNeighbour.exit;
   const earnedReset = earned.reset;
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
@@ -419,16 +452,18 @@ export default function StitchView() {
   const handleContentDeleteModeChange = useCallback(
     (v: boolean | ((prev: boolean) => boolean)) => {
       exitCleanupReview();
+      alignNeighbourExit();
       setContentDeleteMode(v);
     },
-    [exitCleanupReview]
+    [exitCleanupReview, alignNeighbourExit]
   );
   const handleDeleteElementModeChange = useCallback(
     (v: boolean | ((prev: boolean) => boolean)) => {
       exitCleanupReview();
+      alignNeighbourExit();
       setDeleteElementMode(v);
     },
-    [exitCleanupReview]
+    [exitCleanupReview, alignNeighbourExit]
   );
 
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
@@ -475,8 +510,9 @@ export default function StitchView() {
     setPanMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    alignNeighbourExit();
     exitCleanupReview();
-  }, [pointAlign, scaleAlign, exitCleanupReview]);
+  }, [pointAlign, scaleAlign, exitCleanupReview, alignNeighbourExit]);
 
   /** Every auto-align run reports here, whether it came from the CTO plan or
    *  from the Add PDF modal, so the strip and the coach mark always describe the
@@ -519,9 +555,25 @@ export default function StitchView() {
       setDeleteElementMode(false);
       setPanMode(false);
       scaleAlign.setScaleAlignMode(false);
+      alignNeighbourExit();
       exitCleanupReview();
     }
     pointAlign.setPointAlignMode(active);
+  };
+
+  /** "Align to neighbour" is a mode like any other: entering it clears the rest. */
+  const handleAlignNeighbourModeChange = (active: boolean) => {
+    if (!active) {
+      alignNeighbourExit();
+      return;
+    }
+    setContentDeleteMode(false);
+    setDeleteElementMode(false);
+    setPanMode(false);
+    pointAlign.setPointAlignMode(false);
+    scaleAlign.setScaleAlignMode(false);
+    exitCleanupReview();
+    alignNeighbour.enter();
   };
 
   const handleScaleAlignModeChange = (active: boolean) => {
@@ -530,6 +582,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       setPanMode(false);
       pointAlign.setPointAlignMode(false);
+      alignNeighbourExit();
       exitCleanupReview();
     }
     scaleAlign.setScaleAlignMode(active);
@@ -541,6 +594,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       pointAlign.setPointAlignMode(false);
       scaleAlign.setScaleAlignMode(false);
+      alignNeighbourExit();
       exitCleanupReview();
     }
     setPanMode(active);
@@ -552,9 +606,10 @@ export default function StitchView() {
     setDeleteElementMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    alignNeighbourExit();
     exitCleanupReview();
     setSelectedTileIds(useStitchStore.getState().tiles.map((t) => t.id));
-  }, [setSelectedTileIds, exitCleanupReview]);
+  }, [setSelectedTileIds, exitCleanupReview, alignNeighbourExit]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -596,6 +651,7 @@ export default function StitchView() {
     setPanMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    alignNeighbourExit();
     setSelectedTileIds([]);
     setCleanupBusy(true);
     showNotification("Analyzing sheets for title blocks and match margins…", "info");
@@ -645,7 +701,7 @@ export default function StitchView() {
     } finally {
       setCleanupBusy(false);
     }
-  }, [cleanupReviewMode, exitCleanupReview, showNotification, pointAlign, scaleAlign, setSelectedTileIds]);
+  }, [cleanupReviewMode, exitCleanupReview, showNotification, pointAlign, scaleAlign, alignNeighbourExit, setSelectedTileIds]);
 
   const handleToggleCleanupRegion = useCallback((tileId: string, index: number) => {
     setCleanupProposals((prev) =>
@@ -1078,6 +1134,8 @@ export default function StitchView() {
         showSaveToCto={!!ctoContext}
         onSaveToCto={handleSaveToCto}
         cropRect={cropRect}
+        alignNeighbourMode={alignNeighbour.active}
+        onAlignNeighbourModeChange={handleAlignNeighbourModeChange}
         pointAlignMode={pointAlign.pointAlignMode}
         canEnterPointAlign={pointAlign.canEnterPointAlign}
         onPointAlignModeChange={handlePointAlignModeChange}
@@ -1127,6 +1185,7 @@ export default function StitchView() {
           onDeleteElementAlongPath={handleDeleteElementAlongPath}
           erasedRegionFeedback={erasedRegionFeedback}
           isDeletingAlongPath={isDeletingAlongPath}
+          alignToNeighbour={alignNeighbour}
           pointAlignMode={pointAlign.pointAlignMode}
           pointAlignReferenceId={pointAlign.referenceTileId}
           pointAlignTargetId={pointAlign.targetTileId}

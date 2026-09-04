@@ -6,7 +6,9 @@
 import { describe, expect, test } from "vitest";
 import {
   canvasToTileLocal,
+  computeAlignToNeighbour,
   computeResizedPose,
+  computeTwoPointAlignment,
   contentBounds,
   effectiveMinZoomFor,
   fitZoomFor,
@@ -230,5 +232,102 @@ describe("effectiveMinZoomFor", () => {
 
   test("an unmeasured viewport keeps the everyday floor", () => {
     expect(effectiveMinZoomFor({ x: 0, y: 0, width: 10000, height: 10000 }, 0, 0)).toBe(MIN_ZOOM);
+  });
+});
+
+describe("computeAlignToNeighbour", () => {
+  const moving = makeTile({ id: "m", x: 0, y: 0, width: 200, height: 100 });
+
+  test("with Match scale off it is the existing two-point alignment, size untouched", () => {
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 20, y: 30 },
+      { x: 160, y: 70 },
+    ];
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 500, y: 400 },
+      { x: 610, y: 500 },
+    ];
+    const pose = computeAlignToNeighbour(moving, movingPoints, fixedPoints, false);
+    const legacy = computeTwoPointAlignment(fixedPoints, moving, movingPoints);
+    expect(pose.x).toBeCloseTo(legacy.x, 9);
+    expect(pose.y).toBeCloseTo(legacy.y, 9);
+    expect(pose.rotation).toBeCloseTo(legacy.rotation, 9);
+    expect(pose.width).toBe(moving.width);
+    expect(pose.height).toBe(moving.height);
+  });
+
+  test("lands the two clicked points exactly on the two target points", () => {
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 20, y: 30 },
+      { x: 160, y: 70 },
+    ];
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 500, y: 400 },
+      { x: 500 + Math.hypot(140, 40), y: 400 },
+    ];
+    const pose = computeAlignToNeighbour(moving, movingPoints, fixedPoints, false);
+    const placed = { ...moving, ...pose };
+    // A1 must sit on B1 …
+    const local1 = canvasToTileLocal(movingPoints[0], moving)!;
+    const at1 = tileLocalToCanvas(local1.u, local1.v, placed);
+    expect(at1.x).toBeCloseTo(fixedPoints[0].x, 6);
+    expect(at1.y).toBeCloseTo(fixedPoints[0].y, 6);
+    // … and A2 on B2, because the two spans are the same length here.
+    const local2 = canvasToTileLocal(movingPoints[1], moving)!;
+    const at2 = tileLocalToCanvas(local2.u, local2.v, placed);
+    expect(at2.x).toBeCloseTo(fixedPoints[1].x, 6);
+    expect(at2.y).toBeCloseTo(fixedPoints[1].y, 6);
+  });
+
+  test("Match scale resizes uniformly so both points land", () => {
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 50, y: 50 },
+      { x: 150, y: 50 },
+    ];
+    // Target span is 200 — twice the 100 clicked on the moving sheet.
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 400, y: 300 },
+      { x: 600, y: 300 },
+    ];
+    const pose = computeAlignToNeighbour(moving, movingPoints, fixedPoints, true);
+    expect(pose.width).toBeCloseTo(400, 6);
+    expect(pose.height).toBeCloseTo(200, 6);
+    const placed = { ...moving, ...pose };
+    const l1 = canvasToTileLocal(movingPoints[0], moving)!;
+    const at1 = tileLocalToCanvas(l1.u * 2, l1.v * 2, placed);
+    expect(at1.x).toBeCloseTo(400, 6);
+    expect(at1.y).toBeCloseTo(300, 6);
+    const l2 = canvasToTileLocal(movingPoints[1], moving)!;
+    const at2 = tileLocalToCanvas(l2.u * 2, l2.v * 2, placed);
+    expect(at2.x).toBeCloseTo(600, 6);
+    expect(at2.y).toBeCloseTo(300, 6);
+  });
+
+  test("works from an already rotated tile", () => {
+    const rotated = makeTile({ id: "r", x: 10, y: 20, width: 200, height: 100, rotation: 37 });
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 40, y: 60 },
+      { x: 120, y: 90 },
+    ];
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 900, y: 100 },
+      { x: 900 + Math.hypot(80, 30), y: 100 },
+    ];
+    const pose = computeAlignToNeighbour(rotated, movingPoints, fixedPoints, false);
+    const placed = { ...rotated, ...pose };
+    const l1 = canvasToTileLocal(movingPoints[0], rotated)!;
+    const at1 = tileLocalToCanvas(l1.u, l1.v, placed);
+    expect(at1.x).toBeCloseTo(900, 6);
+    expect(at1.y).toBeCloseTo(100, 6);
+  });
+
+  test("two coincident clicks leave the tile exactly where it was", () => {
+    const pose = computeAlignToNeighbour(
+      moving,
+      [{ x: 10, y: 10 }, { x: 10, y: 10 }],
+      [{ x: 500, y: 500 }, { x: 600, y: 500 }],
+      true
+    );
+    expect(pose).toEqual({ x: 0, y: 0, width: 200, height: 100, rotation: 0 });
   });
 });

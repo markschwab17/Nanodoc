@@ -25,6 +25,8 @@ function rulerLabel(inches: number): string {
 }
 import { hitTestTileAtPoint, type CanvasPoint } from "./stitchGeometry";
 import { CleanupReview, type TileProposalUI } from "./cleanup/CleanupReview";
+import { AlignToNeighbourMode } from "./AlignToNeighbourMode";
+import type { AlignToNeighbour } from "./useAlignToNeighbour";
 
 /**
  * Rulers and inch grid only depend on the canvas dimensions — memoized so
@@ -194,6 +196,9 @@ export interface StitchCanvasProps {
   onRelocateCleanupRegion?: (tileId: string, index: number, move: { dx: number; dy: number } | null) => void;
   /** User drew a manual hide-box (canvas-space rect). */
   onCleanupManualBox?: (rect: CanvasRect) => void;
+  /** "Align to neighbour" mode. When active it renders its own viewport overlay
+   *  (dimming, markers, loupe) and owns every left click on the canvas. */
+  alignToNeighbour?: AlignToNeighbour;
 }
 
 export function StitchCanvas({
@@ -222,6 +227,7 @@ export function StitchCanvas({
   onDeleteCleanupRegion,
   onRelocateCleanupRegion,
   onCleanupManualBox,
+  alignToNeighbour,
 }: StitchCanvasProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const setContainerRef = useCallback(
@@ -242,6 +248,7 @@ export function StitchCanvas({
   const cropRect = useStitchStore((s) => s.cropRect);
   const setPanOffset = useStitchStore((s) => s.setPanOffset);
   const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
+  const alignActive = alignToNeighbour?.active ?? false;
 
   // Read fresh on each wheel event rather than captured: the floor moves as tiles are
   // placed and as the viewport resizes.
@@ -279,11 +286,11 @@ export function StitchCanvas({
    * on WINDOW listeners rather than pointer capture precisely because the same code then
    * works from any of those surfaces, and it gives us a place to hang the blur release.
    */
-  const beginMiddlePan = useCallback(
+  const startWindowPan = useCallback(
     (e: React.PointerEvent): boolean => {
-      if (e.button !== 1) return false;
       // preventDefault stops the browser's middle-click autoscroll; stopPropagation keeps
       // the press off whatever tile or overlay sits underneath.
+      const button = e.button;
       e.preventDefault();
       e.stopPropagation();
       if (isMiddlePanRef.current) return true;
@@ -308,7 +315,7 @@ export function StitchCanvas({
         setPanOffset(newPan);
       };
       const onUp = (ev: PointerEvent) => {
-        if (ev.button === 1) endMiddlePan();
+        if (ev.button === button) endMiddlePan();
       };
       const stop = () => endMiddlePan();
       // Capture phase so an overlay that swallows pointer events can't strand the pan.
@@ -326,6 +333,27 @@ export function StitchCanvas({
       return true;
     },
     [endMiddlePan, setPanOffset]
+  );
+
+  /** The middle button, from the canvas and from every mode overlay. */
+  const beginMiddlePan = useCallback(
+    (e: React.PointerEvent): boolean => (e.button === 1 ? startWindowPan(e) : false),
+    [startWindowPan]
+  );
+
+  /**
+   * What a mode overlay hands its pointerdown to first: the middle button pans, and so
+   * does a left drag while Space is held. Without the second case a fullscreen overlay
+   * makes the space-bar pan dead — and precise point placement is exactly when the user
+   * needs to shove the canvas over without leaving the mode.
+   */
+  const beginOverlayPan = useCallback(
+    (e: React.PointerEvent): boolean => {
+      if (e.button === 1) return startWindowPan(e);
+      if (e.button === 0 && isSpacePanRef.current) return startWindowPan(e);
+      return false;
+    },
+    [startWindowPan]
   );
 
   /** Autoscroll is armed on `mousedown`, and preventing the pointerdown default does not
@@ -373,7 +401,7 @@ export function StitchCanvas({
       ro.disconnect();
       win?.removeEventListener("scroll", update, true);
     };
-  }, [pointAlignMode, scaleAlignMode, contentDeleteMode, deleteElementMode]);
+  }, [pointAlignMode, scaleAlignMode, contentDeleteMode, deleteElementMode, alignActive]);
 
   useEffect(() => {
     const isTypingTarget = () => {
@@ -433,7 +461,7 @@ export function StitchCanvas({
       // edit tool is armed.
       if (beginMiddlePan(e)) return;
       if (e.button !== 0) return;
-      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode || alignActive) return;
       const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
@@ -447,13 +475,13 @@ export function StitchCanvas({
         e.stopPropagation();
       }
     },
-    [beginMiddlePan, contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode]
+    [beginMiddlePan, contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, alignActive]
   );
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode || alignActive) return;
       const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
@@ -470,7 +498,7 @@ export function StitchCanvas({
         }
       }
     },
-    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, setSelectedTileIds]
+    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, alignActive, setSelectedTileIds]
   );
 
   const handlePointerMove = useCallback(
@@ -506,7 +534,7 @@ export function StitchCanvas({
       style={{
         cursor: isMiddlePan
           ? "grabbing"
-          : contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode
+          : contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || alignActive
             ? "crosshair"
             : panMode || isSpacePan
               ? "grab"
@@ -927,6 +955,16 @@ export function StitchCanvas({
           </div>,
           document.body
         )}
+      {alignActive && alignToNeighbour && containerRect && (
+        <AlignToNeighbourMode
+          align={alignToNeighbour}
+          containerRect={containerRect}
+          clientToCanvas={clientToCanvas}
+          beginPan={beginOverlayPan}
+          preventMiddleAutoscroll={preventMiddleAutoscroll}
+          isMiddlePan={isMiddlePan}
+        />
+      )}
       {isDeletingAlongPath && (
         <div
           className="absolute inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-[2px]"
