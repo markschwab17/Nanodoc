@@ -76,7 +76,11 @@ const W_ALONG = 40;
 
 export interface TokFeat { text: string; x: number; y: number; }
 export interface SegFeat { mx: number; my: number; len: number; ang: number; }
-export interface Vote { dx: number; dy: number; inliers: number; rmsFt: number; votes?: number; secondVotes?: number; tokens?: string[]; }
+/** `secondSepFt` is how far the runner-up interpretation sits from the winner, in
+ *  feet — the vote's own SPREAD. `secondVotes` says how strong the runner-up was;
+ *  this says how wrong accepting the wrong one would be, which is the number the
+ *  along-axis uncertainty needs when no joint sweep ran. */
+export interface Vote { dx: number; dy: number; inliers: number; rmsFt: number; votes?: number; secondVotes?: number; secondSepFt?: number; tokens?: string[]; }
 
 // ---------------------------------------------------------------- furniture
 /**
@@ -634,14 +638,20 @@ export function segVote(si: any, sj: any, win: { x0: number; x1: number; y0: num
   const my = inl.reduce((s, d) => s + d.dy, 0) / inl.length;
   const rms = Math.sqrt(inl.reduce((s, d) => s + (d.dx - mx) ** 2 + (d.dy - my) ** 2, 0) / inl.length);
   let second = 0;
+  // How far the runner-up basin sits from the winner. This is the vote's SPREAD:
+  // if the margin is thin the seam could equally have landed there, and that
+  // distance is the honest ± for a seam nothing else pins (see the along-axis
+  // uncertainty below). Tracked for the strongest runner-up only.
+  let secondSepFt = 0;
   for (const [k] of bins) {
     const [kx, ky] = k.split(',').map(Number);
-    if (Math.hypot(kx * BIN - cx, ky * BIN - cy) <= 6 * BIN) continue;
+    const sep = Math.hypot(kx * BIN - cx, ky * BIN - cy);
+    if (sep <= 6 * BIN) continue;
     let n9 = 0;
     for (let ux = -1; ux <= 1; ux++) for (let uy = -1; uy <= 1; uy++) n9 += bins.get(`${kx + ux},${ky + uy}`) || 0;
-    second = Math.max(second, n9);
+    if (n9 > second) { second = n9; secondSepFt = sep; }
   }
-  return { dx: mx, dy: my, inliers: inl.length, rmsFt: rms, votes: best.n9, secondVotes: second };
+  return { dx: mx, dy: my, inliers: inl.length, rmsFt: rms, votes: best.n9, secondVotes: second, secondSepFt };
 }
 
 // facing-edge windows in feet. The fixed margins are page-point-derived (scale-
@@ -1240,7 +1250,7 @@ export function stitchSheets(
   // coord on the perp axis, in each unit's own space) from whichever channel located
   // it — the reciprocal/one-sided ANCHOR or the cross-referenced matchline STROKE
   // prior. verifySeams checks the facing band against THIS line (failure J).
-  interface VerifyMeta { perp?: "x" | "y"; votes?: number; second?: number; alongPrecise: boolean; strokeI?: number; strokeJ?: number; }
+  interface VerifyMeta { perp?: "x" | "y"; votes?: number; second?: number; secondSepFt?: number; alongPrecise: boolean; strokeI?: number; strokeJ?: number; }
   const pairs: (PairReport & { _final?: { dx: number; dy: number }; _wx?: number; _wy?: number; _keep?: boolean; _split?: boolean; _verify?: VerifyMeta })[] = [];
   for (const uk of pairKeys) {
     const [ni, nj] = uk.split("-").map(Number);
@@ -1449,28 +1459,28 @@ export function stitchSheets(
     // captured here while the channel inputs are in scope. Post-solve verifySeams
     // re-checks the physical strokes and reads this to rate the along axis.
     let vPerp: "x" | "y" | undefined;
-    let vVotes: number | undefined, vSecond: number | undefined;
+    let vVotes: number | undefined, vSecond: number | undefined, vSecondSepFt: number | undefined;
     let vStrokeI: number | undefined, vStrokeJ: number | undefined;
     if (channel && channel.startsWith("anchor")) {
       vPerp = anchor?.perp ?? "x";
       if (anchor?.precise) { vStrokeI = anchor.strokeI; vStrokeJ = anchor.strokeJ; }
-      if (anchorSeg) { vVotes = anchorSeg.votes; vSecond = anchorSeg.secondVotes; }
+      if (anchorSeg) { vVotes = anchorSeg.votes; vSecond = anchorSeg.secondVotes; vSecondSepFt = anchorSeg.secondSepFt; }
     } else if (channel === "matchline-stroke" || (channel === "matchline+segment" && stroke)) {
       vPerp = stroke!.perp;
       vStrokeI = stroke!.strokeI; vStrokeJ = stroke!.strokeJ;
-      if (seg) { vVotes = seg.votes; vSecond = seg.secondVotes; }
+      if (seg) { vVotes = seg.votes; vSecond = seg.secondVotes; vSecondSepFt = seg.secondSepFt; }
     } else if ((channel === "matchline+segment" || channel === "matchline-label-only") && prior) {
       vPerp = prior.edge === "top" || prior.edge === "bottom" ? "y" : "x";
-      if (seg) { vVotes = seg.votes; vSecond = seg.secondVotes; }
+      if (seg) { vVotes = seg.votes; vSecond = seg.secondVotes; vSecondSepFt = seg.secondSepFt; }
     } else if (channel === "segment(windowed)" && seg) {
-      vVotes = seg.votes; vSecond = seg.secondVotes;
+      vVotes = seg.votes; vSecond = seg.secondVotes; vSecondSepFt = seg.secondSepFt;
     }
 
     pairs.push({
       i: ni, j: nj, channel, conf,
       dxFt: final ? +final.dx.toFixed(2) : null, dyFt: final ? +final.dy.toFixed(2) : null,
       weight: +w.toFixed(2), residFt: null, _final: final ?? undefined, _wx: wx, _wy: wy, _keep: keep,
-      _verify: { perp: vPerp, votes: vVotes, second: vSecond, alongPrecise: channel === "anchor+cross", strokeI: vStrokeI, strokeJ: vStrokeJ },
+      _verify: { perp: vPerp, votes: vVotes, second: vSecond, secondSepFt: vSecondSepFt, alongPrecise: channel === "anchor+cross", strokeI: vStrokeI, strokeJ: vStrokeJ },
       // A matchline anchor's PERP axis (stroke, sub-foot) and ALONG axis (segVote /
       // crossing, alias-prone) are INDEPENDENT measurements. Emit them as SEPARATE
       // single-axis constraints so IRLS-Huber judges each axis on its own residual —
@@ -1730,6 +1740,12 @@ export function stitchSheets(
   const seamReport: SeamReportEntry[] = [];
   /** Seams that independently fixed the along-matchline axis (see the walk below). */
   const alongEdges: [number, number][] = [];
+  /** Per seam that did NOT fix the along axis: how far along it the placement could
+   *  honestly be wrong. `voteFt` is measured (the runner-up basin's distance from the
+   *  winner); `boundFt` is the geometric last resort when nothing measured the axis
+   *  at all. Feeds `worstAlongUncertaintyFt` when no joint sweep declined — see the
+   *  floor below for why zero is never an acceptable answer there. */
+  const alongSpreads: { i: number; j: number; voteFt: number; boundFt: number }[] = [];
   for (const r of pairs) {
     if (!r.channel || r.weight <= 0 || !mainSet.has(r.i) || !mainSet.has(r.j)) continue;
     const si = byNo.get(r.i)!, sj = byNo.get(r.j)!;
@@ -1844,6 +1860,21 @@ export function stitchSheets(
     const alongAnchoredSeam = !siblings && (alongDecisiveStrict
       || (/token/.test(channel) && r.residFt != null && r.residFt <= 2));
     if (alongAnchoredSeam) alongEdges.push([r.i, r.j]);
+    else {
+      // The seam leaves the along axis free. How far could it be out? The vote's own
+      // spread when there was a runner-up basin (the seam could equally have landed
+      // there) — and failing that the sheets' overlap bound: slide further than the
+      // sheet's own extent along the seam and there is nothing left to match, so that
+      // is the widest the answer can honestly be when nothing measured the axis.
+      const dimFt = (s: DriverSheet, axis: "x" | "y") =>
+        axis === "x" ? FT(s.view[2] - s.view[0], s.scale) : FT(s.view[3] - s.view[1], s.scale);
+      const alongAxis = perp === "y" ? "x" : perp === "x" ? "y" : null;
+      const boundFt = alongAxis
+        ? Math.min(dimFt(si, alongAxis), dimFt(sj, alongAxis))
+        : Math.min(dimFt(si, "x"), dimFt(si, "y"), dimFt(sj, "x"), dimFt(sj, "y"));
+      const voteFt = meta.secondSepFt != null && meta.secondSepFt > 0 ? meta.secondSepFt : 0;
+      alongSpreads.push({ i: r.i, j: r.j, voteFt, boundFt: Number.isFinite(boundFt) ? boundFt : 0 });
+    }
 
     // Abutment-floor adjacency: a perp offset sitting essentially AT the 0.5× floor is
     // on the gross-overlap alias boundary (real abutting seams are ~0.8× the sheet dim).
@@ -1962,6 +1993,25 @@ export function stitchSheets(
     if (sw.accepted || sw.top3.length < 2) continue;
     const sep = Math.abs(sw.top3[0].deltaFt - sw.top3[1].deltaFt);
     if (sep > worstAlongUncertaintyFt) worstAlongUncertaintyFt = sep;
+  }
+  // FLOOR — only when the sweep above measured nothing. Most sets never run a joint
+  // sweep at all, and a DECLINED sweep is the only thing that loop can see, so the
+  // honest "± N ft" came back as ±0 ft on exactly the sets whose along axis is least
+  // resolved. Zero is the one answer that cannot be right while un-anchored units
+  // exist: it says "pinned" of sheets that are free to slide. Fall back to the widest
+  // un-anchored seam's own vote spread, and only if no seam even voted to the sheet
+  // extent past which there is nothing left to match. A declined sweep's separation
+  // is the better measurement, so it is never widened by this.
+  if (worstAlongUncertaintyFt === 0 && main.some((k) => !anchoredUnits.has(k))) {
+    let widestVote = 0, widestBound = 0;
+    for (const s of alongSpreads) {
+      // Only seams that actually touch something un-anchored say anything about how
+      // far an un-anchored unit could slide.
+      if (anchoredUnits.has(s.i) && anchoredUnits.has(s.j)) continue;
+      if (s.voteFt > widestVote) widestVote = s.voteFt;
+      if (s.boundFt > widestBound) widestBound = s.boundFt;
+    }
+    worstAlongUncertaintyFt = widestVote > 0 ? widestVote : widestBound;
   }
 
   const placements = new Map<number, { x: number; y: number }>();

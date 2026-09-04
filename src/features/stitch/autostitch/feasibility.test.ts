@@ -193,7 +193,33 @@ describe("along-matchline gate", () => {
     // 1 of 4 fails the >=2 test; 2 of 4 clears both (>=2 and >=50%).
     expect(deriveFeasibility({ ...base, alongAnchored: [0, 1] }, sel).status).not.toBe("unstitchable");
     expect(deriveFeasibility({ ...base, alongAnchored: [0] }, sel).status).toBe("unstitchable");
-    expect(deriveFeasibility({ ...base, alignedPageIndices: [0, 1, 2, 3], alongAnchored: [0, 1] }, sel).status).toBe("confident");
+  });
+
+  it("the claimed count is aligned ∩ along-anchored, so a half-anchored set reads partial", () => {
+    // WAS: "confident" — all four pages aligned, so the copy said 4 of 4 will align
+    // while the commit was about to demote two of them. The number the user is shown
+    // has to be the number the commit will actually claim.
+    const f = deriveFeasibility({ ...base, alignedPageIndices: [0, 1, 2, 3], alongAnchored: [0, 1] }, sel);
+    expect(f.status).toBe("partial");
+    expect(f.alignedInSelection).toBe(2);
+    expect(f.selectedCount).toBe(4);
+  });
+
+  it("an along-anchored page that is not aligned is not claimed either", () => {
+    // alongAnchored names a page the solve never placed: the intersection, not the
+    // along list, is what will survive the commit.
+    const f = deriveFeasibility(
+      { ...base, alignedPageIndices: [0, 1], alongAnchored: [0, 1, 9] },
+      sel,
+    );
+    expect(f.alignedInSelection).toBe(2);
+    expect(f.status).toBe("partial");
+  });
+
+  it("without along data the claimed count is still the aligned count", () => {
+    const f = deriveFeasibility({ ...base, alignedPageIndices: [0, 1, 2] }, sel);
+    expect(f.alignedInSelection).toBe(3);
+    expect(f.status).toBe("partial");
   });
 
   it("names the along axis ahead of the verdict when both would block", () => {

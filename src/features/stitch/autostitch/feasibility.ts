@@ -54,6 +54,12 @@ export interface FeasibilityInput {
 
 export interface Feasibility {
   status: FeasibilityStatus;
+  /** How many of the selected pages will actually be CLAIMED as aligned — the number
+   *  the "N of M will align" copy quotes and the number `status` is decided on. When
+   *  the probe reports `alongAnchored` this is `aligned ∩ alongAnchored`: a page
+   *  connected across its seams but free to slide ALONG them is demoted to unaligned
+   *  by the commit, so counting it here would promise a sheet the commit then drops
+   *  below the composite. Absent `alongAnchored` (old probes) it is the aligned count. */
   alignedInSelection: number;
   selectedCount: number;
   /** Set only when auto-align is disabled specifically because the seams cannot be
@@ -91,6 +97,13 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
   const alongInSelection = selectedPageIndices.reduce((n, i) => n + (alongSet.has(i) ? 1 : 0), 0);
   const alongRatio = geomDenom > 0 ? alongInSelection / geomDenom : 0;
   const alongOk = !alongProvided || (alongInSelection >= 2 && alongRatio >= GEOM_RATIO_FLOOR);
+  // What the caller is TOLD, as opposed to what the gate is computed on: only a page
+  // that is both connected and along-anchored survives the commit's demotion, so that
+  // intersection is the honest "will align" count. The gate bars above deliberately
+  // keep their own denominators (aligned vs along are two separate tests).
+  const claimedInSelection = alongProvided
+    ? selectedPageIndices.reduce((n, i) => n + (aligned.has(i) && alongSet.has(i) ? 1 : 0), 0)
+    : alignedInSelection;
   // Cannot-align gate: an "unverified" verdict blocks geometric auto-align even when
   // the fit looks good. Absent verdict (old probes) never blocks (backward compat).
   const verified = probe.alignmentVerdict !== "unverified";
@@ -111,7 +124,11 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
       : geomOtherwiseOk && !verified
         ? UNVERIFIED_REASON
         : undefined;
-    return { status: "unstitchable", alignedInSelection, selectedCount, reason };
+    return { status: "unstitchable", alignedInSelection: claimedInSelection, selectedCount, reason };
   }
-  return { status: alignedInSelection === selectedCount ? "confident" : "partial", alignedInSelection, selectedCount };
+  return {
+    status: claimedInSelection === selectedCount ? "confident" : "partial",
+    alignedInSelection: claimedInSelection,
+    selectedCount,
+  };
 }

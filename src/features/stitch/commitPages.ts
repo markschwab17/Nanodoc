@@ -108,6 +108,13 @@ export interface CommitResult {
    *  un-anchored one could slide. */
   alongAnchored?: number[];
   worstAlongUncertaintyFt?: number;
+  /** 0-based indices of pages the solve PLACED but never pinned along the matchline —
+   *  the pages `reason: 'along_unresolved'` is about. Deliberately not "every page in
+   *  the run minus the anchored ones": a page that was never placed at all (no refs,
+   *  a skipped notes sheet) has a different problem, and naming it here told the user
+   *  a sheet "meets the matchline correctly" when nothing ever matched it.
+   *  Absent when the solver reported no along data (old probes). */
+  alongUnresolvedPages?: number[];
   /** Pages deliberately kept out of the tiling (overall/key/notes/index/details). */
   skipped?: { pageIndex: number; role: string }[];
   /** 0-based indices of committed pages carrying no readable sheet number or
@@ -460,9 +467,14 @@ export async function commitAutoAlign(
   //   unverified    they were matched, but the seams could not be confirmed.
   const refSet = new Set(refPageIndices);
   const pagesWithoutRefs = selected.filter((p) => !refSet.has(p));
+  const alongUnresolvedPages = alongSet
+    ? [...new Set(placements.filter((p) => p.aligned && !alongSet.has(p.pageIndex)).map((p) => p.pageIndex))].sort(
+        (a, b) => a - b,
+      )
+    : undefined;
   let reason: AutoAlignReason = "ok";
   if (method === "none") reason = refPageIndices.length < 2 ? "no_refs" : "not_adjacent";
-  else if (alongSet && placements.some((p) => p.aligned && !alongSet.has(p.pageIndex))) reason = "along_unresolved";
+  else if (alongUnresolvedPages?.length) reason = "along_unresolved";
   else if (verdict === "unverified" || demoted.size > 0) reason = "unverified";
   const alignedCount = selected.length - unalignedIds.length;
   // The seam figure is TWO numbers, because a seam has two axes and only one of them
@@ -478,7 +490,7 @@ export async function commitAutoAlign(
   return {
     added: newTiles.length, unalignedIds, message,
     verdict, reason, skipped, pagesWithoutRefs,
-    alongAnchored, worstAlongUncertaintyFt,
+    alongAnchored, worstAlongUncertaintyFt, alongUnresolvedPages,
     seams: seamReport?.map((s) => ({
       pageIndexes: s.pageIndexes, status: s.status,
       residFt: s.detail.residFt, perpDeltaFt: s.detail.perpDeltaFt,

@@ -256,6 +256,29 @@ describe("commitAutoAlign honesty gate", () => {
     expect(res.message).toContain("±42 ft along");
   });
 
+  it("names ONLY the placed-but-unpinned pages as along-unresolved", async () => {
+    // Page 3 was never placed at all, so it does not "meet the matchline correctly" —
+    // only page 2 does. Subtracting the anchored set from the whole selection, which
+    // is what the caller used to do, told the user about sheets the run never matched.
+    await solverSays({
+      placements: [placement(0, true), placement(1, true), placement(2, true), placement(3, false)],
+      alignmentVerdict: "verified",
+      seamReport: [seam(0, 1, "verified"), seam(1, 2, "verified")],
+      alongAnchored: [0, 1],
+      worstAlongUncertaintyFt: 42,
+    });
+    const res = await run([0, 1, 2, 3]);
+    expect(res.alongUnresolvedPages).toEqual([2]);
+  });
+
+  it("reports no along-unresolved list at all when the solver sent no along data", async () => {
+    await solverSays({
+      placements: [placement(0, true), placement(1, true)],
+      alignmentVerdict: "verified", seamReport: [seam(0, 1, "verified")],
+    });
+    expect((await run([0, 1])).alongUnresolvedPages).toBeUndefined();
+  });
+
   it("a fully along-anchored run is still ok", async () => {
     await solverSays({
       placements: [placement(0, true), placement(1, true)],

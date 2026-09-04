@@ -29,7 +29,7 @@
       "verdictFloor": "partial",
       "maxWorstResidFt": 3,
       "maxSuspectSeams": 0,
-      "notes": "The reference set. 11 plan units (p2's two strips + p3-p11) are PLACED, but none is along-anchored: the only seams that fix the along axis form a component the solve root is not in, and the sibling-strip seam does not anchor. Measured ground-truth errors run 0-52 ft (p8 42, p11 52, strips 24/171), so claiming any of them would break 'offered means it works'. Ground truth: scripts/fixtures/pg-site-1a.groundtruth.json (its strip convention is documented ambiguously \u2014 treat s1/s2 numbers as indicative).",
+      "notes": "The reference set. 11 plan units (p2's two strips + p3-p11) are PLACED, but none is along-anchored: the only seams that fix the along axis form a component the solve root is not in, and the sibling-strip seam does not anchor. Measured ground-truth errors run 0-52 ft (p8 42, p11 52, strips 24/17), so claiming any of them would break 'offered means it works'. Ground truth: scripts/fixtures/pg-site-1a.groundtruth.json, which now DECLARES its origin convention (page origins, strips keyed 1s1/1s2) \u2014 the runner converts each pose's frame origin before comparing.",
       "groundTruth": "scripts/fixtures/pg-site-1a.groundtruth.json",
       "maxTileErrorFt": 3
     },

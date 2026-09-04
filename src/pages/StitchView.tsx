@@ -295,7 +295,6 @@ export default function StitchView() {
         // Nothing to explain when the run was clean AND nothing was held back — the
         // mark would then be pure noise on a successful align.
         const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
-        const alongSet = new Set(result.alongAnchored ?? []);
         setAlignExplanation(
           autoAlignExplanation(
             worthExplaining
@@ -304,9 +303,10 @@ export default function StitchView() {
                   pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
                   skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
                   worstAlongUncertaintyFt: result.worstAlongUncertaintyFt,
-                  alongUnresolvedPages: result.alongAnchored
-                    ? parsed.pageIndices.filter((i) => !alongSet.has(i)).map((i) => i + 1)
-                    : undefined,
+                  // From the commit, which knows which pages it actually PLACED —
+                  // subtracting the anchored set from the whole plan here named
+                  // pages the run never touched as "meeting the matchline".
+                  alongUnresolvedPages: result.alongUnresolvedPages?.map((i) => i + 1),
                 }
               : null,
           ),

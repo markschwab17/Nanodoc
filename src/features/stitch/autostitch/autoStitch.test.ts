@@ -170,6 +170,52 @@ describe("resolvePrintedNos", () => {
     expect(map.get(0)).toBe(4); // the PDF's own text is kept
     expect(map.get(1)).toBe(2); // the OCR read falls back
   });
+
+  it("(h) a page-order GUESS colliding with a real read is moved off it", () => {
+    // Page 0's title cell is unreadable, so it guesses 1 — and page 2 actually SAYS
+    // it is sheet 1. The reset loop cannot fix this: page 0's page-order value IS the
+    // collision. Left alone, byPrinted.get(1) returns two pages and every "SEE SHEET
+    // 1" anchors the guess alongside the sheet. The guess moves; the read never does.
+    const map = resolvePrintedNos(
+      [
+        { pageIndex: 0, printedNo: null, source: "ocr" },
+        { pageIndex: 1, printedNo: 2, source: "text" },
+        { pageIndex: 2, printedNo: 1, source: "text" },
+      ],
+      6
+    );
+    expect(map.get(2)).toBe(1); // the read is untouched
+    expect(map.get(1)).toBe(2);
+    expect(map.get(0)).toBe(3); // the lowest number nobody claims
+    expect(new Set([...map.values()]).size).toBe(3);
+  });
+
+  it("(h2) two guesses colliding with reads both move, and not onto each other", () => {
+    const map = resolvePrintedNos(
+      [
+        { pageIndex: 0, printedNo: null, source: "ocr" },
+        { pageIndex: 1, printedNo: null, source: "ocr" },
+        { pageIndex: 2, printedNo: 1, source: "text" },
+        { pageIndex: 3, printedNo: 2, source: "text" },
+      ],
+      8
+    );
+    expect(map.get(2)).toBe(1);
+    expect(map.get(3)).toBe(2);
+    expect(new Set([...map.values()]).size).toBe(4);
+  });
+
+  it("(h3) a guess that collides with nothing is left exactly where it was", () => {
+    const map = resolvePrintedNos(
+      [
+        { pageIndex: 0, printedNo: null, source: "ocr" },
+        { pageIndex: 1, printedNo: 7, source: "text" },
+      ],
+      8
+    );
+    expect(map.get(0)).toBe(1);
+    expect(map.get(1)).toBe(7);
+  });
 });
 
 describe("discipline-code reciprocal anchors", () => {

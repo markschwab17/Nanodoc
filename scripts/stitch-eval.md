@@ -63,10 +63,23 @@ engine may be wrong about a sheet, it may not be wrong about a sheet it is offer
 
 PG_SITE currently claims nothing: its cross-seam residuals are all ≤1.33 ft, but no
 unit is pinned ALONG the matchline, and its measured ground-truth errors run 0–52 ft
-(p8 42, p11 52, strips 24/171). The check therefore passes with nothing to check —
-and will fail the moment a change starts claiming any of them. The fixture documents
-its strip convention ambiguously ("frame origins minus 646 pt"), so treat the s1/s2
-numbers as indicative and verify the convention before acting on them.
+(p8 42, p11 52, strips 24/17). The check therefore passes with nothing to check —
+and will fail the moment a change starts claiming any of them.
+
+### The origin convention (settled)
+
+A fixture declares `originConvention`, `ptPerFt` and `rootFtPerIn`. The only supported
+convention is `"page"`: **every** entry, strips included, is where the WHOLE PAGE's
+top-left corner belongs. A solver pose reports the origin of the FRAME it anchors —
+the same point for a whole page, offset by the frame origin for a strip — so the
+runner subtracts `frame[0], frame[1]` (page pt × `scale / rootFtPerIn`) before
+comparing. Comparing frame origins straight against the fixture read PG_SITE's lower
+strip as 170.7 ft out when it is 16.6 ft out: a 646 pt inset is 179 ft at 1"=20'.
+
+Strip keys are per page — `<pageIndex>s<n>`, numbered from 1 in ascending frame order
+(top strip first) — so a second split page cannot collide with the first. If a fixture
+key matches no placed unit the runner says so: a renamed key must never turn the
+comparison into a silent no-op.
 
 An expectation that is absent is not checked. Belcourt has no `verdictFloor` because
 its verdict is honestly `unverified`: every cross-seam axis is confirmed to 0.00 ft,

@@ -106,24 +106,67 @@ const flushCache = () => { if (cacheDirty) { fs.writeFileSync(CACHE_FILE, JSON.s
 /**
  * Per-unit placement error against a hand-verified fixture, in feet.
  *
- * The fixture stores CANVAS POINTS at 3.6 pt/ft, keyed by page index, with `s1`/`s2`
- * for the two strip frames of a split page. A layout has no absolute origin, so the
- * two are aligned by the MEDIAN delta before comparing — robust, and it does not let
- * one badly-placed sheet (which is exactly what we are looking for) drag the whole
- * comparison. Units the fixture does not name are skipped.
+ * The fixture stores CANVAS POINTS (`ptPerFt`, at `rootFtPerIn`) and declares its
+ * `originConvention` — always `"page"`: every entry, strips included, is where the
+ * WHOLE PAGE's top-left corner belongs. A pose reports the origin of the FRAME it
+ * anchors, which is the same point for a whole page and offset by the frame's own
+ * origin for a strip, so a strip is converted to a page origin before comparing.
+ * Skipping that conversion read PG_SITE's lower strip as 170.7 ft out when it is
+ * 16.6 ft out — a 646 pt frame inset is 179 ft at 1"=20'. That ambiguity is what made
+ * the strip numbers "indicative"; the fixture now states the convention, and this is
+ * the only place that applies it.
+ *
+ * Strips are keyed PER PAGE — `<pageIndex>s<n>`, numbered from 1 in ascending frame
+ * order — so a second split page cannot collide with the first. A layout has no
+ * absolute origin, so fixture and solve are aligned by the MEDIAN delta before
+ * comparing: robust, and it does not let one badly-placed sheet (which is exactly what
+ * we are looking for) drag the whole comparison. Units the fixture does not name are
+ * skipped; fixture keys that matched NOTHING are reported, so a renamed key cannot
+ * quietly turn the comparison into a no-op.
  */
 function groundTruthErrors(res, gt) {
-  const PT_PER_FT = 3.6;
+  const PT_PER_FT = gt.ptPerFt ?? 3.6;
   const pos = gt.positions ?? {};
+  if (gt.originConvention && gt.originConvention !== "page") {
+    throw new Error(`ground truth: unsupported originConvention "${gt.originConvention}" (only "page" is implemented)`);
+  }
+  // Strip ordinals, per page, top strip first.
+  const stripOrdinal = new Map();
+  const byPage = new Map();
+  for (const p of res.poses) {
+    if (!p.frame || !p.posFt) continue;
+    if (!byPage.has(p.pageIndex)) byPage.set(p.pageIndex, []);
+    byPage.get(p.pageIndex).push(p);
+  }
+  for (const list of byPage.values()) {
+    list.sort((a, b) => a.frame[1] - b.frame[1] || a.frame[0] - b.frame[0]);
+    list.forEach((p, i) => stripOrdinal.set(p, i + 1));
+  }
   const rows = [];
+  const unmatched = new Set(Object.keys(pos));
   for (const p of res.poses) {
     if (!p.posFt) continue;
-    const key = p.frame ? (p.frame[1] === 0 ? "s1" : "s2") : String(p.pageIndex);
+    const key = p.frame ? `${p.pageIndex}s${stripOrdinal.get(p)}` : String(p.pageIndex);
     const g = pos[key];
     if (!Array.isArray(g)) continue;
-    rows.push({ key, pageIndex: p.pageIndex, dx: p.posFt.x * PT_PER_FT - g[0], dy: p.posFt.y * PT_PER_FT - g[1] });
+    unmatched.delete(key);
+    // Frame origin → page origin, using the same canvas-pt-per-page-pt factor
+    // `layoutPlacements` applies when it subtracts a frame offset.
+    const si = res.rootFtPerIn ? p.scale / res.rootFtPerIn : 1;
+    const fx = p.frame ? p.frame[0] * si : 0;
+    const fy = p.frame ? p.frame[1] * si : 0;
+    rows.push({
+      key, pageIndex: p.pageIndex,
+      dx: p.posFt.x * PT_PER_FT - fx - g[0],
+      dy: p.posFt.y * PT_PER_FT - fy - g[1],
+    });
   }
-  if (rows.length < 2) return { rows: [], medianFt: 0, p95Ft: 0 };
+  const rootMismatch =
+    gt.rootFtPerIn != null && res.rootFtPerIn != null && gt.rootFtPerIn !== res.rootFtPerIn
+      ? `fixture is at rootFtPerIn ${gt.rootFtPerIn}, solve ran at ${res.rootFtPerIn}`
+      : null;
+  const extra = { unmatched: [...unmatched], rootMismatch };
+  if (rows.length < 2) return { rows: [], medianFt: 0, p95Ft: 0, ...extra };
   const med = (xs) => { const a = [...xs].sort((u, v) => u - v); return a[Math.floor(a.length / 2)]; };
   const ox = med(rows.map((r) => r.dx)), oy = med(rows.map((r) => r.dy));
   for (const r of rows) r.errFt = Math.hypot(r.dx - ox, r.dy - oy) / PT_PER_FT;
@@ -132,6 +175,7 @@ function groundTruthErrors(res, gt) {
     rows: rows.sort((a, b) => a.pageIndex - b.pageIndex || a.key.localeCompare(b.key)),
     medianFt: errs[Math.floor(errs.length / 2)],
     p95Ft: errs[Math.min(errs.length - 1, Math.ceil(0.95 * errs.length) - 1)],
+    ...extra,
   };
 }
 
@@ -242,6 +286,10 @@ if (AS_JSON) {
         (r.demoted.length ? `; demoted (placed, free to slide ±${Math.round(r.alongUncertaintyFt)} ft) [${r.demoted.map((p) => p + 1).join(",")}]` : ""));
     }
     if (r.gtMissing) console.log(`${r.name}: ground truth not found (${r.gtMissing})`);
+    // A fixture key nothing matched means the fixture and the solver disagree about
+    // how units are named — the failure mode that silently compares nothing.
+    if (r.gt?.unmatched?.length) console.log(`${r.name}: ground-truth keys matched no placed unit: ${r.gt.unmatched.join(", ")}`);
+    if (r.gt?.rootMismatch) console.log(`${r.name}: ground-truth scale mismatch — ${r.gt.rootMismatch}`);
     if (r.gt?.rows.length) {
       console.log(`${r.name}: ground-truth error median ${r.gt.medianFt.toFixed(1)} ft, 95p ${r.gt.p95Ft.toFixed(1)} ft` +
         (r.gtWorstClaimed != null ? `, worst CLAIMED ${r.gtWorstClaimed.toFixed(1)} ft` : ""));

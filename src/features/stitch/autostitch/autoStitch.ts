@@ -114,6 +114,13 @@ function hasEdgeRefs(extract: PageExtract, frame?: [number, number, number, numb
  *    two OCR reads, two text reads, two caller-supplied codes — is reset to its
  *    page-order fallback, as is any OCR read colliding with a stronger source.
  *    (Distinct pageIndex+1 per page, so the reset group cannot re-collide.)
+ *  - Fallback repair: a page-order FALLBACK sitting on a number some other page
+ *    actually READ loses too — but "reset it to pageIndex+1" is a no-op there,
+ *    because pageIndex+1 IS the colliding value. It is moved to the lowest
+ *    positive number no page claims instead. Leaving it put is the same fan-out
+ *    the rule above exists to stop: `byPrinted.get(n)` would return the guessed
+ *    page alongside the sheet that says it is n, and every "SEE SHEET n" would
+ *    anchor both.
  *
  * Returns pageIndex → resolved printed number.
  */
@@ -162,6 +169,24 @@ export function resolvePrintedNos(
       console.warn(`[autoStitch] printedNo collision on ${resolved.get(g.pageIndex)!.no}: page ${g.pageIndex} (${g.source}) resetting to page-order fallback ${fallback}`);
       resolved.set(g.pageIndex, { no: fallback, source: "fallback" });
     }
+  }
+
+  // A page-order guess that lands on a number another page actually read fans out
+  // exactly like the collisions above, and the reset loop cannot fix it (its
+  // page-order value is the collision). Move the GUESS — never the read — to the
+  // lowest number nobody claims. Lowest, not "pageCount + n", so the numbers stay
+  // small and readable in diagnostics, and deterministic in page order.
+  const claimed = new Set<number>();
+  for (const r of resolved.values()) if (r.source !== "fallback") claimed.add(r.no);
+  const taken = new Set<number>([...resolved.values()].map((r) => r.no));
+  for (const [pageIndex, r] of [...resolved].sort((a, b) => a[0] - b[0])) {
+    if (r.source !== "fallback" || !claimed.has(r.no)) continue;
+    let n = 1;
+    while (taken.has(n)) n++;
+    console.warn(`[autoStitch] printedNo collision on ${r.no}: page ${pageIndex} (page-order guess) moving to ${n}`);
+    // r.no stays in `taken` — the page that READ it still holds it.
+    taken.add(n);
+    resolved.set(pageIndex, { no: n, source: "fallback" });
   }
 
   return new Map([...resolved].map(([k, v]) => [k, v.no]));

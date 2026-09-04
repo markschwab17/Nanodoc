@@ -1212,4 +1212,23 @@ describe("along-axis anchoring", () => {
     expect(res.alongAnchored).toEqual([0]); // only the root
     expect(typeof res.worstAlongUncertaintyFt).toBe("number");
   });
+
+  it("never reports ZERO uncertainty while a unit is un-anchored", () => {
+    // A DECLINED joint sweep is all the sweep-based figure can measure, and most sets
+    // never run one — so the honest "± N ft" came back as ±0 ft on exactly the sets
+    // whose along axis is least resolved, which reads as "pinned". With no runner-up
+    // vote to measure either, the floor is the sheets' own extent along the seam:
+    // slide further than that and there is nothing left to match. 1080 pt at 1"=20'
+    // is 300 ft.
+    const res = stitchSheets([mk(1), mk(2)], undefined, [strokeOnly(1, 2)]);
+    expect(res.alongAnchored).toEqual([0]);
+    expect(res.worstAlongUncertaintyFt).toBeGreaterThan(0);
+    expect(res.worstAlongUncertaintyFt).toBeCloseTo(300, 0);
+  });
+
+  it("a fully anchored set still reports zero — nothing is free to slide", () => {
+    const res = stitchSheets([mk(1), mk(2)], undefined, [cross(1, 2)]);
+    expect(res.alongAnchored).toEqual([0, 1]);
+    expect(res.worstAlongUncertaintyFt).toBe(0);
+  });
 });
