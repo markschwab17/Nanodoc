@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds, embedTileSource, exportStitchToPdf } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, rotatedSourcePose, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds, embedTileSource, exportStitchToPdf } from "./stitchExport";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
@@ -183,17 +183,32 @@ describe("contentExportBounds", () => {
   });
 });
 
-describe("canVectorEmbedRotation", () => {
-  // Only an unrotated source page may use pdf-lib's vector embed — pdf-lib does
-  // not bake /Rotate, so a rotated page must use the (correctly oriented) raster.
-  test("allows vector embed only for an unrotated source page", () => {
-    expect(canVectorEmbedRotation(0)).toBe(true);
-    expect(canVectorEmbedRotation(360)).toBe(true);
-    expect(canVectorEmbedRotation(-360)).toBe(true);
-    expect(canVectorEmbedRotation(90)).toBe(false);
-    expect(canVectorEmbedRotation(180)).toBe(false);
-    expect(canVectorEmbedRotation(270)).toBe(false); // the Rose Hill case
-    expect(canVectorEmbedRotation(-90)).toBe(false);
+describe("rotatedSourcePose", () => {
+  /** The four corners of the drawn (unrotated-content) box after pdf-lib's
+   *  drawPage transform: translate to the anchor, rotate CCW by rotateDeg. */
+  const corners = (p: ReturnType<typeof rotatedSourcePose>) => {
+    const rad = (p.rotateDeg * Math.PI) / 180;
+    const c = Math.cos(rad), s = Math.sin(rad);
+    return [[0, 0], [p.width, 0], [p.width, p.height], [0, p.height]]
+      .map(([lx, ly]) => [Math.round(p.x + lx * c - ly * s), Math.round(p.y + lx * s + ly * c)])
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  };
+  const box = [[10, 20], [10, 50], [70, 20], [70, 50]]; // x 10..70, y 20..50
+
+  test("an unrotated source draws in place", () => {
+    expect(rotatedSourcePose(0, 10, 20, 60, 30)).toEqual({ x: 10, y: 20, width: 60, height: 30, rotateDeg: 0 });
+  });
+
+  test.each([90, 180, 270, -90, 450])("/Rotate %s lands exactly inside the tile box", (r) => {
+    const p = rotatedSourcePose(r, 10, 20, 60, 30);
+    expect(corners(p)).toEqual(box);
+  });
+
+  test("a quarter turn swaps the drawn width and height (the media box is portrait, the tile landscape)", () => {
+    // Belcourt / Rose Hill: 1728×2592 media box, /Rotate 270, displayed 2592×1728.
+    const p = rotatedSourcePose(270, 0, 0, 2592, 1728);
+    expect([p.width, p.height]).toEqual([1728, 2592]);
+    expect(p.rotateDeg).toBe(90);
   });
 });
 

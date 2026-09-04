@@ -173,17 +173,36 @@ export function tileIntersectsCrop(
 }
 
 /**
- * Whether a tile's source page may use the lossless VECTOR embed path.
+ * Where to anchor pdf-lib's `drawPage` so an embedded source page that carries a
+ * `/Rotate` attribute lands UPRIGHT inside the w×h box whose lower-left is (x, y).
  *
- * pdf-lib's `drawPage` does NOT bake a source page's `/Rotate` into the embedded
- * form, but the tile's width/height and the preview raster use mupdf's
- * rotation-applied (displayed) dimensions. So for a rotated source page the
- * vector embed would export stretched and unrotated. Only unrotated pages are
- * safe for vector; rotated pages fall to the raster path (mupdf's render is
- * already correctly oriented). Exported for tests.
+ * pdf-lib embeds the UNROTATED media box and never bakes `/Rotate`, while the
+ * tile's width/height (and its preview raster) are mupdf's rotation-applied,
+ * displayed dimensions. The vector embed used to refuse rotated pages and fall
+ * to the raster path — which silently turned every landscape CAD plot saved with
+ * `/Rotate 270` (Belcourt, Rose Hill) into a capped 3072-px bitmap with NO vector
+ * linework, so the site sheet lost snapping. Displaying `/Rotate r` means
+ * rotating the content CLOCKWISE by r; `drawPage` rotates counter-clockwise
+ * about its anchor, so the rotation is −r and the anchor moves to whichever box
+ * corner the content's lower-left corner lands on. Only multiples of 90 exist in
+ * PDF; anything else is normalised to the nearest legal value by the caller's
+ * source (pdf-lib's `getRotation()` already returns a multiple of 90).
+ * Exported for tests.
  */
-export function canVectorEmbedRotation(srcRotationDeg: number): boolean {
-  return ((((srcRotationDeg % 360) + 360) % 360)) === 0;
+export function rotatedSourcePose(
+  srcRotationDeg: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): { x: number; y: number; width: number; height: number; rotateDeg: number } {
+  const r = (((srcRotationDeg % 360) + 360) % 360);
+  switch (r) {
+    case 90:  return { x, y: y + h, width: h, height: w, rotateDeg: -90 };
+    case 180: return { x: x + w, y: y + h, width: w, height: h, rotateDeg: 180 };
+    case 270: return { x: x + w, y, width: h, height: w, rotateDeg: 90 };
+    default:  return { x, y, width: w, height: h, rotateDeg: 0 };
+  }
 }
 
 /**
@@ -370,6 +389,8 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   const {
     PDFDocument,
     degrees,
+    translate,
+    rotateDegrees,
     pushGraphicsState,
     popGraphicsState,
     setGraphicsState,
@@ -463,46 +484,48 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       // Null once the embed is known to have failed — the page is drawn ONLY on
       // a proven-good embed, so nothing dangling ever reaches the output.
       let embeddedPage: PDFEmbeddedPage | null = null;
+      // The source page's own /Rotate, baked into the draw pose below (see
+      // rotatedSourcePose) — a rotated plot keeps its vector linework.
+      let srcRotation = 0;
       try {
         let sourceDoc = sourceDocCache.get(tile.sourcePdfBytes);
         if (!sourceDoc) {
           sourceDoc = await PDFDocument.load(tile.sourcePdfBytes, { ignoreEncryption: true });
           sourceDocCache.set(tile.sourcePdfBytes, sourceDoc);
         }
-        // A rotated source page (/Rotate != 0) can't use the vector embed: pdf-lib
-        // won't bake the rotation, so it would export stretched + unrotated. Fall
-        // through to the raster path (mupdf's stored render is already oriented).
-        const srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
-        if (!canVectorEmbedRotation(srcRotation)) throw new Error(`ROTATED_SOURCE:${srcRotation}`);
+        srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
 
         // Embeds AND flushes: a page pdf-lib can't embed returns null here rather
         // than exploding later inside save() (see embedTileSource).
         embeddedPage = await embedTileSource(pdfDoc, sourceDoc, tile.sourcePageIndex);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // Rotated source pages fall to the raster path on purpose — not a failure.
-        if (!msg.startsWith("ROTATED_SOURCE:")) {
-          console.warn("Vector embed failed, falling back to raster:", e);
-        }
+        console.warn("Vector embed failed, falling back to raster:", e);
       }
 
       if (embeddedPage) {
         const good = embeddedPage;
-        const opts: {
-          x: number; y: number;
-          width: number; height: number;
-          rotate?: ReturnType<typeof degrees>;
-        } = {
-          x: drawX,
-          y: drawY,
-          width: tile.width,
-          height: tile.height,
+        // Draw in a local frame whose origin is the tile's lower-left corner and
+        // whose axes carry the tile's own editor rotation. The source's /Rotate is
+        // then a second, inner rotation about the pose's anchor — composing the
+        // two through the CTM is what lets a rotated plot AND a rotated tile both
+        // land exactly where the editor shows them.
+        const pose = rotatedSourcePose(srcRotation, 0, 0, tile.width, tile.height);
+        const drawSource = (x: number, y: number) => {
+          page.pushOperators(pushGraphicsState(), translate(x, y));
+          if (rotation !== 0) page.pushOperators(rotateDegrees(rotation));
+          page.drawPage(good, {
+            x: pose.x,
+            y: pose.y,
+            width: pose.width,
+            height: pose.height,
+            ...(pose.rotateDeg !== 0 ? { rotate: degrees(pose.rotateDeg) } : {}),
+          });
+          page.pushOperators(popGraphicsState());
         };
-        if (rotation !== 0) opts.rotate = degrees(rotation);
         openClipped();
-        page.drawPage(good, opts);
+        drawSource(drawX, drawY);
         page.pushOperators(popGraphicsState());
-        drawRelocations((x, y) => page.drawPage(good, { x, y, width: tile.width, height: tile.height }));
+        drawRelocations((x, y) => drawSource(x, y));
         continue;
       }
     }
