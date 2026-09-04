@@ -33,9 +33,12 @@ export interface AddToProjectDialogProps {
   sheetCount: number;
   /** 1-based page-list numbers of the takeoff sources that will be hidden. */
   hiddenPageNumbers: readonly number[];
-  /** Composition reference scale in feet per inch, or null when uncalibrated. */
-  scaleFeetPerInch: number | null;
-  /** True while the save is in flight. */
+  /** Whole feet per inch the composition ACTUALLY reads at — the reference scale
+   *  divided by the composition scale factor, rounded as the toolbar rounds it.
+   *  Null when the composition is uncalibrated, which omits the row. */
+  effectiveScaleFeetPerInch: number | null;
+  /** True while the save is in flight: both buttons go dead, the dialog cannot
+   *  be dismissed out from under the upload, and the primary reads "Adding…". */
   busy?: boolean;
   onConfirm: () => void;
 }
@@ -66,7 +69,7 @@ export function AddToProjectDialog({
   labels,
   sheetCount,
   hiddenPageNumbers,
-  scaleFeetPerInch,
+  effectiveScaleFeetPerInch,
   busy,
   onConfirm,
 }: AddToProjectDialogProps) {
@@ -75,7 +78,7 @@ export function AddToProjectDialog({
   const project = projectName?.trim() ? projectName.trim() : "this project";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent className="sm:max-w-[440px]">
         <DialogHeader>
           <DialogTitle>Add to project</DialogTitle>
@@ -97,9 +100,9 @@ export function AddToProjectDialog({
               <Chip>reversible</Chip>
             </Row>
           )}
-          {scaleFeetPerInch != null && (
+          {effectiveScaleFeetPerInch != null && (
             <Row label="Scale">
-              <span>1&quot; = {scaleFeetPerInch}&#39;</span>
+              <span>1&quot; = {effectiveScaleFeetPerInch}&#39;</span>
             </Row>
           )}
         </div>
@@ -108,7 +111,7 @@ export function AddToProjectDialog({
             Keep arranging
           </Button>
           <Button disabled={busy} onClick={onConfirm}>
-            Add to project
+            {busy ? "Adding…" : "Add to project"}
           </Button>
         </DialogFooter>
       </DialogContent>

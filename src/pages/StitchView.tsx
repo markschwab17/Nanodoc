@@ -240,7 +240,10 @@ export default function StitchView() {
             : await commitPlainAdd(input);
         setPlanRun(null);
         // What the coach mark and the step strip's "need placing" count read.
+        // A fresh run re-arms the mark: these are new strays, not the ones the
+        // user already waved away.
         setUnplacedCount(result.unalignedIds.length);
+        setCoachDismissed(false);
         // Auto-align reports its own seam/alignment line; a plain placement has
         // no report of its own, so say what happened.
         const message =
@@ -364,6 +367,14 @@ export default function StitchView() {
     scaleAlign.setScaleAlignMode(false);
     exitCleanupReview();
   }, [pointAlign, scaleAlign, exitCleanupReview]);
+
+  /** Every auto-align run reports here, whether it came from the CTO plan or
+   *  from the Add PDF modal, so the strip and the coach mark always describe the
+   *  LAST run rather than only the one that opened the session. */
+  const handleAutoAlignResult = useCallback((unalignedCount: number) => {
+    setUnplacedCount(unalignedCount);
+    setCoachDismissed(false);
+  }, []);
 
   const handlePointAlignModeChange = (active: boolean) => {
     if (active) {
@@ -821,28 +832,51 @@ export default function StitchView() {
 
   const cropRect = useStitchStore((s) => s.cropRect);
   const referenceScaleFeetPerInch = useStitchStore((s) => s.referenceScaleFeetPerInch);
+  const compositionScaleFactor = useStitchStore((s) => s.compositionScaleFactor);
 
   /** Takeoff-v2 mode: this view is the middle step of CTO's site-sheet builder
    *  rather than a standalone stitch session. */
   const takeoffMode = !!ctoContext?.embed;
 
+  /** SHEETS on the canvas — what the user counts, and what CTO's manifest counts
+   *  (`buildStitchManifest` uses this exact filter). Scale stamps and promoted
+   *  clean-up crops carry `sourcePageIndex === -1` and are not sheets, so the
+   *  raw tile count would over-report and would keep "Add to project" live on a
+   *  canvas holding nothing but a stamp. `tileCount` is the trigger: the
+   *  filtered count can only move when the tile array does. */
+  const sheetTileCount = useMemo(
+    () => useStitchStore.getState().tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp).length,
+    [tileCount]
+  );
+
+  /** The scale the composed sheet actually reads at. Tile poses are POST-
+   *  composition while `referenceScaleFeetPerInch` is the raw as-imported value,
+   *  so a composite squeezed to 0.5 shows 1"=20' as 1"=40' — quoting the raw
+   *  number here would contradict the sheet the user is about to create. Same
+   *  derivation and rounding as the toolbar's "Adjusted 1"=" field. */
+  const effectiveScaleFeetPerInch = useMemo(() => {
+    if (referenceScaleFeetPerInch == null) return null;
+    const factor =
+      Number.isFinite(compositionScaleFactor) && compositionScaleFactor > 0 ? compositionScaleFactor : 1;
+    const effective = Math.round(referenceScaleFeetPerInch / factor);
+    return Number.isFinite(effective) && effective > 0 ? effective : null;
+  }, [referenceScaleFeetPerInch, compositionScaleFactor]);
+
   /** What the Add-to-project dialog previews. Read straight from the store (not
    *  a subscription) and only while the dialog is open: the tiles change on
    *  every drag frame, and none of this needs to follow them — it is a snapshot
-   *  of the moment the user asked to save. `sheetCount` uses the same filter
-   *  `buildStitchManifest` does, so the count here is the count CTO's own title
-   *  will fall back to. */
+   *  of the moment the user asked to save. */
   const addToProjectSummary = useMemo(() => {
-    const empty = { sheetCount: 0, labels: [] as (string | null)[], hiddenPageNumbers: [] as number[] };
+    const empty = { labels: [] as (string | null)[], hiddenPageNumbers: [] as number[] };
     if (!showAddToProject) return empty;
-    const tiles = useStitchStore.getState().tiles;
-    const sheets = tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+    const sheets = useStitchStore
+      .getState()
+      .tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
     // Only the plan's OWN sheets are described by the plan — a page the user
     // added later from another PDF shares nothing but an index with entry i.
     const entries = planEntriesForTiles(stitchPlanRaw, sheets, sessionSourcePdf?.fileName);
     const takeoffEntries = entries.filter((e) => e.kind === "takeoff");
     return {
-      sheetCount: sheets.length,
       labels: takeoffEntries.map((e) => e.label),
       hiddenPageNumbers: takeoffEntries
         .map((e) => e.pageNumber)
@@ -856,9 +890,9 @@ export default function StitchView() {
     <div className="flex flex-col h-screen bg-background">
       {takeoffMode && (
         <TakeoffModeStrip
-          sheetCount={tileCount}
+          sheetCount={sheetTileCount}
           unplacedCount={unplacedCount}
-          canAdd={tileCount > 0 && !isSaving}
+          canAdd={sheetTileCount > 0 && !isSaving}
           onAddToProject={handleSaveToCto}
         />
       )}
@@ -950,14 +984,6 @@ export default function StitchView() {
           onRelocateCleanupRegion={handleRelocateCleanupRegion}
           onCleanupManualBox={handleCleanupManualBox}
         />
-        {cleanupBusy && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[2px]" aria-live="polite" aria-busy="true">
-            <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-5 py-4 shadow-lg">
-              <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <span className="text-sm font-medium text-muted-foreground">Analyzing sheets…</span>
-            </div>
-          </div>
-        )}
         {takeoffMode && unplacedCount > 0 && !coachDismissed && !showAddToProject && !cleanupReviewMode && (
           <AlignCoachMark
             count={unplacedCount}
@@ -966,6 +992,14 @@ export default function StitchView() {
               setUnplacedCount(0);
             }}
           />
+        )}
+        {cleanupBusy && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[2px]" aria-live="polite" aria-busy="true">
+            <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-5 py-4 shadow-lg">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <span className="text-sm font-medium text-muted-foreground">Analyzing sheets…</span>
+            </div>
+          </div>
         )}
         {cleanupReviewMode && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2.5 shadow-lg">
@@ -1027,6 +1061,7 @@ export default function StitchView() {
         initialPdf={ctoInitialPdf}
         onInitialConsumed={() => setCtoInitialPdf(null)}
         sessionSourcePdf={sessionSourcePdf}
+        onAutoAlignResult={handleAutoAlignResult}
       />
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
@@ -1123,13 +1158,16 @@ export default function StitchView() {
           onOpenChange={setShowAddToProject}
           projectName={ctoContext?.project_name}
           labels={addToProjectSummary.labels}
-          sheetCount={addToProjectSummary.sheetCount}
+          sheetCount={sheetTileCount}
           hiddenPageNumbers={addToProjectSummary.hiddenPageNumbers}
-          scaleFeetPerInch={referenceScaleFeetPerInch}
+          effectiveScaleFeetPerInch={effectiveScaleFeetPerInch}
           busy={isSaving}
           onConfirm={() => {
-            setShowAddToProject(false);
-            void doSaveToCto("project_page");
+            // Stays open, reading "Adding…", until the upload settles — closing
+            // first would drop the user back on the canvas with no sign that
+            // anything was happening, and `doSaveToCto` swallows its own errors
+            // into a toast, so `finally` is the only completion signal.
+            void doSaveToCto("project_page").finally(() => setShowAddToProject(false));
           }}
         />
       )}

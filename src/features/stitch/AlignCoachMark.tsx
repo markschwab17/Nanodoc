@@ -7,6 +7,9 @@
  * composite and a stray sheet off to one side with no explanation. This says
  * what happened, where the strays are, and the two ways out (drag, or two-point
  * align), then names the finish line so the mark doesn't read as a blocker.
+ *
+ * z-30 deliberately: it sits above the canvas but UNDER the clean-up scrim and
+ * review bar (z-40), which own the same bottom-centre slot while they are up.
  */
 
 import { X } from "lucide-react";
@@ -22,7 +25,7 @@ export function AlignCoachMark({ count, onDismiss }: AlignCoachMarkProps) {
     <div
       role="status"
       aria-live="polite"
-      className="absolute bottom-[18px] left-1/2 z-40 flex max-w-[720px] -translate-x-1/2 items-center gap-3.5 rounded-[10px] border border-border bg-popover px-3.5 py-2.5 shadow-lg"
+      className="absolute bottom-[18px] left-1/2 z-30 flex max-w-[720px] -translate-x-1/2 items-center gap-3.5 rounded-[10px] border border-border bg-popover px-3.5 py-2.5 shadow-lg"
     >
       <span
         className="grid h-7 w-7 flex-none place-items-center rounded-full bg-amber-50 text-sm font-bold text-amber-700"
@@ -35,8 +38,9 @@ export function AlignCoachMark({ count, onDismiss }: AlignCoachMarkProps) {
           {count} sheet{count === 1 ? "" : "s"} could not be auto-aligned
         </b>
         <span className="text-muted-foreground">
-          They are placed below. Drag them into position, or pick Two-point align and click two
-          matching points on each sheet. Then press Add to project.
+          {count === 1
+            ? "It is placed below. Drag it into position, or pick Two-point align and click two matching points on each sheet. Then press Add to project."
+            : "They are placed below. Drag them into position, or pick Two-point align and click two matching points on each sheet. Then press Add to project."}
         </span>
       </div>
       <button

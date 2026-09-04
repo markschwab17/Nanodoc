@@ -74,7 +74,7 @@ export function TakeoffModeStrip({
   // sheet count is reassurance, the unplaced count is a task.
   const arrangeSuffix =
     unplacedCount > 0
-      ? ` · ${unplacedCount} need placing`
+      ? ` · ${unplacedCount} need${unplacedCount === 1 ? "s" : ""} placing`
       : ` · ${sheetCount} sheet${sheetCount === 1 ? "" : "s"}`;
 
   return (

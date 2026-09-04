@@ -39,11 +39,18 @@ export function AddPdfModal({
   initialPdf,
   onInitialConsumed,
   sessionSourcePdf,
+  onAutoAlignResult,
 }: {
   open: boolean;
   onClose: () => void;
   initialPdf?: { pdfBytes: Uint8Array; fileName: string } | null;
   onInitialConsumed?: () => void;
+  /** How many sheets the auto-align run could not place, reported after every
+   *  "Add and auto-align" from this modal. In takeoff-v2 mode that number is the
+   *  step strip's "need placing" count and the coach mark's badge — a run
+   *  started HERE has to move them just as a plan-driven run does, or the strip
+   *  goes on claiming everything is placed. */
+  onAutoAlignResult?: (unalignedCount: number) => void;
   /** The site-sheet source PDF for the life of the stitch session (unlike `initialPdf`,
    *  which is consumed once). Offered as an extra entry in the "From Civiltakeoff" list
    *  so switching to a project document doesn't lose the user's selected takeoff sheets. */
@@ -549,6 +556,7 @@ export function AddPdfModal({
         useNotificationStore
           .getState()
           .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
+      onAutoAlignResult?.(result.unalignedIds.length);
       onClose();
     } catch (e) {
       console.error(e);
@@ -556,7 +564,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScales, uniformScale]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScales, uniformScale, onAutoAlignResult]);
 
   const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
