@@ -218,3 +218,30 @@ describe("parseSheetNumber from the title-block layout", () => {
     expect(parseSheetNumber([...cell("S"), B("SHEET 4 OF 30", 0, 40, 120, 58)])).toBe(4);
   });
 });
+
+describe("pageEdgeBands with a drawing frame", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const pageOnly = [
+    ["top", [0, 0, 1000, 120]], ["bottom", [0, 680, 1000, 800]],
+    ["left", [0, 0, 120, 800]], ["right", [880, 0, 1000, 800]],
+  ];
+  test("the four page bands are returned unchanged", () => {
+    const b = pageEdgeBands(view, [20, 20, 720, 780]);
+    expect(b.slice(0, 4).map((s) => [s.edge, s.clip])).toEqual(pageOnly);
+  });
+  test("a frame border the page band cannot reach gets its own band", () => {
+    // Right border at 72% of the width; the page's right band starts at 88%, so the
+    // drawing's own border — and any matchline callout on it — is never rasterised.
+    const b = pageEdgeBands(view, [20, 20, 720, 780]);
+    expect(b).toHaveLength(5);
+    expect(b[4].edge).toBe("right");
+    expect(b[4].clip).toEqual([720 - 0.12 * 700, 20, 720, 780]);
+  });
+  test("a frame that sits inside the page bands adds nothing", () => {
+    // Borders at 7.5% / 93% / 8% / 87% all fall within the page bands already.
+    expect(pageEdgeBands(view, [75, 64, 930, 696])).toHaveLength(4);
+  });
+  test("no frame -> page bands only", () => {
+    expect(pageEdgeBands(view).map((s) => [s.edge, s.clip])).toEqual(pageOnly);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { sliceExtract, stripFrames } from "./frameDetect";
+import { sliceExtract, stripFrames, detectDrawingFrame } from "./frameDetect";
 import type { Geom, PageExtract } from "./types";
 
 const page = (geometry: Geom[], extra: Partial<PageExtract> = {}): PageExtract => ({
@@ -41,5 +41,44 @@ describe("sliceExtract", () => {
     expect(s.labels[0].y).toBeCloseTo(10);  // 770 - 760
     expect(s.geometry).toHaveLength(1);
     expect(s.geometry[0].pts[0]).toEqual([540, 140]);
+  });
+});
+
+describe("detectDrawingFrame", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const vline = (id: string, x: number, y0 = 0, y1 = 800) => ({ id, closed: false, pts: [[x, y0], [x, y1]] as [number, number][] });
+  const hline = (id: string, y: number, x0 = 0, x1 = 1000) => ({ id, closed: false, pts: [[x0, y], [x1, y]] as [number, number][] });
+
+  test("finds a frame whose right border is inset 28% behind a notes column", () => {
+    // The failure-D shape: the drawing is ruled [20,20]-[720,780] and the right 28%
+    // of the sheet is the notes/title column, so page-relative edge rules never see
+    // the callouts drawn on the drawing's own right border.
+    const f = detectDrawingFrame(
+      [vline("l", 20), vline("r", 720), hline("t", 20, 20, 720), hline("b", 780, 20, 720),
+       // page border too — the detector must prefer the INNER right ruler
+       vline("pl", 2), vline("pr", 998), hline("pt", 2), hline("pb", 798)],
+      view,
+    );
+    expect(f).toEqual([20, 20, 720, 780]);
+  });
+
+  test("returns null for a sheet ruled at its page border (nothing to gain)", () => {
+    const f = detectDrawingFrame([vline("l", 0), vline("r", 1000), hline("t", 0), hline("b", 800)], view);
+    expect(f).toBeNull();
+  });
+
+  test("returns null with no geometry", () => {
+    expect(detectDrawingFrame([], view)).toBeNull();
+  });
+
+  test("ignores a long interior line that would shrink the drawing to nothing", () => {
+    // A full-height property line at 30% of the width is not the frame's edge: the
+    // right border must be past 55% of the page, so this candidate is skipped and
+    // the real border at 720 wins.
+    const f = detectDrawingFrame(
+      [vline("l", 20), vline("prop", 300), vline("r", 720), hline("t", 20, 20, 720), hline("b", 780, 20, 720)],
+      view,
+    );
+    expect(f).toEqual([20, 20, 720, 780]);
   });
 });

@@ -171,3 +171,29 @@ describe("fuzzy OCR spellings of the callout vocabulary", () => {
     expect(parseSheetRefs([at("PHASE SHEETING DETAIL", 50, 800)], view)).toHaveLength(0);
   });
 });
+
+describe("edge classification against the drawing frame", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const frame: [number, number, number, number] = [20, 20, 720, 780]; // right border at 72%
+  const at = (text: string, cx: number, cy: number): Label =>
+    ({ text, x: cx - 40, y: cy - 6, endX: cx + 40, endY: cy + 6, angle: 0, h: 12, font: null });
+
+  it("a callout on the drawing's inner right border is an EDGE ref, not interior", () => {
+    const l = [at("MATCH LINE SEE SHEET 5", 700, 400)];
+    expect(parseSheetRefs(l, view)[0].edge).toBe("interior");      // page-relative: 30% in
+    expect(parseSheetRefs(l, view, frame)[0].edge).toBe("right");  // 2.9% from the frame border
+  });
+
+  it("a callout in the notes column beyond the frame stays interior", () => {
+    const l = [at("SEE SHEET 5", 860, 400)]; // 20% past the frame border, 14% from the page edge
+    expect(parseSheetRefs(l, view, frame)[0].edge).toBe("right");  // still near the PAGE edge
+    const deep = [at("SEE SHEET 5", 500, 400)];                    // middle of nowhere
+    expect(parseSheetRefs(deep, view, frame)[0].edge).toBe("interior");
+  });
+
+  it("page-relative edge refs are unchanged by a frame", () => {
+    const l = [at("SEE SHEET 5", 40, 400)];
+    expect(parseSheetRefs(l, view)[0].edge).toBe("left");
+    expect(parseSheetRefs(l, view, frame)[0].edge).toBe("left");
+  });
+});

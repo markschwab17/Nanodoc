@@ -208,7 +208,7 @@ export function matchlinePrior(si: any, sj: any): { dx: number; dy: number; same
   // sheet, and letting it through pins unrelated sheets on garbage. Keep strip
   // refs only when the two sheets are siblings; drop them otherwise.
   const siblings = si.siblingKey === sj.no || sj.siblingKey === si.no;
-  const get = (s: any) => parseSheetRefs(s.raw.shxLabels, s.raw.view)
+  const get = (s: any) => parseSheetRefs(s.raw.shxLabels, s.raw.view, s.drawingFrame)
     .filter((r) => r.matchline && r.edge !== 'interior' && (r.strip == null || siblings))
     .map((r) => ({ ...r, xf: FT(r.at.x, s.scale), yf: FT(r.at.y, s.scale) }));
   const mi = get(si), mj = get(sj);
@@ -587,8 +587,8 @@ export function crossingConsensus(
  */
 export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number; perp: "x" | "y"; strokeI: number; strokeJ: number } | null {
   const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
-  const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view).filter((r) => r.matchline && r.edge !== "interior");
-  const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view).filter((r) => r.matchline && r.edge !== "interior");
+  const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view, si.drawingFrame).filter((r) => r.matchline && r.edge !== "interior");
+  const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view, sj.drawingFrame).filter((r) => r.matchline && r.edge !== "interior");
   const refs = (r: any, other: any) =>
     (r.sheet != null && r.sheet === (other.printedNo ?? other.no)) ||
     (r.sheetCode && other.sheetCode && r.sheetCode.toUpperCase() === other.sheetCode.toUpperCase());
@@ -803,6 +803,12 @@ export interface SheetInput {
   pageIndex?: number;
   /** Page-pt bbox of this unit's frame; absent = whole page. */
   frame?: [number, number, number, number];
+  /** The unit's ruled DRAWING frame in its OWN coordinates (see
+   *  `frameDetect.detectDrawingFrame`), when one was detected. Edge-vs-interior
+   *  classification is measured against it so a matchline callout on the drawing's
+   *  inner border — behind a notes column — counts as an edge ref here exactly as it
+   *  does in autoStitch. Absent ⇒ page-relative, unchanged. */
+  drawingFrame?: [number, number, number, number] | null;
 }
 export interface PairReport { i: number; j: number; channel: string | null; conf: string | null; dxFt: number | null; dyFt: number | null; weight: number; residFt: number | null; }
 
@@ -949,6 +955,7 @@ interface DriverSheet {
   raw: { shxLabels: Label[]; labels: Label[]; geometry: Geom[]; view: [number, number, number, number] };
   key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null; segFine?: SegFeat[];
   printedNo: number; siblingKey?: number; pageIndex?: number;
+  drawingFrame?: [number, number, number, number] | null;
 }
 
 /**
@@ -1016,7 +1023,7 @@ export function stitchSheets(
     return {
       id: s.id, no: s.no, scale: s.scale, view: s.view,
       raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
-      key: s.no, sheetCode: label.sheetCode,
+      key: s.no, sheetCode: label.sheetCode, drawingFrame: s.drawingFrame ?? null,
       printedNo: s.printedNo ?? s.no, siblingKey: s.siblingKey, pageIndex: s.pageIndex,
     };
   });
@@ -1127,7 +1134,7 @@ export function stitchSheets(
   // Refs are direct adjacency evidence, so this loop also seeds pairKeys.
   const pairKeys = new Set<string>();
   for (const s of sheets) {
-    const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view).filter((r) => r.edge !== "interior");
+    const refs = parseSheetRefs(s.raw.shxLabels, s.raw.view, s.drawingFrame).filter((r) => r.edge !== "interior");
     for (const r of refs) {
       const targets: DriverSheet[] = [];
       // A strip ref ("SEE ABOVE/BELOW LEFT/RIGHT") resolves ONLY via siblingKey —

@@ -4,7 +4,7 @@ import { capturePage } from "./captureDevice";
 // roadmap. Do not import it yet.
 import { stitchSheets, findEdgeStroke, oneSidedStrokeAnchor, seamCrossings, crossingConsensus, FT, type SheetInput, type StitchMethod, type StitchResult, type StitchAnchor, type Crossing, type SeamReportEntry, type AlignmentVerdict } from "./stitchCore";
 import { detectKeymapGrid } from "./keymap";
-import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
+import { sliceExtract, stripFrames, detectDrawingFrame, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
 import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
@@ -75,9 +75,9 @@ const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
  *  (not interior). Serves both uses: the OCR gate skips pages that already have
  *  one (`!hasEdgeRefs`), and the feasibility denominator counts pages that have
  *  one after the OCR merge (ref-bearing pages). */
-function hasEdgeRefs(extract: PageExtract): boolean {
+function hasEdgeRefs(extract: PageExtract, frame?: [number, number, number, number] | null): boolean {
   const all = [...extract.shxLabels, ...extract.labels];
-  return parseSheetRefs(all, extract.view).some(
+  return parseSheetRefs(all, extract.view, frame).some(
     (r) => r.edge !== "interior" && (r.sheet != null || r.sheetCode != null || r.strip != null || r.matchline)
   );
 }
@@ -138,10 +138,18 @@ interface Unit {
   scale: number;
   printedNo: number;
   key: number;              // unique numeric key (assigned after uniquify)
+  /** Ruled drawing frame in the UNIT's own coordinates (recomputed per strip). */
+  drawingFrame: [number, number, number, number] | null;
 }
 
 /** Per-page record collected in pass 1 (extract + printed number). */
-interface PageRec { pageIndex: number; extract: PageExtract; printedNo: number; printedNoSource: "ocr" | "text" | "fallback"; }
+interface PageRec {
+  pageIndex: number; extract: PageExtract; printedNo: number; printedNoSource: "ocr" | "text" | "fallback";
+  /** The page's ruled DRAWING frame when one was detected — every edge rule (OCR
+   *  band clips, edge-vs-interior classification) is measured against it. Null on a
+   *  sheet drawn edge to edge. */
+  drawingFrame: [number, number, number, number] | null;
+}
 
 /** Reciprocal-label anchor before unit-key resolution: endpoints keyed by
  *  (pageIndex, label-y). `perp` is the axis the facing label pins precisely — "x"
@@ -203,8 +211,15 @@ export async function autoStitch(
     let printedNo: number | null = null;
     let printedNoSource: "ocr" | "text" | "fallback" = "fallback";
     let recovered: Label[] = [];
+    let drawingFrame: [number, number, number, number] | null = null;
     try {
       extract = capturePage(mupdf, page);
+      // The sheet's ruled drawing frame (null when it draws edge to edge). Every
+      // edge rule below is measured against it: on a set with a notes column the
+      // drawing's own right border sits at ~72% of the page width, and a matchline
+      // callout there is neither rasterised by a page-relative band nor classified
+      // as an edge ref (failure D).
+      drawingFrame = detectDrawingFrame(extract.geometry, extract.view);
       // OCR recovery: OCR the PAGE-EDGE bands (no frame needed) when the text
       // channels are starved of edge refs. Strip refs recovered here declare a
       // two-strip page AND locate the split (see stripFrames) — geometry border
@@ -212,8 +227,8 @@ export async function autoStitch(
       // gate here: raster/scanned pages carry zero vector geometry and are
       // exactly the pages OCR exists to rescue, so gating on geometry would
       // disable OCR precisely where it is needed.
-      if (ocr && !hasEdgeRefs(extract)) {
-        for (const band of pageEdgeBands(extract.view)) {
+      if (ocr && !hasEdgeRefs(extract, drawingFrame)) {
+        for (const band of pageEdgeBands(extract.view, drawingFrame)) {
           const { image, scale: bandScale } = renderBand(mupdf, page, band.clip);
           if (band.edge === "left" || band.edge === "right") {
             const cands: { rot: 90 | 270; words: OcrWord[] }[] = [];
@@ -247,10 +262,10 @@ export async function autoStitch(
       }
     }
 
-    pages.push({ pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource });
+    pages.push({ pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
-    if (hasEdgeRefs(extract)) refPageIndices.push(pageIndex);
+    if (hasEdgeRefs(extract, drawingFrame)) refPageIndices.push(pageIndex);
     opts.onProgress?.(i + 1, total);
   }
 
@@ -295,7 +310,7 @@ export async function autoStitch(
     const edgeRefsOf = (p: PageRec): SheetRef[] => {
       const hit = edgeRefCache.get(p.pageIndex);
       if (hit) return hit;
-      const refs = parseSheetRefs([...p.extract.shxLabels, ...p.extract.labels], p.extract.view)
+      const refs = parseSheetRefs([...p.extract.shxLabels, ...p.extract.labels], p.extract.view, p.drawingFrame)
         .filter((r) => r.edge !== "interior" && (r.sheet != null || r.sheetCode != null));
       edgeRefCache.set(p.pageIndex, refs);
       return refs;
@@ -573,10 +588,13 @@ export async function autoStitch(
     const h = p.extract.view[3] - p.extract.view[1];
     if (frames.length >= 2) {
       for (const f of frames.slice(0, 2)) {
-        units.push({ pageIndex: p.pageIndex, frame: f, extract: sliceExtract(p.extract, f), sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0 });
+        // A strip's extract is frame-LOCAL, so its drawing frame is recomputed in
+        // those coordinates rather than inherited from the page.
+        const ex = sliceExtract(p.extract, f);
+        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view) });
       }
     } else {
-      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0 });
+      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame });
     }
   }
 
@@ -629,7 +647,7 @@ export async function autoStitch(
       view: u.extract.view, extract: u.extract,
       printedNo: u.printedNo, pageIndex: u.pageIndex,
       siblingKey: byPage.get(u.pageIndex)!.find((o) => o.key !== u.key)?.key,
-      frame: u.frame?.bbox,
+      frame: u.frame?.bbox, drawingFrame: u.drawingFrame,
     }));
     // Key-map site grid (whole-page sets only; stitchSheets ignores it when
     // any page produced two units). Grid is keyed by unit key here.

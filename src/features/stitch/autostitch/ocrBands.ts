@@ -20,16 +20,41 @@ export interface BandSpec { edge: "top" | "bottom" | "left" | "right"; clip: [nu
  * 15% of height, left/right 12% of width covers that inset frame while
  * staying inside `parseSheetRefs`'s 18% edge-classification gate, so
  * recovered refs still classify as edge refs.
+ *
+ * `frame` is the sheet's ruled DRAWING frame when one was detected
+ * (`detectDrawingFrame`). The four page bands are returned UNCHANGED, and an extra
+ * frame-relative band is appended for each side whose frame border falls OUTSIDE
+ * the page band — i.e. only where the page band cannot reach it. That is exactly
+ * failure D: a drawing whose right border sits at ~72 % of the page width, behind a
+ * notes column, never has its matchline callouts rasterised at all.
+ *
+ * Deliberately additive rather than a union or a replacement. OCR is sensitive to
+ * the raster it is given: growing a band changes tesseract's segmentation and can
+ * LOSE words it used to read (measured — widening Belcourt's bands cost two of its
+ * four alignments). Keeping the page bands byte-identical keeps every result they
+ * already produce, cache included, and adds coverage only where there was none.
  */
-export function pageEdgeBands(view: [number, number, number, number]): BandSpec[] {
+export function pageEdgeBands(
+  view: [number, number, number, number],
+  frame?: [number, number, number, number] | null,
+): BandSpec[] {
   const [x0, y0, x1, y1] = view;
   const W = x1 - x0, H = y1 - y0;
-  return [
+  const bands: BandSpec[] = [
     { edge: "top",    clip: [x0, y0, x1, y0 + 0.15 * H] },
     { edge: "bottom", clip: [x0, y1 - 0.15 * H, x1, y1] },
     { edge: "left",   clip: [x0, y0, x0 + 0.12 * W, y1] },
     { edge: "right",  clip: [x1 - 0.12 * W, y0, x1, y1] },
   ];
+  if (!frame) return bands;
+  const [fx0, fy0, fx1, fy1] = frame;
+  const FW = fx1 - fx0, FH = fy1 - fy0;
+  if (!(FW > 0 && FH > 0)) return bands;
+  if (fy0 > y0 + 0.15 * H) bands.push({ edge: "top",    clip: [fx0, fy0, fx1, fy0 + 0.15 * FH] });
+  if (fy1 < y1 - 0.15 * H) bands.push({ edge: "bottom", clip: [fx0, fy1 - 0.15 * FH, fx1, fy1] });
+  if (fx0 > x0 + 0.12 * W) bands.push({ edge: "left",   clip: [fx0, fy0, fx0 + 0.12 * FW, fy1] });
+  if (fx1 < x1 - 0.12 * W) bands.push({ edge: "right",  clip: [fx1 - 0.12 * FW, fy0, fx1, fy1] });
+  return bands;
 }
 
 /** Title-block sheet-number cell: bottom-right corner of the PAGE. */

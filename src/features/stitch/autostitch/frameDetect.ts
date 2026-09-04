@@ -59,3 +59,90 @@ export function sliceExtract(extract: PageExtract, frame: Frame, marginPt = 36):
     geometry,
   };
 }
+
+/**
+ * The DRAWING FRAME rectangle, from geometry alone.
+ *
+ * A civil sheet is not drawn edge to edge: the plan lives inside a ruled frame, and
+ * on many sets a notes/title column takes the right quarter of the sheet, so the
+ * drawing's own right border sits at ~72 % of the page width. Every edge rule in the
+ * engine — the OCR band clips, and `parseSheetRefs`' 18 % edge-vs-interior test — is
+ * measured from the PAGE, so a matchline callout drawn on that inner border reads as
+ * `interior` and is ignored by `hasEdgeRefs`, `edgeRefsOf` and the matchline priors.
+ * That is the investigation's failure D (Belcourt sheet 6's east callout).
+ *
+ * The frame is found from full-span ruled lines: axis-aligned strokes whose summed
+ * length at one cross-coordinate reaches `spanFrac` of the perpendicular page
+ * dimension. Of those, the frame's left/top edge is the INNERMOST candidate in the
+ * outer quarter, and its right/bottom edge the INNERMOST candidate past `minExtent`
+ * of the page — i.e. the first ruled divider the drawing actually ends at, which is
+ * the notes-column line when there is one and the sheet border otherwise.
+ *
+ * Returns null (⇒ callers keep using the page) unless a frame was found that is
+ * meaningfully inset on some side and still covers most of the sheet, so a stray
+ * full-height property line cannot shrink the drawing area to nothing.
+ *
+ * Deliberately separate from `stripFrames`: that one splits a sheet into stacked
+ * strips from LABELS and documents why it avoids geometry borders. This is the
+ * different, simpler question of where the sheet's own ruled frame is.
+ */
+export function detectDrawingFrame(
+  geometry: { pts: [number, number][]; closed?: boolean }[],
+  view: [number, number, number, number],
+  { spanFrac = 0.9, minExtent = 0.55, minArea = 0.5, minInsetFrac = 0.02 } = {},
+): [number, number, number, number] | null {
+  const [x0, y0, x1, y1] = view;
+  const W = x1 - x0, H = y1 - y0;
+  if (!(W > 0 && H > 0) || !geometry.length) return null;
+  const BIN = 2;
+  const vSpans = new Map<number, number>(); // x-bin -> summed vertical length
+  const hSpans = new Map<number, number>(); // y-bin -> summed horizontal length
+  for (const g of geometry) {
+    const pts = g.pts;
+    if (!pts || pts.length < 2) continue;
+    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      if (Math.abs(dx) <= 3 && Math.abs(dy) > 3) {
+        const k = Math.round(((a[0] + b[0]) / 2) / BIN);
+        vSpans.set(k, (vSpans.get(k) || 0) + Math.abs(dy));
+      } else if (Math.abs(dy) <= 3 && Math.abs(dx) > 3) {
+        const k = Math.round(((a[1] + b[1]) / 2) / BIN);
+        hSpans.set(k, (hSpans.get(k) || 0) + Math.abs(dx));
+      }
+    }
+  }
+  const rulers = (spans: Map<number, number>, dim: number): number[] =>
+    [...spans.entries()].filter(([, tot]) => tot >= spanFrac * dim).map(([k]) => k * BIN).sort((a, b) => a - b);
+  // low edge: the innermost ruler inside the outer quarter (of the PAGE — that is
+  // where a border can be). high edge: the FIRST ruler past minExtent — the drawing
+  // ends at the first full divider, the notes-column line when one exists and the
+  // sheet border otherwise.
+  const lowEdge = (rs: number[], lo: number, dim: number) => {
+    const c = rs.filter((v) => v <= lo + 0.25 * dim);
+    return c.length ? c[c.length - 1] : lo;
+  };
+  const highEdge = (rs: number[], lo: number, dim: number, fallback: number) => {
+    const c = rs.filter((v) => v >= lo + minExtent * dim);
+    return c.length ? c[0] : fallback;
+  };
+  // A frame's borders span the FRAME, not the page: on a sheet whose drawing stops
+  // at 72 % of the width, its top and bottom rules are 0.72 W long and a page-width
+  // span test rejects them outright. So solve once against the page to size the
+  // frame, then again requiring each ruler to span the frame it just found. One
+  // refinement is enough — the second pass only ever admits more rulers, and the
+  // outer-quarter / minExtent placement tests stay page-relative.
+  const solve = (reqW: number, reqH: number): [number, number, number, number] => {
+    const vs = rulers(vSpans, reqH), hs = rulers(hSpans, reqW);
+    return [lowEdge(vs, x0, W), lowEdge(hs, y0, H), highEdge(vs, x0, W, x1), highEdge(hs, y0, H, y1)];
+  };
+  const first = solve(W, H);
+  const [fx0, fy0, fx1, fy1] = solve(first[2] - first[0], first[3] - first[1]);
+  const fw = fx1 - fx0, fh = fy1 - fy0;
+  if (fw <= 0 || fh <= 0) return null;
+  if (fw * fh < minArea * W * H) return null;                       // implausibly small
+  const inset = Math.max(fx0 - x0, x1 - fx1, fy0 - y0, y1 - fy1);
+  if (inset < minInsetFrac * Math.min(W, H)) return null;           // no real frame — use the page
+  return [fx0, fy0, fx1, fy1];
+}

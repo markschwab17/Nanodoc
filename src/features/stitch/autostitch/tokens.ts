@@ -237,9 +237,21 @@ function computeMatchlineRefMerge(labels: Label[]): Label[] {
   return out;
 }
 
-export function parseSheetRefs(labels: Label[], view: [number, number, number, number]): SheetRef[] {
-  const [x0, y0, x1, y1] = view;
-  const W = x1 - x0, H = y1 - y0;
+/**
+ * `frame` is the sheet's ruled DRAWING frame when one was detected (see
+ * `frameDetect.detectDrawingFrame`). A ref then counts as an edge ref when it is
+ * near the border of the page OR of the frame, whichever it is closer to: on a set
+ * with a notes column the drawing's own right border sits well inside the page, and
+ * a matchline callout there used to read as `interior` and be ignored by
+ * `hasEdgeRefs`, `edgeRefsOf` and the matchline priors (failure D). Taking the
+ * minimum keeps every page-relative edge ref exactly as it was and only ADDS the
+ * ones on the frame border; omitting `frame` is the old behaviour untouched.
+ */
+export function parseSheetRefs(
+  labels: Label[], view: [number, number, number, number],
+  frame?: [number, number, number, number] | null,
+): SheetRef[] {
+  const rects = frame ? [view, frame] : [view];
   const out: SheetRef[] = [];
   for (const l of mergeMatchlineRefLabels(labels)) {
     // numeric ("SEE SHEET 12") or alphanumeric discipline code ("SEE SHEET C5.4")
@@ -249,8 +261,21 @@ export function parseSheetRefs(labels: Label[], view: [number, number, number, n
     const mStrip = l.text.match(/SEE[\s_]+(ABOVE|BELOW)(?:[\s_]+(LEFT|RIGHT))?/i);
     if (!mSheet && !mCode && !mMatch && !mStrip) continue;
     const c = center(l);
-    // which edge? normalized distance to each border
-    const d = { left: (c.x - x0) / W, right: (x1 - c.x) / W, bottom: (c.y - y0) / H, top: (y1 - c.y) / H };
+    // which edge? normalized ABSOLUTE distance to each border, over the page and the
+    // drawing frame, nearest wins. Absolute matters only once a frame is inset: a
+    // callout drawn just OUTSIDE the drawing's border still belongs to that edge,
+    // while one far beyond it, in the notes column, stays interior. Inside the page
+    // rectangle (always, when there is no frame) this is the signed distance
+    // unchanged.
+    const d = { left: Infinity, right: Infinity, bottom: Infinity, top: Infinity };
+    for (const [rx0, ry0, rx1, ry1] of rects) {
+      const rw = rx1 - rx0, rh = ry1 - ry0;
+      if (!(rw > 0 && rh > 0)) continue;
+      d.left = Math.min(d.left, Math.abs(c.x - rx0) / rw);
+      d.right = Math.min(d.right, Math.abs(rx1 - c.x) / rw);
+      d.bottom = Math.min(d.bottom, Math.abs(c.y - ry0) / rh);
+      d.top = Math.min(d.top, Math.abs(ry1 - c.y) / rh);
+    }
     const edge = Object.entries(d).sort((a, b) => a[1] - b[1])[0];
     out.push({
       text: l.text, at: c, angle: l.angle,
