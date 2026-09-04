@@ -246,6 +246,41 @@ export async function recognize(image: RawImage): Promise<OcrWord[]> {
 }
 
 /**
+ * Release the tesseract scheduler and the conversion worker.
+ *
+ * The scheduler holds WORKER_COUNT real Web Workers, each with the tesseract
+ * SIMD WASM heap plus the `eng` traineddata — 80-120 MB apiece, 160-240 MB in
+ * total — and it used to be held for the rest of the session the moment any
+ * probe touched OCR, whether or not another sheet was ever read. Callers
+ * therefore shut it down when their OCR work is finished (the probe settles,
+ * the plan run ends, the modal closes); `ensureScheduler` builds a fresh one
+ * lazily on the next `recognize`, so shutting down is never destructive, only
+ * a cost the next caller pays once.
+ *
+ * Best-effort and idempotent: it never throws, and terminating a scheduler with
+ * a job still in flight simply makes that `recognize` resolve `[]`, which every
+ * caller already treats as "no words".
+ */
+export async function shutdownOcr(): Promise<void> {
+  const pendingScheduler = schedulerPromise;
+  schedulerPromise = null;
+  if (pendingScheduler) {
+    try {
+      const scheduler = await pendingScheduler;
+      await scheduler.terminate();
+    } catch { /* already dead, or never initialised */ }
+  }
+  const worker = convWorker;
+  convWorker = null;
+  if (worker) {
+    // Anything still waiting on a conversion will never be answered now.
+    for (const [, resolve] of convPending) resolve(null);
+    convPending.clear();
+    try { worker.terminate(); } catch { /* ignore */ }
+  }
+}
+
+/**
  * Answer `{kind:"ocr-req", ocrId, image}` messages from the stitch probe worker
  * with `{kind:"ocr-res", ocrId, words}`. Attach once per worker, right after
  * construction. Each request runs the full pipeline (conversion worker → blob →

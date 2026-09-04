@@ -196,6 +196,42 @@ describe("ocrService.recognize (main-thread tesseract + conversion worker)", () 
   });
 });
 
+describe("ocrService.shutdownOcr", () => {
+  it("terminates the scheduler and the conversion worker, then rebuilds lazily", async () => {
+    const { recognize, shutdownOcr } = await import("./ocrService");
+
+    const p = recognize(IMG());
+    const conv = FakeWorker.instances[0];
+    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("first") });
+    await expect(p).resolves.toHaveLength(1);
+    expect(h.schedulersCreated.length).toBe(1);
+
+    await shutdownOcr();
+    expect(h.schedulersCreated[0].terminateCalls).toBe(1);
+    expect(conv.terminated).toBe(true);
+
+    // Lazy recreate: the next recognize builds a fresh scheduler and a fresh
+    // conversion worker, and still answers.
+    const p2 = recognize(IMG());
+    const conv2 = FakeWorker.instances[1];
+    expect(conv2).toBeTruthy();
+    expect(conv2).not.toBe(conv);
+    conv2.emit({ ocrId: conv2.posted[0].ocrId, blob: fakeBlob("second") });
+    await expect(p2).resolves.toEqual([
+      { text: "second", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
+    ]);
+    expect(h.schedulersCreated.length).toBe(2);
+  });
+
+  it("is safe when nothing was ever initialised, and is idempotent", async () => {
+    const { shutdownOcr } = await import("./ocrService");
+    await expect(shutdownOcr()).resolves.toBeUndefined();
+    await expect(shutdownOcr()).resolves.toBeUndefined();
+    expect(h.schedulersCreated.length).toBe(0);
+    expect(FakeWorker.instances.length).toBe(0);
+  });
+});
+
 describe("ocrService.attachOcrRpc (forwarding)", () => {
   it("preserves ocrId pairing when work completes out of order", async () => {
     const { attachOcrRpc } = await import("./ocrService");

@@ -19,7 +19,7 @@ import { Loader2 } from "lucide-react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { attachOcrRpc, recognize } from "./autostitch/ocrService";
+import { attachOcrRpc, recognize, shutdownOcr } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
@@ -196,6 +196,10 @@ export function AddPdfModal({
       if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
       if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
       probeInFlightRef.current = false;
+      // This probe is over and nothing has queued another: hand tesseract's
+      // 160-240 MB back. `ensureScheduler` rebuilds it lazily if a later probe
+      // needs it.
+      if (probeTimerRef.current == null) void shutdownOcr();
       if ("aborted" in msg) {
         // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
         setProbe(null);
@@ -213,7 +217,7 @@ export function AddPdfModal({
       setProbeState("done");
     };
     probeWorkerRef.current = w;
-    return () => { w.terminate(); probeWorkerRef.current = null; };
+    return () => { w.terminate(); probeWorkerRef.current = null; void shutdownOcr(); };
   }, []);
 
   /**
@@ -382,6 +386,7 @@ export function AddPdfModal({
       setProbeState("idle");
       setProbeOcr(false);
       stopProbe("supersede"); // stop a probe still running for the just-closed doc
+      void shutdownOcr();     // and release tesseract's workers with it
       setCtoListening(false);
       setLoadError(null);
       // Reset the guard so the next open triggers the file picker

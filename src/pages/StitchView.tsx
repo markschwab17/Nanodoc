@@ -20,7 +20,7 @@ import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
-import { recognize } from "@/features/stitch/autostitch/ocrService";
+import { recognize, shutdownOcr } from "@/features/stitch/autostitch/ocrService";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
@@ -324,6 +324,9 @@ export default function StitchView() {
         fallBackToPicker();
       } finally {
         renderer?.dispose();
+        // The plan path runs the aligner inline with `recognize`, so tesseract's
+        // 160-240 MB of workers are ours to release when the run ends.
+        void shutdownOcr();
         try {
           doc?.destroy?.();
         } catch {
