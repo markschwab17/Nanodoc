@@ -1,0 +1,47 @@
+{
+  "$comment": [
+    "Regression expectations for scripts/stitch-eval.mjs. Every number here was MEASURED",
+    "on 2026-09-04 at the end of the auto-align T0 work — they are the floor the engine",
+    "must not fall below, not aspirations. The PDFs are local (~ expands to $HOME) and are",
+    "deliberately not in the repo, so this suite is not part of `npm test`.",
+    "",
+    "minAligned    the fewest units the run may place (recall floor)",
+    "maxAligned    the most it may place — for a NEGATIVE set, where any placement is a",
+    "              false pair between sheets that do not share ground",
+    "verdictFloor  the weakest honesty verdict accepted: verified > partial > unverified",
+    "maxWorstResidFt  the worst cross-seam disagreement, in feet, between a seam's own",
+    "              measurement and the solved layout (see stitchCore's worstResidFt)",
+    "maxSuspectSeams  seams the post-solve verification positively believes are wrong"
+  ],
+  "sets": [
+    {
+      "name": "PG_SITE 1A",
+      "pdf": "~/Downloads/PG_SITE 1A.pdf",
+      "pages": "0-21",
+      "scale": 20,
+      "minAligned": 11,
+      "verdictFloor": "partial",
+      "maxWorstResidFt": 3,
+      "maxSuspectSeams": 0,
+      "notes": "The reference set. 11 plan units (p2's two strips + p3-p11); the other 12 pages are a cover, sections, notes and details and correctly place nothing. Ground truth: scripts/fixtures/pg-site-1a.groundtruth.json."
+    },
+    {
+      "name": "Belcourt Grading Plans",
+      "pdf": "~/Downloads/Belcourt Grading Plans.pdf",
+      "pages": "0-3",
+      "scale": 20,
+      "minAligned": 3,
+      "maxWorstResidFt": 3,
+      "maxSuspectSeams": 0,
+      "notes": "Four tiled sheets printed 5-8, all text outlined, so identity and callouts are OCR-only. Aligned 0/4 before T0. Verdict is honestly `unverified` (the along-matchline axis is unproven on two of three seams), so no floor is set."
+    },
+    {
+      "name": "El Centro (negative set)",
+      "pdf": "~/Downloads/CA240435 - EL CENTRO_GRADING_REV 1 CHANGES PRIOR TO REV 2 (FOR BIDDING PURPOSES).pdf",
+      "pages": "0-11",
+      "scale": 20,
+      "maxAligned": 0,
+      "notes": "Notes, details and single plans that share no ground. NOTHING may be placed: any placement here is a false pair. Produced 3 before T0."
+    }
+  ]
+}

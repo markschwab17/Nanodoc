@@ -1,0 +1,65 @@
+# Auto-stitch regression suite
+
+`scripts/stitch-eval.mjs` is the gate for the auto-stitch solver. It runs the REAL
+`autoStitch` over a small corpus of real construction PDFs and checks each set against
+expectations that were **measured, not wished for** — the floor the engine must not
+fall below.
+
+Run it before merging anything that touches `src/features/stitch/autostitch/`.
+It is deliberately NOT part of `npm test`: it needs local PDFs, and it takes about a
+minute warm (several minutes the first time, while it OCRs).
+
+```bash
+npx vite-node scripts/stitch-eval.mjs                    # the whole corpus
+npx vite-node scripts/stitch-eval.mjs --set "PG_SITE 1A" # one set
+npx vite-node scripts/stitch-eval.mjs --json             # machine-readable
+npx vite-node scripts/stitch-eval.mjs --manifest <path>  # a different corpus
+```
+
+Exit code 0 = every set met its expectations, 1 = something regressed (each failure is
+printed as `REGRESSION · <set>: <what>`), 2 = the manifest named no runnable set.
+
+## The corpus
+
+`scripts/fixtures/stitch-eval-sets.json`. Paths use `~` for `$HOME`; the PDFs are not
+in the repo. **A set whose PDF is missing is SKIPPED, not failed** — the suite is
+meant to run on a machine that has only part of the corpus.
+
+| set | what it proves |
+|---|---|
+| PG_SITE 1A (22 pp) | The reference set: 11 plan units placed, verdict at least `partial`, no suspect seam. Ground truth for placement error is `scripts/fixtures/pg-site-1a.groundtruth.json`. |
+| Belcourt Grading Plans (4 pp) | Identity and callouts are OCR-only (all text outlined) and the sheets are printed 5–8, not 1–4. Aligned 0/4 before T0. |
+| El Centro (12 pp) | The NEGATIVE set. Notes, details and single plans that share no ground: nothing may be placed. Produced 3 false pairs before T0. |
+
+Each set may set any of:
+
+| key | meaning |
+|---|---|
+| `minAligned` | recall floor — the fewest units the run may place |
+| `maxAligned` | false-pair ceiling — used on a negative set, where any placement is wrong |
+| `verdictFloor` | the weakest honesty verdict accepted (`verified` > `partial` > `unverified`) |
+| `maxWorstResidFt` | worst cross-seam disagreement between a seam's own measurement and the solved layout |
+| `maxSuspectSeams` | seams the post-solve verification positively believes are wrong |
+| `maxSeconds` | wall-clock ceiling (unset by default — the first run is cold) |
+
+An expectation that is absent is not checked. Belcourt has no `verdictFloor` because
+its verdict is honestly `unverified`: every cross-seam axis is confirmed to 0.00 ft,
+but the along-matchline axis is only a weak vote on two of its three seams.
+
+## Adding a set
+
+Drop the PDF somewhere local, add an entry with its path, page range and scale, run
+the suite once to see what the engine actually does, then write those numbers in as
+the expectations — with a `notes` line saying what the set is for. Never write an
+expectation the engine does not currently meet: a permanently red suite is a suite
+nobody reads.
+
+## Relationship to the other harnesses
+
+- `scripts/stitch-diag.mjs` — the detail view for ONE file: anchors, per-pair channels
+  and residuals, seam quality, crossing registration, the joint sweep, the verdict, and
+  the skipped/scale-warning lines. This is the debugging loop; `stitch-eval` is the gate.
+- `src/features/dev/AutoStitchSmokeHarness.tsx` — the browser equivalent of the diag,
+  run by hand.
+- Both share `scratch-diag/ocr-cache.json` (keyed by image content), so a set OCR'd by
+  one is warm for the other.
