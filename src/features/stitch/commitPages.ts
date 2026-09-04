@@ -23,8 +23,14 @@ import type { AlignmentVerdict, SeamStatus, SeamReportEntry } from "@/features/s
 import type { AutoAlignReason } from "./addToProjectCopy";
 import type { recognize } from "./autostitch/ocrService";
 import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline } from "./pageScales";
+import { tileRenderScale, encodeTileRasterPng, TILE_RENDER_SCALE } from "./rasterEncode";
 
-export const TILE_RENDER_SCALE = 1.5;
+export { TILE_RENDER_SCALE };
+
+/** Shown on a tile whose sheet image could not be produced. A raster that fails
+ *  to encode used to render as NOTHING — an invisible tile the user could still
+ *  select and drag but never see. */
+export const RASTER_ERROR_MESSAGE = "This sheet's image couldn't be created. Remove it and add the page again.";
 export const MARGIN = 20;
 export const GAP = 10;
 export const TILES_PER_ROW = 3;
@@ -137,6 +143,7 @@ type TileData = {
   width: number;
   height: number;
   imageDataUrl?: string;
+  rasterError?: string;
   scaleFeetPerInch?: number;
 };
 
@@ -194,17 +201,20 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
     const { width: tileW, height: tileH } = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
     // noCache: this raster is copied into a PNG on the next line and never
     // requested again — caching it would pin 38 MB per sheet for the session.
-    const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE, noCache: true });
+    const rendered = await renderer.renderPage(doc, pageIndex, { scale: tileRenderScale(widthPt, heightPt), noCache: true });
     const imageData = rendered.imageData as ImageData;
     if (imageData && imageData.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
-    const dataUrl = imageData && imageData.data ? imageDataToDataUrl(imageData) : undefined;
+    // The encode runs in a worker and CONSUMES imageData (the pixel buffer is
+    // transferred), so nothing may touch it after this point.
+    const raster = imageData && imageData.data ? await encodeTileRasterPng(imageData) : null;
     newTiles.push({
       sourcePdfBytes: pdfBytes,
       sourcePageIndex: pageIndex,
       sourceFileName: fileName,
       width: tileW,
       height: tileH,
-      imageDataUrl: dataUrl,
+      imageDataUrl: raster ? URL.createObjectURL(raster) : undefined,
+      rasterError: raster ? undefined : RASTER_ERROR_MESSAGE,
       scaleFeetPerInch: pageScale,
       x: 0,
       y: 0,
@@ -242,16 +252,25 @@ export async function commitAutoAlign(
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
 
   // 1. Render rasters for the selected pages (same as the plain add).
-  const rasters = new Map<number, string>();
+  // Keyed by page index and holding the BLOB, not a URL: a two-strip page
+  // commits twice, and each tile needs its OWN object URL so revoking one
+  // cannot blank the other.
+  const rasters = new Map<number, Blob>();
   for (let i = 0; i < selected.length; i++) {
     const pageIndex = selected[i];
     await new Promise<void>((r) => setTimeout(r, 0));
     checkAbort();
+    const bpage = doc.loadPage(pageIndex);
+    const pbounds = bpage.getBounds();
+    bpage.destroy?.();
+    const scale = tileRenderScale(pbounds[2] - pbounds[0], pbounds[3] - pbounds[1]);
     // noCache — see commitPlainAdd.
-    const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE, noCache: true });
+    const rendered = await renderer.renderPage(doc, pageIndex, { scale, noCache: true });
     const imageData = rendered.imageData as ImageData;
     if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
-    if (imageData?.data) rasters.set(pageIndex, imageDataToDataUrl(imageData));
+    // Consumes imageData (buffer transferred to the encode worker).
+    const raster = imageData?.data ? await encodeTileRasterPng(imageData) : null;
+    if (raster) rasters.set(pageIndex, raster);
     onProgress?.(i + 1, selected.length);
   }
 
@@ -325,6 +344,10 @@ export async function commitAutoAlign(
 
   // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
   //    masked to its own frame) and commit as one undo step.
+  const rasterOf = (pageIndex: number): string | undefined => {
+    const blob = rasters.get(pageIndex);
+    return blob ? URL.createObjectURL(blob) : undefined;
+  };
   const newTiles = placements.map((p) => {
     const page = doc.loadPage(p.pageIndex);
     const bounds = page.getBounds();
@@ -336,7 +359,8 @@ export async function commitAutoAlign(
       sourceFileName: fileName,
       x: p.x, y: p.y,
       width: p.width, height: p.height,
-      imageDataUrl: rasters.get(p.pageIndex),
+      imageDataUrl: rasterOf(p.pageIndex),
+      rasterError: rasters.has(p.pageIndex) ? undefined : RASTER_ERROR_MESSAGE,
       hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
       scaleFeetPerInch: resolvePageScale(p.pageIndex, pageScales, uniformScale),
     };

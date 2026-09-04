@@ -330,7 +330,11 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     [tile.id, tile.locked]
   );
 
-  if (!tile.imageDataUrl) return null;
+  // An image-less tile with no explanation is nothing to draw. One that FAILED
+  // to encode is drawn as a visible error card: the user has to be able to see
+  // and remove it, which an invisible-but-selectable tile made impossible.
+  const rasterSrc = tile.imageDataUrl;
+  if (!rasterSrc && !tile.rasterError) return null;
 
   // Display always honors tile.width/height — the export draws at tile size,
   // so the canvas must show the same thing (scale stamps included).
@@ -376,19 +380,25 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerUp}
     >
-      <img
-        src={tile.imageDataUrl}
-        alt=""
-        className="w-full h-full pointer-events-none select-none object-fill"
-        draggable={false}
-        style={{
-          clipPath: hiddenClip ?? undefined,
-          WebkitClipPath: hiddenClip ?? undefined,
-        }}
-      />
+      {rasterSrc ? (
+        <img
+          src={rasterSrc}
+          alt=""
+          className="w-full h-full pointer-events-none select-none object-fill"
+          draggable={false}
+          style={{
+            clipPath: hiddenClip ?? undefined,
+            WebkitClipPath: hiddenClip ?? undefined,
+          }}
+        />
+      ) : (
+        <div className="w-full h-full pointer-events-none select-none flex items-center justify-center border-2 border-dashed border-destructive/60 bg-destructive/5 p-4 text-center">
+          <span className="text-destructive text-sm font-medium">{tile.rasterError}</span>
+        </div>
+      )}
       {/* Relocated pieces: a copy of the sheet clipped to the source region and
           translated by the offset, so the cut-out content shows at its new spot. */}
-      {relocated.map((r, i) => {
+      {rasterSrc && relocated.map((r, i) => {
         const clip = cssClipToRect(tile.width, tile.height, {
           x: r.rect.x * tile.width,
           y: r.rect.y * tile.height,
@@ -398,7 +408,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         return (
           <img
             key={i}
-            src={tile.imageDataUrl}
+            src={rasterSrc}
             alt=""
             className="absolute inset-0 w-full h-full pointer-events-none select-none object-fill"
             draggable={false}

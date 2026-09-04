@@ -15,9 +15,13 @@ import type { PDFDocument as PdfLibDocument, PDFEmbeddedPage } from "pdf-lib";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
+import { tileRenderScale } from "./rasterEncode";
 
 /** Stored tile rasters are rendered at this scale (see AddPdfModal). */
-const STORED_RASTER_SCALE = 1.5;
+/** What scale the STORED tile raster was rendered at, for this page's size —
+ *  the commit caps the long edge, so it is 1.5x only on small pages. Used to
+ *  decide whether a print-DPI re-render is actually worth it. */
+const storedRasterScale = tileRenderScale;
 
 /**
  * Re-render an erased tile's source page at print DPI and replay the erase
@@ -46,7 +50,7 @@ async function renderModifiedTileHighRes(
     const heightPt = bounds[3] - bounds[1];
     const scale = pickRasterScale(widthPt, heightPt, { minScale: 1 });
     // No meaningful gain over the stored raster — skip the expensive render
-    if (scale <= STORED_RASTER_SCALE + 0.1) return null;
+    if (scale <= storedRasterScale(widthPt, heightPt) + 0.1) return null;
 
     const pixmap = page.toPixmap(
       mupdf.Matrix.scale(scale, scale),
@@ -92,6 +96,29 @@ function dataUrlToBytes(dataUrl: string): Uint8Array {
   const base64 = dataUrl.split(",")[1] || dataUrl;
   const binary = atob(base64);
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+/**
+ * Bytes + MIME for a tile raster, whichever form it is in: a `data:` URL (scale
+ * stamps, cleanup crops, erase results) or a `blob:` object URL (sheet rasters
+ * since the commit path stopped base64-encoding them). Returns null for a form
+ * pdf-lib cannot embed, so the caller skips the tile exactly as before.
+ */
+async function tileRasterBytes(url: string): Promise<{ bytes: Uint8Array; mime: "png" | "jpg" } | null> {
+  if (url.startsWith("data:image/png")) return { bytes: dataUrlToBytes(url), mime: "png" };
+  if (url.startsWith("data:image/jpeg") || url.startsWith("data:image/jpg")) {
+    return { bytes: dataUrlToBytes(url), mime: "jpg" };
+  }
+  if (url.startsWith("data:")) return null;
+  try {
+    const blob = await (await fetch(url)).blob();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (blob.type === "image/png") return { bytes, mime: "png" };
+    if (blob.type === "image/jpeg" || blob.type === "image/jpg") return { bytes, mime: "jpg" };
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -505,15 +532,12 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
     let pdfImage;
     if (highResBytes) {
       pdfImage = await pdfDoc.embedPng(highResBytes);
-    } else if (tile.imageDataUrl.startsWith("data:image/png")) {
-      pdfImage = await pdfDoc.embedPng(dataUrlToBytes(tile.imageDataUrl));
-    } else if (
-      tile.imageDataUrl.startsWith("data:image/jpeg") ||
-      tile.imageDataUrl.startsWith("data:image/jpg")
-    ) {
-      pdfImage = await pdfDoc.embedJpg(dataUrlToBytes(tile.imageDataUrl));
     } else {
-      continue;
+      const raster = await tileRasterBytes(tile.imageDataUrl);
+      if (!raster) continue;
+      pdfImage = raster.mime === "png"
+        ? await pdfDoc.embedPng(raster.bytes)
+        : await pdfDoc.embedJpg(raster.bytes);
     }
     const imgOpts: {
       x: number; y: number;

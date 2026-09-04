@@ -15,6 +15,11 @@ export interface StitchTile {
   /** Rotation in degrees (0–360). */
   rotation?: number;
   imageDataUrl?: string;
+  /** Set when this sheet's raster could not be produced (PNG encode failed, or
+   *  the page was past the platform's canvas ceiling). The tile renders a
+   *  visible error card instead of nothing — an image-less tile used to be
+   *  invisible yet still selectable and draggable. */
+  rasterError?: string;
   /** When true, tile cannot be moved, resized, or rotated until unlocked. */
   locked?: boolean;
   /** True for generated scale bar stamps (no PDF source). */
