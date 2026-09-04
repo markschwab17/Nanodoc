@@ -28,7 +28,7 @@ export function AlignCoachMark({ count, onDismiss }: AlignCoachMarkProps) {
       className="absolute bottom-[18px] left-1/2 z-30 flex max-w-[720px] -translate-x-1/2 items-center gap-3.5 rounded-[10px] border border-border bg-popover px-3.5 py-2.5 shadow-lg"
     >
       <span
-        className="grid h-7 w-7 flex-none place-items-center rounded-full bg-amber-50 text-sm font-bold text-amber-700"
+        className="grid h-7 w-7 flex-none place-items-center rounded-full bg-amber-50 text-sm font-bold text-amber-700 dark:bg-amber-400/15 dark:text-amber-300"
         aria-hidden
       >
         {count}

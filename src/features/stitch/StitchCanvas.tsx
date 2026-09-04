@@ -437,7 +437,10 @@ export function StitchCanvas({
             >
         {canvasVisible && (
           <>
-            <div className="absolute inset-0 border border-border bg-background" />
+            {/* The page "paper" is literally paper — it stays white in dark mode. Tiles are
+                background-removed PNGs (transparent, black linework), so a dark sheet would
+                make the drawings invisible; only the surround follows the theme. */}
+            <div className="absolute inset-0 border border-border bg-white" />
             {/* Inch guidelines (1" = 72 pt) — true 1" boundaries; scale stamp and rulers align to these */}
             <InchGrid canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
           </>

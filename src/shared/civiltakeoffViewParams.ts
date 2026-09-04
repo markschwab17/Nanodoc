@@ -3,6 +3,8 @@
  * Parsed from query string when Nanodoc is opened by Civiltakeoff (e.g. /view?project=...&doc=...&token=...).
  */
 
+import { parseUrlTheme, type UrlTheme } from "./urlTheme";
+
 const DEFAULT_API_ORIGIN = "https://app.vertigraph.com";
 
 export interface CiviltakeoffViewParams {
@@ -48,6 +50,8 @@ export interface CiviltakeoffViewParams {
   contract_id: string | null;
   /** "1" = hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1). Restricts the stitch save dialog to "Add as project page" and swaps Back for a Cancel that messages the parent. */
   embed: string | null;
+  /** Workspace theme the host wants the embed to render in. null = host said nothing; keep whatever is applied. */
+  theme: UrlTheme | null;
 }
 
 /**
@@ -80,6 +84,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const esign_recipients = params.get("esign_recipients") ?? null;
   const contract_id = params.get("contract_id") ?? null;
   const embed = params.get("embed") ?? null;
+  const theme = parseUrlTheme(raw);
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -120,6 +125,7 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     esign_recipients,
     contract_id,
     embed,
+    theme,
   };
 }
 

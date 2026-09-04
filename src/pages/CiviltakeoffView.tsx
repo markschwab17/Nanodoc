@@ -7,7 +7,7 @@
  * so we avoid React #185 infinite loop (no state/result of fetch in deps).
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Editor from "./Editor";
 import {
@@ -15,6 +15,7 @@ import {
   hasCiviltakeoffToken,
   displayNameFor,
 } from "@/shared/civiltakeoffViewParams";
+import { applyUrlTheme } from "@/shared/urlTheme";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
@@ -39,6 +40,14 @@ export default function CiviltakeoffView() {
 
   // Guard: only one fetch per distinct URL (no setState, so no extra renders/effect re-runs)
   const lastFetchedSearchRef = useRef<string | null>(null);
+
+  // Theme (`?theme=dark|light`) BEFORE anything paints: main.tsx already applied it at boot so the
+  // loading screen is dark too, and this re-applies on a client-side navigation that carries a
+  // different theme. useLayoutEffect (not useEffect) so it lands before the first paint of this
+  // route, and before the PDF-fetch effect below runs.
+  useLayoutEffect(() => {
+    applyUrlTheme(location.search);
+  }, [location.search]);
 
   // Listen for CTO postMessage: go to page without reload (scroll + highlight), or open another PDF as new tab
   useEffect(() => {
@@ -90,6 +99,7 @@ export default function CiviltakeoffView() {
               token,
               api_origin: apiOrigin,
               embed: params.embed === "1",
+              theme: params.theme,
             });
           }
           const url = `${apiOrigin}/api/nanodoc/pdf?token=${encodeURIComponent(token)}`;
@@ -198,6 +208,7 @@ export default function CiviltakeoffView() {
             api_origin: params.api_origin,
             project_name: params.project_name ?? undefined,
             embed: params.embed === "1",
+            theme: params.theme,
           });
         }
 
