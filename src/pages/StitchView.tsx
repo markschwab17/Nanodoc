@@ -3,7 +3,7 @@
  * Toolbar + pan/zoom canvas with tiles; Add PDF modal and save/open.
  */
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStitchStore, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
@@ -15,6 +15,10 @@ import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
 import { commitPlainAdd, commitAutoAlign } from "@/features/stitch/commitPages";
 import { parseStitchPlan } from "@/features/stitch/stitchPlan";
+import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
+import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
+import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
+import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
 import { recognize } from "@/features/stitch/autostitch/ocrService";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
@@ -122,6 +126,17 @@ export default function StitchView() {
   // modal loads it) so "From Civiltakeoff" can still offer the site-sheet source after the user
   // switches tabs and loads a different project document.
   const [sessionSourcePdf, setSessionSourcePdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
+  /** The RAW stitch plan CTO sent, kept for the whole session (the initial store
+   *  hands it over exactly once). The Add-to-project dialog reads each entry's
+   *  label and page number out of it to preview what the save will create —
+   *  see `planEntriesForTiles`. Unparsed here for the same reason the store
+   *  keeps it unparsed: only the commit path validates it against a document. */
+  const [stitchPlanRaw, setStitchPlanRaw] = useState<unknown>(null);
+  /** Sheets the last auto-align run could not place. Drives the step strip's
+   *  "· K need placing" and the coach mark; zeroed when the mark is dismissed. */
+  const [unplacedCount, setUnplacedCount] = useState(0);
+  const [coachDismissed, setCoachDismissed] = useState(false);
+  const [showAddToProject, setShowAddToProject] = useState(false);
   /** Non-null while a CTO stitch plan is being committed — drives the entry
    *  overlay. `done/total` is the commit's own page progress. */
   const [planRun, setPlanRun] = useState<{
@@ -139,6 +154,10 @@ export default function StitchView() {
     if (!ctx || !initial) return;
     const source = { pdfBytes: initial.pdfBytes, fileName: initial.fileName };
     setSessionSourcePdf(source);
+    // Retained even when the plan turns out to be unusable and the picker opens
+    // instead: `planEntriesForTiles` re-validates it and yields nothing for a
+    // plan it can't read, so the dialog degrades to its count-only copy.
+    setStitchPlanRaw(initial.plan ?? null);
 
     // No plan — an older CTO build, or a source it can't describe. Unchanged
     // behaviour: the page picker opens on the source PDF and the user chooses.
@@ -220,6 +239,8 @@ export default function StitchView() {
             ? await commitAutoAlign({ ...input, ocr: recognize })
             : await commitPlainAdd(input);
         setPlanRun(null);
+        // What the coach mark and the step strip's "need placing" count read.
+        setUnplacedCount(result.unalignedIds.length);
         // Auto-align reports its own seam/alignment line; a plain placement has
         // no report of its own, so say what happened.
         const message =
@@ -700,6 +721,12 @@ export default function StitchView() {
       return;
     }
     const ctx = useCiviltakeoffContextStore.getState().getContext();
+    // Takeoff-v2 mode has exactly one destination — a new project page — so it
+    // skips the where-to-save dialog and confirms WHAT will be created instead.
+    if (ctx?.embed) {
+      setShowAddToProject(true);
+      return;
+    }
     const defaultName = ctx?.project_name?.trim()
       ? `${ctx.project_name.trim()} - Stitched`
       : "Stitched";
@@ -793,9 +820,48 @@ export default function StitchView() {
   };
 
   const cropRect = useStitchStore((s) => s.cropRect);
+  const referenceScaleFeetPerInch = useStitchStore((s) => s.referenceScaleFeetPerInch);
+
+  /** Takeoff-v2 mode: this view is the middle step of CTO's site-sheet builder
+   *  rather than a standalone stitch session. */
+  const takeoffMode = !!ctoContext?.embed;
+
+  /** What the Add-to-project dialog previews. Read straight from the store (not
+   *  a subscription) and only while the dialog is open: the tiles change on
+   *  every drag frame, and none of this needs to follow them — it is a snapshot
+   *  of the moment the user asked to save. `sheetCount` uses the same filter
+   *  `buildStitchManifest` does, so the count here is the count CTO's own title
+   *  will fall back to. */
+  const addToProjectSummary = useMemo(() => {
+    const empty = { sheetCount: 0, labels: [] as (string | null)[], hiddenPageNumbers: [] as number[] };
+    if (!showAddToProject) return empty;
+    const tiles = useStitchStore.getState().tiles;
+    const sheets = tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+    // Only the plan's OWN sheets are described by the plan — a page the user
+    // added later from another PDF shares nothing but an index with entry i.
+    const entries = planEntriesForTiles(stitchPlanRaw, sheets, sessionSourcePdf?.fileName);
+    const takeoffEntries = entries.filter((e) => e.kind === "takeoff");
+    return {
+      sheetCount: sheets.length,
+      labels: takeoffEntries.map((e) => e.label),
+      hiddenPageNumbers: takeoffEntries
+        .map((e) => e.pageNumber)
+        .filter((n): n is number => n != null),
+    };
+    // tileCount: a sheet added or removed while the dialog is open must change
+    // the preview.
+  }, [showAddToProject, stitchPlanRaw, sessionSourcePdf, tileCount]);
 
   return (
     <div className="flex flex-col h-screen bg-background">
+      {takeoffMode && (
+        <TakeoffModeStrip
+          sheetCount={tileCount}
+          unplacedCount={unplacedCount}
+          canAdd={tileCount > 0 && !isSaving}
+          onAddToProject={handleSaveToCto}
+        />
+      )}
       <StitchToolbar
         onAddPdf={() => setShowAddPdf(true)}
         hasTiles={tileCount > 0}
@@ -831,6 +897,7 @@ export default function StitchView() {
         cleanupBusy={cleanupBusy}
         embed={!!ctoContext?.embed}
         onCancel={handleCancel}
+        takeoffMode={takeoffMode}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
         {tileCount === 0 && (
@@ -890,6 +957,15 @@ export default function StitchView() {
               <span className="text-sm font-medium text-muted-foreground">Analyzing sheets…</span>
             </div>
           </div>
+        )}
+        {takeoffMode && unplacedCount > 0 && !coachDismissed && !showAddToProject && !cleanupReviewMode && (
+          <AlignCoachMark
+            count={unplacedCount}
+            onDismiss={() => {
+              setCoachDismissed(true);
+              setUnplacedCount(0);
+            }}
+          />
         )}
         {cleanupReviewMode && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2.5 shadow-lg">
@@ -984,65 +1060,79 @@ export default function StitchView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={showSaveToCtoDialog} onOpenChange={setShowSaveToCtoDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Save to Civiltakeoff</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground pb-3">
-            {ctoContext?.embed
-              ? "Adds the stitched sheet as a new page on this project."
-              : "Choose how to save the stitched PDF in your project."}
-          </p>
-          <div className="grid gap-2">
-            {!ctoContext?.embed && (
-              <>
+      {/* The where-to-save dialog is the NON-takeoff CTO session's save. Takeoff-v2
+          mode has one destination and confirms with AddToProjectDialog instead. */}
+      {!takeoffMode && (
+        <Dialog open={showSaveToCtoDialog} onOpenChange={setShowSaveToCtoDialog}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Save to Civiltakeoff</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground pb-3">
+              Choose how to save the stitched PDF in your project.
+            </p>
+            <div className="grid gap-2">
+              <Button
+                variant="outline"
+                className="justify-start"
+                onClick={() => doSaveToCto("overwrite")}
+              >
+                Overwrite current file
+              </Button>
+              <div className="flex flex-col gap-2">
                 <Button
                   variant="outline"
                   className="justify-start"
-                  onClick={() => doSaveToCto("overwrite")}
+                  onClick={() => {
+                    const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
+                    const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+                    doSaveToCto("new_file", finalName);
+                  }}
                 >
-                  Overwrite current file
+                  Save as new document
                 </Button>
-                <div className="flex flex-col gap-2">
-                  <Button
-                    variant="outline"
-                    className="justify-start"
-                    onClick={() => {
-                      const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
-                      const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
-                      doSaveToCto("new_file", finalName);
-                    }}
-                  >
-                    Save as new document
-                  </Button>
-                  <label className="text-xs text-muted-foreground pl-2">
-                    File name (you can edit)
-                  </label>
-                  <Input
-                    value={saveToCtoNewFileName}
-                    onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
-                    placeholder="Project name - Stitched"
-                    className="font-mono text-sm"
-                  />
-                </div>
-              </>
-            )}
-            <Button
-              variant="outline"
-              className="justify-start"
-              onClick={() => doSaveToCto("project_page")}
-            >
-              Add as project page
-            </Button>
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0 pt-2">
-            <Button variant="outline" onClick={() => setShowSaveToCtoDialog(false)}>
-              Cancel
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+                <label className="text-xs text-muted-foreground pl-2">
+                  File name (you can edit)
+                </label>
+                <Input
+                  value={saveToCtoNewFileName}
+                  onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
+                  placeholder="Project name - Stitched"
+                  className="font-mono text-sm"
+                />
+              </div>
+              <Button
+                variant="outline"
+                className="justify-start"
+                onClick={() => doSaveToCto("project_page")}
+              >
+                Add as project page
+              </Button>
+            </div>
+            <DialogFooter className="gap-2 sm:gap-0 pt-2">
+              <Button variant="outline" onClick={() => setShowSaveToCtoDialog(false)}>
+                Cancel
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      {takeoffMode && (
+        <AddToProjectDialog
+          open={showAddToProject}
+          onOpenChange={setShowAddToProject}
+          projectName={ctoContext?.project_name}
+          labels={addToProjectSummary.labels}
+          sheetCount={addToProjectSummary.sheetCount}
+          hiddenPageNumbers={addToProjectSummary.hiddenPageNumbers}
+          scaleFeetPerInch={referenceScaleFeetPerInch}
+          busy={isSaving}
+          onConfirm={() => {
+            setShowAddToProject(false);
+            void doSaveToCto("project_page");
+          }}
+        />
+      )}
       <TourOverlay tourId="stitch" />
     </div>
   );

@@ -1,0 +1,167 @@
+import { describe, it, expect } from "vitest";
+import {
+  planEntriesForTiles,
+  siteSheetTitlePreview,
+  hiddenPagesSentence,
+  type TileForPlan,
+} from "./addToProjectCopy";
+
+const SOURCE = "Site sheet source 12345678.pdf";
+
+function tile(sourcePageIndex: number, extra: Partial<TileForPlan> = {}): TileForPlan {
+  return { sourcePageIndex, sourceFileName: SOURCE, ...extra };
+}
+
+function plan(entries: unknown[], version: unknown = 1): unknown {
+  return { version, mode: "auto", entries };
+}
+
+const takeoff = (label: string | null, pageNumber?: number) => ({
+  kind: "takeoff",
+  pageUuid: `uuid-${label}`,
+  scaleFeetPerInch: 20,
+  label,
+  ...(pageNumber === undefined ? {} : { pageNumber }),
+});
+
+describe("planEntriesForTiles", () => {
+  it("maps tiles to plan entries by sourcePageIndex, in tile order", () => {
+    const raw = plan([takeoff("C-3.1", 5), takeoff("C-3.2", 6), takeoff("C-3.3", 7)]);
+    // Tiles are deliberately out of index order — the basket order is the tile
+    // order, and that is what the title reads.
+    const got = planEntriesForTiles(raw, [tile(2), tile(0)], SOURCE);
+    expect(got).toEqual([
+      { kind: "takeoff", label: "C-3.3", pageNumber: 7 },
+      { kind: "takeoff", label: "C-3.1", pageNumber: 5 },
+    ]);
+  });
+
+  it("skips scale stamps and promoted tiles (no PDF source)", () => {
+    const raw = plan([takeoff("C-3.1", 5), takeoff("C-3.2", 6)]);
+    const got = planEntriesForTiles(
+      raw,
+      [tile(-1, { isScaleStamp: true }), tile(-1), tile(1)],
+      SOURCE,
+    );
+    expect(got).toEqual([{ kind: "takeoff", label: "C-3.2", pageNumber: 6 }]);
+  });
+
+  it("reports a page placed twice only once, at its first tile", () => {
+    const raw = plan([takeoff("C-3.1", 5), takeoff("C-3.2", 6)]);
+    const got = planEntriesForTiles(raw, [tile(1), tile(0), tile(1)], SOURCE);
+    expect(got.map((e) => e.label)).toEqual(["C-3.2", "C-3.1"]);
+  });
+
+  it("ignores tiles that came from a different PDF", () => {
+    const raw = plan([takeoff("C-3.1", 5), takeoff("C-3.2", 6)]);
+    const got = planEntriesForTiles(
+      raw,
+      [tile(0), tile(1, { sourceFileName: "Some other plans.pdf" })],
+      SOURCE,
+    );
+    expect(got.map((e) => e.label)).toEqual(["C-3.1"]);
+  });
+
+  it("keeps every tile when no expected file name is given", () => {
+    const raw = plan([takeoff("C-3.1", 5), takeoff("C-3.2", 6)]);
+    const tiles = [{ sourcePageIndex: 0 }, { sourcePageIndex: 1 }];
+    expect(planEntriesForTiles(raw, tiles).map((e) => e.label)).toEqual(["C-3.1", "C-3.2"]);
+    expect(planEntriesForTiles(raw, tiles, "").map((e) => e.label)).toEqual(["C-3.1", "C-3.2"]);
+  });
+
+  it("carries document entries through with a null page number", () => {
+    const raw = plan([
+      takeoff("C-3.1", 5),
+      { kind: "document", documentId: "d1", documentPage: 6, scaleFeetPerInch: null, label: "Bid docs — p.7" },
+    ]);
+    expect(planEntriesForTiles(raw, [tile(1)], SOURCE)).toEqual([
+      { kind: "document", label: "Bid docs — p.7", pageNumber: null },
+    ]);
+  });
+
+  it("normalises a blank, missing or unusable label and page number to null", () => {
+    const raw = plan([
+      takeoff("   ", 5),
+      { kind: "takeoff", scaleFeetPerInch: 20 },
+      takeoff("C-3.3", 0),
+      { kind: "takeoff", label: "C-3.4", pageNumber: "6" },
+    ]);
+    const got = planEntriesForTiles(raw, [tile(0), tile(1), tile(2), tile(3)], SOURCE);
+    expect(got).toEqual([
+      { kind: "takeoff", label: null, pageNumber: 5 },
+      { kind: "takeoff", label: null, pageNumber: null },
+      { kind: "takeoff", label: "C-3.3", pageNumber: null },
+      { kind: "takeoff", label: "C-3.4", pageNumber: null },
+    ]);
+  });
+
+  it("skips a tile whose index is past the end of the plan", () => {
+    const raw = plan([takeoff("C-3.1", 5)]);
+    expect(planEntriesForTiles(raw, [tile(0), tile(4)], SOURCE).map((e) => e.label)).toEqual(["C-3.1"]);
+  });
+
+  it("returns nothing for a missing, foreign or malformed plan", () => {
+    const tiles = [tile(0)];
+    expect(planEntriesForTiles(null, tiles, SOURCE)).toEqual([]);
+    expect(planEntriesForTiles(undefined, tiles, SOURCE)).toEqual([]);
+    expect(planEntriesForTiles("nope", tiles, SOURCE)).toEqual([]);
+    expect(planEntriesForTiles(plan([takeoff("C-3.1", 5)], 2), tiles, SOURCE)).toEqual([]);
+    expect(planEntriesForTiles({ version: 1, mode: "auto" }, tiles, SOURCE)).toEqual([]);
+  });
+});
+
+describe("siteSheetTitlePreview", () => {
+  it("falls back to the sheet count when nothing is labeled", () => {
+    expect(siteSheetTitlePreview([], 3)).toBe("Site sheet — 3 sheets");
+    expect(siteSheetTitlePreview([null, undefined, "", "  "], 4)).toBe("Site sheet — 4 sheets");
+  });
+
+  it("says 'sheet' for a single unlabeled sheet", () => {
+    expect(siteSheetTitlePreview([], 1)).toBe("Site sheet — 1 sheet");
+  });
+
+  it("names the one label when only one distinct label resolves", () => {
+    expect(siteSheetTitlePreview(["C-3.1"], 1)).toBe("Site sheet — C-3.1");
+    expect(siteSheetTitlePreview(["C-3.1", "C-3.1"], 2)).toBe("Site sheet — C-3.1");
+  });
+
+  it("spans first…last, de-duplicated, in the order given", () => {
+    expect(siteSheetTitlePreview(["C-3.1", "C-3.2", "C-3.2", "C-3.4"], 4)).toBe(
+      "Site sheet — C-3.1…C-3.4",
+    );
+    // Tile order, not sorted order: the last TILE names the end of the span.
+    expect(siteSheetTitlePreview(["C-3.4", "C-3.1"], 2)).toBe("Site sheet — C-3.4…C-3.1");
+  });
+
+  it("uses a Unicode ellipsis, not three dots", () => {
+    expect(siteSheetTitlePreview(["A", "Z"], 2)).toBe("Site sheet — A…Z");
+    expect(siteSheetTitlePreview(["A", "Z"], 2)).not.toContain("...");
+  });
+});
+
+describe("hiddenPagesSentence", () => {
+  it("omits the row when nothing will be hidden", () => {
+    expect(hiddenPagesSentence([])).toBeNull();
+    expect(hiddenPagesSentence([0, -1, 1.5, NaN])).toBeNull();
+  });
+
+  it("reads one page in the singular", () => {
+    expect(hiddenPagesSentence([5])).toBe("Page 5 will be hidden from the page list");
+  });
+
+  it("joins two pages with 'and'", () => {
+    expect(hiddenPagesSentence([5, 6])).toBe("Pages 5 and 6 will be hidden from the page list");
+  });
+
+  it("comma-separates three or more, 'and' before the last", () => {
+    expect(hiddenPagesSentence([5, 6, 9])).toBe(
+      "Pages 5, 6 and 9 will be hidden from the page list",
+    );
+  });
+
+  it("de-duplicates and reads ascending regardless of tile order", () => {
+    expect(hiddenPagesSentence([9, 5, 6, 5])).toBe(
+      "Pages 5, 6 and 9 will be hidden from the page list",
+    );
+  });
+});

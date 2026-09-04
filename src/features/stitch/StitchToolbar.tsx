@@ -84,6 +84,12 @@ export interface StitchToolbarProps {
   embed?: boolean;
   /** Called when Cancel is clicked in embed mode. */
   onCancel?: () => void;
+  /** Takeoff-v2 mode (the site-sheet builder): the step strip above owns the
+   *  brand row and the one save, and CTO's own panel header owns Cancel — so
+   *  the brand/Cancel row, "Clear session" and the whole Export group are
+   *  hidden here. Add PDF stays (adding a sheet later is allowed) and so does
+   *  Help. Every arrange tool — align, crop, clean-up, scale — is untouched. */
+  takeoffMode?: boolean;
 }
 
 const POINT_ALIGN_STEP_LABELS = [
@@ -163,6 +169,7 @@ export function StitchToolbar({
   cleanupBusy,
   embed,
   onCancel,
+  takeoffMode,
 }: StitchToolbarProps) {
   // Shallow-picked subscription: avoids re-rendering the whole toolbar on
   // store changes it doesn't use (e.g. panOffset during panning). Tile
@@ -367,19 +374,23 @@ export function StitchToolbar({
   return (
     <header className="flex flex-col gap-1.5 border-b shrink-0 px-2.5 py-2 bg-muted/30">
       <div className="flex items-center gap-1.5 flex-wrap text-xs">
-        <div className="flex items-center gap-1.5">
-          {embed ? (
-            <Button variant="ghost" size="sm" className="h-7 shrink-0" title="Cancel and close" onClick={onCancel}>
-              Cancel
-            </Button>
-          ) : (
-            <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
-              <ArrowLeft className="h-3.5 w-3.5" />
-            </Link>
-          )}
-          <span className="font-semibold text-sm">Stitch PDFs</span>
-        </div>
-        <div className="h-5 w-px bg-border" aria-hidden />
+        {!takeoffMode && (
+          <>
+            <div className="flex items-center gap-1.5">
+              {embed ? (
+                <Button variant="ghost" size="sm" className="h-7 shrink-0" title="Cancel and close" onClick={onCancel}>
+                  Cancel
+                </Button>
+              ) : (
+                <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </Link>
+              )}
+              <span className="font-semibold text-sm">Stitch PDFs</span>
+            </div>
+            <div className="h-5 w-px bg-border" aria-hidden />
+          </>
+        )}
         <div className="flex items-center gap-0.5" role="group" aria-label="History">
           <Button variant="outline" size="icon" className="h-7 w-7 shrink-0" disabled={!canUndo} title="Undo (Ctrl+Z)" onClick={undo}>
             <Undo2 className="h-3.5 w-3.5" />
@@ -427,7 +438,7 @@ export function StitchToolbar({
             <FilePlus className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
         )}
-        {onClearSession && (
+        {onClearSession && !takeoffMode && (
           <IconButtonWithTooltip variant="outline" title="Clear session and start fresh (removes all tiles, resets canvas)" label="Clear session" onClick={onClearSession}>
             <RotateCcw className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
@@ -626,7 +637,9 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         </div>
         <div className="flex-1 min-w-2" />
-        <div className="flex items-center gap-0.5" role="group" aria-label="Export" data-tour="stitch-export">
+        {!takeoffMode && (
+          <>
+            <div className="flex items-center gap-0.5" role="group" aria-label="Export" data-tour="stitch-export">
           <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Download stitched PDF" label={isSaving ? "Saving…" : "Download"} onClick={() => onSaveAndFlatten(false)}>
             <Download className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
@@ -650,7 +663,9 @@ export function StitchToolbar({
             </IconButtonWithTooltip>
           )}
         </div>
-        <div className="h-5 w-px bg-border" aria-hidden />
+            <div className="h-5 w-px bg-border" aria-hidden />
+          </>
+        )}
         <div className="relative inline-flex">
           <IconButtonWithTooltip variant="outline" title="Need help? Take a guided tour of the stitch tools" label="Help" onClick={() => { nudgeDismissedRef.current = true; setShowHelpNudge(false); startTour("stitch"); }}>
             <HelpCircle className="h-3.5 w-3.5 shrink-0" />
