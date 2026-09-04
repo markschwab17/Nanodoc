@@ -83,3 +83,40 @@ describe("detectDrawingFrame", () => {
     expect(f).toEqual([20, 20, 720, 780]);
   });
 });
+
+describe("detectDrawingFrame — a divider with drawing beyond it is not the frame", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const vline = (id: string, x: number, y0 = 0, y1 = 800) => ({ id, closed: false, pts: new Float32Array([x, y0, x, y1]) });
+  const hline = (id: string, y: number, x0 = 0, x1 = 1000) => ({ id, closed: false, pts: new Float32Array([x0, y, x1, y]) });
+  /** Short diagonal "drawing", spread evenly across the width. */
+  const content = () => Array.from({ length: 60 }, (_, i) => {
+    const x = 60 + i * 14, y = 100 + (i % 7) * 80;
+    return { id: `d${i}`, closed: false, pts: new Float32Array([x, y, x + 10, y + 14]) };
+  });
+
+  test("a full-height line at 0.56 W is drawing, not the frame's right edge", () => {
+    // A right-of-way line, a long wall, a section cut — plenty of real sheets carry a
+    // full-height line past the halfway mark. Taking it as the frame would cut the
+    // drawing in half and pull the real matchline callouts out of every band.
+    const f = detectDrawingFrame(
+      [vline("l", 20), vline("row", 560), vline("r", 980),
+       hline("t", 20, 20, 980), hline("b", 780, 20, 980), ...content()],
+      view,
+    );
+    expect(f).not.toBeNull();
+    expect(f![2]).toBe(980); // the sheet border, not the interior line
+  });
+
+  test("a divider with nothing drawn beyond it IS the frame's right edge", () => {
+    // Same sheet with the drawing stopping at the divider: now 560 is where the
+    // drawing genuinely ends (a notes column holds text, not linework).
+    const inside = content().filter((g) => g.pts[0] < 540);
+    const f = detectDrawingFrame(
+      [vline("l", 20), vline("div", 560), vline("r", 980),
+       hline("t", 20, 20, 980), hline("b", 780, 20, 980), ...inside],
+      view,
+    );
+    expect(f).not.toBeNull();
+    expect(f![2]).toBe(560);
+  });
+});

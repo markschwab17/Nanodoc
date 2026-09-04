@@ -15,7 +15,7 @@
  *      gated by a prior/token/edge window so periodic lot geometry can't alias.
  */
 
-import { parseSheetRefs } from "./tokens";
+import { parseSheetRefs, normCode } from "./tokens";
 import { extractPageLabel } from "./pageLabels";
 import type { Label, Geom, PageExtract } from "./types";
 import type { SheetRole } from "./pageLabels";
@@ -374,30 +374,6 @@ export function findBandStroke(
 }
 
 /**
- * The STRONGEST matchline-strength dashed line in a sheet's OUTER band on one side of
- * an axis — found INDEPENDENTLY of any anchor label (the post-solve seam-verification
- * probe). This is deliberately NOT the anchor's own stroke pick: verifySeams re-locates
- * each sheet's border on its own, in the band FACING the neighbour, so a solve that was
- * placed to make ONE (possibly wrong) stroke pick agree is re-checked against the
- * dominant physical border. axis "v" → returns a vertical line's x; "h" → a horizontal
- * line's y. `side` "hi" = the high-cross outer band, "lo" = the low-cross outer band.
- * A solid full-span border (one unbroken stroke ≈ full dimension) is excluded by the
- * maxFrac cap so a dashed matchline wins. Returns the cross-coord (page pts) or null.
- */
-export function facingStroke(
-  geometry: Geom[], view: [number, number, number, number],
-  axis: "h" | "v", side: "lo" | "hi", frac = 0.35
-): number | null {
-  const [x0, y0, x1, y1] = view;
-  const dim = axis === "v" ? x1 - x0 : y1 - y0;
-  const c0 = axis === "v" ? x0 : y0;
-  const lo = side === "hi" ? c0 + (1 - frac) * dim : c0;
-  const hi = side === "hi" ? c0 + dim : c0 + frac * dim;
-  const cand = bandStrokeCandidates(geometry, axis, lo, hi, view, 0.12, 0.98)[0];
-  return cand ? cand.cross : null;
-}
-
-/**
  * ONE-SIDED matchline stroke anchor: a precise perpendicular anchor between a unit j
  * that REFERENCES a neighbour i ("SEE SHEET n" at j's `refEdge`) and i, when i carries
  * NO reciprocal label to locate its own copy of the shared matchline. Both sheets still
@@ -605,7 +581,7 @@ export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number
   const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view, sj.drawingFrame).filter((r) => r.matchline && r.edge !== "interior");
   const refs = (r: any, other: any) =>
     (r.sheet != null && r.sheet === (other.printedNo ?? other.no)) ||
-    (r.sheetCode && other.sheetCode && r.sheetCode.toUpperCase() === other.sheetCode.toUpperCase());
+    (r.sheetCode && other.sheetCode && normCode(r.sheetCode) === normCode(other.sheetCode));
   for (const a of refsI) for (const b of refsJ) {
     if (OPP[a.edge] !== b.edge) continue;
     if (!(refs(a, sj) || refs(b, si))) continue; // only trust cross-referenced matchlines
@@ -852,8 +828,14 @@ export interface SeamReportEntry {
     perpDeltaFt?: number;
     /** Which line `perpDeltaFt` was measured against: `own` = the seam's OWN
      *  label-located matchline (the trustworthy case); `band` = a re-pick of the
-     *  facing bands' matchline-strength candidates (no located matchline). */
-    strokeSource?: "own" | "band";
+     *  facing bands' matchline-strength candidates (no located matchline);
+     *  `band-rescue` = the seam's own strokes DISAGREED and a nearby band candidate
+     *  saved it — enough to clear `suspect`, never enough to reach `verified`. */
+    strokeSource?: "own" | "band" | "band-rescue";
+    /** Did this seam independently fix the ALONG-matchline axis (crossing consensus,
+     *  accepted joint sweep, decisive vote margin, or a token pair to ≤2 ft)? The
+     *  sibling-strip shortcut is deliberately NOT honoured here. */
+    alongAnchored?: boolean;
     /** This seam's own residual against the solved layout (ft), over the axes the
      *  constraint drives. Surfaced per seam for the UI. */
     residFt?: number;
@@ -873,6 +855,15 @@ export interface StitchResult {
   seamReport?: SeamReportEntry[];
   /** Overall honesty verdict: all seams verified / ≥50% verified & none suspect / otherwise. */
   alignmentVerdict?: AlignmentVerdict;
+  /** PAGE INDEXES whose placement is fixed on the ALONG-matchline axis too — see the
+   *  walk in `stitchSheets`. `placements` (i.e. `aligned`) is a CONNECTIVITY flag: a
+   *  unit reached only over seams whose along axis was never resolved is connected
+   *  but free to slide along the seam by tens of feet. Absent for keymap/none. */
+  alongAnchored?: number[];
+  /** How far a non-along-anchored unit could slide, in feet: the widest gap between
+   *  the winning and runner-up candidates of a joint along-sweep that declined. 0
+   *  when nothing was measured. */
+  worstAlongUncertaintyFt?: number;
 }
 
 /**
@@ -1079,7 +1070,7 @@ export function stitchSheets(
   const keys = sheets.map((s) => s.no);
   // sheet-code -> sheet no, for resolving "SEE SHEET C2.01" cross-references.
   const codeToNo = new Map<string, number>();
-  for (const s of sheets) if (s.sheetCode) codeToNo.set(s.sheetCode.toUpperCase(), s.no);
+  for (const s of sheets) if (s.sheetCode) codeToNo.set(normCode(s.sheetCode), s.no);
 
   const FURN_MIN = Math.max(2, Math.min(3, sheets.length));
   const furn = buildFurnitureFilter(sheets, FURN_MIN);
@@ -1173,7 +1164,7 @@ export function stitchSheets(
         for (const t of byPrinted.get(r.sheet) || [])
           if (t.no !== s.no && (t.pageIndex == null || s.pageIndex == null || t.pageIndex !== s.pageIndex)) targets.push(t);
       } else if (r.sheetCode) {
-        const t = codeToNo.get(r.sheetCode.toUpperCase());
+        const t = codeToNo.get(normCode(r.sheetCode));
         if (t != null && t !== s.no && byNo.has(t)) targets.push(byNo.get(t)!);
       }
       for (const t of targets) {
@@ -1728,7 +1719,7 @@ export function stitchSheets(
   // ── POST-SOLVE SEAM VERIFICATION (the cannot-align honesty gate) ─────────────
   // For every placed pair, decide whether the seam is PHYSICALLY verified. The key
   // check is an INDEPENDENT re-measure of BOTH sheets' matchline strokes at the
-  // SOLVED positions (facingStroke) — two wrong lines rarely land on the same canvas
+  // SOLVED positions — two wrong lines rarely land on the same canvas
   // line, so a seam the solver placed against a fooled stroke pick (deep-inset border,
   // title-block line) shows the two facing borders sitting >3 ft apart and is flagged
   // suspect. A seam is verified only on hard evidence: a token residual ≤2 ft, or
@@ -1737,6 +1728,8 @@ export function stitchSheets(
   for (const sw of jointSweeps) if (sw.accepted) for (const sm of sw.seams) if (sm.matches >= 2)
     jointPinned.add(sm.i < sm.j ? `${sm.i}-${sm.j}` : `${sm.j}-${sm.i}`);
   const seamReport: SeamReportEntry[] = [];
+  /** Seams that independently fixed the along-matchline axis (see the walk below). */
+  const alongEdges: [number, number][] = [];
   for (const r of pairs) {
     if (!r.channel || r.weight <= 0 || !mainSet.has(r.i) || !mainSet.has(r.j)) continue;
     const si = byNo.get(r.i)!, sj = byNo.get(r.j)!;
@@ -1764,7 +1757,12 @@ export function stitchSheets(
     let perpMag = 0;
     // Which line the check is measured against: "own" = the seam's OWN located
     // matchline (anchor / stroke prior), "band" = a re-pick from the facing band.
-    let strokeSource: "own" | "band" | undefined;
+    let strokeSource: "own" | "band" | "band-rescue" | undefined;
+    // The rescue below saves a seam whose OWN two strokes disagree, on the strength
+    // of SOME other line in a facing band lining up. That is weaker evidence than a
+    // stroke pair that coincides, so it can clear the suspect bar but must never
+    // reach `verified`.
+    let rescued = false;
     if (perp) {
       const di = perp === "x" ? pj.x - pi.x : pj.y - pi.y;
       perpMag = Math.abs(di);
@@ -1772,8 +1770,7 @@ export function stitchSheets(
         const axis: "h" | "v" = perp === "x" ? "v" : "h";
         const baseI = perp === "x" ? pi.x : pi.y, baseJ = perp === "x" ? pj.x : pj.y;
         // Every matchline-strength line in each sheet's outer band FACING the
-        // neighbour, in CANVAS feet at the solved positions. `facingStroke`'s single
-        // strongest pick is just the head of these lists.
+        // neighbour, in CANVAS feet at the solved positions, strongest first.
         const bandFt = (s: DriverSheet, base: number, side: "lo" | "hi") => {
           const [x0, y0, x1, y1] = s.view;
           const dim = axis === "v" ? x1 - x0 : y1 - y0;
@@ -1810,7 +1807,7 @@ export function stitchSheets(
           // within tolerance of the other's line, the seam is not contradicted.
           if (ownGap > coincideTol) {
             const rescue = Math.min(nearest(candI, ownJ), nearest(candJ, ownI));
-            if (rescue <= coincideTol) perpDeltaFt = rescue;
+            if (rescue <= coincideTol) { perpDeltaFt = rescue; rescued = true; strokeSource = "band-rescue"; }
           }
         } else if (candI.length && candJ.length) {
           // No located matchline on this seam (segment/seam channels): fall back to
@@ -1829,10 +1826,24 @@ export function stitchSheets(
     // an ANCHOR seam needs ≥1.5×; a plain segVote seam needs ≥2× (a stroke-coincident
     // seam whose along is only a weak segVote is NOT verified — it can alias sideways).
     const isAnchor = channel.startsWith("anchor");
-    let alongDecisive: boolean;
-    if (meta.alongPrecise || jointPinned.has(key) || siblings) alongDecisive = true;
-    else if (marginRatio != null) alongDecisive = isAnchor ? marginRatio >= 1.5 : marginRatio >= 2;
-    else alongDecisive = false;
+    // STRICT: the same test WITHOUT the sibling shortcut. Two strips of one page share
+    // an overlap column, which fixes them relative to EACH OTHER and says nothing about
+    // where either sits along the matchline it shares with its neighbours — so the
+    // shortcut must not propagate along-anchoring across a page (see the walk below).
+    let alongDecisiveStrict: boolean;
+    if (meta.alongPrecise || jointPinned.has(key)) alongDecisiveStrict = true;
+    else if (marginRatio != null) alongDecisiveStrict = isAnchor ? marginRatio >= 1.5 : marginRatio >= 2;
+    else alongDecisiveStrict = false;
+    const alongDecisive = alongDecisiveStrict || siblings;
+    // Does THIS seam independently fix the along-matchline axis? Either the strict
+    // test above, or a token pair registered to ≤2 ft (shared text on both sheets
+    // pins both axes outright). A SIBLING seam never anchors: the two strips of one
+    // page share an overlap column, and the segment vote across it is matching the
+    // same content twice — on the reference set it scores a margin of 14 and puts
+    // the two strips 147 ft from where they belong relative to each other.
+    const alongAnchoredSeam = !siblings && (alongDecisiveStrict
+      || (/token/.test(channel) && r.residFt != null && r.residFt <= 2));
+    if (alongAnchoredSeam) alongEdges.push([r.i, r.j]);
 
     // Abutment-floor adjacency: a perp offset sitting essentially AT the 0.5× floor is
     // on the gross-overlap alias boundary (real abutting seams are ~0.8× the sheet dim).
@@ -1868,11 +1879,13 @@ export function stitchSheets(
       status = "suspect"; reason = "perp offset at the abutment floor (gross-overlap alias)";
     } else if (/token/.test(channel) && r.residFt != null && r.residFt <= 2) {
       status = "verified";
-    } else if (strokeVerified && alongDecisive) {
+    } else if (strokeVerified && alongDecisive && !rescued) {
       status = "verified";
     } else {
       status = "plausible";
-      reason = !strokesFound ? "matchline strokes not both found"
+      reason = rescued
+        ? "the seam's own strokes disagree; a nearby matchline in the facing band lines up"
+        : !strokesFound ? "matchline strokes not both found"
         : alongDecisive ? "cross-seam axis confirmed; along axis not independently checked"
         : "cross-seam axis confirmed; along axis not decisively resolved";
     }
@@ -1888,7 +1901,7 @@ export function stitchSheets(
         strokeSource,
         residFt: rr?.residFt, perpResidFt: rr?.perpResidFt,
         marginRatio: marginRatio != null ? +marginRatio.toFixed(2) : undefined,
-        alongDecisive, reason,
+        alongDecisive, alongAnchored: alongAnchoredSeam, reason,
       },
     });
   }
@@ -1903,11 +1916,60 @@ export function stitchSheets(
     else alignmentVerdict = "unverified";
   }
 
+  // ── ALONG-AXIS ANCHORING ────────────────────────────────────────────────────
+  // `aligned` has only ever meant "in the largest connected component" — a
+  // CONNECTIVITY flag, not a quality one. A unit reached across seams whose ALONG-
+  // matchline axis was never resolved is connected, and free to slide along that
+  // seam: on the reference set p8 sits 42 ft, p9 22 ft and the two strips 63–70 ft
+  // from ground truth while every one of their cross-seam residuals is ≤1.33 ft.
+  // Offering that as an alignment is exactly the dishonesty this gate closes.
+  //
+  // So: walk out from the solve's root over the seams that INDEPENDENTLY fixed the
+  // along axis (`alongAnchoredSeam` above). A unit the walk reaches is pinned on both
+  // axes relative to the root; one it does not reach is placed but only pinned across
+  // the seam. Reported, never blocked here — the caller decides what to do with it.
+  const alongAdj = new Map<number, number[]>();
+  for (const [a, b] of alongEdges) {
+    (alongAdj.get(a) ?? alongAdj.set(a, []).get(a)!).push(b);
+    (alongAdj.get(b) ?? alongAdj.set(b, []).get(b)!).push(a);
+  }
+  const anchoredUnits = new Set<number>();
+  if (mainSet.has(rootKey)) {
+    const stack = [rootKey];
+    anchoredUnits.add(rootKey);
+    while (stack.length) {
+      const u = stack.pop()!;
+      for (const v of alongAdj.get(u) ?? []) if (!anchoredUnits.has(v)) { anchoredUnits.add(v); stack.push(v); }
+    }
+  }
+  // Reported per PAGE, and a page counts only when EVERY unit it placed is anchored:
+  // a two-strip page commits as one tile per strip but they share a page index, so a
+  // half-anchored page must not be claimed.
+  const unitsByPage = new Map<number, number[]>();
+  for (const k of main) {
+    const sh = byNo.get(k)!;
+    const pi = sh.pageIndex ?? sh.no;
+    (unitsByPage.get(pi) ?? unitsByPage.set(pi, []).get(pi)!).push(k);
+  }
+  const alongAnchored: number[] = [];
+  for (const [pi, us] of unitsByPage) if (us.every((u) => anchoredUnits.has(u))) alongAnchored.push(pi);
+  alongAnchored.sort((a, b) => a - b);
+  // How far an un-anchored unit could actually slide: the separation between the
+  // winning and runner-up candidates of a joint sweep that DECLINED to choose. That
+  // is the honest ± the toast quotes.
+  let worstAlongUncertaintyFt = 0;
+  for (const sw of jointSweeps) {
+    if (sw.accepted || sw.top3.length < 2) continue;
+    const sep = Math.abs(sw.top3[0].deltaFt - sw.top3[1].deltaFt);
+    if (sep > worstAlongUncertaintyFt) worstAlongUncertaintyFt = sep;
+  }
+
   const placements = new Map<number, { x: number; y: number }>();
   for (const k of main) placements.set(k, pos.get(k)!);
 
   return {
     root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs,
     method: main.length ? "geometric" : "none", jointSweeps, seamReport, alignmentVerdict,
+    alongAnchored, worstAlongUncertaintyFt: +worstAlongUncertaintyFt.toFixed(2),
   };
 }

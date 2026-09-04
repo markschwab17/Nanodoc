@@ -99,7 +99,7 @@ export function sliceExtract(extract: PageExtract, frame: Frame, marginPt = 36):
 export function detectDrawingFrame(
   geometry: { pts: Float32Array; closed?: boolean }[],
   view: [number, number, number, number],
-  { spanFrac = 0.9, minExtent = 0.55, minArea = 0.5, minInsetFrac = 0.02 } = {},
+  { spanFrac = 0.9, minExtent = 0.55, minArea = 0.5, minInsetFrac = 0.02, maxMassBeyond = 0.1 } = {},
 ): [number, number, number, number] | null {
   const [x0, y0, x1, y1] = view;
   const W = x1 - x0, H = y1 - y0;
@@ -107,6 +107,12 @@ export function detectDrawingFrame(
   const BIN = 2;
   const vSpans = new Map<number, number>(); // x-bin -> summed vertical length
   const hSpans = new Map<number, number>(); // y-bin -> summed horizontal length
+  // Drawing MASS by coordinate: total segment length whose midpoint sits in each
+  // 8 pt column / row, whatever its orientation. Used to reject a candidate "frame
+  // edge" that has plenty of drawing beyond it — see `highEdge`.
+  const MBIN = 8;
+  const xMass = new Map<number, number>(), yMass = new Map<number, number>();
+  let totalMass = 0;
   for (const g of geometry) {
     const pts = g.pts;
     if (!pts || pts.length < 4) continue;
@@ -123,8 +129,26 @@ export function detectDrawingFrame(
         const k = Math.round(((ay + by) / 2) / BIN);
         hSpans.set(k, (hSpans.get(k) || 0) + Math.abs(dx));
       }
+      const len = Math.hypot(dx, dy);
+      if (len <= 0) continue;
+      // Rulers are not DRAWING. A long axis-aligned run is a border, a frame line or
+      // a title-block rule; counting it as content would make the sheet border itself
+      // look like "drawing beyond the divider" and reject every real frame.
+      const axisAligned = Math.abs(dx) <= 3 || Math.abs(dy) <= 3;
+      if (axisAligned && len >= 0.5 * (Math.abs(dx) > Math.abs(dy) ? W : H)) continue;
+      totalMass += len;
+      const kx = Math.round(((ax + bx) / 2) / MBIN), ky = Math.round(((ay + by) / 2) / MBIN);
+      xMass.set(kx, (xMass.get(kx) || 0) + len);
+      yMass.set(ky, (yMass.get(ky) || 0) + len);
     }
   }
+  /** Fraction of the sheet's drawing that lies beyond `coord` on this axis. */
+  const massBeyond = (mass: Map<number, number>, coord: number): number => {
+    if (totalMass <= 0) return 0;
+    let sum = 0;
+    for (const [k, m] of mass) if (k * MBIN > coord) sum += m;
+    return sum / totalMass;
+  };
   const rulers = (spans: Map<number, number>, dim: number): number[] =>
     [...spans.entries()].filter(([, tot]) => tot >= spanFrac * dim).map(([k]) => k * BIN).sort((a, b) => a - b);
   // low edge: the innermost ruler inside the outer quarter (of the PAGE — that is
@@ -135,9 +159,18 @@ export function detectDrawingFrame(
     const c = rs.filter((v) => v <= lo + 0.25 * dim);
     return c.length ? c[c.length - 1] : lo;
   };
-  const highEdge = (rs: number[], lo: number, dim: number, fallback: number) => {
+  // A ruler is the drawing's far edge only when there is LITTLE DRAWING BEYOND IT.
+  // Without that test any full-height line past the halfway mark — a right-of-way
+  // line, a long wall, a section cut — becomes the "frame" and cuts the drawing in
+  // half, taking the real matchline callouts out of every band with it. A genuine
+  // notes/title column holds text, not linework, so the mass past its divider is
+  // small; the sheet border has nothing past it at all.
+  const highEdge = (rs: number[], lo: number, dim: number, fallback: number, mass?: Map<number, number>) => {
     const c = rs.filter((v) => v >= lo + minExtent * dim);
-    return c.length ? c[0] : fallback;
+    if (!c.length) return fallback;
+    if (!mass) return c[0];
+    for (const v of c) if (massBeyond(mass, v) <= maxMassBeyond) return v;
+    return fallback;
   };
   // A frame's borders span the FRAME, not the page: on a sheet whose drawing stops
   // at 72 % of the width, its top and bottom rules are 0.72 W long and a page-width
@@ -147,7 +180,7 @@ export function detectDrawingFrame(
   // outer-quarter / minExtent placement tests stay page-relative.
   const solve = (reqW: number, reqH: number): [number, number, number, number] => {
     const vs = rulers(vSpans, reqH), hs = rulers(hSpans, reqW);
-    return [lowEdge(vs, x0, W), lowEdge(hs, y0, H), highEdge(vs, x0, W, x1), highEdge(hs, y0, H, y1)];
+    return [lowEdge(vs, x0, W), lowEdge(hs, y0, H), highEdge(vs, x0, W, x1, xMass), highEdge(hs, y0, H, y1, yMass)];
   };
   const first = solve(W, H);
   const [fx0, fy0, fx1, fy1] = solve(first[2] - first[0], first[3] - first[1]);

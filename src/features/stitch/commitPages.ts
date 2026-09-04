@@ -75,6 +75,24 @@ export interface CommitInput {
   shouldAbort?: () => boolean;
 }
 
+/**
+ * A probe result the caller has already paid for, reused instead of re-running the
+ * solver. It must carry the honesty payload too: without it the commit had no seam
+ * report, so the demotion below silently did nothing and the modal path committed
+ * placements the plan path would have held back.
+ */
+export interface CachedProbePlacement {
+  placements: TilePlacement[];
+  rootFtPerIn: number;
+  worstResidFt: number;
+  method?: string;
+  seamReport?: SeamReportEntry[];
+  alignmentVerdict?: AlignmentVerdict;
+  alongAnchored?: number[];
+  worstAlongUncertaintyFt?: number;
+  refPageIndices?: number[];
+}
+
 export interface CommitResult {
   added: number;
   unalignedIds: string[];
@@ -83,9 +101,13 @@ export interface CommitResult {
    *  and WHY the run did not place everything (`'ok'` when it did). */
   verdict?: AlignmentVerdict;
   reason?: AutoAlignReason;
-  /** Per-seam quality, for the UI: which pages, how the seam rated, and how far it
-   *  sits from what its own measurement said. */
-  seams?: { pageIndexes: [number, number]; status: SeamStatus; residFt?: number; perpDeltaFt?: number }[];
+  /** Per-seam quality, for the UI: which pages, how the seam rated, how far it sits
+   *  from what its own measurement said, and whether it pinned the along axis. */
+  seams?: { pageIndexes: [number, number]; status: SeamStatus; residFt?: number; perpDeltaFt?: number; alongAnchored?: boolean }[];
+  /** Page indices pinned along the matchline as well as across it, and how far an
+   *  un-anchored one could slide. */
+  alongAnchored?: number[];
+  worstAlongUncertaintyFt?: number;
   /** Pages deliberately kept out of the tiling (overall/key/notes/index/details). */
   skipped?: { pageIndex: number; role: string }[];
   /** 0-based indices of committed pages carrying no readable sheet number or
@@ -245,7 +267,7 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
  *  `cached` placements the caller already probed), and commit as one undo step.
  *  Returns the report line; the caller shows it. Throws on failure. */
 export async function commitAutoAlign(
-  input: CommitInput & { cached?: { placements: TilePlacement[]; rootFtPerIn: number; worstResidFt: number } | null }
+  input: CommitInput & { cached?: CachedProbePlacement | null }
 ): Promise<CommitResult> {
   const {
     mupdf, doc, pdfBytes, fileName, selected, pageScales, uniformScale, pageCodes,
@@ -290,6 +312,8 @@ export async function commitAutoAlign(
   let skipped: { pageIndex: number; role: string }[] = [];
   let refPageIndices: number[] = [];
   let method: string = "none";
+  let alongAnchored: number[] | undefined;
+  let worstAlongUncertaintyFt = 0;
   if (cached) {
     // The cached path skips the solver entirely, so its own abort checkpoints
     // never run — check here instead.
@@ -297,6 +321,14 @@ export async function commitAutoAlign(
     placements = cached.placements;
     rootFtPerIn = cached.rootFtPerIn;
     worstResidFt = cached.worstResidFt;
+    // The honesty payload the probe already computed. `method` matters: without it
+    // every cached commit reported `method: "none"` and therefore the wrong reason.
+    method = cached.method ?? (cached.placements.some((p) => p.aligned) ? "geometric" : "none");
+    verdict = cached.alignmentVerdict;
+    seamReport = cached.seamReport;
+    alongAnchored = cached.alongAnchored;
+    worstAlongUncertaintyFt = cached.worstAlongUncertaintyFt ?? 0;
+    refPageIndices = cached.refPageIndices ?? selected;
   } else {
     const result = await autoStitch(mupdf, doc, selected, {
       userScale: uniformScale,
@@ -314,34 +346,42 @@ export async function commitAutoAlign(
     skipped = result.skipped.map((s) => ({ pageIndex: s.pageIndex, role: s.role }));
     refPageIndices = result.refPageIndices;
     method = result.method;
+    alongAnchored = result.alongAnchored;
+    worstAlongUncertaintyFt = result.worstAlongUncertaintyFt ?? 0;
   }
 
   // ── HONESTY GATE ON THE COMMIT ──────────────────────────────────────────────
-  // A placement the solver could not physically verify must not be presented as an
-  // alignment. Two cases are demoted to "unaligned" — placed below, selected, and
-  // counted in the coach mark — rather than committed into the composite:
-  //   • a unit every one of whose seams is SUSPECT (a seam is suspect only on
-  //     positive evidence it is wrong; one verified seam elsewhere still anchors it);
-  //   • a unit bonded ONLY through the band-seam channel, the weakest in the ladder.
-  // This is what the CTO plan path was missing: the modal has always refused to
-  // offer auto-align on an unverified set, while `commitAutoAlign` committed it.
+  // A placement the solver could not stand behind must not be presented as an
+  // alignment. Three cases are demoted to "unaligned" — placed below, selected, and
+  // named by the coach mark — rather than committed into the composite:
+  //   • a unit with ANY suspect seam and no verified one (a seam is suspect only on
+  //     positive evidence it is wrong; a verified seam elsewhere still anchors it);
+  //   • a unit bonded ONLY through the band-seam channel, the weakest in the ladder;
+  //   • a unit that is not ALONG-ANCHORED — connected across its seams but never
+  //     pinned along them, so it can sit tens of feet out while every cross-seam
+  //     residual is sub-foot. That is the reference set's p8 (42 ft), p9 (22 ft) and
+  //     both strips (63-70 ft), and it is the case that made "offered" mean "looks
+  //     right and is wrong".
+  // Demote, never block: the sheets are still placed, just not claimed as aligned.
   const demoted = new Set<number>();
-  if (seamReport?.length) {
-    const status = new Map<number, { verified: number; suspect: number; seamOnly: number; total: number }>();
-    for (const s of seamReport) {
-      for (const pageIndex of s.pageIndexes) {
-        const e = status.get(pageIndex) ?? { verified: 0, suspect: 0, seamOnly: 0, total: 0 };
-        e.total++;
-        if (s.status === "verified") e.verified++;
-        if (s.status === "suspect") e.suspect++;
-        if (s.detail.channel === "seam") e.seamOnly++;
-        status.set(pageIndex, e);
-      }
+  const alongSet = alongAnchored ? new Set(alongAnchored) : null;
+  const status = new Map<number, { verified: number; suspect: number; seamOnly: number; total: number }>();
+  for (const s of seamReport ?? []) {
+    for (const pageIndex of s.pageIndexes) {
+      const e = status.get(pageIndex) ?? { verified: 0, suspect: 0, seamOnly: 0, total: 0 };
+      e.total++;
+      if (s.status === "verified") e.verified++;
+      if (s.status === "suspect") e.suspect++;
+      if (s.detail.channel === "seam") e.seamOnly++;
+      status.set(pageIndex, e);
     }
-    for (const [pageIndex, e] of status) {
-      if (e.verified > 0) continue;
-      if (e.suspect === e.total || e.seamOnly === e.total) demoted.add(pageIndex);
-    }
+  }
+  for (const p of placements) {
+    if (!p.aligned) continue;
+    if (alongSet && !alongSet.has(p.pageIndex)) { demoted.add(p.pageIndex); continue; }
+    const e = status.get(p.pageIndex);
+    if (!e || e.verified > 0) continue;
+    if (e.suspect > 0 || e.seamOnly === e.total) demoted.add(p.pageIndex);
   }
 
   // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
@@ -395,17 +435,27 @@ export async function commitAutoAlign(
   const pagesWithoutRefs = selected.filter((p) => !refSet.has(p));
   let reason: AutoAlignReason = "ok";
   if (method === "none") reason = refPageIndices.length < 2 ? "no_refs" : "not_adjacent";
+  else if (alongSet && placements.some((p) => p.aligned && !alongSet.has(p.pageIndex))) reason = "along_unresolved";
   else if (verdict === "unverified" || demoted.size > 0) reason = "unverified";
   const alignedCount = selected.length - unalignedIds.length;
+  // The seam figure is TWO numbers, because a seam has two axes and only one of them
+  // was ever reported: "1.33 ft across" is the cross-seam residual, "±40 ft along" is
+  // how far an un-anchored sheet could slide along the matchline. Quoting only the
+  // first is what let a 42-ft error read as a 0.00-ft success.
+  const seamText = worstAlongUncertaintyFt > 0 && demoted.size > 0
+    ? `worst seam ${worstResidFt.toFixed(2)} ft across, ±${Math.round(worstAlongUncertaintyFt)} ft along`
+    : `worst seam ${worstResidFt.toFixed(2)} ft`;
   const message = unalignedIds.length > 0
-    ? `Aligned ${alignedCount} of ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft. ${unalignedIds.length} placed below for manual alignment.`
-    : `Aligned ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft.`;
+    ? `Aligned ${alignedCount} of ${selected.length} pages · ${seamText}. ${unalignedIds.length} placed below for manual alignment.`
+    : `Aligned ${selected.length} pages · ${seamText}.`;
   return {
     added: newTiles.length, unalignedIds, message,
     verdict, reason, skipped, pagesWithoutRefs,
+    alongAnchored, worstAlongUncertaintyFt,
     seams: seamReport?.map((s) => ({
       pageIndexes: s.pageIndexes, status: s.status,
       residFt: s.detail.residFt, perpDeltaFt: s.detail.perpDeltaFt,
+      alongAnchored: s.detail.alongAnchored,
     })),
   };
 }

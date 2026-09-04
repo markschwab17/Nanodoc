@@ -34,6 +34,10 @@ export interface ProbeResult {
   seamReport?: SeamReportEntry[];
   /** Cannot-align honesty verdict. Absent → old (pre-gate) behavior. */
   alignmentVerdict?: AlignmentVerdict;
+  /** Page indices pinned ALONG the matchline as well as across it, and how far an
+   *  un-anchored one could slide. Absent → the along gate is not applied. */
+  alongAnchored?: number[];
+  worstAlongUncertaintyFt?: number;
 }
 
 export type ProbeMessage =
@@ -55,5 +59,7 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     refPageIndices: res.refPageIndices,
     seamReport: res.seamReport,
     alignmentVerdict: res.alignmentVerdict,
+    alongAnchored: res.alongAnchored,
+    worstAlongUncertaintyFt: res.worstAlongUncertaintyFt,
   };
 }

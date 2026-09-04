@@ -218,3 +218,23 @@ describe("autoAlignExplanation", () => {
     expect(s.endsWith("Page 5 is an overall plan and was left out of the alignment.")).toBe(true);
   });
 });
+
+describe("autoAlignExplanation — the along-matchline case", () => {
+  it("says the sheets meet the line but not where along it, with the slide in feet", () => {
+    expect(autoAlignExplanation({
+      reason: "along_unresolved", alongUnresolvedPages: [9, 8], worstAlongUncertaintyFt: 42,
+    })).toBe(
+      "Pages 8 and 9 meet the matchline correctly, but nothing fixes where along it they sit — they could be up to 42 ft out along it.",
+    );
+  });
+
+  it("omits the figure when nothing measured it", () => {
+    expect(autoAlignExplanation({ reason: "along_unresolved", alongUnresolvedPages: [3] })).toBe(
+      "Page 3 meets the matchline correctly, but nothing fixes where along it the sheet sits.",
+    );
+  });
+
+  it("falls back to 'these sheets' when no page is named", () => {
+    expect(autoAlignExplanation({ reason: "along_unresolved" })!).toContain("These sheets meet the matchline correctly");
+  });
+});

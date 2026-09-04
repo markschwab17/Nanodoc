@@ -132,7 +132,10 @@ describe("resolvePrintedNos", () => {
     expect(map.get(2)).toBe(6);
   });
 
-  it("does not reset a collision group with no OCR member (two text pages left as-is)", () => {
+  it("(e) two pages claiming one number from the SAME source both fall back", () => {
+    // Neither reading can be preferred, and leaving both is the worse failure:
+    // byPrinted.get(4) would return two pages and every "SEE SHEET 4" would anchor
+    // both. Distinct page-order fallbacks are wrong in a way that cannot fan out.
     const map = resolvePrintedNos(
       [
         { pageIndex: 0, printedNo: 4, source: "text" },
@@ -140,8 +143,32 @@ describe("resolvePrintedNos", () => {
       ],
       6
     );
-    expect(map.get(0)).toBe(4);
-    expect(map.get(1)).toBe(4); // only OCR-sourced collisions are repaired
+    expect(map.get(0)).toBe(1);
+    expect(map.get(1)).toBe(2);
+  });
+
+  it("(f) two caller-supplied numbers colliding are repaired the same way", () => {
+    const map = resolvePrintedNos(
+      [
+        { pageIndex: 0, printedNo: 7, source: "cto" },
+        { pageIndex: 1, printedNo: 7, source: "cto" },
+        { pageIndex: 2, printedNo: 9, source: "cto" },
+      ],
+      6
+    );
+    expect([map.get(0), map.get(1), map.get(2)]).toEqual([1, 2, 9]);
+  });
+
+  it("(g) a weaker source colliding with a stronger one loses alone", () => {
+    const map = resolvePrintedNos(
+      [
+        { pageIndex: 0, printedNo: 4, source: "text" },
+        { pageIndex: 1, printedNo: 4, source: "ocr" },
+      ],
+      6
+    );
+    expect(map.get(0)).toBe(4); // the PDF's own text is kept
+    expect(map.get(1)).toBe(2); // the OCR read falls back
   });
 });
 

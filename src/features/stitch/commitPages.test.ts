@@ -239,6 +239,47 @@ describe("commitAutoAlign honesty gate", () => {
     expect((await run([0, 1])).reason).toBe("not_adjacent");
   });
 
+  it("a placed sheet that is not ALONG-anchored is left unaligned", async () => {
+    // Every cross-seam residual is sub-foot and the seam verifies — and page 2 was
+    // never pinned along the matchline, so it can sit tens of feet out. Placed
+    // below, selected, and named, rather than committed into the composite.
+    await solverSays({
+      placements: [placement(0, true), placement(1, true), placement(2, true)],
+      alignmentVerdict: "verified",
+      seamReport: [seam(0, 1, "verified"), seam(1, 2, "verified")],
+      alongAnchored: [0, 1],
+      worstAlongUncertaintyFt: 42,
+    });
+    const res = await run([0, 1, 2]);
+    expect(res.unalignedIds).toHaveLength(1);
+    expect(res.reason).toBe("along_unresolved");
+    expect(res.message).toContain("±42 ft along");
+  });
+
+  it("a fully along-anchored run is still ok", async () => {
+    await solverSays({
+      placements: [placement(0, true), placement(1, true)],
+      alignmentVerdict: "verified", seamReport: [seam(0, 1, "verified")],
+      alongAnchored: [0, 1],
+    });
+    const res = await run([0, 1]);
+    expect(res.reason).toBe("ok");
+    expect(res.unalignedIds).toHaveLength(0);
+  });
+
+  it("ANY suspect seam with no verified one demotes the sheet", async () => {
+    // Was: only a sheet whose seams are ALL suspect. One seam the solver positively
+    // believes is wrong is enough — a plausible sibling is not evidence of anything.
+    await solverSays({
+      placements: [placement(0, true), placement(1, true), placement(2, true)],
+      alignmentVerdict: "unverified",
+      seamReport: [seam(0, 1, "plausible"), seam(1, 2, "suspect")],
+      alongAnchored: [0, 1, 2],
+    });
+    const res = await run([0, 1, 2]);
+    expect(res.unalignedIds).toHaveLength(2); // pages 1 and 2, both on the suspect seam
+  });
+
   it("carries the skipped sheets and the per-seam quality through to the caller", async () => {
     await solverSays({
       placements: [placement(0, true), placement(1, true)],
@@ -249,5 +290,49 @@ describe("commitAutoAlign honesty gate", () => {
     const res = await run([0, 1]);
     expect(res.skipped).toEqual([{ pageIndex: 4, role: "overall" }]);
     expect(res.seams).toEqual([{ pageIndexes: [0, 1], status: "plausible", residFt: 1.25, perpDeltaFt: 0.13 }]);
+  });
+});
+
+describe("commitAutoAlign cached probe", () => {
+  const fakeDoc = { loadPage: () => ({ getBounds: () => [0, 0, 612, 792], destroy() {} }) };
+  const fakeRenderer = { renderPage: async () => ({ imageData: null }), dispose() {} } as any;
+  const placement = (pageIndex: number, aligned: boolean) =>
+    ({ pageIndex, x: pageIndex * 100, y: 0, width: 100, height: 100, aligned });
+
+  beforeEach(() => { useStitchStore.getState().reset(); vi.clearAllMocks(); });
+
+  it("runs the honesty gate on the cached path too", async () => {
+    // The modal reuses the probe it already paid for. Before the payload travelled
+    // with it there was no seam report here, so the demotion silently did nothing and
+    // this path committed placements the plan path would have held back.
+    const { autoStitch } = await import("./autostitch/autoStitch");
+    const res = await commitAutoAlign({
+      mupdf: {}, doc: fakeDoc, pdfBytes: new Uint8Array([1]), fileName: "plan.pdf",
+      selected: [0, 1], pageScales: new Map(), uniformScale: 20,
+      removeWhiteBackground: false, renderer: fakeRenderer,
+      cached: {
+        placements: [placement(0, true), placement(1, true)],
+        rootFtPerIn: 20, worstResidFt: 1.33, method: "geometric",
+        alignmentVerdict: "partial",
+        seamReport: [{ i: 1, j: 2, pageIndexes: [0, 1], status: "suspect", detail: { channel: "anchor+segment" } }] as any,
+        alongAnchored: [0, 1],
+        refPageIndices: [0, 1],
+      },
+    });
+    expect(autoStitch).not.toHaveBeenCalled();
+    expect(res.unalignedIds).toHaveLength(2);
+    expect(res.reason).toBe("unverified");
+  });
+
+  it("a cached run with placements reports a geometric method, not 'none'", async () => {
+    const res = await commitAutoAlign({
+      mupdf: {}, doc: fakeDoc, pdfBytes: new Uint8Array([1]), fileName: "plan.pdf",
+      selected: [0, 1], pageScales: new Map(), uniformScale: 20,
+      removeWhiteBackground: false, renderer: fakeRenderer,
+      cached: { placements: [placement(0, true), placement(1, true)], rootFtPerIn: 20, worstResidFt: 0 },
+    });
+    // Without `method` this reported reason "no_refs" — "no sheet numbers were
+    // found" — on a run that had just aligned both sheets.
+    expect(res.reason).toBe("ok");
   });
 });

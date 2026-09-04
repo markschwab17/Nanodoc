@@ -113,9 +113,11 @@ describe("parseStitchPlan — sheet codes from the labels", () => {
     entries: labels.map((label) => ({ scaleFeetPerInch: 20, label })),
   });
 
-  it("takes the leading sheet code of each label", () => {
+  it("takes the leading sheet code of each label, in the engine's canonical form", () => {
+    // Separators are stripped so "C-5.01" here and "C5.01" in a title block are the
+    // same sheet — one normCode, shared with the solver and the anchor pass.
     const p = parseStitchPlan(plan(["C5.00 — GRADING PLAN", "C-5.01 GRADING PLAN", "C 502 PLAN"]), 3)!;
-    expect([...p.pageCodes]).toEqual([[0, "C5.00"], [1, "C-5.01"], [2, "C502"]]);
+    expect([...p.pageCodes]).toEqual([[0, "C5.00"], [1, "C5.01"], [2, "C502"]]);
   });
 
   it("takes a bare printed number", () => {

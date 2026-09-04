@@ -129,6 +129,20 @@ const REF_NUMBER_RE = new RegExp(REF_NUMBER_SRC, "i");
 const REF_CODE_RE = new RegExp(REF_CODE_SRC, "i");
 const MATCHLINE_STATION_RE = /\bMA\s?T\s?C\s?H\s*LI[NM]E\s*([\d+.]+)?/i;
 
+/**
+ * Canonical form of a discipline sheet code, for COMPARISON only.
+ *
+ * The same sheet is written "C-302", "C302" and "C 302" by different hands — in the
+ * title block, in a callout, and in the CTO plan label — so every comparison in the
+ * engine has to be separator-insensitive and case-insensitive. This is the one
+ * definition: the reciprocal-anchor pass, `matchlineStrokePrior`, `codeToNo`/`relOf`
+ * in the solver and `stitchPlan`'s label reader all key on it. A dot is significant
+ * (C5.1 is not C51) and is kept.
+ */
+export function normCode(code: string): string {
+  return code.toUpperCase().replace(/[\s-]/g, "");
+}
+
 /** The sheet NUMBER a "SEE SHEET n" callout names, tolerant of OCR spellings. */
 export function refSheetNumber(text: string): number | null {
   const m = text.match(REF_NUMBER_RE);

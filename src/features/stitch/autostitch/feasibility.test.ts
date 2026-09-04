@@ -169,3 +169,44 @@ describe("deriveFeasibility", () => {
     expect(f.status).toBe("confident");
   });
 });
+
+describe("along-matchline gate", () => {
+  const base = {
+    method: "geometric" as const,
+    alignedPageIndices: [0, 1, 2, 3],
+    worstResidFt: 1.33,
+    alignmentVerdict: "partial" as const,
+    refPageIndices: [0, 1, 2, 3],
+  };
+  const sel = [0, 1, 2, 3];
+
+  it("a set pinned across the matchline but not along it is NOT offered", () => {
+    // Every cross-seam residual is sub-foot and the fit looks perfect — and the
+    // sheets can still be tens of feet out along the seam. Offering that is the one
+    // thing auto-align must never do.
+    const f = deriveFeasibility({ ...base, alongAnchored: [0], worstAlongUncertaintyFt: 48 }, sel);
+    expect(f.status).toBe("unstitchable");
+    expect(f.reason).toBe("sheets can be lined up across the matchline but not along it — they may slide up to 48 ft");
+  });
+
+  it("the along count faces the same two bars as the aligned count", () => {
+    // 1 of 4 fails the >=2 test; 2 of 4 clears both (>=2 and >=50%).
+    expect(deriveFeasibility({ ...base, alongAnchored: [0, 1] }, sel).status).not.toBe("unstitchable");
+    expect(deriveFeasibility({ ...base, alongAnchored: [0] }, sel).status).toBe("unstitchable");
+    expect(deriveFeasibility({ ...base, alignedPageIndices: [0, 1, 2, 3], alongAnchored: [0, 1] }, sel).status).toBe("confident");
+  });
+
+  it("names the along axis ahead of the verdict when both would block", () => {
+    const f = deriveFeasibility({ ...base, alignmentVerdict: "unverified", alongAnchored: [], worstAlongUncertaintyFt: 12 }, sel);
+    expect(f.reason).toContain("along it");
+  });
+
+  it("an old probe with no along data is unaffected", () => {
+    const f = deriveFeasibility(base, sel);
+    expect(f.status).toBe("confident");
+  });
+
+  it("a fully along-anchored set is offered", () => {
+    expect(deriveFeasibility({ ...base, alongAnchored: [0, 1, 2, 3] }, sel).status).toBe("confident");
+  });
+});

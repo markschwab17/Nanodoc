@@ -282,13 +282,21 @@ export default function StitchView() {
         // WHY it could not place everything. Without this the mark says a number and
         // nothing else, which reads as a broken feature rather than a set the
         // aligner honestly cannot match. Page numbers are 1-based for the reader.
+        // Nothing to explain when the run was clean AND nothing was held back — the
+        // mark would then be pure noise on a successful align.
+        const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
+        const alongSet = new Set(result.alongAnchored ?? []);
         setAlignExplanation(
           autoAlignExplanation(
-            result.reason
+            worthExplaining
               ? {
-                  reason: result.reason,
+                  reason: result.reason!,
                   pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
                   skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
+                  worstAlongUncertaintyFt: result.worstAlongUncertaintyFt,
+                  alongUnresolvedPages: result.alongAnchored
+                    ? parsed.pageIndices.filter((i) => !alongSet.has(i)).map((i) => i + 1)
+                    : undefined,
                 }
               : null,
           ),

@@ -24,10 +24,10 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import { layoutPlacements, type TilePlacement } from "@/features/stitch/autostitch/layout";
+import { layoutPlacements } from "@/features/stitch/autostitch/layout";
 import { parseScaleInput, isUniform, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
-import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain } from "./commitPages";
+import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain, type CachedProbePlacement } from "./commitPages";
 
 const THUMB_SCALE = 0.3;
 
@@ -602,7 +602,7 @@ export function AddPdfModal({
       // The probe always ran with a uniform (null) scale, so its cached poses are
       // only valid when this selection turns out uniform too — a mixed selection
       // always takes the live path, which is per-page-scale aware.
-      let cached: { placements: TilePlacement[]; rootFtPerIn: number; worstResidFt: number } | null = null;
+      let cached: CachedProbePlacement | null = null;
       if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
         const sel = new Set(selected);
         // Re-run the (cheap) layout over just the selected sheets so the committed
@@ -614,6 +614,14 @@ export function AddPdfModal({
           placements: layoutPlacements(subset, probe.rootFtPerIn),
           rootFtPerIn: probe.rootFtPerIn,
           worstResidFt: probe.worstResidFt,
+          // The honesty payload travels with the poses: without it the commit had no
+          // seam report and its demotion silently did nothing on this path.
+          method: probe.method,
+          seamReport: probe.seamReport,
+          alignmentVerdict: probe.alignmentVerdict,
+          alongAnchored: probe.alongAnchored,
+          worstAlongUncertaintyFt: probe.worstAlongUncertaintyFt,
+          refPageIndices: probe.refPageIndices,
         };
       }
       const result = await commitAutoAlign({

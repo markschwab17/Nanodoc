@@ -916,7 +916,7 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
   });
 
   // ── T0 Task 1: the honesty gate measures the seam's OWN matchline ────────────
-  // The failure the gate had: `facingStroke` re-picked the STRONGEST dashed line in
+  // The failure the gate had (the since-deleted `facingStroke`): it re-picked the STRONGEST dashed line in
   // the facing band. On a real civil sheet that is a parking row or a border, not
   // the matchline, so a seam whose own strokes agree to 0.00 ft was reported as
   // 4-192 ft off and the whole reference set came back `unverified`.
@@ -996,6 +996,24 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
     expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
     expect(seam.detail.alongDecisive).toBe(false);
     expect(seam.status).toBe("plausible");
+  });
+
+  it("(d5) a seam rescued by a NEARBY band line is plausible, never verified", () => {
+    // The anchor named the parking row as the matchline, so the seam's own two
+    // strokes sit 40 ft apart; sheet 1's REAL matchline still lands exactly on sheet
+    // 2's line, so the seam is not contradicted. That is enough to clear `suspect`
+    // and nowhere near enough to call verified — the placement rests on a line the
+    // seam never claimed.
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true, along: 0, alongPrecise: true,
+      strokeI: 1424, strokeJ: 200,
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("band-rescue");
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.detail.alongDecisive).toBe(true);
+    expect(seam.status).toBe("plausible");
+    expect(res.alignmentVerdict).not.toBe("verified");
   });
 
   it("(e) worstResidFt is reported on a matchline-only set (was always 0 without tokens)", () => {
@@ -1120,5 +1138,78 @@ describe("sheet roles and the band-seam gate", () => {
   it("role defaults to tile when the caller does not classify", () => {
     const res = stitchSheets([mk(1, seamCluster(460, "a"), undefined), B()]);
     expect(res.placements.size).toBe(2);
+  });
+});
+
+// ── Fix round 1: the ALONG-matchline axis ────────────────────────────────────
+describe("along-axis anchoring", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 1600, 1080]; // 444 x 300 ft @20
+  const mk = (no: number, extra: Partial<SheetInput> = {}): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW, pageIndex: no - 1,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry: [] } as PageExtract,
+    ...extra,
+  });
+  /** A fully-2D-precise anchor: pins BOTH axes, so it anchors the along axis. */
+  const cross = (i: number, j: number, d = 350) =>
+    ({ i, j, dx: d, perp: "x" as const, precise: true, along: 0, alongPrecise: true });
+  /** A stroke-only anchor: pins the PERPENDICULAR axis and leaves along free. */
+  const strokeOnly = (i: number, j: number, d = 350) =>
+    ({ i, j, dx: d, perp: "x" as const, precise: true });
+
+  it("stops at a seam that never fixed the along axis", () => {
+    // 1=2 (both axes) — 2=3 (across only) — 3=4 (both axes). Units 3 and 4 are placed
+    // and rigid with each other, but nothing says where they sit ALONG the seam they
+    // share with 2, so they can slide. The walk starts at the solve's root (unit 2,
+    // the most-connected) and must not cross the 2-3 seam.
+    const res = stitchSheets([mk(1), mk(2), mk(3), mk(4)], undefined, [cross(1, 2), strokeOnly(2, 3), cross(3, 4)]);
+    expect(res.placements.size).toBe(4);
+    expect(res.alongAnchored).toEqual([0, 1]);
+    const at = (a: number, b: number) => res.seamReport!.find((s) => (s.i === a && s.j === b) || (s.i === b && s.j === a))!;
+    expect(at(1, 2).detail.alongAnchored).toBe(true);
+    expect(at(2, 3).detail.alongAnchored).toBe(false);
+    expect(at(3, 4).detail.alongAnchored).toBe(true);
+  });
+
+  it("every seam fixing the along axis anchors the whole set", () => {
+    const res = stitchSheets([mk(1), mk(2), mk(3)], undefined, [cross(1, 2), cross(2, 3)]);
+    expect(res.alongAnchored).toEqual([0, 1, 2]);
+  });
+
+  it("the sibling-strip shortcut does NOT propagate along-anchoring", () => {
+    // Two strips of one page share an overlap column, which fixes them relative to
+    // EACH OTHER and says nothing about where either sits along the matchline it
+    // shares with a neighbour. `alongDecisive` still reads true for that seam (it is
+    // used for the seam's own status); the anchoring walk ignores it.
+    const res = stitchSheets(
+      [mk(1, { pageIndex: 0, siblingKey: 2 }), mk(2, { pageIndex: 0, siblingKey: 1 }), mk(3, { pageIndex: 1 })],
+      undefined,
+      [strokeOnly(1, 2), cross(2, 3)],
+    );
+    const sib = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(sib.detail.alongDecisive).toBe(true);   // siblings ⇒ decisive, for its own status
+    expect(sib.detail.alongAnchored).toBe(false);  // but it anchors nothing
+    // Page 0 has TWO placed units and only one of them is anchored, so the page is
+    // not claimed: a page is anchored only when every unit it placed is.
+    expect(res.alongAnchored).toEqual([1]);
+  });
+
+  it("a sibling seam does not anchor even with a strong vote of its own", () => {
+    // The overlap column between two strips gives the segment vote a huge margin —
+    // it is matching the SAME content twice. On the reference set that margin is 14
+    // and the two strips end up 147 ft apart from where they belong.
+    const res = stitchSheets(
+      [mk(1, { pageIndex: 0, siblingKey: 2 }), mk(2, { pageIndex: 0, siblingKey: 1 })],
+      undefined,
+      [{ i: 1, j: 2, dx: 350, perp: "x", precise: true, along: 0, alongPrecise: true }],
+    );
+    const sib = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(sib.detail.alongAnchored).toBe(false);
+    expect(res.alongAnchored).toEqual([]);
+  });
+
+  it("reports how far an un-anchored unit could slide", () => {
+    const res = stitchSheets([mk(1), mk(2)], undefined, [strokeOnly(1, 2)]);
+    expect(res.alongAnchored).toEqual([0]); // only the root
+    expect(typeof res.worstAlongUncertaintyFt).toBe("number");
   });
 });

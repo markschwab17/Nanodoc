@@ -8,8 +8,8 @@ import { sliceExtract, stripFrames, detectDrawingFrame, type Frame } from "./fra
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
 import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
-import { parseSheetRefs, parseScaleNotes, refSheetNumber, refSheetCode, type SheetRef } from "./tokens";
-import { extractPageLabel, classifySheetRole, type SheetRole } from "./pageLabels";
+import { parseSheetRefs, parseScaleNotes, refSheetNumber, refSheetCode, normCode, type SheetRef } from "./tokens";
+import { extractPageLabel, classifySheetRole, type SheetRole, type PageLabelResult } from "./pageLabels";
 import type { OcrWord, RawImage } from "./ocrService";
 import { DEFAULT_SCALE_FT_PER_IN as DEFAULT_SCALE } from "../pageScales";
 
@@ -71,6 +71,11 @@ export interface AutoStitchResult {
   seamReport?: SeamReportEntry[];
   /** Cannot-align honesty verdict from the seam report. Absent → old behavior. */
   alignmentVerdict?: AlignmentVerdict;
+  /** Page indices pinned on the ALONG-matchline axis as well as across it. A placed
+   *  page missing from this list is connected but free to slide along its seam by up
+   *  to `worstAlongUncertaintyFt`. Absent for keymap/none. */
+  alongAnchored?: number[];
+  worstAlongUncertaintyFt?: number;
   /** Pages deliberately kept OUT of the tiling (overall/key plans, notes, index,
    *  details). They are still laid out — below the tiles, unaligned — but they never
    *  take part in the pair search, so they cannot be collaged into it. */
@@ -104,10 +109,11 @@ function hasEdgeRefs(extract: PageExtract, frame?: [number, number, number, numb
  *    text/cto/fallback numbers are trusted as given (the range is an OCR-misread
  *    guard, and a 2-page commit out of a 30-sheet set is legitimately numbered 5
  *    and 6); a null of any source also falls back to page order.
- *  - Collision repair: a resolved number shared by ≥2 pages where at least one
- *    is still OCR-sourced is almost certainly a misread — reset every
- *    OCR-sourced page in that group to its page-order fallback (distinct
- *    pageIndex+1 per page, so the reset group cannot re-collide internally).
+ *  - Collision repair: a resolved number shared by ≥2 pages is a contradiction.
+ *    Every page in the group whose source is shared with another member of it —
+ *    two OCR reads, two text reads, two caller-supplied codes — is reset to its
+ *    page-order fallback, as is any OCR read colliding with a stronger source.
+ *    (Distinct pageIndex+1 per page, so the reset group cannot re-collide.)
  *
  * Returns pageIndex → resolved printed number.
  */
@@ -136,11 +142,24 @@ export function resolvePrintedNos(
   }
   for (const group of byNo.values()) {
     if (group.length < 2) continue;
-    if (!group.some((g) => g.source === "ocr")) continue;
+    const reset = new Set<number>();
+    // TWO pages claiming one number from the SAME source contradict each other, and
+    // neither reading can be trusted over the other — whether the source is OCR, the
+    // PDF's text or the caller. Leaving both is the worse failure: `byPrinted.get(n)`
+    // then returns two pages and every "SEE SHEET n" anchors both of them. Distinct
+    // page-order fallbacks are wrong in a way that cannot fan out.
+    for (const src of ["ocr", "text", "cto"] as const) {
+      const same = group.filter((g) => g.source === src);
+      if (same.length >= 2) for (const g of same) reset.add(g.pageIndex);
+    }
+    // A weaker source colliding with a stronger one simply loses.
+    if (group.some((g) => g.source === "text" || g.source === "cto")) {
+      for (const g of group) if (g.source === "ocr") reset.add(g.pageIndex);
+    }
     for (const g of group) {
-      if (g.source !== "ocr") continue;
+      if (!reset.has(g.pageIndex)) continue;
       const fallback = g.pageIndex + 1;
-      console.warn(`[autoStitch] printedNo collision on ${resolved.get(g.pageIndex)!.no}: page ${g.pageIndex} was OCR-sourced; resetting to page-order fallback ${fallback}`);
+      console.warn(`[autoStitch] printedNo collision on ${resolved.get(g.pageIndex)!.no}: page ${g.pageIndex} (${g.source}) resetting to page-order fallback ${fallback}`);
       resolved.set(g.pageIndex, { no: fallback, source: "fallback" });
     }
   }
@@ -180,6 +199,9 @@ interface PageRec {
   title: string | null;
   statedFtPerIn: number | null;
   role: SheetRole;
+  /** The page's title-block read, done ONCE (it walks every label on the page and
+   *  the reciprocal-anchor pass wants the same answer the role classification used). */
+  pageLabel: PageLabelResult;
 }
 
 /** Reciprocal-label anchor before unit-key resolution: endpoints keyed by
@@ -244,6 +266,7 @@ export async function autoStitch(
     let drawingFrame: [number, number, number, number] | null = null;
     let title: string | null = null;
     let statedFtPerIn: number | null = null;
+    let pageLabel: PageLabelResult | null = null;
     try {
       extract = capturePage(mupdf, page);
       // The sheet's ruled drawing frame (null when it draws edge to edge). Every
@@ -257,8 +280,8 @@ export async function autoStitch(
       // edge-band text ("… ON SHEET 3. CASE PER PLAN" and the like), and letting that
       // reach the title picker mislabels plan sheets — it cost PG_SITE four
       // alignments in testing. Title-block reading is a text-channel job.
-      const baseLabel = extractPageLabel({ labels: extract.labels, shxLabels: extract.shxLabels, view: extract.view });
-      title = baseLabel.title;
+      pageLabel = extractPageLabel({ labels: extract.labels, shxLabels: extract.shxLabels, view: extract.view });
+      title = pageLabel.title;
       const baseNotes = parseScaleNotes([...extract.labels, ...extract.shxLabels]);
       statedFtPerIn = baseNotes.length ? baseNotes[0].ftPerIn : null;
       // OCR recovery: OCR the PAGE-EDGE bands (no frame needed) when the text
@@ -317,6 +340,7 @@ export async function autoStitch(
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
       title, statedFtPerIn, role: "tile", ctoCode,
+      pageLabel: pageLabel ?? { sheetCode: null, discipline: null, title: null, sheetNo: null, sheetOf: null, confidence: "none", source: "none" },
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
@@ -381,12 +405,10 @@ export async function autoStitch(
     // all. Each page's own code comes from its title block (`extractPageLabel`),
     // exactly as stitchCore already resolves `SEE SHEET C2.01` cross-references.
     // Codes are compared with separators stripped so "C-302" ≡ "C302" ≡ "C 302".
-    const normCode = (c: string): string => c.toUpperCase().replace(/[\s-]/g, "");
     const codeOf = new Map<number, string | null>();
     const byCode = new Map<string, PageRec[]>();
     for (const p of pages) {
-      const code = p.ctoCode
-        ?? extractPageLabel({ labels: p.extract.labels, shxLabels: p.extract.shxLabels, view: p.extract.view }).sheetCode;
+      const code = p.ctoCode ?? p.pageLabel.sheetCode;
       const n = code ? normCode(code) : null;
       codeOf.set(p.pageIndex, n);
       if (n) (byCode.get(n) || byCode.set(n, []).get(n)!).push(p);
@@ -727,6 +749,8 @@ export async function autoStitch(
   let method: StitchMethod = "none";
   let seamReport: SeamReportEntry[] | undefined;
   let alignmentVerdict: AlignmentVerdict | undefined;
+  let alongAnchored: number[] | undefined;
+  let worstAlongUncertaintyFt: number | undefined;
   if (units.length >= 2) {
     const byPage = new Map<number, Unit[]>();
     for (const u of units) (byPage.get(u.pageIndex) || byPage.set(u.pageIndex, []).get(u.pageIndex)!).push(u);
@@ -757,6 +781,8 @@ export async function autoStitch(
     method = res.method;
     seamReport = res.seamReport;
     alignmentVerdict = res.alignmentVerdict;
+    alongAnchored = res.alongAnchored;
+    worstAlongUncertaintyFt = res.worstAlongUncertaintyFt;
   }
 
   // Per-unit poses for placed units; ONE whole-page null pose per fully-unplaced page.
@@ -777,5 +803,5 @@ export async function autoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, skipped, scaleWarnings };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, alongAnchored, worstAlongUncertaintyFt, skipped, scaleWarnings };
 }

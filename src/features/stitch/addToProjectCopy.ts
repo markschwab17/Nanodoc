@@ -144,7 +144,7 @@ export function hiddenPagesSentence(numbers: readonly number[]): string | null {
  * Returns null when there is nothing to explain — a clean run, or a caller that has
  * no outcome to report.
  */
-export type AutoAlignReason = "ok" | "no_refs" | "not_adjacent" | "unverified";
+export type AutoAlignReason = "ok" | "no_refs" | "not_adjacent" | "along_unresolved" | "unverified";
 
 export interface AutoAlignOutcome {
   reason: AutoAlignReason;
@@ -152,6 +152,10 @@ export interface AutoAlignOutcome {
   pagesWithoutRefs?: readonly number[];
   /** 1-based page numbers deliberately kept out of the tiling, with their role. */
   skipped?: readonly { pageNumber: number; role: string }[];
+  /** How far an un-anchored sheet could slide ALONG its matchline, in feet. */
+  worstAlongUncertaintyFt?: number;
+  /** 1-based page numbers placed but not pinned along the matchline. */
+  alongUnresolvedPages?: readonly number[];
 }
 
 function pageList(numbers: readonly number[]): string {
@@ -181,6 +185,24 @@ export function autoAlignExplanation(outcome: AutoAlignOutcome | null | undefine
     case "not_adjacent":
       parts.push("These sheets don't share a matchline, so there is nothing to line them up along.");
       break;
+    case "along_unresolved": {
+      // The hardest case to say honestly: the sheets DO meet on the right line, and
+      // the composite will look convincing — but nothing fixed where along that line
+      // they sit, so they can be tens of feet out. Name the slide, in feet.
+      const pages = outcome.alongUnresolvedPages ?? [];
+      const uniq = new Set(pages.filter((n) => Number.isInteger(n) && n > 0));
+      const one = uniq.size === 1;
+      const named = uniq.size ? pageList(pages) : "";
+      const subject = named ? `${named.charAt(0).toUpperCase()}${named.slice(1)}` : "These sheets";
+      const verb = one ? "meets" : "meet";
+      const who = one ? "the sheet sits" : "they sit";
+      const ft = outcome.worstAlongUncertaintyFt;
+      const slide = ft && ft >= 1
+        ? ` — ${one ? "it" : "they"} could be up to ${Math.round(ft)} ft out along it`
+        : "";
+      parts.push(`${subject} ${verb} the matchline correctly, but nothing fixes where along it ${who}${slide}.`);
+      break;
+    }
     case "unverified":
       parts.push("Alignment could not be verified — check the seams before adding.");
       break;

@@ -24,6 +24,8 @@
  * blank page does.
  */
 
+import { normCode } from "./autostitch/tokens";
+
 export interface ParsedStitchPlan {
   mode: "auto" | "manual";
   /** Ascending combined-PDF page indices to commit. */
@@ -58,7 +60,9 @@ const LABEL_CODE_RE = /^\s*([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?|\d{1,3})\b/i;
 function readLabelCode(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const m = v.match(LABEL_CODE_RE);
-  return m ? m[1].replace(/\s+/g, "").toUpperCase() : null;
+  // Stored in the engine's canonical form so "C-5.01" here and "C5.01" in a title
+  // block are the same sheet without every consumer remembering to normalise.
+  return m ? normCode(m[1]) : null;
 }
 
 /** A usable feet-per-inch, or null for "this page has no scale" — which covers

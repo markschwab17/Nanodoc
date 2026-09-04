@@ -17,6 +17,16 @@ export const GEOM_RESID_CEIL_FT = 5;
 export const UNVERIFIED_REASON =
   "seams cannot be verified — matchline references ambiguous or repetitive layout";
 
+/** Shown when the ONLY thing stopping auto-align is the along-matchline axis: the
+ *  sheets demonstrably abut on the right line, but too few of them are pinned along
+ *  it, so the composite would look right and be tens of feet out. */
+export function alongUncertainReason(worstAlongUncertaintyFt?: number): string {
+  const n = Math.round(worstAlongUncertaintyFt ?? 0);
+  return n > 0
+    ? `sheets can be lined up across the matchline but not along it — they may slide up to ${n} ft`
+    : "sheets can be lined up across the matchline but not along it";
+}
+
 export type FeasibilityStatus = "confident" | "partial" | "unstitchable";
 
 export interface FeasibilityInput {
@@ -33,6 +43,13 @@ export interface FeasibilityInput {
    *  notes/details sheets doesn't read as unstitchable. Absent/empty OR
    *  empty intersection → old behavior (denominator = selectedCount). */
   refPageIndices?: number[];
+  /** Page indices pinned on the ALONG-matchline axis as well as across it. `aligned`
+   *  is only a connectivity flag, so a set can be fully "aligned" and still slide
+   *  tens of feet along its seams — the offered composite would look right and be
+   *  wrong. Absent (old probes) → the along gate is not applied. */
+  alongAnchored?: number[];
+  /** How far an un-anchored unit could slide, in feet (drives the reason copy). */
+  worstAlongUncertaintyFt?: number;
 }
 
 export interface Feasibility {
@@ -64,6 +81,16 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
   // The geometric fit is otherwise acceptable (ratio + residual). Kept separate from
   // the verdict so we can tell "not a tiled set" apart from "tiled but unverifiable".
   const geomFitOk = geomRatio >= GEOM_RATIO_FLOOR && probe.worstResidFt <= GEOM_RESID_CEIL_FT;
+  // ALONG-AXIS gate: the along-anchored pages must clear the SAME two bars the
+  // aligned count does. Without it a set whose cross-seam residuals are all sub-foot
+  // is offered while its sheets are 20-70 ft out along the matchline — the composite
+  // looks right and is wrong, which is the one thing auto-align must never do.
+  // Absent on an old probe → not applied (backward compat).
+  const alongProvided = probe.alongAnchored != null;
+  const alongSet = new Set(probe.alongAnchored ?? []);
+  const alongInSelection = selectedPageIndices.reduce((n, i) => n + (alongSet.has(i) ? 1 : 0), 0);
+  const alongRatio = geomDenom > 0 ? alongInSelection / geomDenom : 0;
+  const alongOk = !alongProvided || (alongInSelection >= 2 && alongRatio >= GEOM_RATIO_FLOOR);
   // Cannot-align gate: an "unverified" verdict blocks geometric auto-align even when
   // the fit looks good. Absent verdict (old probes) never blocks (backward compat).
   const verified = probe.alignmentVerdict !== "unverified";
@@ -71,15 +98,19 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
   let passesGate = false;
   if (alignedInSelection >= 2) {
     if (probe.method === "keymap") passesGate = ratio >= KEYMAP_COVERAGE; // keymap path unchanged
-    else if (probe.method === "geometric") passesGate = geomFitOk && verified;
+    else if (probe.method === "geometric") passesGate = geomFitOk && verified && alongOk;
   }
 
   if (!passesGate) {
-    // Reason-aware disable: only when the SOLE blocker is the unverified verdict
-    // (the geometric fit would otherwise have passed) do we surface the honesty copy.
-    const reason = probe.method === "geometric" && geomFitOk && !verified && alignedInSelection >= 2
-      ? UNVERIFIED_REASON
-      : undefined;
+    // Reason-aware disable: only when the geometric fit would OTHERWISE have passed
+    // do we name the specific blocker, and the along axis is named ahead of the
+    // verdict because it is the more concrete thing to say.
+    const geomOtherwiseOk = probe.method === "geometric" && geomFitOk && alignedInSelection >= 2;
+    const reason = geomOtherwiseOk && !alongOk
+      ? alongUncertainReason(probe.worstAlongUncertaintyFt)
+      : geomOtherwiseOk && !verified
+        ? UNVERIFIED_REASON
+        : undefined;
     return { status: "unstitchable", alignedInSelection, selectedCount, reason };
   }
   return { status: alignedInSelection === selectedCount ? "confident" : "partial", alignedInSelection, selectedCount };
