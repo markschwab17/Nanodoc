@@ -30,6 +30,7 @@ import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
 import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
+import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
 
 const THUMB_SCALE = 0.3;
 const TILE_RENDER_SCALE = 1.5;
@@ -59,11 +60,16 @@ export function AddPdfModal({
   onClose,
   initialPdf,
   onInitialConsumed,
+  sessionSourcePdf,
 }: {
   open: boolean;
   onClose: () => void;
   initialPdf?: { pdfBytes: Uint8Array; fileName: string } | null;
   onInitialConsumed?: () => void;
+  /** The site-sheet source PDF for the life of the stitch session (unlike `initialPdf`,
+   *  which is consumed once). Offered as an extra entry in the "From Civiltakeoff" list
+   *  so switching to a project document doesn't lose the user's selected takeoff sheets. */
+  sessionSourcePdf?: { pdfBytes: Uint8Array; fileName: string } | null;
 }) {
   const fileSystem = useFileSystem();
   const addTiles = useStitchStore((s) => s.addTiles);
@@ -105,6 +111,12 @@ export function AddPdfModal({
   const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
   const [ctoDocumentsError, setCtoDocumentsError] = useState<string | null>(null);
   const ctoDocumentsRespondedRef = useRef(false);
+  // The site-sheet source, kept selectable as the first "From Civiltakeoff" entry for the
+  // life of the stitch session — never sent to the CTO document-list request.
+  const ctoDocumentsWithSession = useMemo(
+    () => withSessionSource(ctoDocuments, sessionSourcePdf),
+    [ctoDocuments, sessionSourcePdf]
+  );
   /** Prevents the file-picker / initial-PDF effect from re-triggering after
    *  the first run within a single modal session (open→close cycle). */
   const hasTriggeredFileOpenRef = useRef(false);
@@ -422,6 +434,20 @@ export function AddPdfModal({
       }
     },
     [ctoContext, loadPdfFromResult]
+  );
+
+  /** Selecting an entry from the merged "From Civiltakeoff" list: the synthetic
+   *  session-source entry loads its retained bytes directly (no network); any
+   *  other entry is a real CTO document fetched by token as before. */
+  const handleSelectCtoDoc = useCallback(
+    (doc: CtoDoc) => {
+      if (doc.type === SESSION_SOURCE_DOC_TYPE) {
+        if (sessionSourcePdf) loadPdfFromResult(sessionSourcePdf.pdfBytes, sessionSourcePdf.fileName);
+        return;
+      }
+      loadCtoDocument(doc);
+    },
+    [sessionSourcePdf, loadPdfFromResult, loadCtoDocument]
   );
 
   // From Civiltakeoff: postMessage listener for nanodoc-add-cto-doc (legacy: CTO pushes one doc)
@@ -770,23 +796,16 @@ export function AddPdfModal({
           </div>
         ) : ctoContext && sourceTab === "cto" && !pdfBytes ? (
           <div className="py-8 flex flex-col items-stretch gap-4 text-muted-foreground">
-            {ctoDocumentsLoading ? (
-              <div className="flex items-center justify-center gap-2 py-8">
-                <Loader2 className="h-6 w-6 animate-spin" />
-                <span>Loading project documents…</span>
-              </div>
-            ) : ctoDocumentsError ? (
-              <p className="text-destructive text-center py-4">{ctoDocumentsError}</p>
-            ) : ctoDocuments.length > 0 ? (
+            {ctoDocumentsWithSession.length > 0 ? (
               <>
                 <p className="text-sm text-center">Choose a document to add pages from:</p>
                 <ul className="space-y-2 max-h-64 overflow-auto">
-                  {ctoDocuments.map((doc, idx) => (
+                  {ctoDocumentsWithSession.map((doc, idx) => (
                     <li key={idx}>
                       <Button
                         variant="outline"
                         className="w-full justify-start font-normal"
-                        onClick={() => loadCtoDocument(doc)}
+                        onClick={() => handleSelectCtoDoc(doc)}
                         disabled={loading}
                       >
                         {doc.displayName}
@@ -794,7 +813,20 @@ export function AddPdfModal({
                     </li>
                   ))}
                 </ul>
+                {ctoDocumentsLoading && (
+                  <p className="text-xs text-center">Loading more project documents…</p>
+                )}
+                {!ctoDocumentsLoading && ctoDocumentsError && (
+                  <p className="text-destructive text-xs text-center">{ctoDocumentsError}</p>
+                )}
               </>
+            ) : ctoDocumentsLoading ? (
+              <div className="flex items-center justify-center gap-2 py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span>Loading project documents…</span>
+              </div>
+            ) : ctoDocumentsError ? (
+              <p className="text-destructive text-center py-4">{ctoDocumentsError}</p>
             ) : (
               <p className="text-center py-4">No project PDFs found.</p>
             )}

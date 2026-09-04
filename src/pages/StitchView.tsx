@@ -112,11 +112,16 @@ export default function StitchView() {
   // CTO stitch preload: when opened from CTO with stitch=1, open Add PDF modal with the initial PDF
   // so the user can choose which pages to add (instead of auto-adding all).
   const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
+  // Kept for the life of the stitch session (unlike ctoInitialPdf, which is consumed once the
+  // modal loads it) so "From Civiltakeoff" can still offer the site-sheet source after the user
+  // switches tabs and loads a different project document.
+  const [sessionSourcePdf, setSessionSourcePdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
     if (ctx && initial) {
       setCtoInitialPdf({ pdfBytes: initial.pdfBytes, fileName: initial.fileName });
+      setSessionSourcePdf({ pdfBytes: initial.pdfBytes, fileName: initial.fileName });
       setShowAddPdf(true);
     }
   }, []);
@@ -783,6 +788,7 @@ export default function StitchView() {
         onClose={() => setShowAddPdf(false)}
         initialPdf={ctoInitialPdf}
         onInitialConsumed={() => setCtoInitialPdf(null)}
+        sessionSourcePdf={sessionSourcePdf}
       />
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
