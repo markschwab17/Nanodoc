@@ -204,11 +204,13 @@ export function alignClickableTiles<T extends { id: string }>(
  */
 export function alignPickTargets<T extends { id: string }>(
   state: AlignMachine,
-  tiles: readonly T[]
+  tiles: readonly T[],
+  /** Overrides the machine's own record — the canvas's GROUPS are the durable version
+   *  of "already part of the composition", and they outlive a session. */
+  isPlaced: (tileId: string) => boolean = (id) => state.placedTileIds.includes(id),
 ): { preferred: T[]; fallback: T[] } {
   const clickable = alignClickableTiles(state, tiles);
-  const placed = new Set(state.placedTileIds);
-  return { preferred: clickable.filter((t) => !placed.has(t.id)), fallback: clickable };
+  return { preferred: clickable.filter((t) => !isPlaced(t.id)), fallback: clickable };
 }
 
 /**
@@ -220,10 +222,11 @@ export function alignPickTargets<T extends { id: string }>(
 export function alignHitForStep<T extends TilePose & { id: string }>(
   coords: CanvasPoint,
   state: AlignMachine,
-  tiles: readonly T[]
+  tiles: readonly T[],
+  isPlaced?: (tileId: string) => boolean,
 ): { tile: T; point: CanvasPoint } | null {
   if (state.step === "M1") {
-    const { preferred, fallback } = alignPickTargets(state, tiles);
+    const { preferred, fallback } = alignPickTargets(state, tiles, isPlaced);
     return hitTestTileAtPoint(coords, preferred, true) ?? hitTestTileAtPoint(coords, fallback, true);
   }
   return hitTestTileAtPoint(coords, alignClickableTiles(state, tiles), true);

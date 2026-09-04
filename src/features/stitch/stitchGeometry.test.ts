@@ -8,6 +8,7 @@ import {
   canvasToTileLocal,
   computeAlignToNeighbour,
   computeAlignTranslation,
+  rigidGroupPose,
   seamMissFt,
   computeResizedPose,
   computeTwoPointAlignment,
@@ -416,5 +417,59 @@ describe("computeAlignTranslation — the default one-point move", () => {
   test("a point already on the target moves nothing", () => {
     const pose = computeAlignTranslation(moving, { x: 100, y: 100 }, { x: 100, y: 100 });
     expect(pose).toEqual({ x: moving.x, y: moving.y });
+  });
+});
+
+describe("rigidGroupPose — a group moves as one thing", () => {
+  const member = makeTile({ id: "m2", x: 300, y: 100, width: 200, height: 100, rotation: 0 });
+
+  test("a plain translation carries every member by the same delta", () => {
+    const pose = rigidGroupPose(member, { x: 100, y: 100 }, { x: 500, y: 400 }, 0, 1);
+    expect(pose.x).toBeCloseTo(300 + 400, 9);
+    expect(pose.y).toBeCloseTo(100 + 300, 9);
+    expect(pose.width).toBe(200);
+    expect(pose.rotation).toBe(0);
+  });
+
+  test("keeps the spacing between two members exactly", () => {
+    const a = makeTile({ id: "a", x: 0, y: 0, width: 100, height: 100 });
+    const b = makeTile({ id: "b", x: 150, y: 40, width: 100, height: 100 });
+    const origin = { x: 10, y: 10 };
+    const target = { x: 800, y: 620 };
+    const pa = rigidGroupPose(a, origin, target, 37, 1);
+    const pb = rigidGroupPose(b, origin, target, 37, 1);
+    const before = Math.hypot(b.x - a.x, b.y - a.y);
+    const after = Math.hypot(pb.x - pa.x, pb.y - pa.y);
+    expect(after).toBeCloseTo(before, 9);
+    expect(pa.rotation).toBe(37);
+    expect(pb.rotation).toBe(37);
+  });
+
+  test("rotates the whole group about the point that is being pinned", () => {
+    // A member one unit to the RIGHT of the pinned point ends up one unit BELOW it
+    // after a 90° turn (canvas y grows downwards).
+    const one = makeTile({ id: "one", x: 100, y: -50, width: 100, height: 100 }); // centre (150, 0)
+    const pose = rigidGroupPose(one, { x: 50, y: 0 }, { x: 50, y: 0 }, 90, 1);
+    expect(pose.x + pose.width / 2).toBeCloseTo(50, 9);
+    expect(pose.y + pose.height / 2).toBeCloseTo(100, 9);
+  });
+
+  test("scales distances and sizes together about the pinned point", () => {
+    const pose = rigidGroupPose(member, { x: 100, y: 100 }, { x: 100, y: 100 }, 0, 2);
+    expect(pose.width).toBe(400);
+    expect(pose.height).toBe(200);
+    // Its centre was (400,150), i.e. (300,50) from the origin; doubled that is (600,100).
+    expect(pose.x + pose.width / 2).toBeCloseTo(700, 9);
+    expect(pose.y + pose.height / 2).toBeCloseTo(200, 9);
+  });
+
+  test("agrees with the one-point move for the sheet that was clicked", () => {
+    const moving = makeTile({ id: "m", x: 40, y: 25, width: 200, height: 100 });
+    const clicked = { x: 60, y: 45 };
+    const target = { x: 500, y: 300 };
+    const direct = computeAlignTranslation(moving, clicked, target);
+    const viaGroup = rigidGroupPose(moving, clicked, target, 0, 1);
+    expect(viaGroup.x).toBeCloseTo(direct.x, 9);
+    expect(viaGroup.y).toBeCloseTo(direct.y, 9);
   });
 });

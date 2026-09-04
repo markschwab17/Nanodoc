@@ -18,9 +18,11 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import {
   computeAlignToNeighbour,
   computeAlignTranslation,
+  rigidGroupPose,
   seamMissFt,
   type CanvasPoint,
 } from "./stitchGeometry";
+import { expandSelectionToGroups } from "./groups";
 import { compositionFeetPerInch } from "./pageScales";
 import { isTypingTarget } from "./useStitchKeyboard";
 import {
@@ -88,28 +90,66 @@ export function useAlignToNeighbour(): AlignToNeighbour {
 
   const active = state.step !== "idle";
 
-  /** Commit the transform. One `updateTile` = one undo step. */
+  /**
+   * Commit the pair: move the sheet that moves — with its whole GROUP — and merge the
+   * two sides into one group. `applyAlignedPair` does both in a single undo step,
+   * because a first undo that left the sheets moved but ungrouped would be a state the
+   * user never asked for.
+   */
   const applyTransform = useCallback((apply: AlignApply) => {
     const store = useStitchStore.getState();
     const moving = store.tiles.find((t) => t.id === apply.movingTileId);
     if (!moving) return;
     const [a1, a2] = apply.movingPoints;
     const [b1, b2] = apply.fixedPoints;
+    if (!a1 || !b1) return;
+
+    /** The moving sheet and everything grouped with it — they travel together. */
+    const movingSet = expandSelectionToGroups(store.tiles, [apply.movingTileId]);
+    const followers = store.tiles.filter((t) => movingSet.includes(t.id) && t.id !== moving.id);
+    /** Both sides of the pair, so the merge takes in each one's existing group. */
+    const mergeIds = apply.fixedTileId ? [apply.fixedTileId, apply.movingTileId] : [apply.movingTileId];
 
     // The default: one anchor each side, so the sheet SLIDES. No rotation is derived
     // from a single point, and none is invented.
     if (!a2 || !b2) {
-      if (!a1 || !b1) return;
-      store.updateTile(apply.movingTileId, computeAlignTranslation(moving, a1, b1));
+      const pose = computeAlignTranslation(moving, a1, b1);
+      store.applyAlignedPair(
+        [
+          { id: moving.id, patch: pose },
+          // Same map, so the group keeps its spacing exactly.
+          ...followers.map((t) => ({ id: t.id, patch: rigidGroupPose(t, a1, b1, 0, 1) })),
+        ],
+        mergeIds,
+      );
       setSeamNote(null);
       return;
     }
 
     const matchScaleOn = matchScaleRef.current;
     const pose = computeAlignToNeighbour(moving, [a1, a2], [b1, b2], matchScaleOn);
-    store.updateTile(
-      apply.movingTileId,
-      matchScaleOn ? pose : { x: pose.x, y: pose.y, rotation: pose.rotation }
+    // Whatever the two-point solve did to the sheet that was clicked, in terms every
+    // other member can be carried through: turn by this much, scale by this much, and
+    // pin the clicked point onto the point it was aimed at.
+    const rotationDelta = pose.rotation - (moving.rotation ?? 0);
+    const scale = matchScaleOn && moving.width > 0 ? pose.width / moving.width : 1;
+    store.applyAlignedPair(
+      [
+        {
+          id: moving.id,
+          patch: matchScaleOn ? pose : { x: pose.x, y: pose.y, rotation: pose.rotation },
+        },
+        ...followers.map((t) => {
+          const followerPose = rigidGroupPose(t, a1, b1, rotationDelta, scale);
+          return {
+            id: t.id,
+            patch: matchScaleOn
+              ? followerPose
+              : { x: followerPose.x, y: followerPose.y, rotation: followerPose.rotation },
+          };
+        }),
+      ],
+      mergeIds,
     );
 
     // The honest figure for THIS move: the first point lands exactly and the rotation

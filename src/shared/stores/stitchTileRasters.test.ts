@@ -119,7 +119,10 @@ describe("tileRasters", () => {
   it("never puts the raster map into an undo snapshot", () => {
     useStitchStore.getState().addTiles([{ ...blank(), rasterBlob: new Blob(["x"]) }]);
     const snap = useStitchStore.getState().undoStack[0] as unknown as Record<string, unknown>;
-    expect(Object.keys(snap)).toEqual(["tiles", "canvasWidth", "canvasHeight", "cropRect"]);
+    // `groups` rides along (names and colours, so an undone Ungroup comes back intact);
+    // the RASTER map must not, which is what this is guarding.
+    expect(Object.keys(snap)).toEqual(["tiles", "canvasWidth", "canvasHeight", "cropRect", "groups"]);
+    expect(snap.tileRasters).toBeUndefined();
   });
 });
 

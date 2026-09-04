@@ -219,6 +219,44 @@ export function computeAlignToNeighbour(
 }
 
 /**
+ * Carry one member of a GROUP through the same rigid transform a move applied to the
+ * sheet that was actually clicked.
+ *
+ * A group has to keep its internal spacing — that is the whole reason it exists — so
+ * when "Align to neighbour" moves one member, every other member follows through the
+ * same map: the point `origin` lands on `target`, everything rotates by `rotationDeg`
+ * about that point, and (only when Match scale is on) everything scales by `scale`
+ * about it too. With no rotation and no scale this is a plain translation, which is the
+ * default case and by far the common one.
+ */
+export function rigidGroupPose(
+  member: TilePose,
+  origin: CanvasPoint,
+  target: CanvasPoint,
+  rotationDeg: number,
+  scale: number
+): { x: number; y: number; width: number; height: number; rotation: number } {
+  const rad = (rotationDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const cx = member.x + member.width / 2;
+  const cy = member.y + member.height / 2;
+  const dx = (cx - origin.x) * scale;
+  const dy = (cy - origin.y) * scale;
+  const width = member.width * scale;
+  const height = member.height * scale;
+  const centerX = target.x + (dx * cos - dy * sin);
+  const centerY = target.y + (dx * sin + dy * cos);
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+    rotation: (member.rotation ?? 0) + rotationDeg,
+  };
+}
+
+/**
  * How far the SECOND point misses, in feet, after an "Align to neighbour" move.
  *
  * The first point lands exactly (the transform pins it), and the rotation makes the

@@ -9,7 +9,7 @@
  *   3. the crosshair, and a ring on the point a click would snap to.
  */
 
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { canvasToTileLocal } from "./stitchGeometry";
 import { LOUPE_SIZE_PX, placeLoupe, type Viewport } from "./loupeGeometry";
 import type { LoupeView } from "./useLoupeRender";
@@ -38,16 +38,24 @@ export const AlignLoupe = memo(function AlignLoupe({
 }: AlignLoupeProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fallbackRef = useRef<{ url: string; img: HTMLImageElement } | null>(null);
+  /** Has the fallback image decoded? Until it has — and until a crop lands — there is
+   *  nothing to magnify, and drawing anyway is how the loupe became a blank white disc
+   *  hanging off the cursor. */
+  const [fallbackReady, setFallbackReady] = useState(false);
 
   // One decoded fallback image at a time — swapped when the subject sheet changes.
   useEffect(() => {
     if (!fallbackUrl) {
       fallbackRef.current = null;
+      setFallbackReady(false);
       return;
     }
     if (fallbackRef.current?.url === fallbackUrl) return;
     const img = new Image();
+    setFallbackReady(false);
+    img.onload = () => setFallbackReady(true);
     img.src = fallbackUrl;
+    if (img.complete && img.naturalWidth > 0) setFallbackReady(true);
     fallbackRef.current = { url: fallbackUrl, img };
   }, [fallbackUrl]);
 
@@ -138,7 +146,10 @@ export const AlignLoupe = memo(function AlignLoupe({
     // canvas element itself is stable.
   }, [view, tile, cropCanvas, version, cursorX, cursorY, magnification, snapX, snapY]);
 
+  // Nothing under the cursor the current step can take, or nothing drawable yet: no
+  // magnifier at all. A 220 px white circle over empty canvas is worse than no loupe.
   if (!view || !tile) return null;
+  if (!view.crop && !fallbackReady) return null;
   const { left, top } = placeLoupe(view.screen, viewport);
 
   return (

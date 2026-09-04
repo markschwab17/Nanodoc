@@ -12,6 +12,7 @@ import { postToCto } from "@/shared/ctoBridge";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
+import { StitchContextMenu } from "@/features/stitch/StitchContextMenu";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
 import { commitPlainAdd, type CommitResult } from "@/features/stitch/commitPages";
 import { parseStitchPlan } from "@/features/stitch/stitchPlan";
@@ -1226,6 +1227,13 @@ export default function StitchView() {
             </Button>
           </div>
         )}
+        <StitchContextMenu
+          onAlignFromHere={() => handleAlignNeighbourModeChange(true)}
+          onRecenter={handleRecenter}
+          // A mode overlay covers the canvas and owns its own interaction; a menu
+          // opening behind it would act on a selection the user cannot see.
+          disabled={alignNeighbour.active || cleanupReviewMode || contentDeleteMode || deleteElementMode}
+        >
         <StitchCanvas
           contentDeleteMode={contentDeleteMode}
           onContentDeleteRect={handleContentDeleteRect}
@@ -1257,6 +1265,7 @@ export default function StitchView() {
           onRelocateCleanupRegion={handleRelocateCleanupRegion}
           onCleanupManualBox={handleCleanupManualBox}
         />
+        </StitchContextMenu>
         {takeoffMode && (unplacedCount > 0 || alignExplanation) && !coachDismissed && !showAddToProject && !cleanupReviewMode && (
           <AlignCoachMark
             count={unplacedCount}

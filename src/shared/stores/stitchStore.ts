@@ -127,6 +127,13 @@ interface StitchState {
   /** Merge every group these sheets belong to (plus the sheets themselves) into one —
    *  what a completed align pair does. */
   mergeGroups: (tileIds: string[]) => string | null;
+  /** ONE undo step for a completed "Align to neighbour" pair: move the sheets that
+   *  moved AND merge the two sides into one group. Two calls would make a single
+   *  alignment two undos, and the first would leave the sheets moved but ungrouped. */
+  applyAlignedPair: (
+    updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation">> }>,
+    mergeTileIds: string[],
+  ) => void;
   setSelectedTileId: (id: string | null) => void;
   setSelectedTileIds: (ids: string[]) => void;
   /** Toggle a tile in selection (for shift-click). Adds if not selected, removes if selected. */
@@ -616,6 +623,17 @@ export const useStitchStore = create<StitchState>((set, get) => ({
     if (!result.groupId) return null;
     pushUndoAndSet(set, get, { tiles: result.tiles, groups: result.groups });
     return result.groupId;
+  },
+
+  applyAlignedPair: (updates, mergeTileIds) => {
+    const state = get();
+    const byId = new Map(updates.map((u) => [u.id, u.patch]));
+    const moved = state.tiles.map((t) => {
+      const patch = byId.get(t.id);
+      return patch ? { ...t, ...patch } : t;
+    });
+    const merged = mergeGroupsFor(moved, state.groups, mergeTileIds);
+    pushUndoAndSet(set, get, { tiles: merged.tiles, groups: merged.groups });
   },
 
   setSelectedTileId: (id) =>

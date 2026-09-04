@@ -409,6 +409,9 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     <div
       ref={tileContainerRef}
       data-stitch-tile
+      // The right-click menu finds its target by asking the DOM what is under the
+      // cursor, so the id has to be ON the element (see StitchContextMenu).
+      data-stitch-tile-id={tile.id}
       className="absolute"
       style={{
         left: 0,

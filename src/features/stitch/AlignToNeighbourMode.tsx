@@ -64,6 +64,7 @@ export function AlignToNeighbourMode({
 }: AlignToNeighbourModeProps) {
   const tiles = useStitchStore((s) => s.tiles);
   const tileRasters = useStitchStore((s) => s.tileRasters);
+  const groups = useStitchStore((s) => s.groups);
   const zoomLevel = useStitchStore((s) => s.zoomLevel);
   const panOffset = useStitchStore((s) => s.panOffset);
 
@@ -126,9 +127,16 @@ export function AlignToNeighbourMode({
    * in, and a plain top-most test then handed the next click back to sheet 2 — the
    * mode peeled the sheet it had just placed instead of bringing in the next one.
    */
+  /** Part of the composition already: this session placed it, or it is in a group. */
+  const isPlaced = useCallback(
+    (tileId: string) =>
+      align.isPlaced(tileId) || Boolean(tiles.find((t) => t.id === tileId)?.groupId),
+    [align, tiles]
+  );
+
   const hitForStep = useCallback(
-    (coords: CanvasPoint) => alignHitForStep(coords, align.state, tiles),
-    [align.state, tiles]
+    (coords: CanvasPoint) => alignHitForStep(coords, align.state, tiles, isPlaced),
+    [align.state, isPlaced, tiles]
   );
 
   /** Only the steps that draw a rubber band need the live cursor. In one-point mode
@@ -255,18 +263,24 @@ export function AlignToNeighbourMode({
               Undo does not remove a sheet from the group; it only orders that
               preference, and the next pair re-adds whatever it touches. */}
           {(align.state.step === "F1" || align.state.step === "M1") &&
-            tiles.map((tile) =>
-              align.isPlaced(tile.id) ? (
+            tiles.map((tile) => {
+              // A sheet is part of the composition if this session placed it OR it is
+              // in a group — after the first pair those are the same thing, and the
+              // group is the durable record. Outlined in the GROUP's own colour so two
+              // separate compositions on one canvas do not read as one.
+              const color = tile.groupId ? groups[tile.groupId]?.color : undefined;
+              if (!color && !align.isPlaced(tile.id)) return null;
+              return (
                 <polygon
                   key={`placed-${tile.id}`}
                   points={tilePolygon(tile)}
                   fill="none"
-                  stroke="hsl(var(--primary))"
+                  stroke={color ?? "hsl(var(--primary))"}
                   strokeWidth={1.5}
-                  opacity={0.45}
+                  opacity={color ? 0.7 : 0.45}
                 />
-              ) : null
-            )}
+              );
+            })}
           {/* Whatever the cursor is over is what a click would take. */}
           {hoverTileId &&
             (() => {
@@ -354,7 +368,12 @@ export function AlignToNeighbourMode({
           className="absolute left-1/2 -translate-x-1/2 bottom-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1.5 rounded-lg border bg-popover/95 px-3 py-2 text-xs text-popover-foreground shadow-lg"
           style={{ pointerEvents: "auto", maxWidth: "calc(100vw - 32px)" }}
           onPointerDown={(e) => e.stopPropagation()}
-          onPointerMove={(e) => e.stopPropagation()}
+          onPointerMove={(e) => {
+            // The bar swallows the move, so the overlay never sees the cursor leave the
+            // sheet — without this the magnifier hangs where it last was.
+            e.stopPropagation();
+            clearLoupe();
+          }}
         >
           <div className="flex min-w-0 items-center gap-2">
             <span className="font-semibold shrink-0">Align to neighbour</span>
