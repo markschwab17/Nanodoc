@@ -1062,3 +1062,63 @@ describe("oneSidedStrokeAnchor", () => {
     expect(r).toBeNull();
   });
 });
+
+// ── T0 Task 5: overlay/notes sheets out of tiling; seam-only pairs need a ref ──
+describe("sheet roles and the band-seam gate", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720 x 480 ft @20
+  const ftToPt = (ft: number) => ft * 3.6;
+  /** 14 distinctly-signatured segments on one horizontal line at `cyFt` (feet). */
+  const seamCluster = (cyFt: number, tag: string): Geom[] => {
+    const g: Geom[] = [];
+    for (let i = 0; i < 14; i++) {
+      const cx = 120 + i * 40, len = 12 + i * 2, ang = ((i * 13) % 170) + 5;
+      const r = (ang * Math.PI) / 180;
+      const dx = (Math.cos(r) * len) / 2, dy = (Math.sin(r) * len) / 2;
+      g.push({ id: `${tag}${i}`, closed: false, pts: [
+        [ftToPt(cx - dx), ftToPt(cyFt - dy)], [ftToPt(cx + dx), ftToPt(cyFt + dy)],
+      ] });
+    }
+    return g;
+  };
+  const mk = (no: number, geometry: Geom[], role?: SheetInput["role"]): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW, role,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+  // A's content sits in its BOTTOM band, B's identical content in its TOP band, ~0.92
+  // of the sheet height apart: the band-seam channel's abutting case.
+  const A = () => mk(1, seamCluster(460, "a"));
+  const B = () => mk(2, seamCluster(18.4, "b"));
+
+  it("a two-sheet set still bonds on the band seam alone", () => {
+    const res = stitchSheets([A(), B()]);
+    const pair = res.pairs.find((r) => r.channel);
+    expect(pair?.channel).toBe("seam");
+    expect(res.placements.size).toBe(2);
+  });
+
+  it("on a 4+ sheet set a band seam with no reference or matchline is refused", () => {
+    // Repeated axis-aligned EDGE content is not distinctive across a large set — one
+    // sheet border looks much like another — so the weakest channel in the ladder
+    // needs corroboration that the two sheets are neighbours. (El Centro bonded an
+    // Overall Site Plan, a Drainage Plan and a General Notes sheet this way.)
+    const res = stitchSheets([A(), B(), mk(3, []), mk(4, [])]);
+    expect(res.pairs.every((r) => r.channel !== "seam")).toBe(true);
+    expect(res.method).toBe("none");
+  });
+
+  it("a non-tile sheet is dropped from the pair search entirely", () => {
+    const res = stitchSheets([A(), mk(2, seamCluster(18.4, "b"), "notes")]);
+    expect(res.pairs.filter((r) => r.channel)).toHaveLength(0);
+    expect(res.method).toBe("none");
+  });
+
+  it("an overall plan cannot be collaged onto the tiles it overlays", () => {
+    const res = stitchSheets([A(), mk(2, seamCluster(18.4, "b"), "overall")]);
+    expect(res.placements.size).toBe(0);
+  });
+
+  it("role defaults to tile when the caller does not classify", () => {
+    const res = stitchSheets([mk(1, seamCluster(460, "a"), undefined), B()]);
+    expect(res.placements.size).toBe(2);
+  });
+});

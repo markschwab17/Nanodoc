@@ -11,7 +11,7 @@ describe("toProbeResult", () => {
         { pageIndex: 2, x: 0, y: 500, width: 100, height: 100, aligned: false },
       ],
       rootFtPerIn: 20, alignedCount: 2, unplacedCount: 1, worstResidFt: 0, method: "keymap", poses: [],
-      refPageIndices: [0, 1],
+      refPageIndices: [0, 1], skipped: [], scaleWarnings: [],
     };
     const probe = toProbeResult(res, 7);
     expect(probe.docId).toBe(7);

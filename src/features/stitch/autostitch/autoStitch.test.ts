@@ -226,3 +226,53 @@ describe("discipline-code reciprocal anchors", () => {
     expect(debug.anchors).toHaveLength(1);
   });
 });
+
+describe("sheet roles and scale warnings in the result", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 1000, 800];
+  const lab = (text: string, cx: number, cy: number, w = 90, h = 14) =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
+  // Title-block cell (bottom-right corner is what pickTitle scores), plus an optional
+  // scale note anywhere on the sheet.
+  const sheet = (title: string, scaleNote?: string) => ({
+    view: VIEW, words: [], geometry: [], shxLabels: [],
+    labels: [lab(title, 880, 740), ...(scaleNote ? [lab(scaleNote, 500, 400)] : [])],
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const run = async (pages: ReturnType<typeof sheet>[], userScale = 20) => {
+    const { capturePage } = await import("./captureDevice");
+    let n = 0;
+    (capturePage as any).mockImplementation(() => pages[n++]);
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    return await autoStitch({} as any, fakeDoc as any, pages.map((_, i) => i), { ocr: async () => [], userScale });
+  };
+
+  it("reports the non-tile sheets it kept out of the tiling, by page and reason", async () => {
+    const res = await run([
+      sheet("PRECISE GRADING PLAN"), sheet("GENERAL NOTES 1"),
+      sheet("OVERALL SITE PLAN"), sheet("LANDSCAPE DETAILS"),
+    ]);
+    expect(res.skipped.map((s) => [s.pageIndex, s.role])).toEqual([[1, "notes"], [2, "overall"], [3, "details"]]);
+    expect(res.skipped[0].reason).toMatch(/notes/i);
+  });
+
+  it("no skips on a set of plan sheets", async () => {
+    const res = await run([sheet("GRADING PLAN"), sheet("DRAINAGE PLAN")]);
+    expect(res.skipped).toEqual([]);
+  });
+
+  it("warns when a sheet's own scale note disagrees with the scale in use by >25%", async () => {
+    const res = await run([sheet("GRADING PLAN", '1" = 20\''), sheet("ENLARGED PLAN", '1/8" = 1\'-0"')], 20);
+    expect(res.scaleWarnings).toEqual([{ pageIndex: 1, usedFtPerIn: 20, statedFtPerIn: 8 }]);
+  });
+
+  it("an agreeing scale note is not a warning", async () => {
+    const res = await run([sheet("GRADING PLAN", '1" = 20\'')], 20);
+    expect(res.scaleWarnings).toEqual([]);
+  });
+});

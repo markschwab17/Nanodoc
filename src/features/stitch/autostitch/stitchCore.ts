@@ -18,6 +18,7 @@
 import { parseSheetRefs } from "./tokens";
 import { extractPageLabel } from "./pageLabels";
 import type { Label, Geom, PageExtract } from "./types";
+import type { SheetRole } from "./pageLabels";
 
 export const FT = (pt: number, scale: number): number => (pt / 72) * scale; // pts -> world feet at sheet scale
 
@@ -803,6 +804,11 @@ export interface SheetInput {
   pageIndex?: number;
   /** Page-pt bbox of this unit's frame; absent = whole page. */
   frame?: [number, number, number, number];
+  /** What this sheet IS (see `pageLabels.classifySheetRole`). Anything other than
+   *  `tile` is kept out of the pair search: an overall/key plan overlays the tiles
+   *  rather than abutting them, and a notes/index/details sheet shares no ground
+   *  with anything. Absent ⇒ treated as a tile, i.e. unchanged behaviour. */
+  role?: SheetRole;
   /** The unit's ruled DRAWING frame in its OWN coordinates (see
    *  `frameDetect.detectDrawingFrame`), when one was detected. Edge-vs-interior
    *  classification is measured against it so a matchline callout on the drawing's
@@ -956,6 +962,7 @@ interface DriverSheet {
   key: number; tok?: TokFeat[]; seg?: SegFeat[]; sheetCode?: string | null; segFine?: SegFeat[];
   printedNo: number; siblingKey?: number; pageIndex?: number;
   drawingFrame?: [number, number, number, number] | null;
+  role: SheetRole;
 }
 
 /**
@@ -1024,6 +1031,7 @@ export function stitchSheets(
       id: s.id, no: s.no, scale: s.scale, view: s.view,
       raw: { shxLabels: text, labels: s.extract.labels || [], geometry: s.extract.geometry || [], view: s.view },
       key: s.no, sheetCode: label.sheetCode, drawingFrame: s.drawingFrame ?? null,
+      role: s.role ?? "tile",
       printedNo: s.printedNo ?? s.no, siblingKey: s.siblingKey, pageIndex: s.pageIndex,
     };
   });
@@ -1191,10 +1199,10 @@ export function stitchSheets(
   {
     const paired = new Set<number>();
     for (const k of pairKeys) { const [a, b] = k.split("-").map(Number); paired.add(a); paired.add(b); }
-    for (const si of sheets.filter((s) => !paired.has(s.no))) {
+    for (const si of sheets.filter((s) => !paired.has(s.no) && s.role === "tile")) {
       let best: { key: string; inl: number } | null = null;
       for (const sj of sheets) {
-        if (sj.no === si.no) continue;
+        if (sj.no === si.no || sj.role !== "tile") continue;
         const key = si.no < sj.no ? `${si.no}-${sj.no}` : `${sj.no}-${si.no}`;
         if (pairKeys.has(key)) continue;
         const seam = bandSeamPrior(si, sj);
@@ -1202,6 +1210,20 @@ export function stitchSheets(
       }
       if (best) pairKeys.add(best.key);
     }
+  }
+
+  // ── NON-TILE SHEETS LEAVE THE PAIR SEARCH ──────────────────────────────────
+  // An overall/key plan covers the same ground as the tiles at a different scale,
+  // so it OVERLAYS them; a notes/index/details sheet shares no ground with anything.
+  // Both can still win a channel — repeated border geometry and shared boilerplate
+  // tokens are enough — and the result is a placement that is geometrically
+  // plausible and physically wrong (failures G and K: an Overall Site Plan, a
+  // Drainage Plan and a General Notes sheet bonded into one collage). Dropping their
+  // candidates here leaves them unplaced, so they are laid out below the tiles and
+  // reported as skipped rather than silently collaged in.
+  for (const k of [...pairKeys]) {
+    const [a, b] = k.split("-").map(Number);
+    if (byNo.get(a)?.role !== "tile" || byNo.get(b)?.role !== "tile") pairKeys.delete(k);
   }
 
   // `_verify` carries the per-pair metadata the post-solve seam classifier needs
@@ -1390,7 +1412,13 @@ export function stitchSheets(
     }
     // Band-seam: axis-aligned edge-band match between two tiles (no readable
     // matchline/tokens). The seam offset is the true adjacency, not the interior.
-    else if (seam) { final = { dx: seam.dx, dy: seam.dy }; channel = "seam"; conf = seam.inliers >= 20 ? "high" : "medium"; w = seam.inliers / (seam.rmsFt ** 2 + 0.09); }
+    // The band-seam channel is the weakest evidence in the ladder: it matches
+    // repeated axis-aligned EDGE content, which on a large set is not distinctive —
+    // a sheet border looks much like any other sheet border. On a set of 4+ sheets
+    // it therefore needs corroboration that the two sheets are actually neighbours:
+    // a resolved cross-reference (`rel`) or a facing matchline label. Small sets
+    // keep the unconditional behaviour, where there is little to false-match against.
+    else if (seam && (sheets.length < 4 || rel != null || prior != null)) { final = { dx: seam.dx, dy: seam.dy }; channel = "seam"; conf = seam.inliers >= 20 ? "high" : "medium"; w = seam.inliers / (seam.rmsFt ** 2 + 0.09); }
     else if (seg) { final = seg; channel = "segment(windowed)"; conf = seg.votes! >= 2 * seg.secondVotes! ? "medium" : "low"; w = 0.5 * seg.inliers / (seg.rmsFt ** 2 + 0.25); }
     // Cross-referenced matchline STROKES: the perpendicular offset is exact (from
     // the physical line); the parallel is a coarse label estimate segVote couldn't

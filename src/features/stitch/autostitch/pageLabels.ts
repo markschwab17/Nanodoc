@@ -129,3 +129,40 @@ export function extractPageLabel(page: LabelPage): PageLabelResult {
     source: codeHit ? "title-block-code" : sheetNo != null ? "sheet-count" : title ? "title-only" : "none",
   };
 }
+
+/**
+ * What a sheet IS, for the purposes of tiling. Only a `tile` belongs in the
+ * geometric solve: an OVERALL or KEY plan covers the same ground as the tiles at a
+ * different scale (so it overlays them rather than abutting them), and a notes,
+ * index or details sheet shares no ground with anything. Left in the pair search
+ * they produce placements that are geometrically plausible and physically wrong —
+ * the investigation's failures G and K, and exactly what put three unrelated El
+ * Centro sheets into one collage.
+ */
+export type SheetRole = "tile" | "overall" | "keyplan" | "index" | "notes" | "details";
+
+const ROLE_RULES: [RegExp, SheetRole][] = [
+  [/\bKEY\s*(?:PLAN|MAP|SHEET)?\b/i, "keyplan"],
+  [/\bOVERALL\b/i, "overall"],
+  [/\bINDEX\b/i, "index"],
+  [/\bNOTES?\b/i, "notes"],
+  [/\bDETAILS?\b/i, "details"],
+];
+
+/**
+ * Classify a sheet from its title and (optionally) its stated scale against the
+ * set's median. A sheet drawn at ≥ `overallScaleRatio`× the median scale is an
+ * overall/key sheet however it is titled — 1" = 200' among 1" = 20' tiles covers ten
+ * times the ground. Pure; `title` null and no scale ⇒ `tile` (the safe default: an
+ * unclassified sheet keeps taking part in the solve exactly as before).
+ */
+export function classifySheetRole(
+  title: string | null,
+  opts: { scaleFtPerIn?: number | null; medianScaleFtPerIn?: number | null; overallScaleRatio?: number } = {},
+): SheetRole {
+  if (title) for (const [re, role] of ROLE_RULES) if (re.test(title)) return role;
+  const { scaleFtPerIn, medianScaleFtPerIn, overallScaleRatio = 4 } = opts;
+  if (scaleFtPerIn != null && medianScaleFtPerIn != null && medianScaleFtPerIn > 0
+      && scaleFtPerIn >= overallScaleRatio * medianScaleFtPerIn) return "overall";
+  return "tile";
+}

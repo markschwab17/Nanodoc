@@ -166,6 +166,8 @@ function keyToPage(inputs, key) {
 function reportRun(scale, res, debug) {
   const inputs = debug?.inputs;
   console.log(`method=${res.method} aligned=${res.alignedCount} unplaced=${res.unplacedCount} worstResid=${res.worstResidFt}ft refPages=[${res.refPageIndices.map(p=>p+1).join(",")}]`);
+  if (res.skipped?.length) console.log(`SKIPPED (not tiles): ${res.skipped.map(s => `p${s.pageIndex + 1}:${s.role}`).join("  ")}`);
+  if (res.scaleWarnings?.length) console.log(`SCALE WARNINGS: ${res.scaleWarnings.map(w => `p${w.pageIndex + 1} stated ${w.statedFtPerIn} vs used ${w.usedFtPerIn}`).join("  ")}`);
   if (debug?.anchors?.length) {
     console.log("ANCHORS:");
     for (const a of debug.anchors) { const perp = a.perp ?? "x"; const d = perp === "y" ? a.dy : a.dx; console.log(`  ${keyToPage(inputs, a.i)} -> ${keyToPage(inputs, a.j)}  d${perp}=${(d ?? 0).toFixed(1)}ft  perp=${perp}`); }

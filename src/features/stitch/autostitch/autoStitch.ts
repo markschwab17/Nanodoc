@@ -8,8 +8,8 @@ import { sliceExtract, stripFrames, detectDrawingFrame, type Frame } from "./fra
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
 import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
-import { parseSheetRefs, refSheetNumber, refSheetCode, type SheetRef } from "./tokens";
-import { extractPageLabel } from "./pageLabels";
+import { parseSheetRefs, parseScaleNotes, refSheetNumber, refSheetCode, type SheetRef } from "./tokens";
+import { extractPageLabel, classifySheetRole, type SheetRole } from "./pageLabels";
 import type { OcrWord, RawImage } from "./ocrService";
 import { DEFAULT_SCALE_FT_PER_IN as DEFAULT_SCALE } from "../pageScales";
 
@@ -65,6 +65,13 @@ export interface AutoStitchResult {
   seamReport?: SeamReportEntry[];
   /** Cannot-align honesty verdict from the seam report. Absent → old behavior. */
   alignmentVerdict?: AlignmentVerdict;
+  /** Pages deliberately kept OUT of the tiling (overall/key plans, notes, index,
+   *  details). They are still laid out — below the tiles, unaligned — but they never
+   *  take part in the pair search, so they cannot be collaged into it. */
+  skipped: { pageIndex: number; role: SheetRole; reason: string }[];
+  /** Pages whose own stated scale note disagrees with the scale being used by more
+   *  than 25%. Advisory only — the scale in use is never overridden. */
+  scaleWarnings: { pageIndex: number; usedFtPerIn: number; statedFtPerIn: number }[];
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
@@ -140,6 +147,7 @@ interface Unit {
   key: number;              // unique numeric key (assigned after uniquify)
   /** Ruled drawing frame in the UNIT's own coordinates (recomputed per strip). */
   drawingFrame: [number, number, number, number] | null;
+  role: SheetRole;
 }
 
 /** Per-page record collected in pass 1 (extract + printed number). */
@@ -149,6 +157,11 @@ interface PageRec {
    *  band clips, edge-vs-interior classification) is measured against it. Null on a
    *  sheet drawn edge to edge. */
   drawingFrame: [number, number, number, number] | null;
+  /** Title-block title, and the plan scale the sheet states for itself (its own
+   *  scale note, NOT the scale in use). Both feed the sheet-role classification. */
+  title: string | null;
+  statedFtPerIn: number | null;
+  role: SheetRole;
 }
 
 /** Reciprocal-label anchor before unit-key resolution: endpoints keyed by
@@ -212,6 +225,8 @@ export async function autoStitch(
     let printedNoSource: "ocr" | "text" | "fallback" = "fallback";
     let recovered: Label[] = [];
     let drawingFrame: [number, number, number, number] | null = null;
+    let title: string | null = null;
+    let statedFtPerIn: number | null = null;
     try {
       extract = capturePage(mupdf, page);
       // The sheet's ruled drawing frame (null when it draws edge to edge). Every
@@ -220,6 +235,15 @@ export async function autoStitch(
       // callout there is neither rasterised by a page-relative band nor classified
       // as an edge ref (failure D).
       drawingFrame = detectDrawingFrame(extract.geometry, extract.view);
+      // Title-block title + the sheet's OWN stated scale, read from the PDF's text
+      // channels BEFORE the OCR merge below. Deliberately pre-merge: OCR recovers
+      // edge-band text ("… ON SHEET 3. CASE PER PLAN" and the like), and letting that
+      // reach the title picker mislabels plan sheets — it cost PG_SITE four
+      // alignments in testing. Title-block reading is a text-channel job.
+      const baseLabel = extractPageLabel({ labels: extract.labels, shxLabels: extract.shxLabels, view: extract.view });
+      title = baseLabel.title;
+      const baseNotes = parseScaleNotes([...extract.labels, ...extract.shxLabels]);
+      statedFtPerIn = baseNotes.length ? baseNotes[0].ftPerIn : null;
       // OCR recovery: OCR the PAGE-EDGE bands (no frame needed) when the text
       // channels are starved of edge refs. Strip refs recovered here declare a
       // two-strip page AND locate the split (see stripFrames) — geometry border
@@ -262,7 +286,10 @@ export async function autoStitch(
       }
     }
 
-    pages.push({ pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame });
+    pages.push({
+      pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
+      title, statedFtPerIn, role: "tile",
+    });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
     if (hasEdgeRefs(extract, drawingFrame)) refPageIndices.push(pageIndex);
@@ -275,6 +302,38 @@ export async function autoStitch(
     pageIndices.length
   );
   for (const p of pages) p.printedNo = resolvedNos.get(p.pageIndex)!;
+
+  // ── SHEET ROLE + SCALE-NOTE CROSS-CHECK ─────────────────────────────────────
+  // Which pages are TILES. An overall/key plan covers the tiles' ground at a
+  // different scale (it overlays them rather than abutting them) and a notes/index/
+  // details sheet shares no ground with anything; both are kept out of the pair
+  // search, then reported so the UI can say WHICH pages were left out and why.
+  // The scale test is against the set's own median stated scale, so it needs every
+  // page's note first.
+  const stated = pages.map((p) => p.statedFtPerIn).filter((v): v is number => v != null && v > 0).sort((a, b) => a - b);
+  const medianStated = stated.length ? stated[Math.floor(stated.length / 2)] : null;
+  const skipped: { pageIndex: number; role: SheetRole; reason: string }[] = [];
+  const ROLE_REASON: Record<string, string> = {
+    overall: "an overall plan — it covers the same ground as the tiles, at a different scale",
+    keyplan: "a key plan",
+    index: "a sheet index",
+    notes: "a notes sheet",
+    details: "a details sheet",
+  };
+  for (const p of pages) {
+    p.role = classifySheetRole(p.title, { scaleFtPerIn: p.statedFtPerIn, medianScaleFtPerIn: medianStated });
+    if (p.role !== "tile") skipped.push({ pageIndex: p.pageIndex, role: p.role, reason: ROLE_REASON[p.role] ?? p.role });
+  }
+  // Advisory only: the sheet's own scale note vs the scale actually in use. Never an
+  // override — the user's scale (or the CTO plan's) stays authoritative.
+  const scaleWarnings: { pageIndex: number; usedFtPerIn: number; statedFtPerIn: number }[] = [];
+  for (const p of pages) {
+    const used = scaleOf(p.pageIndex);
+    if (p.statedFtPerIn == null || !(used > 0)) continue;
+    if (Math.abs(p.statedFtPerIn - used) / used > 0.25) {
+      scaleWarnings.push({ pageIndex: p.pageIndex, usedFtPerIn: used, statedFtPerIn: p.statedFtPerIn });
+    }
+  }
 
   // ── PASS 2: reciprocal interior-matchline anchor search ─────────────────────
   // A one-sided edge ref on page j ("SEE SHEET n" on its left/right edge) has no
@@ -591,14 +650,14 @@ export async function autoStitch(
         // A strip's extract is frame-LOCAL, so its drawing frame is recomputed in
         // those coordinates rather than inherited from the page.
         const ex = sliceExtract(p.extract, f);
-        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view) });
+        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role });
       }
     } else {
-      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame });
+      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role });
     }
   }
 
-  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], refPageIndices };
+  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], refPageIndices, skipped, scaleWarnings };
 
   // Unique numeric keys, stable order.
   units.forEach((u, i) => { u.key = i + 1; });
@@ -647,7 +706,7 @@ export async function autoStitch(
       view: u.extract.view, extract: u.extract,
       printedNo: u.printedNo, pageIndex: u.pageIndex,
       siblingKey: byPage.get(u.pageIndex)!.find((o) => o.key !== u.key)?.key,
-      frame: u.frame?.bbox, drawingFrame: u.drawingFrame,
+      frame: u.frame?.bbox, drawingFrame: u.drawingFrame, role: u.role,
     }));
     // Key-map site grid (whole-page sets only; stitchSheets ignores it when
     // any page produced two units). Grid is keyed by unit key here.
@@ -689,5 +748,5 @@ export async function autoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, skipped, scaleWarnings };
 }
