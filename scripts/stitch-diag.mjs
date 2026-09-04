@@ -166,6 +166,13 @@ function keyToPage(inputs, key) {
 function reportRun(scale, res, debug) {
   const inputs = debug?.inputs;
   console.log(`method=${res.method} aligned=${res.alignedCount} unplaced=${res.unplacedCount} worstResid=${res.worstResidFt}ft refPages=[${res.refPageIndices.map(p=>p+1).join(",")}]`);
+  if (res.alongAnchored) {
+    const placed = [...new Set(res.poses.filter(p => p.posFt).map(p => p.pageIndex))].sort((a, b) => a - b);
+    const anchored = new Set(res.alongAnchored);
+    const loose = placed.filter(p => !anchored.has(p));
+    console.log(`ALONG-ANCHORED: [${res.alongAnchored.map(p => p + 1).join(",")}]` +
+      (loose.length ? `   NOT anchored (free to slide): [${loose.map(p => p + 1).join(",")}]  ±${res.worstAlongUncertaintyFt ?? 0}ft` : ""));
+  }
   if (res.skipped?.length) console.log(`SKIPPED (not tiles): ${res.skipped.map(s => `p${s.pageIndex + 1}:${s.role}`).join("  ")}`);
   if (res.scaleWarnings?.length) console.log(`SCALE WARNINGS: ${res.scaleWarnings.map(w => `p${w.pageIndex + 1} stated ${w.statedFtPerIn} vs used ${w.usedFtPerIn}`).join("  ")}`);
   if (debug?.anchors?.length) {

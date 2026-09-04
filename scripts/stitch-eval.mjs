@@ -102,6 +102,39 @@ async function ocr(image) {
 }
 const flushCache = () => { if (cacheDirty) { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache)); cacheDirty = false; } };
 
+// ── ground-truth comparison ──────────────────────────────────────────────────
+/**
+ * Per-unit placement error against a hand-verified fixture, in feet.
+ *
+ * The fixture stores CANVAS POINTS at 3.6 pt/ft, keyed by page index, with `s1`/`s2`
+ * for the two strip frames of a split page. A layout has no absolute origin, so the
+ * two are aligned by the MEDIAN delta before comparing — robust, and it does not let
+ * one badly-placed sheet (which is exactly what we are looking for) drag the whole
+ * comparison. Units the fixture does not name are skipped.
+ */
+function groundTruthErrors(res, gt) {
+  const PT_PER_FT = 3.6;
+  const pos = gt.positions ?? {};
+  const rows = [];
+  for (const p of res.poses) {
+    if (!p.posFt) continue;
+    const key = p.frame ? (p.frame[1] === 0 ? "s1" : "s2") : String(p.pageIndex);
+    const g = pos[key];
+    if (!Array.isArray(g)) continue;
+    rows.push({ key, pageIndex: p.pageIndex, dx: p.posFt.x * PT_PER_FT - g[0], dy: p.posFt.y * PT_PER_FT - g[1] });
+  }
+  if (rows.length < 2) return { rows: [], medianFt: 0, p95Ft: 0 };
+  const med = (xs) => { const a = [...xs].sort((u, v) => u - v); return a[Math.floor(a.length / 2)]; };
+  const ox = med(rows.map((r) => r.dx)), oy = med(rows.map((r) => r.dy));
+  for (const r of rows) r.errFt = Math.hypot(r.dx - ox, r.dy - oy) / PT_PER_FT;
+  const errs = rows.map((r) => r.errFt).sort((a, b) => a - b);
+  return {
+    rows: rows.sort((a, b) => a.pageIndex - b.pageIndex || a.key.localeCompare(b.key)),
+    medianFt: errs[Math.floor(errs.length / 2)],
+    p95Ft: errs[Math.min(errs.length - 1, Math.ceil(0.95 * errs.length) - 1)],
+  };
+}
+
 // ── run ──────────────────────────────────────────────────────────────────────
 const VERDICT_RANK = { unverified: 0, partial: 1, verified: 2 };
 
@@ -139,6 +172,23 @@ for (const set of sets) {
   row.suspect = (res.seamReport ?? []).filter((s) => s.status === "suspect").length;
   row.seams = (res.seamReport ?? []).length;
   row.skippedSheets = (res.skipped ?? []).length;
+  // ALONG-anchored pages, and the placed pages that are NOT (they are connected but
+  // free to slide along their seams, so the commit demotes them to unaligned).
+  const placedPages = [...new Set(res.poses.filter((p) => p.posFt).map((p) => p.pageIndex))].sort((a, b) => a - b);
+  const anchoredSet = new Set(res.alongAnchored ?? []);
+  row.alongAnchored = res.alongAnchored ? [...anchoredSet].sort((a, b) => a - b) : null;
+  row.demoted = res.alongAnchored ? placedPages.filter((p) => !anchoredSet.has(p)) : [];
+  row.alongUncertaintyFt = res.worstAlongUncertaintyFt ?? 0;
+
+  if (set.groundTruth) {
+    const gtPath = expandHome(set.groundTruth);
+    if (fs.existsSync(gtPath)) {
+      const gt = groundTruthErrors(res, JSON.parse(fs.readFileSync(gtPath, "utf8")));
+      row.gt = gt;
+    } else {
+      row.gtMissing = gtPath;
+    }
+  }
 
   const fail = (m) => row.failures.push(m);
   if (set.minAligned != null && row.aligned < set.minAligned) fail(`aligned ${row.aligned} < ${set.minAligned}`);
@@ -147,6 +197,24 @@ for (const set of sets) {
   if (set.maxWorstResidFt != null && row.worstResidFt > set.maxWorstResidFt) fail(`worstResid ${row.worstResidFt} ft > ${set.maxWorstResidFt} ft`);
   if (set.maxSuspectSeams != null && row.suspect > set.maxSuspectSeams) fail(`${row.suspect} suspect seams > ${set.maxSuspectSeams}`);
   if (set.maxSeconds != null && row.seconds > set.maxSeconds) fail(`${row.seconds.toFixed(1)}s > ${set.maxSeconds}s`);
+  // GROUND TRUTH. The bar applies to the units the solver CLAIMS: an along-anchored
+  // unit is offered as aligned, so it must actually be where it belongs. A unit that
+  // is not along-anchored is demoted to unaligned by the commit, so a large error
+  // there is reported, not failed — but it must never be claimed.
+  if (row.gt?.rows.length) {
+    row.gtWorstClaimed = 0;
+    for (const r of row.gt.rows) {
+      const claimed = row.alongAnchored == null || anchoredSet.has(r.pageIndex);
+      if (!claimed) continue;
+      if (r.errFt > row.gtWorstClaimed) row.gtWorstClaimed = r.errFt;
+      if (set.maxTileErrorFt != null && r.errFt > set.maxTileErrorFt) {
+        fail(`${r.key} is offered as aligned but sits ${r.errFt.toFixed(1)} ft from ground truth (> ${set.maxTileErrorFt} ft)`);
+      }
+    }
+  }
+  if (set.gtMedianCeilFt != null && row.gt && row.gt.medianFt > set.gtMedianCeilFt) {
+    fail(`ground-truth median ${row.gt.medianFt.toFixed(1)} ft > ${set.gtMedianCeilFt} ft`);
+  }
   rows.push(row);
 }
 flushCache();
@@ -165,6 +233,20 @@ if (AS_JSON) {
       `${pad(r.name, 26)}${pad(r.aligned, 9)}${pad(r.method, 11)}${pad(r.verdict, 12)}` +
       `${pad(`${r.worstResidFt.toFixed(2)} ft`, 12)}${pad(`${r.suspect}/${r.seams}`, 9)}${pad(r.skippedSheets, 9)}${pad(r.ocrCalls, 6)}${r.seconds.toFixed(1)}s`,
     );
+  }
+  console.log("");
+  for (const r of rows) {
+    if (r.skipped) continue;
+    if (r.alongAnchored) {
+      console.log(`${r.name}: along-anchored pages [${r.alongAnchored.map((p) => p + 1).join(",") || "—"}]` +
+        (r.demoted.length ? `; demoted (placed, free to slide ±${Math.round(r.alongUncertaintyFt)} ft) [${r.demoted.map((p) => p + 1).join(",")}]` : ""));
+    }
+    if (r.gtMissing) console.log(`${r.name}: ground truth not found (${r.gtMissing})`);
+    if (r.gt?.rows.length) {
+      console.log(`${r.name}: ground-truth error median ${r.gt.medianFt.toFixed(1)} ft, 95p ${r.gt.p95Ft.toFixed(1)} ft` +
+        (r.gtWorstClaimed != null ? `, worst CLAIMED ${r.gtWorstClaimed.toFixed(1)} ft` : ""));
+      console.log(`    ${r.gt.rows.map((x) => `${x.key}:${x.errFt.toFixed(1)}`).join("  ")}`);
+    }
   }
   console.log("");
   for (const r of rows) for (const f of r.failures) console.log(`REGRESSION · ${r.name}: ${f}`);
