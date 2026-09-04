@@ -29,52 +29,16 @@ const applyX = (m: number[], x: number, y: number): number => m[0] * x + m[2] * 
 const applyY = (m: number[], x: number, y: number): number => m[1] * x + m[3] * y + m[5];
 
 /**
- * Run a page through a capture Device, returning glyphs (visible + invisible
- * render-mode-3 "SHX" channel) reconstructed into words/labels, plus stroke
- * geometry — all in mupdf page space (points, y-down). Identity CTM at page.run
- * keeps everything in one frame that matches the tile raster and DOM canvas.
+ * The stroke-geometry half of a capture, on its own.
+ *
+ * `capturePage` and `capturePageGeometry` share it: one flattens text as well, the
+ * other does not. Kept as a factory (rather than module state) because the arena
+ * below is per-capture — two captures running against the same module must not
+ * hand out views into each other's chunks.
  */
-export function capturePage(mupdf: any, page: any): PageExtract {
-  const visAtoms: Atom[] = [];
-  const shxAtoms: Atom[] = [];
+function createPathCapture(): { geometry: Geom[]; walkPath: (path: any, ctm: number[]) => void } {
   const geometry: Geom[] = [];
   let gid = 0;
-
-  const walkText = (text: any, ctm: number[], bucket: Atom[]) => {
-    let span: { m: number[]; ucs: number }[] = [];
-    const flushSpan = () => {
-      for (let i = 0; i < span.length; i++) {
-        const { m, ucs } = span[i];
-        const ch = ucs > 0 ? String.fromCodePoint(ucs) : "";
-        if (!ch) continue;
-        const a = m[0], b = m[1], c = m[2], d = m[3];
-        const norm = Math.hypot(a, b) || 1;
-        // advance = distance to the next glyph origin within the span (real
-        // kerning/advance, incl. skipped space glyphs); last glyph falls back to h.
-        const len = i + 1 < span.length
-          ? Math.hypot(span[i + 1].m[4] - m[4], span[i + 1].m[5] - m[5])
-          : (Math.hypot(c, d) || 1);
-        bucket.push({
-          text: ch, x: m[4], y: m[5],
-          dirX: a / norm, dirY: b / norm,
-          h: Math.hypot(c, d) || 1, len,
-          angle: (Math.atan2(b, a) * 180) / Math.PI, font: null,
-        });
-      }
-      span = [];
-    };
-    text.walk({
-      beginSpan() { flushSpan(); },
-      showGlyph(_font: any, trm: number[], _gid: number, ucs: number) {
-        // Glyph device matrix = trm THEN ctm (mupdf fz_concat(trm, ctm) — apply
-        // trm first, then the device ctm). Order matters: matMul(a,b) applies a first.
-        span.push({ m: matMul(trm as unknown as number[], ctm), ucs });
-      },
-      endSpan() { flushSpan(); },
-    });
-    flushSpan();
-  };
-
   // Points accumulate FLAT (x,y,x,y,...) in one reused scratch array, so a path
   // costs one Float32Array at flush() instead of one JS array per point. Reused
   // across paths because a dense sheet walks hundreds of thousands of them.
@@ -138,6 +102,55 @@ export function capturePage(mupdf: any, page: any): PageExtract {
     flush();
   };
 
+  return { geometry, walkPath };
+}
+
+/**
+ * Run a page through a capture Device, returning glyphs (visible + invisible
+ * render-mode-3 "SHX" channel) reconstructed into words/labels, plus stroke
+ * geometry — all in mupdf page space (points, y-down). Identity CTM at page.run
+ * keeps everything in one frame that matches the tile raster and DOM canvas.
+ */
+export function capturePage(mupdf: any, page: any): PageExtract {
+  const visAtoms: Atom[] = [];
+  const shxAtoms: Atom[] = [];
+  const { geometry, walkPath } = createPathCapture();
+
+  const walkText = (text: any, ctm: number[], bucket: Atom[]) => {
+    let span: { m: number[]; ucs: number }[] = [];
+    const flushSpan = () => {
+      for (let i = 0; i < span.length; i++) {
+        const { m, ucs } = span[i];
+        const ch = ucs > 0 ? String.fromCodePoint(ucs) : "";
+        if (!ch) continue;
+        const a = m[0], b = m[1], c = m[2], d = m[3];
+        const norm = Math.hypot(a, b) || 1;
+        // advance = distance to the next glyph origin within the span (real
+        // kerning/advance, incl. skipped space glyphs); last glyph falls back to h.
+        const len = i + 1 < span.length
+          ? Math.hypot(span[i + 1].m[4] - m[4], span[i + 1].m[5] - m[5])
+          : (Math.hypot(c, d) || 1);
+        bucket.push({
+          text: ch, x: m[4], y: m[5],
+          dirX: a / norm, dirY: b / norm,
+          h: Math.hypot(c, d) || 1, len,
+          angle: (Math.atan2(b, a) * 180) / Math.PI, font: null,
+        });
+      }
+      span = [];
+    };
+    text.walk({
+      beginSpan() { flushSpan(); },
+      showGlyph(_font: any, trm: number[], _gid: number, ucs: number) {
+        // Glyph device matrix = trm THEN ctm (mupdf fz_concat(trm, ctm) — apply
+        // trm first, then the device ctm). Order matters: matMul(a,b) applies a first.
+        span.push({ m: matMul(trm as unknown as number[], ctm), ucs });
+      },
+      endSpan() { flushSpan(); },
+    });
+    flushSpan();
+  };
+
   const device = new mupdf.Device({
     fillText: (text: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
     strokeText: (text: any, _s: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
@@ -154,4 +167,28 @@ export function capturePage(mupdf: any, page: any): PageExtract {
   const vis = reconstruct(visAtoms);
   const shx = reconstruct(shxAtoms);
   return { view, labels: vis.labels, words: vis.words, shxLabels: shx.labels as Label[], geometry };
+}
+
+/**
+ * Stroke geometry ONLY — no glyphs, no `reconstruct`.
+ *
+ * The align loupe's line snapping needs the paths and nothing else, and on a dense
+ * sheet the text half of `capturePage` (hundreds of thousands of glyph atoms, then
+ * word/label reconstruction) is most of the work and all of the peak memory. This
+ * path skips it entirely: no fillText/strokeText/ignoreText handlers are installed,
+ * so mupdf never materialises the glyph walk.
+ *
+ * Returned in mupdf page space (points, y-down), identical to `capturePage().geometry`.
+ */
+export function capturePageGeometry(mupdf: any, page: any): { view: [number, number, number, number]; geometry: Geom[] } {
+  const { geometry, walkPath } = createPathCapture();
+  const device = new mupdf.Device({
+    fillPath: (path: any, _eo: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
+    strokePath: (path: any, _s: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
+  });
+  page.run(device, mupdf.Matrix.identity);
+  (device as any).close?.();
+  (device as any).destroy?.();
+  const bounds = page.getBounds();
+  return { view: [bounds[0], bounds[1], bounds[2], bounds[3]], geometry };
 }

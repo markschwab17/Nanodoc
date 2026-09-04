@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  ALIGN_NEXT_SHEET_HINT,
   ALIGN_STEP_HINTS,
   IDLE_ALIGN,
+  alignClickableTiles,
   alignHint,
   isLockedForAlign,
   loupeActive,
@@ -25,6 +27,15 @@ function run(events: Parameters<typeof reduceAlign>[1][], from: AlignMachine = I
 const enter = { type: "enter" } as const;
 const click = (tileId: string, x: number, y: number) =>
   ({ type: "click", tileId, point: P(x, y) }) as const;
+/** The whole four-click sequence, moving "a" onto "b". */
+const fullRun = [
+  enter,
+  click("a", 0, 0),
+  click("a", 1, 1),
+  click("a", 2, 2),
+  click("b", 3, 3),
+  click("b", 4, 4),
+];
 
 describe("alignToNeighbour state machine", () => {
   it("enters at pickMoving with nothing chosen", () => {
@@ -45,42 +56,80 @@ describe("alignToNeighbour state machine", () => {
   });
 
   it("runs A1 → A2 → B1 → B2 and applies on the fourth click", () => {
-    const last = run([
-      enter,
-      click("a", 0, 0),
-      click("a", 10, 20),
-      click("a", 30, 40),
-      click("b", 100, 100),
-      click("b", 130, 140),
-    ]);
-    expect(last.state.step).toBe("applied");
+    const last = run(fullRun);
     expect(last.apply).toEqual({
       movingTileId: "a",
       fixedTileId: "b",
-      movingPoints: [P(10, 20), P(30, 40)],
-      fixedPoints: [P(100, 100), P(130, 140)],
+      movingPoints: [P(1, 1), P(2, 2)],
+      fixedPoints: [P(3, 3), P(4, 4)],
     });
   });
 
-  it("refuses a locked sheet during the A steps, with the step hint", () => {
+  it("loops back to pickMoving for the next neighbour, remembering what moved", () => {
+    const { state } = run(fullRun);
+    expect(state.step).toBe("pickMoving");
+    expect(state.movingTileId).toBeNull();
+    expect(state.lastMovedTileId).toBe("a");
+    expect(state.points).toEqual([null, null, null, null]);
+    expect(alignHint(state)).toBe(ALIGN_NEXT_SHEET_HINT);
+    // Nothing is locked between moves — any sheet can be picked next.
+    expect(isLockedForAlign(state, "b")).toBe(false);
+    // …and picking one starts a fresh sequence.
+    const next = reduceAlign(state, click("c", 9, 9));
+    expect(next.state.step).toBe("A1");
+    expect(next.state.movingTileId).toBe("c");
+    expect(next.state.lastMovedTileId).toBe("a");
+  });
+
+  it("scopes the clickable sheets to the step", () => {
+    const tiles = [{ id: "a" }, { id: "b" }, { id: "c" }];
+    const picking = run([enter]).state;
+    expect(alignClickableTiles(picking, tiles)).toHaveLength(3);
+
+    const placingA = run([enter, click("a", 0, 0)]).state;
+    expect(alignClickableTiles(placingA, tiles).map((t) => t.id)).toEqual(["a"]);
+
+    const placingB = run([enter, click("a", 0, 0), click("a", 1, 1), click("a", 2, 2)]).state;
+    expect(alignClickableTiles(placingB, tiles).map((t) => t.id)).toEqual(["b", "c"]);
+
+    expect(alignClickableTiles(IDLE_ALIGN, tiles)).toHaveLength(0);
+  });
+
+  it("refuses a locked sheet during the A steps, naming what went wrong", () => {
     const state = run([enter, click("a", 0, 0)]).state;
     const refused = reduceAlign(state, click("b", 5, 5));
-    expect(refused.refusal).toBe(ALIGN_STEP_HINTS.A1);
+    expect(refused.refusal).toEqual({
+      reason: "wrong-sheet",
+      message: `Not that sheet — ${ALIGN_STEP_HINTS.A1}`,
+    });
     expect(refused.state).toBe(state); // nothing recorded
     expect(refused.apply).toBeUndefined();
   });
 
-  it("refuses the moving sheet during the B steps, with the step hint", () => {
+  it("refuses the moving sheet during the B steps", () => {
     const state = run([enter, click("a", 0, 0), click("a", 1, 1), click("a", 2, 2)]).state;
     expect(state.step).toBe("B1");
-    const refused = reduceAlign(state, click("a", 3, 3));
-    expect(refused.refusal).toBe(ALIGN_STEP_HINTS.B1);
-    expect(refused.state.step).toBe("B1");
+    expect(reduceAlign(state, click("a", 3, 3)).refusal).toEqual({
+      reason: "wrong-sheet",
+      message: `Not that sheet — ${ALIGN_STEP_HINTS.B1}`,
+    });
 
     const atB2 = reduceAlign(state, click("b", 9, 9)).state;
     const refusedB2 = reduceAlign(atB2, click("a", 4, 4));
-    expect(refusedB2.refusal).toBe(ALIGN_STEP_HINTS.B2);
+    expect(refusedB2.refusal?.reason).toBe("wrong-sheet");
     expect(refusedB2.apply).toBeUndefined();
+  });
+
+  it("says so when a click lands on no sheet at all", () => {
+    const state = run([enter, click("a", 0, 0)]).state;
+    const missed = reduceAlign(state, { type: "miss" });
+    expect(missed.refusal).toEqual({
+      reason: "no-sheet",
+      message: `No sheet there — ${ALIGN_STEP_HINTS.A1}`,
+    });
+    expect(missed.state).toBe(state);
+    // A miss outside the mode is not a refusal.
+    expect(reduceAlign(IDLE_ALIGN, { type: "miss" }).refusal).toBeUndefined();
   });
 
   it("Esc backs up exactly one click, all the way to pickMoving, then exits", () => {
@@ -116,35 +165,20 @@ describe("alignToNeighbour state machine", () => {
     expect(exited).toEqual(IDLE_ALIGN);
   });
 
-  it("Enter confirms only at `applied`; elsewhere it changes nothing", () => {
+  it("Esc mid-sequence after a move keeps the memory of what moved", () => {
+    const afterMove = run(fullRun).state;
+    const started = reduceAlign(afterMove, click("c", 1, 1)).state;
+    const backed = reduceAlign(started, { type: "escape" }).state;
+    expect(backed.step).toBe("pickMoving");
+    expect(backed.lastMovedTileId).toBe("a");
+  });
+
+  it("Enter is Done between moves and does nothing mid-sequence", () => {
     const midway = run([enter, click("a", 0, 0), click("a", 1, 1)]).state;
     expect(reduceAlign(midway, { type: "confirm" }).state).toBe(midway);
 
-    const applied = run([
-      enter,
-      click("a", 0, 0),
-      click("a", 1, 1),
-      click("a", 2, 2),
-      click("b", 3, 3),
-      click("b", 4, 4),
-    ]).state;
-    expect(reduceAlign(applied, { type: "confirm" }).state).toEqual(IDLE_ALIGN);
-    // Esc at `applied` also leaves, keeping the result (it is undoable on its own).
-    expect(reduceAlign(applied, { type: "escape" }).state).toEqual(IDLE_ALIGN);
-  });
-
-  it("a click after the apply does nothing until the mode is re-entered", () => {
-    const applied = run([
-      enter,
-      click("a", 0, 0),
-      click("a", 1, 1),
-      click("a", 2, 2),
-      click("b", 3, 3),
-      click("b", 4, 4),
-    ]).state;
-    const after = reduceAlign(applied, click("b", 5, 5));
-    expect(after.state).toBe(applied);
-    expect(after.apply).toBeUndefined();
+    const afterMove = run(fullRun).state;
+    expect(reduceAlign(afterMove, { type: "confirm" }).state).toEqual(IDLE_ALIGN);
   });
 
   it("B2 may land on a different fixed sheet than B1", () => {
@@ -165,10 +199,11 @@ describe("alignToNeighbour state machine", () => {
     for (const step of ["A1", "A2", "B1", "B2"] as const) {
       expect(loupeActive({ ...IDLE_ALIGN, step })).toBe(true);
     }
-    expect(loupeActive({ ...IDLE_ALIGN, step: "applied" })).toBe(false);
+    expect(loupeActive(IDLE_ALIGN)).toBe(false);
   });
 
   it("uses the plan's exact step copy", () => {
+    expect(alignHint({ ...IDLE_ALIGN, step: "pickMoving" })).toBe("Click the sheet you want to move");
     expect(alignHint({ ...IDLE_ALIGN, step: "A1" })).toBe(
       "Click the first point on the sheet you're moving"
     );

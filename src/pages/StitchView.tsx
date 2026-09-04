@@ -195,9 +195,6 @@ export default function StitchView() {
    *  renders (and hands it to the solver) and throws AutoStitchAborted. */
   const planAbortRef = useRef(false);
 
-  /** Per-seam quality from the LAST auto-align run (T0's seam report), by page pair. */
-  const lastSeamsRef = useRef<CommitResult["seams"]>(undefined);
-
   /**
    * What an auto-align run — the earned button's, or the Add PDF modal's — leaves
    * behind: the strip's "needs placing" count and the coach mark's explanation of WHY
@@ -206,9 +203,6 @@ export default function StitchView() {
   const handleAlignResult = useCallback(
     (result: CommitResult) => {
       setUnplacedCount(result.unalignedIds.length);
-      // Kept for "Align to neighbour": after a hand alignment we can say what the last
-      // auto-align run measured across that pair's seam, when it had anything to say.
-      lastSeamsRef.current = result.seams;
       // Nothing to explain when the run was clean AND nothing was held back — the mark
       // would then be pure noise on a successful align. Page numbers are 1-based.
       const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
@@ -249,31 +243,12 @@ export default function StitchView() {
   });
   const earnedCheck = earned.check;
 
-  /**
-   * The seam figure shown after a manual align: the residual T0's seam report measured
-   * for exactly this pair of sheets. Absent (and then the line is simply not shown)
-   * whenever no auto-align run has covered the pair — a hand-placed pair has never been
-   * measured, and inventing a number for it would be the dishonesty T0 removed.
-   */
-  const seamResidualFt = useCallback((movingTileId: string, fixedTileId: string): number | null => {
-    const seams = lastSeamsRef.current;
-    if (!seams?.length) return null;
-    const tiles = useStitchStore.getState().tiles;
-    const a = tiles.find((t) => t.id === movingTileId)?.sourcePageIndex;
-    const b = tiles.find((t) => t.id === fixedTileId)?.sourcePageIndex;
-    if (a == null || b == null || a < 0 || b < 0) return null;
-    const seam = seams.find(
-      (s) =>
-        (s.pageIndexes[0] === a && s.pageIndexes[1] === b) ||
-        (s.pageIndexes[0] === b && s.pageIndexes[1] === a),
-    );
-    const value = seam?.residFt ?? seam?.perpDeltaFt;
-    return value == null || !Number.isFinite(value) ? null : value;
-  }, []);
-
   /** The revamped manual align. Owns its own overlay, loupe and keyboard. */
-  const alignNeighbour = useAlignToNeighbour({ seamResidualFt });
+  const alignNeighbour = useAlignToNeighbour();
   const alignNeighbourExit = alignNeighbour.exit;
+  /** Read by the select-all listener, which is installed once. */
+  const alignNeighbourActiveRef = useRef(alignNeighbour.active);
+  alignNeighbourActiveRef.current = alignNeighbour.active;
   const earnedReset = earned.reset;
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
@@ -418,7 +393,10 @@ export default function StitchView() {
   const { loadPDF } = usePDF();
   const { showNotification } = useNotificationStore();
 
-  useStitchKeyboard();
+  // While Align to neighbour is up the moving sheet is the selection, so Delete would
+  // delete the sheet being aligned and Ctrl+A would select all of them out from under
+  // the mode. Nudges stay — they are the mode's own fine adjustment.
+  useStitchKeyboard({ selectionEditsDisabled: alignNeighbour.active });
 
   const [showAddPdf, setShowAddPdf] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
@@ -608,6 +586,9 @@ export default function StitchView() {
           target?.tagName === "TEXTAREA" ||
           target?.isContentEditable === true;
         if (inInput) return;
+        // Select-all would drop the mode's own selection (the sheet being moved) and
+        // switch tools out from under it.
+        if (alignNeighbourActiveRef.current) return;
         e.preventDefault();
         e.stopPropagation();
         handleSelectToolActivate();

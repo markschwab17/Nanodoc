@@ -17,9 +17,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { capturePage } from "./autostitch/captureDevice";
+import type { CaptureMessage, CaptureRequest } from "./geometryCapture.worker";
 import {
-  buildSnapIndex,
   canvasToPagePoint,
   findSnapPoint,
   loupeCropRect,
@@ -43,11 +42,20 @@ const CROP_DEBOUNCE_MS = 60;
 interface DocEntry {
   doc: any;
   renderer: PDFRenderer;
+  /** Stable id for the capture worker, which keeps its own copy of the document. */
+  docId: string;
   pages: Map<number, PageSize>;
-  /** null = captured and there was nothing to snap to; undefined = not captured yet. */
+  /** null = captured and there was nothing to snap to; undefined = not captured yet.
+   *  Insertion-ordered and capped at SNAP_CACHE_PAGES: a session that hovers a dozen
+   *  sheets must not accumulate a dozen grids. */
   snap: Map<number, SnapIndex | null>;
   capturing: Set<number>;
+  /** True once the worker has this document's bytes. */
+  sentToWorker: boolean;
 }
+
+/** How many pages' snap grids to keep. Beyond this the least recently added goes. */
+const SNAP_CACHE_PAGES = 4;
 
 /** What the loupe should draw right now. */
 export interface LoupeView {
@@ -97,6 +105,13 @@ export function useLoupeRender(opts: {
 
   const mupdfRef = useRef<any>(null);
   const docsRef = useRef(new Map<Uint8Array, DocEntry>());
+  /** Bumped by `release`. A document opened by an `ensureDoc` that was in flight when
+   *  the mode exited belongs to a dead generation: it is destroyed, never registered. */
+  const genRef = useRef(0);
+  const workerRef = useRef<Worker | null>(null);
+  const captureSeqRef = useRef(0);
+  const capturePendingRef = useRef(new Map<number, (msg: CaptureMessage) => void>());
+  const nextDocIdRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Monotonic; a crop that finishes after the cursor moved is thrown away. */
   const tokenRef = useRef(0);
@@ -113,6 +128,10 @@ export function useLoupeRender(opts: {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
     tokenRef.current++;
+    genRef.current++;
+    workerRef.current?.terminate();
+    workerRef.current = null;
+    capturePendingRef.current.clear();
     for (const entry of docsRef.current.values()) {
       try {
         entry.renderer.dispose();
@@ -152,6 +171,7 @@ export function useLoupeRender(opts: {
     if (tile.sourcePageIndex < 0) return null;
     const existing = docsRef.current.get(tile.sourcePdfBytes);
     if (existing) return existing;
+    const gen = genRef.current;
     if (!mupdfRef.current) mupdfRef.current = await import("mupdf").then((m) => m.default);
     const mupdf = mupdfRef.current;
     if (!aliveRef.current) return null;
@@ -159,12 +179,24 @@ export function useLoupeRender(opts: {
     const already = docsRef.current.get(tile.sourcePdfBytes);
     if (already) return already;
     const doc = mupdf.Document.openDocument(tile.sourcePdfBytes, "application/pdf");
+    if (gen !== genRef.current) {
+      // The mode exited while the mupdf module was loading — this document would
+      // otherwise be registered into a map nothing will ever release again.
+      try {
+        doc?.destroy?.();
+      } catch {
+        // already freed
+      }
+      return null;
+    }
     const entry: DocEntry = {
       doc,
       renderer: new PDFRenderer(mupdf),
+      docId: `loupe-${++nextDocIdRef.current}`,
       pages: new Map(),
       snap: new Map(),
       capturing: new Set(),
+      sentToWorker: false,
     };
     docsRef.current.set(tile.sourcePdfBytes, entry);
     return entry;
@@ -181,32 +213,59 @@ export function useLoupeRender(opts: {
     return size;
   }, []);
 
-  /**
-   * Capture the page's stroke geometry once, for snapping. Deferred to idle: it is a
-   * full page walk and the cursor must not stutter while it runs.
-   */
-  const ensureSnapIndex = useCallback((entry: DocEntry, pageIndex: number) => {
-    if (entry.snap.has(pageIndex) || entry.capturing.has(pageIndex)) return;
-    entry.capturing.add(pageIndex);
-    const run = () => {
-      if (!aliveRef.current) return;
-      let page: any = null;
-      try {
-        page = entry.doc.loadPage(pageIndex);
-        const extract = capturePage(mupdfRef.current, page);
-        entry.snap.set(pageIndex, extract.geometry.length ? buildSnapIndex(extract.geometry) : null);
-      } catch {
-        entry.snap.set(pageIndex, null);
-      } finally {
-        page?.destroy?.();
-        entry.capturing.delete(pageIndex);
-      }
+  /** The capture worker, spawned on first use and terminated with the mode. */
+  const ensureWorker = useCallback((): Worker => {
+    if (workerRef.current) return workerRef.current;
+    const w = new Worker(new URL("./geometryCapture.worker.ts", import.meta.url), { type: "module" });
+    w.onmessage = (ev: MessageEvent<CaptureMessage>) => {
+      const done = capturePendingRef.current.get(ev.data.id);
+      if (!done) return;
+      capturePendingRef.current.delete(ev.data.id);
+      done(ev.data);
     };
-    const idle = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number })
-      .requestIdleCallback;
-    if (idle) idle(run, { timeout: 1500 });
-    else setTimeout(run, 0);
+    workerRef.current = w;
+    return w;
   }, []);
+
+  /**
+   * Capture the page's stroke geometry once, for snapping — IN THE WORKER.
+   *
+   * On a dense civil sheet the page walk is hundreds of milliseconds, and doing it on
+   * the main thread froze the cursor exactly while the user was aiming. The worker
+   * uses the geometry-only capture path (no glyphs, no reconstruction) and builds the
+   * snap grid there too, so what crosses to the main thread is a set of transferred
+   * buffers and no work at all.
+   */
+  const ensureSnapIndex = useCallback(
+    (entry: DocEntry, pageIndex: number, bytes: Uint8Array) => {
+      if (entry.snap.has(pageIndex) || entry.capturing.has(pageIndex)) return;
+      entry.capturing.add(pageIndex);
+      const gen = genRef.current;
+      const id = ++captureSeqRef.current;
+      const worker = ensureWorker();
+      capturePendingRef.current.set(id, (msg) => {
+        if (!aliveRef.current || gen !== genRef.current) return;
+        entry.capturing.delete(pageIndex);
+        entry.snap.set(pageIndex, msg.type === "geometry" ? msg.index : null);
+        // Keep the cache small: the oldest page's grid goes once we hold five.
+        while (entry.snap.size > SNAP_CACHE_PAGES) {
+          const oldest = entry.snap.keys().next().value;
+          if (oldest === undefined || oldest === pageIndex) break;
+          entry.snap.delete(oldest);
+        }
+      });
+      const request: CaptureRequest = {
+        type: "capture",
+        id,
+        docId: entry.docId,
+        data: entry.sentToWorker ? undefined : bytes,
+        pageIndex,
+      };
+      entry.sentToWorker = true;
+      worker.postMessage(request);
+    },
+    [ensureWorker]
+  );
 
   /** The snap for a cursor, using only what is already captured (never blocks). */
   const snapFor = useCallback(
@@ -237,7 +296,7 @@ export function useLoupeRender(opts: {
       } catch {
         return;
       }
-      ensureSnapIndex(entry, tile.sourcePageIndex);
+      if (snapRef.current) ensureSnapIndex(entry, tile.sourcePageIndex, tile.sourcePdfBytes);
 
       const magnification = loupeMagnification(zoomRef.current);
       const centre = canvasToPagePoint(canvasPoint, tile, page);

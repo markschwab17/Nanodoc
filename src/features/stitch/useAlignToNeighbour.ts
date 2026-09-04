@@ -13,28 +13,30 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
-import { computeAlignToNeighbour, type CanvasPoint } from "./stitchGeometry";
+import { computeAlignToNeighbour, seamMissFt, type CanvasPoint } from "./stitchGeometry";
+import { compositionFeetPerInch } from "./pageScales";
 import {
   IDLE_ALIGN,
+  alignClickableTiles,
   alignHint,
   isLockedForAlign,
   loupeActive,
   reduceAlign,
   type AlignApply,
   type AlignMachine,
+  type AlignRefusal,
 } from "./alignToNeighbourMachine";
-
-/** Feet of seam residual for a pair of sheets, from T0's seam report. */
-export type SeamResidualLookup = (movingTileId: string, fixedTileId: string) => number | null;
 
 export interface AlignToNeighbour {
   active: boolean;
   state: AlignMachine;
   /** The step hint (exact plan copy) for the click the mode is waiting for. */
   hint: string;
-  /** Set when the last click was refused — the same hint, to be shown as a warning. */
-  refusal: string | null;
-  /** "Seam: 0.4 ft off along the matchline", or null when nothing is computable. */
+  /** Set when the last click was refused: a full sentence ("Not that sheet — …"), so
+   *  the refusal reads as words and not only as a colour. */
+  refusal: AlignRefusal | null;
+  /** "Seam: second point lands 0.4 ft off" — this move's own miss. Null while no move
+   *  has been made, and while **Match scale** is on (it is 0 by construction there). */
   seamNote: string | null;
   matchScale: boolean;
   setMatchScale: (v: boolean) => void;
@@ -44,24 +46,25 @@ export interface AlignToNeighbour {
   showLoupe: boolean;
   movingTileId: string | null;
   isLocked: (tileId: string) => boolean;
+  /** The sheets this step accepts a click on — what the hit test must search. */
+  clickableTiles: <T extends { id: string }>(tiles: readonly T[]) => T[];
   enter: () => void;
   exit: () => void;
   /** A click on a sheet, in canvas space (already snapped by the caller). */
   click: (tileId: string, point: CanvasPoint) => void;
+  /** A click that hit no sheet this step accepts. */
+  miss: () => void;
 }
 
-export function useAlignToNeighbour(opts: { seamResidualFt?: SeamResidualLookup } = {}): AlignToNeighbour {
-  const { seamResidualFt } = opts;
+export function useAlignToNeighbour(): AlignToNeighbour {
   const [state, setState] = useState<AlignMachine>(IDLE_ALIGN);
-  const [refusal, setRefusal] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<AlignRefusal | null>(null);
   const [seamNote, setSeamNote] = useState<string | null>(null);
   const [matchScale, setMatchScale] = useState(false);
   const [snapToLines, setSnapToLines] = useState(true);
 
   const matchScaleRef = useRef(matchScale);
   matchScaleRef.current = matchScale;
-  const seamLookupRef = useRef(seamResidualFt);
-  seamLookupRef.current = seamResidualFt;
 
   const active = state.step !== "idle";
 
@@ -70,23 +73,34 @@ export function useAlignToNeighbour(opts: { seamResidualFt?: SeamResidualLookup 
     const store = useStitchStore.getState();
     const moving = store.tiles.find((t) => t.id === apply.movingTileId);
     if (!moving) return;
+    const matchScaleOn = matchScaleRef.current;
     const pose = computeAlignToNeighbour(
       moving,
       apply.movingPoints,
       apply.fixedPoints,
-      matchScaleRef.current
+      matchScaleOn
     );
-    store.updateTile(apply.movingTileId, matchScaleRef.current
-      ? pose
-      : { x: pose.x, y: pose.y, rotation: pose.rotation });
+    store.updateTile(
+      apply.movingTileId,
+      matchScaleOn ? pose : { x: pose.x, y: pose.y, rotation: pose.rotation }
+    );
 
-    const residual = apply.fixedTileId
-      ? seamLookupRef.current?.(apply.movingTileId, apply.fixedTileId) ?? null
-      : null;
+    // The honest figure for THIS move: the first point lands exactly and the rotation
+    // makes the spans parallel, so the whole of what could not be reconciled is the
+    // difference in the two spans' length. With Match scale on that difference is zero
+    // by construction, so there is nothing to say.
+    if (matchScaleOn) {
+      setSeamNote(null);
+      return;
+    }
+    const feetPerInch = compositionFeetPerInch({
+      referenceScaleFeetPerInch: store.referenceScaleFeetPerInch,
+      compositionScaleFactor: store.compositionScaleFactor,
+      tileScaleFeetPerInch: moving.scaleFeetPerInch,
+    });
+    const miss = seamMissFt(apply.movingPoints, apply.fixedPoints, feetPerInch);
     setSeamNote(
-      residual != null && Number.isFinite(residual)
-        ? `Seam: ${residual.toFixed(1)} ft off along the matchline`
-        : null
+      Number.isFinite(miss) ? `Seam: second point lands ${miss.toFixed(1)} ft off` : null
     );
   }, []);
 
@@ -102,16 +116,19 @@ export function useAlignToNeighbour(opts: { seamResidualFt?: SeamResidualLookup 
       stateRef.current = next.state;
       setState(next.state);
       setRefusal(next.refusal ?? null);
-      if (event.type === "enter" || (next.state.step === "idle" && prev.step !== "idle")) {
+      // The note describes the move that was just made; entering, leaving, or starting
+      // the next sheet all retire it.
+      if (event.type === "enter" || next.state.step === "idle" || event.type === "click") {
         setSeamNote(null);
       }
+      // …and then the apply, which sets the note for the move it just made.
       if (next.apply) applyTransform(next.apply);
-      // Picking the moving sheet makes it the selection, so the arrow-key nudge in
-      // `useStitchKeyboard` moves exactly that sheet and nothing else.
-      if (next.state.movingTileId !== prev.movingTileId) {
-        useStitchStore.getState().setSelectedTileIds(
-          next.state.movingTileId ? [next.state.movingTileId] : []
-        );
+      // The moving sheet (or, between moves, the one just moved) is the selection, so
+      // the arrow-key nudge in `useStitchKeyboard` moves exactly that sheet.
+      const wanted = next.state.movingTileId ?? next.state.lastMovedTileId;
+      const before = prev.movingTileId ?? prev.lastMovedTileId;
+      if (wanted !== before) {
+        useStitchStore.getState().setSelectedTileIds(wanted ? [wanted] : []);
       }
     },
     [applyTransform]
@@ -123,13 +140,23 @@ export function useAlignToNeighbour(opts: { seamResidualFt?: SeamResidualLookup 
     (tileId: string, point: CanvasPoint) => dispatch({ type: "click", tileId, point }),
     [dispatch]
   );
+  const miss = useCallback(() => dispatch({ type: "miss" }), [dispatch]);
 
-  // Esc backs up one click (and leaves at step 0); Enter confirms an applied result.
+  // Esc backs up one click (and leaves at step 0); Enter is Done between moves.
   // Capture phase, and stopPropagation, so the canvas's own Esc handling and the
   // old point-align listener never see these while the mode owns the keyboard.
   useEffect(() => {
     if (!active) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      // Never steal the keys from a field — Esc closes a popover, Enter submits.
+      const target = document.activeElement as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable === true
+      ) {
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -147,6 +174,10 @@ export function useAlignToNeighbour(opts: { seamResidualFt?: SeamResidualLookup 
   }, [active, dispatch]);
 
   const isLocked = useCallback((tileId: string) => isLockedForAlign(state, tileId), [state]);
+  const clickableTiles = useCallback(
+    <T extends { id: string }>(tiles: readonly T[]) => alignClickableTiles(state, tiles),
+    [state]
+  );
 
   return useMemo(
     () => ({
@@ -162,10 +193,12 @@ export function useAlignToNeighbour(opts: { seamResidualFt?: SeamResidualLookup 
       showLoupe: loupeActive(state),
       movingTileId: state.movingTileId,
       isLocked,
+      clickableTiles,
       enter,
       exit,
       click,
+      miss,
     }),
-    [active, state, refusal, seamNote, matchScale, snapToLines, isLocked, enter, exit, click]
+    [active, state, refusal, seamNote, matchScale, snapToLines, isLocked, clickableTiles, enter, exit, click, miss]
   );
 }

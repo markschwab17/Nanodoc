@@ -4,7 +4,7 @@
  */
 
 import type { StitchTile } from "./stitchTypes";
-import { ABSOLUTE_MIN_ZOOM, FIT_VIEWPORT_MARGIN, MIN_ZOOM } from "./stitchConstants";
+import { ABSOLUTE_MIN_ZOOM, FIT_VIEWPORT_MARGIN, MIN_ZOOM, PT_PER_INCH } from "./stitchConstants";
 
 /** Canvas point (e.g. from clientToCanvas). */
 export interface CanvasPoint {
@@ -195,6 +195,33 @@ export function computeAlignToNeighbour(
     height,
     rotation: R_deg,
   };
+}
+
+/**
+ * How far the SECOND point misses, in feet, after an "Align to neighbour" move.
+ *
+ * The first point lands exactly (the transform pins it), and the rotation makes the
+ * two spans parallel — so everything the move could not reconcile shows up as the
+ * difference in LENGTH between the span the user drew on the moving sheet and the span
+ * they drew on the fixed one. That is a measurement of THIS interaction, taken after
+ * the move, not a stale figure from whatever the auto-aligner last thought about the
+ * pair.
+ *
+ * Canvas units are points and a canvas inch is `feetPerInch` feet of ground (every
+ * tile is sized to the composition's reference scale at commit), so the conversion is
+ * one division.
+ *
+ * Meaningless when **Match scale** is on: the scale is then chosen to make the two
+ * spans equal, so this is 0 by construction and the caller must not show it.
+ */
+export function seamMissFt(
+  movingPoints: [CanvasPoint, CanvasPoint],
+  fixedPoints: [CanvasPoint, CanvasPoint],
+  feetPerInch: number
+): number {
+  const moved = distance(movingPoints[0], movingPoints[1]);
+  const target = distance(fixedPoints[0], fixedPoints[1]);
+  return (Math.abs(moved - target) / PT_PER_INCH) * feetPerInch;
 }
 
 /**

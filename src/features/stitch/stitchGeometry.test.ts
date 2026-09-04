@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 import {
   canvasToTileLocal,
   computeAlignToNeighbour,
+  seamMissFt,
   computeResizedPose,
   computeTwoPointAlignment,
   contentBounds,
@@ -329,5 +330,53 @@ describe("computeAlignToNeighbour", () => {
       true
     );
     expect(pose).toEqual({ x: 0, y: 0, width: 200, height: 100, rotation: 0 });
+  });
+});
+
+describe("seamMissFt", () => {
+  /** 1" = 20', so 72 canvas points (one inch) = 20 ft. */
+  test("reports how far the second point misses, in feet", () => {
+    // The moving span is 72 pt (= 20 ft) and the target span is 79.2 pt (= 22 ft).
+    const miss = seamMissFt(
+      [{ x: 0, y: 0 }, { x: 72, y: 0 }],
+      [{ x: 500, y: 300 }, { x: 579.2, y: 300 }],
+      20
+    );
+    expect(miss).toBeCloseTo(2, 6);
+  });
+
+  test("is zero when the two spans are the same length, whatever their direction", () => {
+    const miss = seamMissFt(
+      [{ x: 0, y: 0 }, { x: 30, y: 40 }], // 50 pt
+      [{ x: 100, y: 100 }, { x: 100, y: 150 }], // 50 pt
+      20
+    );
+    expect(miss).toBeCloseTo(0, 9);
+  });
+
+  test("scales with the composition, not with the canvas", () => {
+    const pts: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 72, y: 0 },
+    ];
+    const target: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 144, y: 0 },
+    ];
+    // One inch of miss: 20 ft at 1"=20', 50 ft at 1"=50'.
+    expect(seamMissFt(pts, target, 20)).toBeCloseTo(20, 6);
+    expect(seamMissFt(pts, target, 50)).toBeCloseTo(50, 6);
+  });
+
+  test("does not care which span is longer", () => {
+    const a: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 144, y: 0 },
+    ];
+    const b: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 72, y: 0 },
+    ];
+    expect(seamMissFt(a, b, 20)).toBeCloseTo(seamMissFt(b, a, 20), 9);
   });
 });

@@ -180,6 +180,39 @@ describe("snapping to captured lines", () => {
     expect(findSnapPoint(index, { x: 50, y: 20 }, 6)).toBeNull();
   });
 
+  it("finds a long stroke that is too big to bucket (the oversize list)", () => {
+    // A full-width border crosses far more cells than the grid will index it into.
+    const index = buildSnapIndex([
+      path(0, 0, 5000, 0),
+      path(0, 0, 0, 5000),
+      path(2000, 10, 2000, 40),
+    ]);
+    // The border's own endpoint is nowhere near, but its crossing with the vertical
+    // stroke's extension is: the query must still see the oversize segment.
+    const hit = findSnapPoint(index, { x: 2000, y: 11 }, 6);
+    expect(hit).toEqual({ x: 2000, y: 10, kind: "endpoint" });
+  });
+
+  it("stays correct on a sheet with thousands of paths away from the cursor", () => {
+    const paths = [] as { pts: Float32Array }[];
+    for (let i = 0; i < 5000; i++) {
+      const x = (i % 100) * 20;
+      const y = Math.floor(i / 100) * 20;
+      paths.push(path(x, y, x + 8, y + 8));
+    }
+    paths.push(path(1234, 777, 1234, 800));
+    const index = buildSnapIndex(paths);
+    const hit = findSnapPoint(index, { x: 1235, y: 778 }, 4);
+    expect(hit).toEqual({ x: 1234, y: 777, kind: "endpoint" });
+    // A cursor in a genuinely empty spot finds nothing rather than the nearest grid line.
+    expect(findSnapPoint(index, { x: 1234, y: 900 }, 4)).toBeNull();
+  });
+
+  it("survives geometry with no segments at all", () => {
+    const index = buildSnapIndex([{ pts: Float32Array.from([1, 1]) }]);
+    expect(findSnapPoint(index, { x: 1, y: 1 }, 6)).toBeNull();
+  });
+
   it("converts the 6 px snap radius into page points at the current zoom", () => {
     // 0.5 canvas units per page pt, zoom 2 → 1 screen px per page pt.
     expect(snapRadiusPagePt(sheet, page, 2)).toBeCloseTo(6, 6);

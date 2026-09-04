@@ -8,7 +8,11 @@
  *   • takes the four clicks, snapping each to captured linework when **Snap to lines**
  *     is on, and paints A1/A2/B1/B2 with their connecting lines;
  *   • carries the loupe under the cursor for the four point clicks;
- *   • shows the step hint, the two toggles and — after the apply — the seam figure.
+ *   • shows the step hint, the two toggles and — after a move — how far the second
+ *     point actually landed from where it was asked to.
+ *
+ * A finished move returns to step 0 ("Pick the next sheet to move, or press Done"), so a
+ * plan set is aligned neighbour by neighbour without leaving and re-entering the mode.
  *
  * Middle-drag pan, the space-bar pan and the wheel zoom all keep working: pointerdown is
  * offered to the canvas's shared pan first (`beginPan` takes the middle button, and the
@@ -99,23 +103,25 @@ export function AlignToNeighbourMode({
     [tiles, align.movingTileId]
   );
 
+  /** The sheets THIS step accepts — the hit test never looks at any other. */
+  const clickable = useMemo(() => align.clickableTiles(tiles), [align, tiles]);
+
+  /** Only the steps that draw a rubber band need the live cursor. */
+  const wantsCursor = align.state.step === "A2" || align.state.step === "B2";
+
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
       const coords = clientToCanvas(e.clientX, e.clientY);
-      setCursor(coords);
-      const hit = coords ? hitTestTileAtPoint(coords, tiles, true) : null;
-      setHoverTileId(hit?.tile.id ?? null);
+      setCursor(wantsCursor ? coords : null);
+      // Hit-test ONLY the step's own sheets: along a matchline the sheets overlap, and
+      // testing all of them let the neighbour on top swallow the click and blank the
+      // loupe exactly where the work happens.
+      const hit = coords ? hitTestTileAtPoint(coords, clickable, true) : null;
+      setHoverTileId(align.state.step === "pickMoving" ? hit?.tile.id ?? null : null);
       if (!align.showLoupe) return;
-      // The loupe only ever magnifies the sheet the current step is about.
-      const subject =
-        hit && (align.state.step === "A1" || align.state.step === "A2"
-          ? hit.tile.id === align.movingTileId
-          : hit.tile.id !== align.movingTileId)
-          ? hit.tile
-          : null;
-      track(subject, subject ? hit!.point : null, { x: e.clientX, y: e.clientY });
+      track(hit?.tile ?? null, hit?.point ?? null, { x: e.clientX, y: e.clientY });
     },
-    [align.movingTileId, align.showLoupe, align.state.step, clientToCanvas, tiles, track]
+    [align.showLoupe, align.state.step, clickable, clientToCanvas, track, wantsCursor]
   );
 
   const handlePointerDown = useCallback(
@@ -125,13 +131,17 @@ export function AlignToNeighbourMode({
       e.preventDefault();
       e.stopPropagation();
       const coords = clientToCanvas(e.clientX, e.clientY);
-      if (!coords) return;
-      const hit = hitTestTileAtPoint(coords, tiles, true);
-      if (!hit) return;
+      const hit = coords ? hitTestTileAtPoint(coords, clickable, true) : null;
+      if (!hit) {
+        // Empty canvas, or a sheet this step will not take: say so rather than
+        // swallowing the click silently.
+        align.miss();
+        return;
+      }
       const point = align.showLoupe ? resolveClick(hit.tile, hit.point) : hit.point;
       align.click(hit.tile.id, point);
     },
-    [align, beginPan, clientToCanvas, resolveClick, tiles]
+    [align, beginPan, clickable, clientToCanvas, resolveClick]
   );
 
   const markerZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
@@ -271,12 +281,14 @@ export function AlignToNeighbourMode({
           style={{ pointerEvents: "auto" }}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerMove={(e) => e.stopPropagation()}
-          role="status"
-          aria-live="polite"
         >
           <span className="font-semibold shrink-0">Align to neighbour</span>
-          <span className={cn("shrink-0", align.refusal ? "text-destructive font-medium" : "text-muted-foreground")}>
-            {align.refusal ?? align.hint}
+          <span
+            className={cn("shrink-0", align.refusal ? "text-destructive font-medium" : "text-muted-foreground")}
+            role="status"
+            aria-live="polite"
+          >
+            {align.refusal?.message ?? align.hint}
           </span>
           {align.seamNote && (
             <span className="shrink-0 rounded bg-primary/10 px-2 py-0.5 font-medium text-primary">
@@ -302,7 +314,7 @@ export function AlignToNeighbourMode({
             Snap to lines
           </label>
           <Button variant="ghost" size="sm" className="h-6 shrink-0" onClick={align.exit}>
-            {align.state.step === "applied" ? "Done" : "Cancel"}
+            {align.state.lastMovedTileId ? "Done" : "Cancel"}
           </Button>
         </div>
       </div>

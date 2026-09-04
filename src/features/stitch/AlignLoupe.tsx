@@ -137,7 +137,9 @@ export const AlignLoupe = memo(function AlignLoupe({
   const { left, top } = placeLoupe(view.screen, viewport);
 
   return (
-    <div className="fixed z-[110] pointer-events-none" style={{ left, top }}>
+    // Decoration for the eye: the step hint it repeats is already announced by the
+    // mode bar's live region, so a screen reader must not hear it twice.
+    <div className="fixed z-[110] pointer-events-none" style={{ left, top }} aria-hidden="true">
       <div
         className="rounded-full overflow-hidden border-2 border-primary/70 shadow-xl bg-white"
         style={{ width: LOUPE_SIZE_PX, height: LOUPE_SIZE_PX }}

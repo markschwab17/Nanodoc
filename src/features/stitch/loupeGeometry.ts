@@ -233,11 +233,130 @@ export interface SnapPath {
   pts: Float32Array;
 }
 
-/** Captured geometry plus a per-path bounding box, so a search is a bbox scan. */
+/**
+ * Captured geometry in a uniform grid.
+ *
+ * A dense civil sheet keeps ~60 000 polylines. Scanning all of them on every cursor
+ * sample — which is what the first cut did — is 60 000 bbox tests per mouse move, and
+ * the pairwise intersection pass on top. The grid makes a query cost the cells the
+ * 6 px window touches (one or two) plus the handful of segments in them, whatever the
+ * sheet's size.
+ *
+ * Segments live in one flat array; each cell holds indices into it (CSR). A segment
+ * whose bbox covers a silly number of cells — a full-width border, a match line — goes
+ * into `oversize` instead of being written into every cell it crosses.
+ */
 export interface SnapIndex {
-  paths: readonly SnapPath[];
-  /** minX, minY, maxX, maxY per path, 4 floats each. */
-  bboxes: Float32Array;
+  /** x1,y1,x2,y2 per segment. */
+  segs: Float32Array;
+  /** Bit 1: the segment's start vertex is a polyline END. Bit 2: its end vertex is. */
+  ends: Uint8Array;
+  cell: number;
+  minX: number;
+  minY: number;
+  cols: number;
+  rows: number;
+  /** CSR: cellStart[c]…cellStart[c+1] index into cellItems. */
+  cellStart: Int32Array;
+  cellItems: Int32Array;
+  /** Segments too long to bucket; always considered. */
+  oversize: Int32Array;
+  /** Per-segment stamp, so a query dedupes without allocating a Set. */
+  stamp: Int32Array;
+  /** Bumped per query (a mutable box: the index is a plain object, not a class). */
+  queryId: { v: number };
+}
+
+/** A segment covering more cells than this is treated as oversize. */
+const MAX_CELLS_PER_SEGMENT = 64;
+/** Target grid resolution on the long side of the page. */
+const GRID_DIVISIONS = 128;
+
+export function buildSnapIndex(paths: readonly SnapPath[]): SnapIndex {
+  let segCount = 0;
+  for (const p of paths) segCount += Math.max(0, p.pts.length / 2 - 1);
+
+  const segs = new Float32Array(segCount * 4);
+  const ends = new Uint8Array(segCount);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let n = 0;
+  for (const p of paths) {
+    const pts = p.pts;
+    const last = pts.length / 2 - 1;
+    for (let v = 0; v < last; v++) {
+      const x1 = pts[v * 2], y1 = pts[v * 2 + 1], x2 = pts[v * 2 + 2], y2 = pts[v * 2 + 3];
+      const at = n * 4;
+      segs[at] = x1; segs[at + 1] = y1; segs[at + 2] = x2; segs[at + 3] = y2;
+      ends[n] = (v === 0 ? 1 : 0) | (v === last - 1 ? 2 : 0);
+      if (x1 < minX) minX = x1;
+      if (x2 < minX) minX = x2;
+      if (x1 > maxX) maxX = x1;
+      if (x2 > maxX) maxX = x2;
+      if (y1 < minY) minY = y1;
+      if (y2 < minY) minY = y2;
+      if (y1 > maxY) maxY = y1;
+      if (y2 > maxY) maxY = y2;
+      n++;
+    }
+  }
+  if (n === 0) {
+    return {
+      segs, ends, cell: 1, minX: 0, minY: 0, cols: 1, rows: 1,
+      cellStart: new Int32Array(2), cellItems: new Int32Array(0),
+      oversize: new Int32Array(0), stamp: new Int32Array(0), queryId: { v: 0 },
+    };
+  }
+
+  const cell = Math.max(1e-3, Math.max(maxX - minX, maxY - minY) / GRID_DIVISIONS);
+  const cols = Math.max(1, Math.floor((maxX - minX) / cell) + 1);
+  const rows = Math.max(1, Math.floor((maxY - minY) / cell) + 1);
+
+  const cellOf = (v: number, min: number, count: number) =>
+    Math.min(count - 1, Math.max(0, Math.floor((v - min) / cell)));
+
+  // Pass 1: how many entries per cell, and which segments are oversize.
+  const counts = new Int32Array(cols * rows + 1);
+  const oversizeList: number[] = [];
+  const spans = new Int32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const at = i * 4;
+    const c0 = cellOf(Math.min(segs[at], segs[at + 2]), minX, cols);
+    const c1 = cellOf(Math.max(segs[at], segs[at + 2]), minX, cols);
+    const r0 = cellOf(Math.min(segs[at + 1], segs[at + 3]), minY, rows);
+    const r1 = cellOf(Math.max(segs[at + 1], segs[at + 3]), minY, rows);
+    if ((c1 - c0 + 1) * (r1 - r0 + 1) > MAX_CELLS_PER_SEGMENT) {
+      oversizeList.push(i);
+      spans[at] = -1;
+      continue;
+    }
+    spans[at] = c0; spans[at + 1] = c1; spans[at + 2] = r0; spans[at + 3] = r1;
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) counts[r * cols + c]++;
+  }
+
+  const cellStart = new Int32Array(cols * rows + 1);
+  let running = 0;
+  for (let i = 0; i < cols * rows; i++) {
+    cellStart[i] = running;
+    running += counts[i];
+  }
+  cellStart[cols * rows] = running;
+
+  const fill = cellStart.slice();
+  const cellItems = new Int32Array(running);
+  for (let i = 0; i < n; i++) {
+    const at = i * 4;
+    if (spans[at] === -1) continue;
+    for (let r = spans[at + 2]; r <= spans[at + 3]; r++) {
+      for (let c = spans[at]; c <= spans[at + 1]; c++) cellItems[fill[r * cols + c]++] = i;
+    }
+  }
+
+  return {
+    segs, ends, cell, minX, minY, cols, rows, cellStart, cellItems,
+    oversize: Int32Array.from(oversizeList),
+    stamp: new Int32Array(n),
+    queryId: { v: 0 },
+  };
 }
 
 export type SnapKind = "endpoint" | "intersection";
@@ -245,26 +364,6 @@ export interface SnapHit {
   x: number;
   y: number;
   kind: SnapKind;
-}
-
-export function buildSnapIndex(paths: readonly SnapPath[]): SnapIndex {
-  const bboxes = new Float32Array(paths.length * 4);
-  for (let i = 0; i < paths.length; i++) {
-    const pts = paths[i].pts;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (let k = 0; k + 1 < pts.length; k += 2) {
-      const x = pts[k], y = pts[k + 1];
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-    bboxes[i * 4] = minX;
-    bboxes[i * 4 + 1] = minY;
-    bboxes[i * 4 + 2] = maxX;
-    bboxes[i * 4 + 3] = maxY;
-  }
-  return { paths, bboxes };
 }
 
 /** Segment (p1→p2) × (p3→p4) intersection, endpoints included. Null when parallel. */
@@ -285,22 +384,23 @@ function segmentIntersection(
 /**
  * The line feature nearest `at` within `radius` (page points), or null.
  *
- * Endpoints win ties at equal distance — the end of a matchline is a far more
- * deliberate thing to click than the place two strokes happen to cross — and only
- * segments whose path bbox reaches the search window are considered, which is what
- * keeps this cheap on a sheet with 60 000 captured paths.
+ * Only the grid cells the search window touches are visited, and intersections are
+ * only computed between the segments those cells hold — so a click in an empty corner
+ * of a 60 000-path sheet costs a handful of array reads.
+ *
+ * Endpoints win ties at equal distance: the end of a matchline is a far more
+ * deliberate thing to click than the place two strokes happen to cross.
  */
 export function findSnapPoint(
   index: SnapIndex,
   at: CanvasPoint,
   radius: number
 ): SnapHit | null {
-  if (!(radius > 0)) return null;
+  if (!(radius > 0) || index.stamp.length === 0) return null;
   const r2 = radius * radius;
   let best: SnapHit | null = null;
   let bestScore = Infinity;
 
-  /** Endpoints beat intersections at the same distance. */
   const consider = (x: number, y: number, kind: SnapKind) => {
     const d2 = (x - at.x) * (x - at.x) + (y - at.y) * (y - at.y);
     if (d2 > r2) return;
@@ -311,30 +411,33 @@ export function findSnapPoint(
     }
   };
 
-  // Segments near the cursor, collected once and reused for the intersection pass.
+  const q = ++index.queryId.v;
   const near: number[] = [];
-  for (let i = 0; i < index.paths.length; i++) {
-    const b = i * 4;
-    if (
-      index.bboxes[b] - radius > at.x ||
-      index.bboxes[b + 2] + radius < at.x ||
-      index.bboxes[b + 1] - radius > at.y ||
-      index.bboxes[b + 3] + radius < at.y
-    ) {
-      continue;
-    }
-    const pts = index.paths[i].pts;
-    if (pts.length < 4) continue;
-    consider(pts[0], pts[1], "endpoint");
-    consider(pts[pts.length - 2], pts[pts.length - 1], "endpoint");
-    for (let k = 0; k + 3 < pts.length; k += 2) {
-      const x1 = pts[k], y1 = pts[k + 1], x2 = pts[k + 2], y2 = pts[k + 3];
-      // Keep only segments whose own bbox reaches the window.
-      if (Math.min(x1, x2) - radius > at.x || Math.max(x1, x2) + radius < at.x) continue;
-      if (Math.min(y1, y2) - radius > at.y || Math.max(y1, y2) + radius < at.y) continue;
-      near.push(x1, y1, x2, y2);
+  const gather = (i: number) => {
+    if (index.stamp[i] === q) return;
+    index.stamp[i] = q;
+    const a = i * 4;
+    const x1 = index.segs[a], y1 = index.segs[a + 1], x2 = index.segs[a + 2], y2 = index.segs[a + 3];
+    if (Math.min(x1, x2) - radius > at.x || Math.max(x1, x2) + radius < at.x) return;
+    if (Math.min(y1, y2) - radius > at.y || Math.max(y1, y2) + radius < at.y) return;
+    if (index.ends[i] & 1) consider(x1, y1, "endpoint");
+    if (index.ends[i] & 2) consider(x2, y2, "endpoint");
+    near.push(x1, y1, x2, y2);
+  };
+
+  const c0 = Math.max(0, Math.floor((at.x - radius - index.minX) / index.cell));
+  const c1 = Math.min(index.cols - 1, Math.floor((at.x + radius - index.minX) / index.cell));
+  const r0 = Math.max(0, Math.floor((at.y - radius - index.minY) / index.cell));
+  const r1 = Math.min(index.rows - 1, Math.floor((at.y + radius - index.minY) / index.cell));
+  for (let r = r0; r <= r1; r++) {
+    for (let c = c0; c <= c1; c++) {
+      const cellIndex = r * index.cols + c;
+      for (let k = index.cellStart[cellIndex]; k < index.cellStart[cellIndex + 1]; k++) {
+        gather(index.cellItems[k]);
+      }
     }
   }
+  for (let k = 0; k < index.oversize.length; k++) gather(index.oversize[k]);
 
   for (let i = 0; i + 3 < near.length; i += 4) {
     for (let j = i + 4; j + 3 < near.length; j += 4) {

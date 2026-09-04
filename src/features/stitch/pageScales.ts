@@ -57,3 +57,31 @@ export function referenceBaseline(opts: {
   if (hasTiles && existing != null && existing > 0) return existing;
   return referenceScaleFor(selection, pageScales, null);
 }
+
+/**
+ * Feet per CANVAS inch for the composition as it currently stands.
+ *
+ * Every tile is sized to the composition's reference scale at commit
+ * (`tileSizeAtReference`), so one canvas inch is the same number of feet on every
+ * sheet — that reference, divided by the composition shrink factor (the same
+ * adjustment the manifest and training export make). Falls back to the moving sheet's
+ * own scale, then to the 1"=20' default, so a canvas with no reference set still
+ * reports a sane figure instead of nothing.
+ */
+export function compositionFeetPerInch(opts: {
+  referenceScaleFeetPerInch: number | null;
+  compositionScaleFactor: number;
+  tileScaleFeetPerInch?: number;
+}): number {
+  const { referenceScaleFeetPerInch, compositionScaleFactor, tileScaleFeetPerInch } = opts;
+  const base =
+    referenceScaleFeetPerInch != null && referenceScaleFeetPerInch > 0
+      ? referenceScaleFeetPerInch
+      : tileScaleFeetPerInch != null && tileScaleFeetPerInch > 0
+        ? tileScaleFeetPerInch
+        : DEFAULT_SCALE_FT_PER_IN;
+  const factor = compositionScaleFactor > 0 && Number.isFinite(compositionScaleFactor)
+    ? compositionScaleFactor
+    : 1;
+  return base / factor;
+}

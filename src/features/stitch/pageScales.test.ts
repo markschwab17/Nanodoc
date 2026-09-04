@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DEFAULT_SCALE_FT_PER_IN, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference } from "./pageScales";
+import { DEFAULT_SCALE_FT_PER_IN, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference } from "./pageScales";
 
 describe("parseScaleInput", () => {
   test("plain numbers and decimals", () => {
@@ -76,5 +76,41 @@ describe("referenceBaseline", () => {
     expect(
       referenceBaseline({ typed: null, existing: 40, hasTiles: false, selection: [0], pageScales: new Map() })
     ).toBe(DEFAULT_SCALE_FT_PER_IN);
+  });
+});
+
+describe("compositionFeetPerInch", () => {
+  test("uses the composition's reference scale", () => {
+    expect(
+      compositionFeetPerInch({ referenceScaleFeetPerInch: 20, compositionScaleFactor: 1 })
+    ).toBe(20);
+  });
+
+  test("adjusts for a shrunk composition, like the manifest does", () => {
+    expect(
+      compositionFeetPerInch({ referenceScaleFeetPerInch: 20, compositionScaleFactor: 0.5 })
+    ).toBe(40);
+  });
+
+  test("falls back to the sheet's own scale, then to the default", () => {
+    expect(
+      compositionFeetPerInch({
+        referenceScaleFeetPerInch: null,
+        compositionScaleFactor: 1,
+        tileScaleFeetPerInch: 50,
+      })
+    ).toBe(50);
+    expect(
+      compositionFeetPerInch({ referenceScaleFeetPerInch: null, compositionScaleFactor: 1 })
+    ).toBe(DEFAULT_SCALE_FT_PER_IN);
+  });
+
+  test("survives a zero or broken shrink factor", () => {
+    expect(
+      compositionFeetPerInch({ referenceScaleFeetPerInch: 20, compositionScaleFactor: 0 })
+    ).toBe(20);
+    expect(
+      compositionFeetPerInch({ referenceScaleFeetPerInch: 20, compositionScaleFactor: NaN })
+    ).toBe(20);
   });
 });

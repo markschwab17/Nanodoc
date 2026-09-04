@@ -9,7 +9,7 @@
  *   Shift+Arrow  → 10 screen pixels (= 10/zoom pt)
  */
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { ABSOLUTE_MIN_ZOOM } from "./stitchConstants";
 
@@ -25,7 +25,20 @@ function isTypingTarget(): boolean {
   );
 }
 
-export function useStitchKeyboard() {
+export interface StitchKeyboardOptions {
+  /** When true, Delete/Backspace and Ctrl+A do nothing — a mode owns the selection
+   *  (Align to neighbour keeps the sheet being moved selected so the nudges work, and
+   *  deleting or replacing that selection mid-alignment is never what was meant).
+   *  The nudge itself stays live. */
+  selectionEditsDisabled?: boolean;
+}
+
+export function useStitchKeyboard(options: StitchKeyboardOptions = {}) {
+  // Read through a ref so the listener is installed once and still sees the latest
+  // value — the flag flips as modes come and go, not as the app loads.
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+
   useEffect(() => {
     // One undo snapshot per burst of arrow nudges, not one per keypress.
     let lastNudgeAt = 0;
@@ -39,6 +52,7 @@ export function useStitchKeyboard() {
       const key = e.key.toLowerCase();
 
       if ((e.ctrlKey || e.metaKey) && key === "a") {
+        if (optionsRef.current.selectionEditsDisabled) return;
         e.preventDefault();
         e.stopPropagation();
         if (store.tiles.length > 0) {
@@ -97,6 +111,7 @@ export function useStitchKeyboard() {
       }
 
       if (e.key !== "Delete" && e.key !== "Backspace") return;
+      if (optionsRef.current.selectionEditsDisabled) return;
       if (store.selectedTileIds.length > 0) {
         e.preventDefault();
         e.stopPropagation();
