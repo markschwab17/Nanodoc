@@ -15,6 +15,17 @@
  *     export is untouched by both: `stitchExport` re-renders from
  *     `sourcePdfBytes` at its own budget and only falls back to the stored
  *     raster for erased / stamp / vector-fail tiles.
+ *
+ * THE BUFFER IS NEVER DETACHED. An earlier version transferred
+ * `imageData.data.buffer` into the worker, which is free and tidy right up to
+ * the first failure: on a webview without `OffscreenCanvas.convertToBlob` the
+ * worker replies "error" having already taken the pixels, the main-thread
+ * fallback has nothing left to encode, and EVERY sheet in the commit becomes an
+ * error card. The buffer is copied instead, so the caller still holds the
+ * pixels and every failure path — incapable worker, encode error, timeout —
+ * can fall back. The price is one extra copy of the raster (24 MB for a 36x24
+ * in sheet) alive for the ~300 ms the encode takes; the capability handshake
+ * means an incapable worker costs no copy and no round-trip at all.
  */
 import type { RasterEncodeRequest, RasterEncodeResponse } from "./rasterEncode.worker";
 
@@ -32,8 +43,11 @@ export const TILE_LONG_EDGE_PX = 3072;
  */
 export const CANVAS_MAX_SIDE_PX = 4096;
 
-/** How long to wait for the encode worker before falling back to main. */
+/** How long to wait for one encode before giving up on the worker entirely. */
 const ENCODE_TIMEOUT_MS = 30_000;
+
+/** How long to wait for the worker's `{kind:"ready"}` before writing it off. */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 /**
  * Render scale for one page: 1.5x, reduced until the long edge fits
@@ -50,43 +64,79 @@ export function tileRenderScale(widthPt: number, heightPt: number): number {
   );
 }
 
-// ── encode worker (lazily spawned, reused for the life of the tab) ──────────
+// ── encode worker (lazily spawned, reused for the life of the session) ──────
 
 let worker: Worker | null = null;
-let workerDead = false;
+/** Resolves true once the worker has PROVEN it can encode; false if it cannot,
+ *  never started, died, or failed a job. Null before the first attempt. */
+let capability: Promise<boolean> | null = null;
 let seq = 0;
 const pending = new Map<number, (r: Blob | null) => void>();
 
-function ensureWorker(): Worker | null {
-  if (workerDead) return null;
-  if (worker) return worker;
-  try {
-    const w = new Worker(new URL("./rasterEncode.worker.ts", import.meta.url), { type: "module" });
-    w.onmessage = (e: MessageEvent<RasterEncodeResponse>) => {
-      const msg = e.data;
-      const resolve = pending.get(msg.id);
-      if (!resolve) return;
-      pending.delete(msg.id);
-      resolve("blob" in msg ? msg.blob : null);
-    };
-    // A crashed worker must not hang a commit: fail everything outstanding and
-    // stop trying (every later encode takes the main-thread path).
-    w.onerror = () => {
-      for (const [, resolve] of pending) resolve(null);
-      pending.clear();
-      try { w.terminate(); } catch { /* ignore */ }
-      if (worker === w) worker = null;
-      workerDead = true;
-    };
-    worker = w;
-    return w;
-  } catch {
-    workerDead = true;
-    return null;
+/** Terminate the worker and route everything, now and later, to the main
+ *  thread. Called on a spawn failure, a worker error, a failed encode (the next
+ *  page must not repeat a doomed round-trip) and an encode timeout. */
+function retireWorker(): void {
+  if (worker) {
+    try { worker.terminate(); } catch { /* ignore */ }
+    worker = null;
   }
+  for (const [, resolve] of pending) resolve(null);
+  pending.clear();
+  capability = Promise.resolve(false);
 }
 
-/** Release the encode worker. Safe to call when none was ever spawned. */
+/**
+ * Spawn the worker (once) and wait for its capability handshake. Resolves
+ * false — permanently, for this session — when there is no worker, no
+ * `OffscreenCanvas.convertToBlob`, or no answer within HANDSHAKE_TIMEOUT_MS.
+ */
+function ensureCapableWorker(): Promise<boolean> {
+  if (capability) return capability;
+  capability = new Promise<boolean>((resolve) => {
+    let w: Worker;
+    try {
+      w = new Worker(new URL("./rasterEncode.worker.ts", import.meta.url), { type: "module" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const settle = (capable: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!capable) { try { w.terminate(); } catch { /* ignore */ } if (worker === w) worker = null; }
+      resolve(capable);
+    };
+    const timer = setTimeout(() => settle(false), HANDSHAKE_TIMEOUT_MS);
+
+    w.onmessage = (e: MessageEvent<RasterEncodeResponse>) => {
+      const msg = e.data;
+      if (msg.kind === "ready") { settle(msg.capable); return; }
+      const resolveJob = pending.get(msg.id);
+      if (!resolveJob) return;
+      pending.delete(msg.id);
+      if (msg.kind === "result") { resolveJob(msg.blob); return; }
+      // A message-level error means this worker cannot do the job (a partial
+      // OffscreenCanvas implementation, an out-of-memory encode). Retire it so
+      // the rest of the commit goes straight to the main thread — and resolve
+      // null so THIS page falls back too (the caller still has its pixels).
+      console.warn("[rasterEncode] worker encode failed, falling back to the main thread:", msg.message);
+      resolveJob(null);
+      retireWorker();
+    };
+    w.onerror = () => {
+      settle(false);
+      retireWorker();
+    };
+    worker = w;
+  });
+  return capability;
+}
+
+/** Release the encode worker and let a later session spawn a fresh one.
+ *  Safe when none was ever created. */
 export function disposeRasterEncoder(): void {
   if (worker) {
     try { worker.terminate(); } catch { /* ignore */ }
@@ -94,15 +144,22 @@ export function disposeRasterEncoder(): void {
   }
   for (const [, resolve] of pending) resolve(null);
   pending.clear();
-  workerDead = false;
+  capability = null;
 }
 
+/** Post one encode to a worker already known to be capable. Null on error or
+ *  timeout — the caller's ImageData is untouched either way. */
 function encodeInWorker(imageData: ImageData): Promise<Blob | null> {
-  const w = ensureWorker();
+  const w = worker;
   if (!w) return Promise.resolve(null);
   return new Promise<Blob | null>((resolve) => {
     const id = ++seq;
-    const timer = setTimeout(() => { pending.delete(id); resolve(null); }, ENCODE_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      console.warn("[rasterEncode] worker encode timed out, falling back to the main thread");
+      resolve(null);
+      retireWorker();
+    }, ENCODE_TIMEOUT_MS);
     pending.set(id, (blob) => { clearTimeout(timer); resolve(blob); });
     const req: RasterEncodeRequest = {
       id,
@@ -111,8 +168,9 @@ function encodeInWorker(imageData: ImageData): Promise<Blob | null> {
       data: imageData.data,
     };
     try {
-      // Transfer: the caller must not touch `imageData` afterwards.
-      w.postMessage(req, [imageData.data.buffer]);
+      // NO transfer list: the worker gets a copy so this ImageData survives for
+      // the fallback. See the module docstring.
+      w.postMessage(req);
     } catch {
       clearTimeout(timer);
       pending.delete(id);
@@ -121,7 +179,7 @@ function encodeInWorker(imageData: ImageData): Promise<Blob | null> {
   });
 }
 
-/** Main-thread `<canvas>` encode — the fallback when no worker is available. */
+/** Main-thread `<canvas>` encode — the fallback whenever the worker cannot. */
 function encodeOnMainThread(imageData: ImageData): Promise<Blob | null> {
   if (
     imageData.width > CANVAS_MAX_SIDE_PX ||
@@ -145,8 +203,8 @@ function encodeOnMainThread(imageData: ImageData): Promise<Blob | null> {
   if (!ctx) return Promise.resolve(null);
   ctx.putImageData(imageData, 0, 0);
   if (typeof canvas.toBlob !== "function") {
-    // jsdom and very old webviews: fall back to the synchronous data URL and
-    // wrap it, still refusing the empty "data:," WebKit returns over the cap.
+    // Very old webviews: the synchronous data URL, still refusing the empty
+    // "data:," WebKit returns over the cap.
     try {
       const url = canvas.toDataURL("image/png");
       if (!url || !url.startsWith("data:image/png") || url.length < 32) return Promise.resolve(null);
@@ -163,21 +221,18 @@ function encodeOnMainThread(imageData: ImageData): Promise<Blob | null> {
 }
 
 /**
- * Encode one tile raster to a PNG Blob: in the worker when it is available
- * (pixel buffer transferred, main thread untouched), on the main thread
- * otherwise. Returns null when the PNG could not be produced — callers surface
- * that as a visible error tile, never as an empty one.
+ * Encode one tile raster to a PNG Blob: in the worker when it has proven it
+ * can, on the main thread otherwise or whenever the worker fails. Returns null
+ * only when NEITHER path could produce a PNG — callers surface that as a
+ * visible error tile, never as an empty one.
  *
- * NOTE the worker path TRANSFERS `imageData.data`; treat `imageData` as
- * consumed once this is called.
+ * `imageData` is read, never consumed: it is still valid after this resolves.
  */
 export async function encodeTileRasterPng(imageData: ImageData): Promise<Blob | null> {
   if (!imageData || !imageData.data || imageData.width < 1 || imageData.height < 1) return null;
-  const viaWorker = await encodeInWorker(imageData);
-  if (viaWorker) return viaWorker;
-  // The worker path detaches the buffer on transfer, so a main-thread retry is
-  // only possible when the transfer never happened (no worker, or postMessage
-  // threw). `data.length === 0` is the detached case.
-  if (imageData.data.length === 0) return null;
+  if (await ensureCapableWorker()) {
+    const viaWorker = await encodeInWorker(imageData);
+    if (viaWorker) return viaWorker;
+  }
   return encodeOnMainThread(imageData);
 }

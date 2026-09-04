@@ -262,21 +262,26 @@ export async function recognize(image: RawImage): Promise<OcrWord[]> {
  * caller already treats as "no words".
  */
 export async function shutdownOcr(): Promise<void> {
+  // BOTH singletons are detached BEFORE the first await. Terminating the
+  // scheduler is asynchronous, and a `recognize()` that starts during that
+  // window must find the module state already empty and build itself a fresh
+  // scheduler and conversion worker — not adopt the ones being torn down and
+  // then have them terminated underneath it.
   const pendingScheduler = schedulerPromise;
-  schedulerPromise = null;
-  if (pendingScheduler) {
-    try {
-      const scheduler = await pendingScheduler;
-      await scheduler.terminate();
-    } catch { /* already dead, or never initialised */ }
-  }
   const worker = convWorker;
+  schedulerPromise = null;
   convWorker = null;
   if (worker) {
     // Anything still waiting on a conversion will never be answered now.
     for (const [, resolve] of convPending) resolve(null);
     convPending.clear();
     try { worker.terminate(); } catch { /* ignore */ }
+  }
+  if (pendingScheduler) {
+    try {
+      const scheduler = await pendingScheduler;
+      await scheduler.terminate();
+    } catch { /* already dead, or never initialised */ }
   }
 }
 

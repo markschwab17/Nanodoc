@@ -55,6 +55,17 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     centerY: number;
   } | null>(null);
   const [rotationWhileDragging, setRotationWhileDragging] = useState<number | null>(null);
+  /**
+   * Whether this tile should be promoted to its own compositor layer.
+   *
+   * `willChange: transform` used to be set unconditionally, which gives EVERY
+   * tile a permanent GPU surface — at 3072x2048 that is roughly a full-size
+   * texture per sheet, and ten sheets is what makes an integrated-GPU laptop
+   * start swapping. The promotion only pays for itself while the tile is
+   * actually about to move, so it goes on when the pointer arrives (hover, the
+   * frame before a drag can start) and comes off when it leaves.
+   */
+  const [pointerOver, setPointerOver] = useState(false);
   const resizeStartRef = useRef<{
     dir: string;
     x: number;
@@ -244,6 +255,12 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
   }, []);
 
+  const handlePointerEnter = useCallback(() => setPointerOver(true), []);
+  const handlePointerLeave = useCallback((e: React.PointerEvent) => {
+    setPointerOver(false);
+    handlePointerUp(e);
+  }, [handlePointerUp]);
+
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
       e.stopPropagation();
@@ -378,12 +395,16 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         boxShadow: isMultiSelected ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
         transform: `translate(${tile.x}px, ${tile.y}px)${displayRotation ? ` rotate(${displayRotation}deg)` : ""}`,
         transformOrigin: "center center",
-        willChange: "transform",
+        // Promoted only while the tile is in play — see `pointerOver`. A
+        // rotation drag keeps the promotion even when the pointer wanders off
+        // the tile, because the rotate handle is what is being dragged.
+        willChange: pointerOver || rotationDragStart !== null ? "transform" : undefined,
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerLeave={handlePointerUp}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
       {rasterSrc ? (
         <img

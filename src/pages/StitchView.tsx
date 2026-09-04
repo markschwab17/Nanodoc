@@ -21,6 +21,7 @@ import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
 import { recognize, shutdownOcr } from "@/features/stitch/autostitch/ocrService";
+import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
@@ -130,6 +131,15 @@ export default function StitchView() {
       x: rect.width / 2 - (innerBounds.x + innerBounds.width / 2) * zoom,
       y: rect.height / 2 - (innerBounds.y + innerBounds.height / 2) * zoom,
     });
+  }, []);
+
+  // Leaving stitch ends the session's worker budget: the PNG encode worker and
+  // tesseract's scheduler both survive individual commits on purpose (they are
+  // reused across them) and both rebuild lazily, so releasing them here costs
+  // the next session one spawn and frees 160-240 MB plus a worker realm now.
+  useEffect(() => () => {
+    disposeRasterEncoder();
+    void shutdownOcr();
   }, []);
 
   // Center the canvas in the viewport when first opening stitch mode
@@ -426,6 +436,7 @@ export default function StitchView() {
 
   const handleClearSession = useCallback(() => {
     useStitchStore.getState().reset();
+    disposeRasterEncoder();
     setContentDeleteMode(false);
     setDeleteElementMode(false);
     setPanMode(false);

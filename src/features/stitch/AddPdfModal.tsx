@@ -194,12 +194,19 @@ export function AddPdfModal({
         return;
       }
       if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
-      if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
+      // Nothing running and nothing queued means tesseract's 160-240 MB has no
+      // more work: hand it back. `ensureScheduler` rebuilds it lazily if a
+      // later probe needs it.
+      const ocrIdle = () => probeTimerRef.current == null && !probeInFlightRef.current;
+      if (msg.docId !== probeDocIdRef.current) {
+        // A SUPERSEDED probe finishing. Usually a replacement is already in
+        // flight or debounced — but not when the selection that superseded it
+        // fell below two pages, and then nothing else will ever release OCR.
+        if (ocrIdle()) void shutdownOcr();
+        return; // stale — superseded by a newer selection or load
+      }
       probeInFlightRef.current = false;
-      // This probe is over and nothing has queued another: hand tesseract's
-      // 160-240 MB back. `ensureScheduler` rebuilds it lazily if a later probe
-      // needs it.
-      if (probeTimerRef.current == null) void shutdownOcr();
+      if (ocrIdle()) void shutdownOcr();
       if ("aborted" in msg) {
         // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
         setProbe(null);

@@ -223,6 +223,38 @@ describe("ocrService.shutdownOcr", () => {
     expect(h.schedulersCreated.length).toBe(2);
   });
 
+  it("a recognize starting mid-teardown gets fresh workers, not the dying ones", async () => {
+    const { recognize, shutdownOcr } = await import("./ocrService");
+
+    const p0 = recognize(IMG());
+    const conv0 = FakeWorker.instances[0];
+    conv0.emit({ ocrId: conv0.posted[0].ocrId, blob: fakeBlob("a") });
+    await p0;
+
+    // Terminating the scheduler is async. A recognize that starts inside that
+    // window must find the singletons already detached and build its own —
+    // otherwise it adopts the scheduler and conversion worker that are about to
+    // be terminated underneath it.
+    const teardown = shutdownOcr();
+    const p1 = recognize(IMG());
+    await flush();
+
+    const conv1 = FakeWorker.instances[1];
+    expect(conv1).toBeTruthy();
+    expect(conv1).not.toBe(conv0);
+    conv1.emit({ ocrId: conv1.posted[0].ocrId, blob: fakeBlob("b") });
+
+    await teardown;
+    await expect(p1).resolves.toEqual([
+      { text: "b", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
+    ]);
+    // The teardown killed the first scheduler and left the newcomer alone.
+    expect(h.schedulersCreated.length).toBe(2);
+    expect(h.schedulersCreated[0].terminateCalls).toBe(1);
+    expect(h.schedulersCreated[1].terminateCalls).toBe(0);
+    expect(conv1.terminated).toBe(false);
+  });
+
   it("is safe when nothing was ever initialised, and is idempotent", async () => {
     const { shutdownOcr } = await import("./ocrService");
     await expect(shutdownOcr()).resolves.toBeUndefined();

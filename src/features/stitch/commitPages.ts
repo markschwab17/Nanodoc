@@ -209,6 +209,20 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
   }
 
   const sizes: Array<{ w: number; h: number }> = [];
+  // Depth-1 encode pipeline: the PNG encode for page N runs in the worker while
+  // the main thread rasterises page N+1 (the raster is ~700-1200 ms of mupdf,
+  // the encode ~200-300 ms, and they used to run back to back). Exactly one
+  // encode is ever in flight, so at most two rasters are live on this side —
+  // the memory budget the cap bought is not handed back.
+  let inFlight: { at: number; blob: Promise<Blob | null> } | null = null;
+  const drainEncode = async () => {
+    if (!inFlight) return;
+    const { at, blob } = inFlight;
+    inFlight = null;
+    const raster = await blob;
+    newTiles[at].rasterBlob = raster ?? undefined;
+    newTiles[at].rasterError = raster ? undefined : RASTER_ERROR_MESSAGE;
+  };
   for (let idx = 0; idx < selected.length; idx++) {
     const pageIndex = selected[idx];
     await yieldToMain();
@@ -228,24 +242,28 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
     const rendered = await renderer.renderPage(doc, pageIndex, { scale: tileRenderScale(widthPt, heightPt), noCache: true });
     const imageData = rendered.imageData as ImageData;
     if (imageData && imageData.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
-    // The encode runs in a worker and CONSUMES imageData (the pixel buffer is
-    // transferred), so nothing may touch it after this point.
-    const raster = imageData && imageData.data ? await encodeTileRasterPng(imageData) : null;
+    // Collect the PREVIOUS page's encode now that this page's raster is done —
+    // it ran in the worker while mupdf was busy above.
+    await drainEncode();
     newTiles.push({
       sourcePdfBytes: pdfBytes,
       sourcePageIndex: pageIndex,
       sourceFileName: fileName,
       width: tileW,
       height: tileH,
-      rasterBlob: raster ?? undefined,
-      rasterError: raster ? undefined : RASTER_ERROR_MESSAGE,
+      rasterError: RASTER_ERROR_MESSAGE, // replaced by drainEncode on success
       scaleFeetPerInch: pageScale,
       x: 0,
       y: 0,
     });
+    if (imageData && imageData.data) {
+      inFlight = { at: newTiles.length - 1, blob: encodeTileRasterPng(imageData) };
+    }
     sizes.push({ w: tileW, h: tileH });
+    // Progress tracks the RASTER, the long pole — not the encode trailing it.
     onProgress?.(idx + 1, selected.length);
   }
+  await drainEncode();
   // Last checkpoint before anything is written: past here the commit lands.
   checkAbort();
   const positions = gridLayout(sizes, startY);
@@ -280,6 +298,15 @@ export async function commitAutoAlign(
   // and `addTiles` gives each resulting tile its OWN object URL so revoking one
   // cannot blank the other.
   const rasters = new Map<number, Blob>();
+  // Depth-1 encode pipeline — see commitPlainAdd.
+  let inFlight: { pageIndex: number; blob: Promise<Blob | null> } | null = null;
+  const drainEncode = async () => {
+    if (!inFlight) return;
+    const { pageIndex, blob } = inFlight;
+    inFlight = null;
+    const raster = await blob;
+    if (raster) rasters.set(pageIndex, raster);
+  };
   for (let i = 0; i < selected.length; i++) {
     const pageIndex = selected[i];
     await new Promise<void>((r) => setTimeout(r, 0));
@@ -292,11 +319,11 @@ export async function commitAutoAlign(
     const rendered = await renderer.renderPage(doc, pageIndex, { scale, noCache: true });
     const imageData = rendered.imageData as ImageData;
     if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
-    // Consumes imageData (buffer transferred to the encode worker).
-    const raster = imageData?.data ? await encodeTileRasterPng(imageData) : null;
-    if (raster) rasters.set(pageIndex, raster);
+    await drainEncode();
+    if (imageData?.data) inFlight = { pageIndex, blob: encodeTileRasterPng(imageData) };
     onProgress?.(i + 1, selected.length);
   }
+  await drainEncode();
 
   // 2. Placements: prefer the caller's cached probe (skip the second stitch);
   //    else fall back to running the aligner live (probe absent/errored/running).
