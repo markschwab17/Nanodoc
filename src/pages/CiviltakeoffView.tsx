@@ -221,7 +221,11 @@ export default function CiviltakeoffView() {
           useCtoStitchInitialStore
             .getState()
             .setInitial({ pdfBytes: data, fileName: name, plan: json?.stitchPlan ?? null });
-          navigate("/stitch");
+          // KEEP THE QUERY. The handoff (the PDF bytes and the plan) only lives in
+          // memory, so a reload of a bare `/stitch` lands in the plain editor with no
+          // CTO context at all. With the params still on the URL, StitchView can send
+          // the browser back through this route and the session comes back.
+          navigate({ pathname: "/stitch", search: window.location.search });
           return;
         }
 

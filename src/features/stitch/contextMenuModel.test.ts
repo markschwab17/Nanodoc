@@ -80,6 +80,14 @@ describe("the sheet menu", () => {
     expect(pair.alignFromHere.enabled).toBe(true);
   });
 
+  it("says what Delete will actually take", () => {
+    expect(sheetMenuModel(loose, {}, ["a"], "a")!.removeLabel).toBe("Delete sheet");
+    // One member selected, but Delete takes the group — say so.
+    expect(sheetMenuModel(grouped.tiles, grouped.groups, ["a"], "a")!.removeLabel).toBe(
+      "Delete 2 sheets",
+    );
+  });
+
   it("returns nothing for a sheet that is not there", () => {
     expect(sheetMenuModel(loose, {}, [], "ghost")).toBeNull();
   });

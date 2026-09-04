@@ -14,12 +14,18 @@
  * worse than no row.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { cn } from "@/lib/utils";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { expandSelectionToGroups } from "./groups";
-import { canvasMenuModel, sheetMenuModel, type MenuAction } from "./contextMenuModel";
+import {
+  canvasMenuModel,
+  sheetMenuModel,
+  type CanvasMenuModel,
+  type MenuAction,
+  type SheetMenuModel,
+} from "./contextMenuModel";
 
 const ITEM_CLASS =
   "relative flex cursor-default select-none items-center justify-between gap-6 rounded px-2 py-1.5 text-xs outline-none data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
@@ -47,39 +53,43 @@ export function StitchContextMenu({
   onRecenter,
   disabled = false,
 }: StitchContextMenuProps) {
-  const tiles = useStitchStore((s) => s.tiles);
-  const groups = useStitchStore((s) => s.groups);
-  const selectedTileIds = useStitchStore((s) => s.selectedTileIds);
-  /** The sheet the press landed on, decided before Radix opens the menu. */
-  const [targetId, setTargetId] = useState<string | null>(null);
+  /**
+   * The menu is built ONCE, when it opens.
+   *
+   * Subscribing to `tiles` / `groups` / `selectedTileIds` re-rendered this wrapper —
+   * and therefore the whole canvas it wraps — on every drag frame, for a menu that is
+   * shut 99.9% of the time. The store is read imperatively in the contextmenu handler
+   * instead, which is also the only moment the answer can matter.
+   */
+  const [menu, setMenu] = useState<{
+    sheet: SheetMenuModel | null;
+    canvas: CanvasMenuModel;
+    /** The sheets an action applies to: the selection, grown to whole groups. */
+    acting: string[];
+  } | null>(null);
 
-  const handleContextMenu = useCallback(
-    (e: React.MouseEvent) => {
-      const el = (e.target as HTMLElement | null)?.closest?.("[data-stitch-tile-id]");
-      const id = el?.getAttribute("data-stitch-tile-id") ?? null;
-      setTargetId(id);
-      if (!id) return;
-      // Act on what the user can SEE is selected: a right-click on a sheet outside the
-      // current selection makes it (and its group) the selection first.
-      const store = useStitchStore.getState();
-      if (!store.selectedTileIds.includes(id)) {
-        store.setSelectedTileIds(expandSelectionToGroups(store.tiles, [id]));
-      }
-    },
-    []
-  );
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    const el = (e.target as HTMLElement | null)?.closest?.("[data-stitch-tile-id]");
+    const id = el?.getAttribute("data-stitch-tile-id") ?? null;
+    const store = useStitchStore.getState();
 
-  const sheet = useMemo(
-    () => (targetId ? sheetMenuModel(tiles, groups, selectedTileIds, targetId) : null),
-    [tiles, groups, selectedTileIds, targetId]
-  );
-  const canvas = useMemo(() => canvasMenuModel(tiles), [tiles]);
+    // Act on what the user can SEE is selected: a right-click on a sheet outside the
+    // current selection makes it (and its group) the selection first.
+    let selection = store.selectedTileIds;
+    if (id && !selection.includes(id)) {
+      selection = expandSelectionToGroups(store.tiles, [id]);
+      store.setSelectedTileIds(selection);
+    }
+    setMenu({
+      sheet: id ? sheetMenuModel(store.tiles, store.groups, selection, id) : null,
+      canvas: canvasMenuModel(store.tiles),
+      acting: expandSelectionToGroups(store.tiles, selection),
+    });
+  }, []);
 
-  /** The sheets an action applies to: the selection, grown to whole groups. */
-  const acting = useMemo(
-    () => expandSelectionToGroups(tiles, selectedTileIds),
-    [tiles, selectedTileIds]
-  );
+  const sheet = menu?.sheet ?? null;
+  const canvas = menu?.canvas ?? { selectAll: { enabled: false }, fitToSheets: { enabled: false }, recenter: { enabled: true } };
+  const acting = menu?.acting ?? [];
 
   const store = () => useStitchStore.getState();
 
@@ -195,7 +205,7 @@ export function StitchContextMenu({
                 className={cn(ITEM_CLASS, "text-destructive data-[highlighted]:text-destructive")}
                 onSelect={() => store().removeTiles(acting)}
               >
-                Delete
+                {sheet.removeLabel}
               </ContextMenu.Item>
 
               <ContextMenu.Separator className="my-1 h-px bg-border" />

@@ -9,7 +9,16 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getGroupBounds } from "./stitchGeometry";
-import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS } from "./stitchConstants";
+import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS, RULER_SIZE } from "./stitchConstants";
+import {
+  OVERLAY_ACCENT,
+  OVERLAY_INK,
+  OVERLAY_PAPER,
+  OVERLAY_PILL_STYLE,
+  RING_SCREEN_PX,
+  badgePlacement,
+  screenPx,
+} from "./canvasOverlayStyle";
 
 function angleDeg(clientX: number, clientY: number, centerX: number, centerY: number): number {
   return Math.atan2(clientY - centerY, clientX - centerX) * (180 / Math.PI);
@@ -50,8 +59,8 @@ export function GroupSelectionOverlay() {
         ? groups[groupIds[0]]
         : undefined;
     return whole
-      ? { text: `${text} · ${whole.name}`, color: whole.color }
-      : { text, color: "hsl(var(--primary))" };
+      ? { text: `${text} · ${whole.name}`, dotColor: whole.color }
+      : { text, dotColor: null as string | null };
   }, [selectedTiles, groups]);
   const groupCenter = useMemo(
     () => ({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }),
@@ -74,9 +83,16 @@ export function GroupSelectionOverlay() {
   // Actual zoom (see StitchTile): MIN_ZOOM is no longer the floor, so clamping to it would
   // scale group drags/handles wrong once the user is zoomed further out than 25%.
   const scale = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
+  /** Where the label goes: above the box, or inside it when the box's top is off the
+   *  top of the viewport (the badge used to be clipped away up there). */
+  const panOffsetY = useStitchStore((s) => s.panOffset.y);
+  const badgeSpot = badgePlacement(panOffsetY + (bounds.y + RULER_SIZE) * scale);
 
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
+      // The right button opens the context menu; it must not start a resize (which
+      // pushes an undo snapshot and clears redo for a click that moves nothing).
+      if (e.button === 2) return;
       e.stopPropagation();
       if (resizeLocked || unlockedTiles.length === 0) return;
       // Push undo snapshot before continuous resize
@@ -160,6 +176,7 @@ export function GroupSelectionOverlay() {
 
   const handleRotatePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button === 2) return;
       e.stopPropagation();
       e.preventDefault();
       if (resizeLocked || unlockedTiles.length === 0) return;
@@ -265,8 +282,10 @@ export function GroupSelectionOverlay() {
         top: bounds.y,
         width: bounds.width,
         height: bounds.height,
-        border: `${2 * invZoom}px solid hsl(var(--primary))`,
-        boxShadow: `0 0 0 ${invZoom}px hsl(var(--primary) / 0.3)`,
+        // Fixed accent with a white counter-line, at a real 3 screen px whatever the
+        // zoom — at a fit zoom of 14 % the old 2px border was a quarter of a pixel.
+        border: `${screenPx(RING_SCREEN_PX, scale)}px solid ${OVERLAY_ACCENT}`,
+        boxShadow: `0 0 0 ${screenPx(1, scale)}px ${OVERLAY_PAPER}, inset 0 0 0 ${screenPx(1, scale)}px ${OVERLAY_PAPER}`,
       }}
     >
       {/* What is selected, in words, pinned to the box. A ring alone does not survive a
@@ -274,25 +293,44 @@ export function GroupSelectionOverlay() {
           were selected. The label sits ABOVE the box and scales down with the zoom so
           it stays the same size on screen. */}
       <div
-        className="absolute whitespace-nowrap rounded px-1.5 py-0.5 font-medium text-white shadow"
+        className="absolute flex items-center gap-1.5 whitespace-nowrap rounded px-1.5 py-0.5 font-medium shadow"
         style={{
           left: 0,
           top: 0,
-          transform: `translate(0, -100%) translate(0, ${-4 * invZoom}px) scale(${invZoom})`,
-          transformOrigin: "left bottom",
+          // Above the box, unless the box's top edge is off the top of the viewport —
+          // then inside it, because a badge above that is simply clipped away.
+          transform:
+            badgeSpot === "above"
+              ? `translate(0, -100%) translate(0, ${-4 * invZoom}px) scale(${invZoom})`
+              : `translate(${4 * invZoom}px, ${4 * invZoom}px) scale(${invZoom})`,
+          transformOrigin: badgeSpot === "above" ? "left bottom" : "left top",
           fontSize: 11,
-          background: groupLabel.color,
+          // An opaque INK pill with white text, never the group's colour behind white
+          // text — that was unreadable on amber, and invisible in dark mode when the
+          // pill came from a theme token.
+          ...OVERLAY_PILL_STYLE,
         }}
       >
+        {groupLabel.dotColor && (
+          <span
+            className="inline-block h-2 w-2 shrink-0 rounded-full"
+            style={{ background: groupLabel.dotColor }}
+            aria-hidden
+          />
+        )}
         {groupLabel.text}
       </div>
       {!resizeLocked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
         <div
           key={dir}
-          className="absolute bg-primary rounded-md border-white shadow-md pointer-events-auto"
+          // White fill, dark border — fixed colours over paper (canvasOverlayStyle).
+          className="absolute rounded-md shadow-md pointer-events-auto"
           style={{
             width: hs,
             height: hs,
+            background: OVERLAY_PAPER,
+            borderStyle: "solid",
+            borderColor: OVERLAY_INK,
             borderWidth: 2 * invZoom,
             cursor: RESIZE_CURSORS[dir] ?? "se-resize",
             ...pos[dir],

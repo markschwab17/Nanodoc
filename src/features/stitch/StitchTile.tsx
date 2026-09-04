@@ -14,6 +14,14 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
 import { computeResizedPose } from "@/features/stitch/stitchGeometry";
 import { expandSelectionToGroups, toggleGroupInSelection } from "@/features/stitch/groups";
+import {
+  OVERLAY_INK,
+  OVERLAY_PAPER,
+  groupMemberRingStyle,
+  hoverRingStyle,
+  screenPx,
+  selectionRingStyle,
+} from "@/features/stitch/canvasOverlayStyle";
 import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
 import { cssClipPathWithHoles, cssClipToRect } from "./cleanup/clipRegions";
 import { Lock, RotateCw, Unlock } from "lucide-react";
@@ -274,6 +282,9 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
+      // The right button belongs to the context menu: starting a resize here would push
+      // an undo snapshot and wipe the redo stack for a click that moves nothing.
+      if (e.button === 2) return;
       e.stopPropagation();
       const store = useStitchStore.getState();
       if (store.resizeLocked || tile.locked) return;
@@ -301,6 +312,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   const handleRotatePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button === 2) return;
       e.stopPropagation();
       e.preventDefault();
       const store = useStitchStore.getState();
@@ -391,19 +403,18 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   }));
   const hiddenClip = isRotated ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
 
-  // Ring weights in SCREEN pixels: everything here lives inside the zoom-scaled layer,
-  // so a constant on screen means dividing by the zoom.
-  const ringPx = 2.5 / Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
-  const outlineStyle = isSelected
-    ? `${ringPx}px solid hsl(var(--primary))`
-    : groupColor
-      ? `${ringPx * 0.7}px dashed ${groupColor}`
-      : pointerOver
-        ? `${ringPx}px solid hsl(var(--primary) / 0.45)`
-        : undefined;
-  const haloStyle = isSelected
-    ? `0 0 0 ${ringPx * 1.6}px ${groupColor ? `color-mix(in srgb, ${groupColor} 45%, transparent)` : "hsl(var(--primary) / 0.28)"}`
-    : undefined;
+  // Selection chrome: FIXED colours, SCREEN-pixel widths (see canvasOverlayStyle — the
+  // sheets are white paper in both themes, and the layer this lives in is zoom-scaled).
+  // Hover wins over the group's dashed outline: the ring under the cursor should always
+  // be the one that says "this is what you are about to click".
+  const ringZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
+  const ring = isSelected
+    ? selectionRingStyle(ringZoom, groupColor)
+    : pointerOver
+      ? hoverRingStyle(ringZoom)
+      : groupColor
+        ? groupMemberRingStyle(ringZoom, groupColor)
+        : null;
 
   return (
     <div
@@ -422,12 +433,12 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         // layer, so at a fit-the-set zoom of 0.3 the selection ring was 0.6 px — Mark:
         // "it's also very difficult to tell when a pdf is selected". Dividing by the
         // zoom keeps the ring the same weight however far out the canvas is.
-        outline: outlineStyle,
-        outlineOffset: `${-ringPx}px`,
-        // A soft halo outside the ring, in the GROUP's colour when the sheet is in one,
-        // so a selected group reads as one object and not as n sheets that happen to be
-        // lit up.
-        boxShadow: haloStyle,
+        outline: ring?.outline,
+        outlineOffset: ring?.outlineOffset,
+        // The white counter-stroke inside the ring, plus a halo outside it in the
+        // GROUP's colour when the sheet is in one, so a selected group reads as one
+        // object and not as n sheets that happen to be lit up.
+        boxShadow: ring && "boxShadow" in ring ? (ring.boxShadow as string) : undefined,
         transform: `translate(${tile.x}px, ${tile.y}px)${displayRotation ? ` rotate(${displayRotation}deg)` : ""}`,
         transformOrigin: "center center",
         // Promoted only while the tile is in play — see `pointerOver`. A
@@ -504,11 +515,16 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
               (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
                 <div
                   key={dir}
-                  className="absolute bg-primary rounded-md border-white shadow-md z-10"
+                  // White fill, dark border: fixed colours, because a handle sits on
+                  // paper that is white in both themes and often on black linework.
+                  className="absolute rounded-md shadow-md z-10"
                   style={{
                     width: hs,
                     height: hs,
-                    borderWidth: 2 * invZoom,
+                    background: OVERLAY_PAPER,
+                    borderStyle: "solid",
+                    borderColor: OVERLAY_INK,
+                    borderWidth: screenPx(2, Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel)),
                     cursor: RESIZE_CURSORS[dir] ?? "se-resize",
                     ...pos[dir],
                   }}

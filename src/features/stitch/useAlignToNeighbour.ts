@@ -22,10 +22,11 @@ import {
   seamMissFt,
   type CanvasPoint,
 } from "./stitchGeometry";
-import { expandSelectionToGroups } from "./groups";
+import { alignFollowers } from "./groups";
 import { compositionFeetPerInch } from "./pageScales";
 import { isTypingTarget } from "./useStitchKeyboard";
 import {
+  ALIGN_LOCKED_REFUSAL,
   IDLE_ALIGN,
   alignClickableTiles,
   alignHint,
@@ -104,9 +105,11 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     const [b1, b2] = apply.fixedPoints;
     if (!a1 || !b1) return;
 
-    /** The moving sheet and everything grouped with it — they travel together. */
-    const movingSet = expandSelectionToGroups(store.tiles, [apply.movingTileId]);
-    const followers = store.tiles.filter((t) => movingSet.includes(t.id) && t.id !== moving.id);
+    /** Everything that travels WITH the moving sheet: its group, minus the anchor's
+     *  side. Aligning two members of one composition must move only the far side —
+     *  taking the anchor along with them closes no seam at all. */
+    const followerIds = alignFollowers(store.tiles, apply.movingTileId, apply.fixedTileId);
+    const followers = store.tiles.filter((t) => followerIds.includes(t.id));
     /** Both sides of the pair, so the merge takes in each one's existing group. */
     const mergeIds = apply.fixedTileId ? [apply.fixedTileId, apply.movingTileId] : [apply.movingTileId];
 
@@ -209,7 +212,19 @@ export function useAlignToNeighbour(): AlignToNeighbour {
   const enter = useCallback(() => dispatch({ type: "enter" }), [dispatch]);
   const exit = useCallback(() => dispatch({ type: "exit" }), [dispatch]);
   const click = useCallback(
-    (tileId: string, point: CanvasPoint) => dispatch({ type: "click", tileId, point }),
+    (tileId: string, point: CanvasPoint) => {
+      // A locked sheet is the user saying "this one stays". Catch it at the click that
+      // NAMES the mover, so the mode says why instead of running a move that the store
+      // would then silently drop.
+      if (stateRef.current.step === "M1") {
+        const target = useStitchStore.getState().tiles.find((t) => t.id === tileId);
+        if (target?.locked) {
+          setRefusal({ reason: "locked", message: ALIGN_LOCKED_REFUSAL });
+          return;
+        }
+      }
+      dispatch({ type: "click", tileId, point });
+    },
     [dispatch]
   );
   const miss = useCallback(() => dispatch({ type: "miss" }), [dispatch]);

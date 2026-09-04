@@ -22,7 +22,11 @@ import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
-import { STITCH_SESSION_LOST, isStitchSessionLost } from "@/features/stitch/ctoSessionSource";
+import {
+  STITCH_SESSION_LOST,
+  isStitchSessionLost,
+  stitchHandoffRecovery,
+} from "@/features/stitch/ctoSessionSource";
 import { shutdownOcr } from "@/features/stitch/autostitch/ocrService";
 import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
@@ -90,6 +94,10 @@ async function cropRegionToDataUrl(tile: StitchTile, rect: CropRect): Promise<st
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL("image/png");
 }
+
+/** Module scope on purpose: the recovery bounce below must happen at most once per page
+ *  load, and the component remounts across the navigation it performs. */
+let handoffRecoveryAttempted = false;
 
 export default function StitchView() {
   // Subscribe to the count only — tile content changes every drag frame and
@@ -302,6 +310,9 @@ export default function StitchView() {
   const alignNeighbour = useAlignToNeighbour();
   const alignNeighbourExit = alignNeighbour.exit;
   /** Read by the select-all listener, which is installed once. */
+  /** The navigate function, in a ref: the handoff effect runs once on mount and must
+   *  not re-run because a router hook re-rendered. */
+  const navigateRef = useRef<ReturnType<typeof useNavigate> | null>(null);
   const alignNeighbourActiveRef = useRef(alignNeighbour.active);
   alignNeighbourActiveRef.current = alignNeighbour.active;
   const earnedReset = earned.reset;
@@ -309,19 +320,27 @@ export default function StitchView() {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
     if (!ctx || !initial) {
-      // Nothing was handed over. Inside the CTO panel that is a RELOADED IFRAME, not a
-      // fresh standalone visit: the source PDF lived in memory and went with it, so the
-      // "Stitch PDFs Together / Add PDF" hero would invite a session CTO can never save
-      // back. Say what happened instead.
       const tiles = useStitchStore.getState().tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
-      setSessionLost(
-        isStitchSessionLost({
-          embed: !!ctx?.embed,
-          hasInitial: receivedInitialRef.current,
-          tileCount: tiles.length,
-          busy: false,
-        }),
-      );
+      const lost = isStitchSessionLost({
+        embed: !!ctx?.embed,
+        hasInitial: receivedInitialRef.current,
+        tileCount: tiles.length,
+        busy: false,
+      });
+      // Nothing was handed over — but the URL may still say WHICH document this was.
+      // The handoff only ever lived in memory, so a reload lost it; `/view` owns the
+      // fetch, so bounce back through it once and it will hand over and return here.
+      // Once per page load, so a fetch that fails cannot become a redirect loop.
+      const recovery = stitchHandoffRecovery(window.location.search);
+      if (lost && recovery && !handoffRecoveryAttempted) {
+        handoffRecoveryAttempted = true;
+        navigateRef.current?.({ pathname: "/view", search: recovery.search }, { replace: true });
+        return;
+      }
+      // Truly lost: no handoff, nothing on the canvas, and nothing on the URL to
+      // recover from. Say what happened rather than showing the standalone hero, which
+      // would invite a session CTO can never save back.
+      setSessionLost(lost);
       return;
     }
     receivedInitialRef.current = true;
@@ -464,6 +483,7 @@ export default function StitchView() {
   }, [fitWhenMeasured, earnedCheck]);
 
   const navigate = useNavigate();
+  navigateRef.current = navigate;
   const { loadPDF } = usePDF();
   const { showNotification } = useNotificationStore();
 
@@ -1198,9 +1218,9 @@ export default function StitchView() {
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
         {tileCount === 0 && sessionLost && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50 px-6">
-            <div className="max-w-sm rounded-lg border bg-background px-5 py-4 text-center shadow-sm">
-              <p className="text-sm font-medium text-foreground">{STITCH_SESSION_LOST}</p>
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-muted/50 px-6">
+            <div className="max-w-md rounded-lg border bg-popover px-5 py-4 text-center text-popover-foreground shadow-lg">
+              <p className="text-sm font-medium">{STITCH_SESSION_LOST}</p>
               <Button variant="outline" size="sm" className="mt-3" onClick={handleCancel}>
                 Cancel
               </Button>
@@ -1208,23 +1228,29 @@ export default function StitchView() {
           </div>
         )}
         {tileCount === 0 && !sessionLost && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50">
-            <FilePlus className="h-16 w-16 text-muted-foreground mb-4" />
-            <h2 className="text-2xl font-bold mb-2 text-foreground">Stitch PDFs Together</h2>
-            <p className="text-sm text-muted-foreground mb-6 text-center max-w-md">
-              Arrange multiple PDF pages onto one canvas — remove white backgrounds,
-              resize, rotate, and export as a single PDF. Get started by selecting
-              a PDF and choosing the pages you want to stitch.
-            </p>
-            <Button
-              size="lg"
-              className="h-14 px-8 text-lg gap-3 shadow-lg"
-              onClick={() => setShowAddPdf(true)}
-              data-tour="stitch-add-pdf"
-            >
-              <FilePlus className="h-7 w-7" />
-              Add PDF
-            </Button>
+          // The empty state sits on its own CARD. It used to be bare text on the
+          // canvas: in dark mode `text-muted-foreground` over the light paper was
+          // unreadable, and the rule for anything text-like on the canvas is that it
+          // brings its own opaque surface.
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-muted/50 px-6">
+            <div className="flex max-w-md flex-col items-center rounded-lg border bg-popover px-6 py-6 text-center text-popover-foreground shadow-lg">
+              <FilePlus className="mb-4 h-16 w-16 text-muted-foreground" />
+              <h2 className="mb-2 text-2xl font-bold">Stitch PDFs Together</h2>
+              <p className="mb-6 text-sm text-muted-foreground">
+                Arrange multiple PDF pages onto one canvas — remove white backgrounds,
+                resize, rotate, and export as a single PDF. Get started by selecting
+                a PDF and choosing the pages you want to stitch.
+              </p>
+              <Button
+                size="lg"
+                className="h-14 gap-3 px-8 text-lg shadow-lg"
+                onClick={() => setShowAddPdf(true)}
+                data-tour="stitch-add-pdf"
+              >
+                <FilePlus className="h-7 w-7" />
+                Add PDF
+              </Button>
+            </div>
           </div>
         )}
         <StitchContextMenu
@@ -1232,7 +1258,14 @@ export default function StitchView() {
           onRecenter={handleRecenter}
           // A mode overlay covers the canvas and owns its own interaction; a menu
           // opening behind it would act on a selection the user cannot see.
-          disabled={alignNeighbour.active || cleanupReviewMode || contentDeleteMode || deleteElementMode}
+          disabled={
+            alignNeighbour.active ||
+            cleanupReviewMode ||
+            contentDeleteMode ||
+            deleteElementMode ||
+            pointAlign.pointAlignMode ||
+            scaleAlign.scaleAlignMode
+          }
         >
         <StitchCanvas
           contentDeleteMode={contentDeleteMode}

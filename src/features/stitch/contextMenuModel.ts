@@ -37,6 +37,9 @@ export interface SheetMenuModel {
   lockLabel: "Lock" | "Unlock";
   order: MenuAction;
   remove: MenuAction;
+  /** "Delete sheet" / "Delete group (5 sheets)" — the entry says what it will take,
+   *  because Delete on one member of a group deletes the group. */
+  removeLabel: string;
   alignFromHere: MenuAction;
 }
 
@@ -86,6 +89,8 @@ export function sheetMenuModel(
     lockLabel: tile.locked ? "Unlock" : "Lock",
     order: sheetsOnCanvas > 1 ? { enabled: true } : { enabled: false, hint: "only one sheet" },
     remove: { enabled: true },
+    removeLabel:
+      selectionCount > 1 ? `Delete ${selectionCount} sheets` : "Delete sheet",
     alignFromHere:
       sheetsOnCanvas >= 2
         ? { enabled: true }

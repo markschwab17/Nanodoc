@@ -72,3 +72,29 @@ export function isStitchSessionLost(opts: {
 }): boolean {
   return opts.embed && !opts.hasInitial && opts.tileCount === 0 && !opts.busy;
 }
+
+/**
+ * Can a stitch session that lost its in-memory handoff recover from the URL?
+ *
+ * The takeoff panel hands the PDF over in memory and then navigates to `/stitch`. A
+ * reload of that page has no handoff — but if the CTO parameters are still on the URL,
+ * the document can simply be fetched again: `/view` owns that fetch, so the recovery is
+ * to bounce back through it and let it hand over and navigate here a second time.
+ *
+ * Pure so the condition is testable: everything it needs is in the query string.
+ */
+export function stitchHandoffRecovery(search: string): { search: string } | null {
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(search);
+  } catch {
+    return null;
+  }
+  // The same three the fetch needs, plus the flag that says this was a stitch open.
+  const enough =
+    params.get("stitch") === "1" &&
+    !!params.get("project") &&
+    !!params.get("doc") &&
+    !!params.get("token");
+  return enough ? { search: params.toString() } : null;
+}

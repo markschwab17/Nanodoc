@@ -12,6 +12,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { canvasToTileLocal } from "./stitchGeometry";
 import { LOUPE_SIZE_PX, placeLoupe, type Viewport } from "./loupeGeometry";
+import { OVERLAY_ACCENT, OVERLAY_PAPER, OVERLAY_PILL_STYLE } from "./canvasOverlayStyle";
 import type { LoupeView } from "./useLoupeRender";
 import type { StitchTile } from "./stitchTypes";
 
@@ -157,8 +158,15 @@ export const AlignLoupe = memo(function AlignLoupe({
     // mode bar's live region, so a screen reader must not hear it twice.
     <div className="fixed z-[110] pointer-events-none" style={{ left, top }} aria-hidden="true">
       <div
-        className="rounded-full overflow-hidden border-2 border-primary/70 shadow-xl bg-white"
-        style={{ width: LOUPE_SIZE_PX, height: LOUPE_SIZE_PX }}
+        // Fixed colours: this circle sits ON the paper (see canvasOverlayStyle).
+        className="rounded-full overflow-hidden shadow-xl"
+        style={{
+          width: LOUPE_SIZE_PX,
+          height: LOUPE_SIZE_PX,
+          background: OVERLAY_PAPER,
+          border: `2px solid ${OVERLAY_ACCENT}`,
+          boxShadow: `0 0 0 1px ${OVERLAY_PAPER}, 0 6px 18px rgba(0,0,0,0.35)`,
+        }}
       >
         <canvas
           ref={canvasRef}
@@ -166,7 +174,10 @@ export const AlignLoupe = memo(function AlignLoupe({
         />
       </div>
       {hint && (
-        <div className="mt-1.5 max-w-[260px] rounded bg-popover/95 border border-border px-2 py-1 text-[11px] text-popover-foreground shadow">
+        <div
+          className="mt-1.5 max-w-[260px] rounded px-2 py-1 text-[11px]"
+          style={OVERLAY_PILL_STYLE}
+        >
           {hint}
         </div>
       )}

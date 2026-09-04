@@ -32,6 +32,7 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 import { ABSOLUTE_MIN_ZOOM, RULER_SIZE } from "./stitchConstants";
 import { hitTestTileAtPoint, tileLocalToCanvas, type CanvasPoint } from "./stitchGeometry";
 import { alignHitForStep, alignPointerEvent } from "./alignToNeighbourMachine";
+import { OVERLAY_ACCENT, OVERLAY_ACCENT_DARK, OVERLAY_PAPER } from "./canvasOverlayStyle";
 import { AlignLoupe } from "./AlignLoupe";
 import { useLoupeRender } from "./useLoupeRender";
 import type { AlignToNeighbour } from "./useAlignToNeighbour";
@@ -251,7 +252,9 @@ export function AlignToNeighbourMode({
               <polygon
                 key={`dim-${tile.id}`}
                 points={tilePolygon(tile)}
-                fill="hsl(var(--background))"
+                // Paper white, NOT the theme background: in dark mode that token is
+                // near-black, so "fading" a sheet would have blacked it out.
+                fill={OVERLAY_PAPER}
                 opacity={1 - opacity}
               />
             ) : null;
@@ -275,7 +278,7 @@ export function AlignToNeighbourMode({
                   key={`placed-${tile.id}`}
                   points={tilePolygon(tile)}
                   fill="none"
-                  stroke={color ?? "hsl(var(--primary))"}
+                  stroke={color ?? OVERLAY_ACCENT}
                   strokeWidth={1.5}
                   opacity={color ? 0.7 : 0.45}
                 />
@@ -289,9 +292,9 @@ export function AlignToNeighbourMode({
               return (
                 <polygon
                   points={tilePolygon(tile)}
-                  fill="hsl(var(--primary))"
+                  fill={OVERLAY_ACCENT}
                   fillOpacity={0.12}
-                  stroke="hsl(var(--primary))"
+                  stroke={OVERLAY_ACCENT}
                   strokeWidth={3}
                 />
               );
@@ -301,7 +304,7 @@ export function AlignToNeighbourMode({
             <polygon
               points={tilePolygon(anchorTile)}
               fill="none"
-              stroke="hsl(var(--primary))"
+              stroke={OVERLAY_ACCENT}
               strokeWidth={2}
               strokeDasharray={`${dash * 2} ${dash}`}
               opacity={0.9}
@@ -311,17 +314,17 @@ export function AlignToNeighbourMode({
           {pts[0] && pts[1] && (() => {
             const a = toOverlay(pts[0]);
             const b = toOverlay(pts[1]);
-            return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dash} ${dash}`} opacity={0.85} />;
+            return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dash} ${dash}`} opacity={0.85} />;
           })()}
           {pts[2] && pts[3] && (() => {
             const a = toOverlay(pts[2]);
             const b = toOverlay(pts[3]);
-            return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dash} ${dash}`} opacity={0.85} />;
+            return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dash} ${dash}`} opacity={0.85} />;
           })()}
           {liveFrom && cursor && (() => {
             const a = toOverlay(liveFrom);
             const b = toOverlay(cursor);
-            return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dash} ${dash}`} opacity={0.6} />;
+            return <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dash} ${dash}`} opacity={0.6} />;
           })()}
           {pts.map((p, i) =>
             p ? (
@@ -333,8 +336,8 @@ export function AlignToNeighbourMode({
                       cx={o.x}
                       cy={o.y}
                       r={markerR}
-                      fill="hsl(var(--primary))"
-                      stroke="hsl(var(--background))"
+                      fill={OVERLAY_ACCENT_DARK}
+                      stroke={OVERLAY_PAPER}
                       strokeWidth={markerStroke}
                       opacity={0.92}
                     />
@@ -343,7 +346,7 @@ export function AlignToNeighbourMode({
                       y={o.y}
                       textAnchor="middle"
                       dominantBaseline="central"
-                      fill="hsl(var(--primary-foreground))"
+                      fill={OVERLAY_PAPER}
                       fontSize={Math.max(11, 10 * markerZoom)}
                       fontWeight="bold"
                     >

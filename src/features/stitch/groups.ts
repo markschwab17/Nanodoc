@@ -119,14 +119,24 @@ export function createGroupIn(
   if (ids.size < 2) return { tiles: [...tiles], groups, groupId: null };
 
   const groupId = generateGroupId();
-  const created: TileGroup = {
-    id: groupId,
-    name: nextGroupName(groups),
-    color: nextGroupColor(groups),
-  };
   const nextTiles = tiles.map((t) => (ids.has(t.id) ? { ...t, groupId } : t));
-  const pruned = pruneGroups(nextTiles, { ...groups, [groupId]: created });
-  return { ...pruned, groupId: pruned.groups[groupId] ? groupId : null };
+  // Prune FIRST (with a placeholder so the new group survives it), then name and
+  // colour from what is actually left. Reading the pre-prune record could see all six
+  // colours "taken" by groups this very create is dissolving, and fall through to the
+  // wrap-around — handing a live group a colour another live group already has.
+  const placeholder: TileGroup = { id: groupId, name: "", color: "" };
+  const pruned = pruneGroups(nextTiles, { ...groups, [groupId]: placeholder });
+  if (!pruned.groups[groupId]) return { tiles: [...tiles], groups, groupId: null };
+  const survivors: TileGroups = {};
+  for (const [id, g] of Object.entries(pruned.groups)) if (id !== groupId) survivors[id] = g;
+  return {
+    tiles: pruned.tiles,
+    groups: {
+      ...pruned.groups,
+      [groupId]: { id: groupId, name: nextGroupName(survivors), color: nextGroupColor(survivors) },
+    },
+    groupId,
+  };
 }
 
 /** Add `tileIds` to an existing group (leaving whatever group they were in). */
@@ -170,8 +180,9 @@ export function ungroupIn(
  *
  * This is what a completed "Align to neighbour" pair does: the sheet that stayed and
  * the sheet that came to meet it are now one rigid thing, and so is everything either
- * of them was already grouped with. The oldest surviving group keeps its identity so
- * its name and colour do not change under the user mid-chain.
+ * of them was already grouped with. `tileIds` is passed anchor-first, so the FIXED
+ * side's group keeps its identity — the composition the user has been building keeps
+ * its name and colour, and the sheet arriving joins it rather than renaming it.
  */
 export function mergeGroupsFor(
   tiles: readonly StitchTile[],
@@ -266,4 +277,24 @@ export function selectionSummary(
     if (group) return `${count} · ${group.name}`;
   }
   return count;
+}
+
+/**
+ * The sheets that must travel WITH the one being moved by "Align to neighbour".
+ *
+ * Its group, minus itself — and minus the anchor's side entirely. When both sheets are
+ * already in one group (aligning two members of a composition to tighten a seam), the
+ * naive "everything in my group" answer includes the anchor, so the whole group slides
+ * together and the seam never closes: the two points stay exactly as far apart as they
+ * were. The anchor's side stays put by definition; only the rest follows.
+ */
+export function alignFollowers(
+  tiles: readonly StitchTile[],
+  movingTileId: string,
+  fixedTileId: string | null
+): string[] {
+  const staying = new Set(fixedTileId ? expandSelectionToGroups(tiles, [fixedTileId]) : []);
+  return expandSelectionToGroups(tiles, [movingTileId]).filter(
+    (id) => id !== movingTileId && !staying.has(id)
+  );
 }

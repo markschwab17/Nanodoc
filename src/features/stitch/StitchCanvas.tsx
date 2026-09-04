@@ -26,6 +26,7 @@ function rulerLabel(inches: number): string {
 import { hitTestTileAtPoint, type CanvasPoint } from "./stitchGeometry";
 import { CleanupReview, type TileProposalUI } from "./cleanup/CleanupReview";
 import { AlignToNeighbourMode } from "./AlignToNeighbourMode";
+import { OVERLAY_ACCENT, OVERLAY_ACCENT_DARK, OVERLAY_PAPER } from "./canvasOverlayStyle";
 import type { AlignToNeighbour } from "./useAlignToNeighbour";
 
 /**
@@ -595,12 +596,15 @@ export function StitchCanvas({
         )}
         {cropRect && (
           <div
-            className="absolute border-2 border-dashed border-primary pointer-events-none"
+            // Fixed accent: the crop rect is drawn ON the paper, which is white in
+            // both themes (see canvasOverlayStyle).
+            className="absolute border-2 border-dashed pointer-events-none"
             style={{
               left: cropRect.x,
               top: cropRect.y,
               width: cropRect.w,
               height: cropRect.h,
+              borderColor: OVERLAY_ACCENT,
             }}
           />
         )}
@@ -894,8 +898,8 @@ export function StitchCanvas({
                               cx={o.x}
                               cy={o.y}
                               r={markerR}
-                              fill="hsl(var(--primary))"
-                              stroke="hsl(var(--background))"
+                              fill={OVERLAY_ACCENT_DARK}
+                              stroke={OVERLAY_PAPER}
                               strokeWidth={markerStroke}
                               opacity={0.9}
                             />
@@ -904,7 +908,7 @@ export function StitchCanvas({
                               y={o.y}
                               textAnchor="middle"
                               dominantBaseline="central"
-                              fill="hsl(var(--primary-foreground))"
+                              fill={OVERLAY_PAPER}
                               fontSize={Math.max(14, 12 * markerZoom)}
                               fontWeight="bold"
                             >
@@ -918,35 +922,35 @@ export function StitchCanvas({
                     const a = toOverlay(pointAlignPoints[0]);
                     const b = toOverlay(pointAlignPoints[1]);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
                     );
                   })()}
                   {pointAlignMode && pointAlignStep === 1 && pointAlignPoints[0] && pointAlignMouse && (() => {
                     const a = toOverlay(pointAlignPoints[0]);
                     const b = toOverlay(pointAlignMouse);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
                     );
                   })()}
                   {pointAlignMode && pointAlignStep === 3 && pointAlignPoints[2] && pointAlignMouse && (() => {
                     const a = toOverlay(pointAlignPoints[2]);
                     const b = toOverlay(pointAlignMouse);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
                     );
                   })()}
                   {scaleAlignMode && scaleAlignPoints[0] && scaleAlignPoints[1] && (() => {
                     const a = toOverlay(scaleAlignPoints[0]);
                     const b = toOverlay(scaleAlignPoints[1]);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
                     );
                   })()}
                   {scaleAlignMode && scaleAlignPoints[2] && scaleAlignPoints[3] && (() => {
                     const a = toOverlay(scaleAlignPoints[2]);
                     const b = toOverlay(scaleAlignPoints[3]);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
                     );
                   })()}
                 </svg>

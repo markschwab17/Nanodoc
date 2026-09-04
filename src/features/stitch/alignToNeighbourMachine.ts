@@ -77,7 +77,9 @@ export interface AlignApply {
   fixedPoints: CanvasPoint[];
 }
 
-export type RefusalReason = "wrong-sheet" | "same-sheet" | "no-sheet";
+/** `locked` is raised by the hook, not the machine: whether a sheet can move is a fact
+ *  about the store, and the machine does not read it. */
+export type RefusalReason = "wrong-sheet" | "same-sheet" | "no-sheet" | "locked";
 export interface AlignRefusal {
   reason: RefusalReason;
   /** The whole sentence to show and announce — never colour alone. */
@@ -117,6 +119,9 @@ export const ALIGN_TWO_POINT_HINTS: Record<"F1" | "F2" | "M1" | "M2", string> = 
 
 /** Said when the second click lands back on the anchor: the whole point is two sheets. */
 export const ALIGN_SAME_SHEET_REFUSAL = "Click the matching point on a different sheet";
+
+/** Said when the sheet chosen to MOVE cannot: the user locked it. */
+export const ALIGN_LOCKED_REFUSAL = "That sheet is locked";
 
 export function alignHint(state: AlignMachine): string {
   if (state.step === "idle") return "";

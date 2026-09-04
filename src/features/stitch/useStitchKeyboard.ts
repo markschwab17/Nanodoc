@@ -77,9 +77,10 @@ export function useStitchKeyboard(options: StitchKeyboardOptions = {}) {
         const ids = store.selectedTileIds;
         if (e.shiftKey) {
           // Ungroup whatever groups the selection touches — the whole group each time,
-          // because a half-ungrouped group is not what "ungroup" means.
+          // because a half-ungrouped group is not what "ungroup" means, and all of them
+          // in ONE undo step.
           const groupIds = [...new Set(ids.map((id) => groupOf(store.tiles, id)).filter((g): g is string => !!g))];
-          for (const groupId of groupIds) store.ungroup(groupId);
+          store.ungroupMany(groupIds);
         } else if (ids.length >= 2) {
           store.createGroup(ids);
         }

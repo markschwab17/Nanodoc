@@ -3,6 +3,7 @@ import {
   SESSION_SOURCE_DOC_TYPE,
   STITCH_SESSION_LOST,
   isStitchSessionLost,
+  stitchHandoffRecovery,
   sessionSourceLabel,
   withSessionSource,
   type CtoDocLike,
@@ -53,5 +54,27 @@ describe("isStitchSessionLost", () => {
 
   test("is false once there are sheets on the canvas", () => {
     expect(isStitchSessionLost({ ...base, tileCount: 3 })).toBe(false);
+  });
+});
+
+describe("stitchHandoffRecovery", () => {
+  const full = "?project=p1&doc=d1&token=t1&stitch=1&embed=1";
+
+  test("recovers when the URL still carries everything the fetch needs", () => {
+    const out = stitchHandoffRecovery(full);
+    expect(out).not.toBeNull();
+    expect(out!.search).toContain("project=p1");
+    expect(out!.search).toContain("token=t1");
+    expect(out!.search).toContain("embed=1");
+  });
+
+  test("does not recover a URL that was never a stitch open", () => {
+    expect(stitchHandoffRecovery("?project=p1&doc=d1&token=t1")).toBeNull();
+  });
+
+  test("does not recover without the credentials the fetch needs", () => {
+    expect(stitchHandoffRecovery("?stitch=1&project=p1&doc=d1")).toBeNull();
+    expect(stitchHandoffRecovery("?stitch=1")).toBeNull();
+    expect(stitchHandoffRecovery("")).toBeNull();
   });
 });

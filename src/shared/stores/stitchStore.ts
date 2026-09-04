@@ -124,6 +124,9 @@ interface StitchState {
   detachFromGroup: (tileIds: string[]) => void;
   /** Dissolve a whole group. */
   ungroup: (groupId: string) => void;
+  /** Dissolve several groups as ONE undo step (Shift+Cmd/Ctrl+G over a mixed
+   *  selection) — one step per group would make undo a chore. */
+  ungroupMany: (groupIds: string[]) => void;
   /** Merge every group these sheets belong to (plus the sheets themselves) into one —
    *  what a completed align pair does. */
   mergeGroups: (tileIds: string[]) => string | null;
@@ -514,8 +517,16 @@ export const useStitchStore = create<StitchState>((set, get) => ({
         }
         added.push({ ...tile, id });
       }
+      // The swap deletes sheets, so it can leave a group with one member or none — an
+      // auto-align composite replacing a grid is exactly that case, and the leftovers
+      // showed up as empty entries in the "Add to group" menu.
+      const pruned = pruneGroups(
+        [...state.tiles.filter((t) => !remove.has(t.id)), ...added],
+        state.groups,
+      );
       const next = {
-        tiles: [...state.tiles.filter((t) => !remove.has(t.id)), ...added],
+        tiles: pruned.tiles,
+        groups: pruned.groups,
         selectedTileIds: [],
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
@@ -617,6 +628,20 @@ export const useStitchStore = create<StitchState>((set, get) => ({
     pushUndoAndSet(set, get, { tiles: result.tiles, groups: result.groups });
   },
 
+  ungroupMany: (groupIds) => {
+    const state = get();
+    const live = groupIds.filter((id) => state.groups[id]);
+    if (live.length === 0) return;
+    let tiles = state.tiles;
+    let groups = state.groups;
+    for (const groupId of live) {
+      const result = ungroupIn(tiles, groups, groupId);
+      tiles = result.tiles;
+      groups = result.groups;
+    }
+    pushUndoAndSet(set, get, { tiles, groups });
+  },
+
   mergeGroups: (tileIds) => {
     const state = get();
     const result = mergeGroupsFor(state.tiles, state.groups, tileIds);
@@ -627,7 +652,11 @@ export const useStitchStore = create<StitchState>((set, get) => ({
 
   applyAlignedPair: (updates, mergeTileIds) => {
     const state = get();
-    const byId = new Map(updates.map((u) => [u.id, u.patch]));
+    // A locked sheet does not move, even as part of a group — the lock is the user
+    // saying "this one stays where it is", and an align pair is not an exception.
+    const byId = new Map(
+      updates.filter((u) => !state.tiles.find((t) => t.id === u.id)?.locked).map((u) => [u.id, u.patch]),
+    );
     const moved = state.tiles.map((t) => {
       const patch = byId.get(t.id);
       return patch ? { ...t, ...patch } : t;

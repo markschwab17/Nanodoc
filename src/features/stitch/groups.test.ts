@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   GROUP_COLORS,
   addToGroupIn,
+  alignFollowers,
   createGroupIn,
   detachFromGroupIn,
   expandSelectionToGroups,
@@ -179,5 +180,31 @@ describe("selection", () => {
     expect(selectionSummary(base.tiles, base.groups, ["a", "b"])).toBe("2 sheets selected · Group 1");
     // A group plus a loose sheet is not "Group 1" — that would misdescribe what moves.
     expect(selectionSummary(base.tiles, base.groups, ["a", "b", "c"])).toBe("3 sheets selected");
+  });
+});
+
+describe("who travels with the sheet an align pair moves", () => {
+  it("takes the mover's whole group", () => {
+    const g = createGroupIn(sheets("a", "b", "c"), {}, ["b", "c"]);
+    expect(alignFollowers(g.tiles, "b", "a")).toEqual(["c"]);
+  });
+
+  it("leaves the ANCHOR's group behind — including when both sides share one group", () => {
+    // Tightening a seam between two members of one composition. If the anchor came
+    // along, the whole group would slide and the two points would stay exactly as far
+    // apart as they started.
+    const g = createGroupIn(sheets("a", "b", "c"), {}, ["a", "b", "c"]);
+    expect(alignFollowers(g.tiles, "b", "a")).toEqual([]);
+  });
+
+  it("leaves every member of the anchor's group behind", () => {
+    const one = createGroupIn(sheets("a", "b", "c", "d"), {}, ["a", "b"]);
+    const two = createGroupIn(one.tiles, one.groups, ["c", "d"]);
+    // Moving "c" onto "a": "d" follows, "b" (the anchor's group) does not.
+    expect(alignFollowers(two.tiles, "c", "a")).toEqual(["d"]);
+  });
+
+  it("is empty for a loose sheet", () => {
+    expect(alignFollowers(sheets("a", "b"), "b", "a")).toEqual([]);
   });
 });
