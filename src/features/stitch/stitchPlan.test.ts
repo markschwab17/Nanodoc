@@ -1,0 +1,94 @@
+import { describe, it, expect } from "vitest";
+import { parseStitchPlan } from "./stitchPlan";
+
+const takeoff = (scaleFeetPerInch: number | null, label = "C-1") => ({
+  kind: "takeoff",
+  pageUuid: "uuid-" + label,
+  scaleFeetPerInch,
+  label,
+});
+
+const plan = (entries: unknown[], mode: "auto" | "manual" = "auto") => ({
+  version: 1,
+  mode,
+  entries,
+});
+
+describe("parseStitchPlan", () => {
+  it("reads the mode and one page index per entry", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20), takeoff(20)], "manual"), 2);
+    expect(parsed?.mode).toBe("manual");
+    expect(parsed?.pageIndices).toEqual([0, 1]);
+  });
+
+  it("collapses a uniformly-scaled plan to one uniform scale", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20), takeoff(20), takeoff(20)]), 3);
+    expect(parsed?.uniformScale).toBe(20);
+    expect(parsed?.pageScales).toEqual(new Map([[0, 20], [1, 20], [2, 20]]));
+  });
+
+  it("keeps a mixed-scale plan per-page with no uniform scale", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20), takeoff(40)]), 2);
+    expect(parsed?.uniformScale).toBeNull();
+    expect(parsed?.pageScales).toEqual(new Map([[0, 20], [1, 40]]));
+  });
+
+  it("leaves blank scales out of the map and off the uniform path", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20), takeoff(null)]), 2);
+    expect(parsed?.pageScales.has(1)).toBe(false);
+    expect(parsed?.pageScales.get(0)).toBe(20);
+    // Page 1 has no scale, so the set is not uniform even though every scale
+    // present is 20 — the commit must resolve page 1 on its own.
+    expect(parsed?.uniformScale).toBeNull();
+  });
+
+  it("treats an absent scaleFeetPerInch like an explicit null", () => {
+    const parsed = parseStitchPlan(
+      plan([{ kind: "document", documentId: "d1", documentPage: 0, label: "A" }]),
+      1
+    );
+    expect(parsed?.pageIndices).toEqual([0]);
+    expect(parsed?.pageScales.size).toBe(0);
+  });
+
+  it("truncates entries past the document's page count", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20), takeoff(40), takeoff(50)]), 2);
+    expect(parsed?.pageIndices).toEqual([0, 1]);
+    expect(parsed?.pageScales).toEqual(new Map([[0, 20], [1, 40]]));
+  });
+
+  it("commits only the pages the plan describes when the PDF has more", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20)]), 5);
+    expect(parsed?.pageIndices).toEqual([0]);
+  });
+
+  it("returns null when the document has no pages", () => {
+    expect(parseStitchPlan(plan([takeoff(20)]), 0)).toBeNull();
+  });
+
+  it("returns null for a version this build does not understand", () => {
+    expect(parseStitchPlan({ ...plan([takeoff(20)]), version: 2 }, 1)).toBeNull();
+  });
+
+  it("returns null for a malformed plan", () => {
+    expect(parseStitchPlan(null, 3)).toBeNull();
+    expect(parseStitchPlan("not a plan", 3)).toBeNull();
+    expect(parseStitchPlan([takeoff(20)], 3)).toBeNull();
+    expect(parseStitchPlan(plan([]), 3)).toBeNull();
+    expect(parseStitchPlan({ version: 1, mode: "sideways", entries: [takeoff(20)] }, 3)).toBeNull();
+    expect(parseStitchPlan({ version: 1, mode: "auto", entries: "nope" }, 3)).toBeNull();
+    expect(parseStitchPlan(plan(["not an entry"]), 3)).toBeNull();
+  });
+
+  it("returns null for an unusable scale rather than guessing", () => {
+    expect(parseStitchPlan(plan([takeoff(0)]), 1)).toBeNull();
+    expect(parseStitchPlan(plan([takeoff(-20)]), 1)).toBeNull();
+    expect(parseStitchPlan(plan([takeoff(Number.NaN)]), 1)).toBeNull();
+    expect(parseStitchPlan(plan([{ kind: "takeoff", pageUuid: "u", scaleFeetPerInch: "20" }]), 1)).toBeNull();
+  });
+
+  it("ignores a malformed entry that the page count truncates away", () => {
+    const parsed = parseStitchPlan(plan([takeoff(20), "garbage"]), 1);
+    expect(parsed?.pageIndices).toEqual([0]);
+  });
+});

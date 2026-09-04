@@ -205,7 +205,11 @@ export default function CiviltakeoffView() {
         if (params.stitch === "1") {
           // Lazy: the stitch feature (and its stores) must not load on the plain /view boot path.
           const { useCtoStitchInitialStore } = await import("@/shared/stores/ctoStitchInitialStore");
-          useCtoStitchInitialStore.getState().setInitial({ pdfBytes: data, fileName: name });
+          // `stitchPlan` (when this CTO build sends one) lets the stitch view place
+          // the sheets itself instead of opening the page picker — see StitchView.
+          useCtoStitchInitialStore
+            .getState()
+            .setInitial({ pdfBytes: data, fileName: name, plan: json?.stitchPlan ?? null });
           navigate("/stitch");
           return;
         }

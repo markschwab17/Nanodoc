@@ -13,6 +13,10 @@ import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
+import { commitPlainAdd, commitAutoAlign } from "@/features/stitch/commitPages";
+import { parseStitchPlan } from "@/features/stitch/stitchPlan";
+import { recognize } from "@/features/stitch/autostitch/ocrService";
+import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
@@ -109,22 +113,110 @@ export default function StitchView() {
     };
   }, [handleRecenter]);
 
-  // CTO stitch preload: when opened from CTO with stitch=1, open Add PDF modal with the initial PDF
-  // so the user can choose which pages to add (instead of auto-adding all).
+  // CTO stitch preload: when opened from CTO with stitch=1, either commit the sheets
+  // straight onto the canvas (CTO sent a stitch plan) or open the Add PDF modal on the
+  // initial PDF so the user picks the pages themselves (no plan / the plan failed).
   const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
   // Kept for the life of the stitch session (unlike ctoInitialPdf, which is consumed once the
   // modal loads it) so "From Civiltakeoff" can still offer the site-sheet source after the user
   // switches tabs and loads a different project document.
   const [sessionSourcePdf, setSessionSourcePdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
+  /** Non-null while a CTO stitch plan is being committed — drives the entry
+   *  overlay. `done/total` is the commit's own page progress. */
+  const [planRun, setPlanRun] = useState<{ mode: "auto" | "manual"; done: number; total: number } | null>(null);
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
-    if (ctx && initial) {
-      setCtoInitialPdf({ pdfBytes: initial.pdfBytes, fileName: initial.fileName });
-      setSessionSourcePdf({ pdfBytes: initial.pdfBytes, fileName: initial.fileName });
+    if (!ctx || !initial) return;
+    const source = { pdfBytes: initial.pdfBytes, fileName: initial.fileName };
+    setSessionSourcePdf(source);
+
+    // No plan — an older CTO build, or a source it can't describe. Unchanged
+    // behaviour: the page picker opens on the source PDF and the user chooses.
+    if (initial.plan == null) {
+      setCtoInitialPdf(source);
       setShowAddPdf(true);
+      return;
     }
-  }, []);
+
+    /** Hand the source to the picker — exactly what a planless open does. Used
+     *  for an unusable plan and for a commit that threw. */
+    const fallBackToPicker = () => {
+      setPlanRun(null);
+      setCtoInitialPdf(source);
+      setShowAddPdf(true);
+    };
+
+    // Deliberately NO cancellation token / cleanup: under StrictMode this effect
+    // mounts twice, and a cleanup that aborted the first run would abort the ONLY
+    // run — the second pass finds `takeInitial()` already drained and returns early
+    // (which is also what stops a double commit). A real unmount mid-run is safe
+    // instead: the tiles land in the global stitch store either way, the setState
+    // calls below are no-ops on an unmounted tree, and `handleRecenter` bails when
+    // its container ref is gone.
+
+    (async () => {
+      const mupdf = await import("mupdf").then((m) => m.default);
+      let doc: any = null;
+      let renderer: PDFRenderer | null = null;
+      try {
+        // ONE document for the whole run: the plan is validated against this
+        // doc's real page count and the commit renders from the same handle.
+        doc = mupdf.Document.openDocument(source.pdfBytes, "application/pdf");
+        const parsed = parseStitchPlan(initial.plan, doc.countPages());
+        if (!parsed) {
+          fallBackToPicker();
+          return;
+        }
+        setPlanRun({ mode: parsed.mode, done: 0, total: parsed.pageIndices.length });
+        renderer = new PDFRenderer(mupdf);
+        const input = {
+          mupdf,
+          doc,
+          pdfBytes: source.pdfBytes,
+          fileName: source.fileName || undefined,
+          selected: parsed.pageIndices,
+          pageScales: parsed.pageScales,
+          uniformScale: parsed.uniformScale,
+          // The Add PDF modal's own default, so a plan-driven open and a
+          // hand-picked one produce identical tiles.
+          removeWhiteBackground: true,
+          renderer,
+          onProgress: (done: number, total: number) =>
+            setPlanRun((p) => (p ? { ...p, done, total } : p)),
+        };
+        // `recognize` is the main-thread OCR entry point and stands alone —
+        // `attachOcrRpc` exists only to bridge the modal's probe WORKER to it,
+        // and this path runs the aligner inline with no probe worker.
+        const result =
+          parsed.mode === "auto"
+            ? await commitAutoAlign({ ...input, ocr: recognize })
+            : await commitPlainAdd(input);
+        setPlanRun(null);
+        if (result.message) {
+          useNotificationStore
+            .getState()
+            .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
+        }
+        // Two frames, as on first mount: the tiles must be laid out before
+        // recenter can measure the canvas against them.
+        requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
+      } catch (e) {
+        console.error(e);
+        useNotificationStore
+          .getState()
+          .showNotification("Could not place the sheets automatically — pick them below.", "error");
+        fallBackToPicker();
+      } finally {
+        renderer?.dispose();
+        try {
+          doc?.destroy?.();
+        } catch {
+          // already freed
+        }
+      }
+    })();
+  }, [handleRecenter]);
 
   const navigate = useNavigate();
   const { loadPDF } = usePDF();
@@ -783,6 +875,26 @@ export default function StitchView() {
         canvasVisible={canvasVisible}
         onCanvasVisibleChange={setCanvasVisible}
       />
+      {planRun && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-background/80 backdrop-blur-[2px]"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-8 py-6 shadow-lg">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <span className="text-sm font-medium text-foreground">
+              {planRun.mode === "auto"
+                ? `Aligning ${planRun.total} sheet${planRun.total === 1 ? "" : "s"}…`
+                : `Placing ${planRun.total} sheet${planRun.total === 1 ? "" : "s"}…`}
+            </span>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {planRun.done} of {planRun.total} done
+            </span>
+          </div>
+        </div>
+      )}
       <AddPdfModal
         open={showAddPdf}
         onClose={() => setShowAddPdf(false)}

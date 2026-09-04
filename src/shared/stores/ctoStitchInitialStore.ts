@@ -8,6 +8,12 @@ import { create } from "zustand";
 export interface CtoStitchInitialPdf {
   pdfBytes: Uint8Array;
   fileName: string;
+  /** Raw `stitchPlan` from CTO's `/api/nanodoc/pdf`, when that build sends one.
+   *  Kept unparsed here on purpose: it is validated against the REAL page count
+   *  of the opened document (see `parseStitchPlan`), which only StitchView knows
+   *  — and typing it here would drag the stitch feature's types onto the plain
+   *  viewer's boot path. */
+  plan?: unknown;
 }
 
 interface CtoStitchInitialState {
