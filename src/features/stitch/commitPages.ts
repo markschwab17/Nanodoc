@@ -22,7 +22,7 @@ import { frameMask, type TilePlacement } from "@/features/stitch/autostitch/layo
 import type { AlignmentVerdict, SeamStatus, SeamReportEntry } from "@/features/stitch/autostitch/stitchCore";
 import type { AutoAlignReason } from "./addToProjectCopy";
 import type { recognize } from "./autostitch/ocrService";
-import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline } from "./pageScales";
+import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, newTileCanvasFactor } from "./pageScales";
 import { tileRenderScale, encodeTileRasterPng, TILE_RENDER_SCALE } from "./rasterEncode";
 
 export { TILE_RENDER_SCALE };
@@ -214,6 +214,16 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
   const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
   const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
   const refScale = referenceBaseline({ typed: uniformScale, existing: existingRef, hasTiles, selection: selected, pageScales });
+  // Then onto the canvas as the user has ADJUSTED it: "Adjusted 1\"=" scaled every
+  // sheet already placed, and a new sheet must land at that same feet-per-canvas-inch
+  // — sized at the reference alone it came in "pre-adjust", out of step with its
+  // neighbours. (Sizes are at `refScale` and the store is about to keep `refScale`,
+  // so only the composition factor applies here.)
+  const canvasFactor = newTileCanvasFactor({
+    compositionScaleFactor: useStitchStore.getState().compositionScaleFactor,
+    batchRef: refScale,
+    canvasRef: refScale,
+  });
   // Start below any existing content so a second add doesn't stack
   // perfectly on top of the first batch.
   const existingTiles = useStitchStore.getState().tiles;
@@ -251,7 +261,9 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
     // when this page's own scale is coarser than the batch's reference scale
     // (mixed-scale sets size and align by feet).
     const pageScale = resolvePageScale(pageIndex, pageScales, uniformScale);
-    const { width: tileW, height: tileH } = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
+    const atRef = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
+    const tileW = atRef.width * canvasFactor;
+    const tileH = atRef.height * canvasFactor;
     // noCache: this raster is copied into a PNG on the next line and never
     // requested again — caching it would pin 38 MB per sheet for the session.
     const rendered = await renderer.renderPage(doc, pageIndex, { scale: tileRenderScale(widthPt, heightPt), noCache: true });
@@ -429,6 +441,24 @@ export async function commitAutoAlign(
     if (e.suspect > 0 || e.seamOnly === e.total) demoted.add(p.pageIndex);
   }
 
+  // Read the pre-commit baseline BEFORE addTiles below so "does the canvas already
+  // have sheets" reflects what was there before this batch, not this batch itself.
+  const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
+  const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+  const refScale = referenceScaleFor(selected, pageScales, uniformScale);
+  const { value: finalRef, write } = finalReferenceScale({
+    uniformScale, existingRef, hasTiles, isUniformSelection, refScale, rootFtPerIn,
+  });
+  // The solver's poses are in points at `rootFtPerIn`; the canvas keeps `finalRef`
+  // and has been scaled as a whole by the user's "Adjusted 1\"=". Bring the poses
+  // onto the canvas as it stands (see `newTileCanvasFactor`) — without this the
+  // aligned set replaced an adjusted grid at its un-adjusted size.
+  const canvasFactor = newTileCanvasFactor({
+    compositionScaleFactor: useStitchStore.getState().compositionScaleFactor,
+    batchRef: rootFtPerIn,
+    canvasRef: finalRef,
+  });
+
   // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
   //    masked to its own frame) and commit as one undo step.
   const newTiles = placements.map((p) => {
@@ -440,27 +470,19 @@ export async function commitAutoAlign(
       sourcePdfBytes: pdfBytes,
       sourcePageIndex: p.pageIndex,
       sourceFileName: fileName,
-      x: p.x, y: p.y,
-      width: p.width, height: p.height,
+      x: p.x * canvasFactor, y: p.y * canvasFactor,
+      width: p.width * canvasFactor, height: p.height * canvasFactor,
       rasterBlob: rasters.get(p.pageIndex),
       rasterError: rasters.has(p.pageIndex) ? undefined : RASTER_ERROR_MESSAGE,
       hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
       scaleFeetPerInch: resolvePageScale(p.pageIndex, pageScales, uniformScale),
     };
   });
-  // Read the pre-commit baseline BEFORE addTiles below so "does the canvas already
-  // have sheets" reflects what was there before this batch, not this batch itself.
-  const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
-  const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
   // Last checkpoint before anything is written: past here the commit lands.
   checkAbort();
   if (replaceTileIds?.length) useStitchStore.getState().replaceTiles(replaceTileIds, newTiles);
   else useStitchStore.getState().addTiles(newTiles);
   fitCanvasIfUntouched();
-  const refScale = referenceScaleFor(selected, pageScales, uniformScale);
-  const { value: finalRef, write } = finalReferenceScale({
-    uniformScale, existingRef, hasTiles, isUniformSelection, refScale, rootFtPerIn,
-  });
   if (write) useStitchStore.getState().setReferenceScaleFeetPerInch(finalRef);
 
   // 4. Leave unaligned tiles selected so the user can place them manually.

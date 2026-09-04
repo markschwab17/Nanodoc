@@ -359,3 +359,55 @@ describe("commitAutoAlign cached probe", () => {
     expect(res.reason).toBe("ok");
   });
 });
+
+describe("new sheets land on the canvas as ADJUSTED", () => {
+  const fakeDoc = { loadPage: () => ({ getBounds: () => [0, 0, 612, 792], destroy() {} }) };
+  const fakeRenderer = { renderPage: async () => ({ imageData: null }), dispose() {} } as any;
+  const base = {
+    mupdf: {}, doc: fakeDoc, pdfBytes: new Uint8Array([1]), fileName: "plan.pdf",
+    pageScales: new Map<number, number>(), uniformScale: 20 as number | null,
+    removeWhiteBackground: false, renderer: fakeRenderer,
+  };
+
+  beforeEach(() => { useStitchStore.getState().reset(); vi.clearAllMocks(); });
+
+  it("plain add: a canvas adjusted from 1\"=20' to 1\"=40' gets half-size sheets, not pre-adjust ones", async () => {
+    useStitchStore.getState().setReferenceScaleFeetPerInch(20);
+    useStitchStore.getState().setCompositionScaleFactor(0.5);
+    await commitPlainAdd({ ...base, selected: [0] });
+    const [t] = useStitchStore.getState().tiles;
+    expect(t.width).toBeCloseTo(306);
+    expect(t.height).toBeCloseTo(396);
+    // The adjustment is preserved, not reset by the add.
+    expect(useStitchStore.getState().compositionScaleFactor).toBe(0.5);
+  });
+
+  it("plain add: an un-adjusted canvas is unchanged (control)", async () => {
+    await commitPlainAdd({ ...base, selected: [0] });
+    const [t] = useStitchStore.getState().tiles;
+    expect(t.width).toBeCloseTo(612);
+    expect(t.height).toBeCloseTo(792);
+  });
+
+  it("auto-align: solver poses are brought onto the adjusted canvas, positions included", async () => {
+    const { autoStitch } = await import("./autostitch/autoStitch");
+    (autoStitch as any).mockResolvedValue({
+      placements: [
+        { pageIndex: 0, x: 0, y: 0, width: 612, height: 792, aligned: true },
+        { pageIndex: 1, x: 612, y: 0, width: 612, height: 792, aligned: true },
+      ],
+      rootFtPerIn: 20, alignedCount: 2, unplacedCount: 0, worstResidFt: 0, method: "geometric",
+      poses: [], refPageIndices: [0, 1], skipped: [], scaleWarnings: [],
+      alignmentVerdict: "verified",
+      seamReport: [{ i: 1, j: 2, pageIndexes: [0, 1], status: "verified", detail: { channel: "anchor+segment" } }],
+    });
+    useStitchStore.getState().setReferenceScaleFeetPerInch(20);
+    useStitchStore.getState().setCompositionScaleFactor(0.5);
+    await commitAutoAlign({ ...base, selected: [0, 1] });
+    const tiles = useStitchStore.getState().tiles;
+    // Sizes halved, and the second sheet still butts against the first (the
+    // fit-to-sheets pass shifts the whole set into positive space, so compare gaps).
+    expect(tiles.map((t) => t.width)).toEqual([306, 306]);
+    expect(tiles[1].x - tiles[0].x).toBeCloseTo(306);
+  });
+});

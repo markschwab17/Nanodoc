@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { DEFAULT_SCALE_FT_PER_IN, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference } from "./pageScales";
+import { describe, expect, test, it } from "vitest";
+import { DEFAULT_SCALE_FT_PER_IN, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference, newTileCanvasFactor } from "./pageScales";
 
 describe("parseScaleInput", () => {
   test("plain numbers and decimals", () => {
@@ -112,5 +112,22 @@ describe("compositionFeetPerInch", () => {
     expect(
       compositionFeetPerInch({ referenceScaleFeetPerInch: 20, compositionScaleFactor: NaN })
     ).toBe(20);
+  });
+});
+
+describe("newTileCanvasFactor", () => {
+  it("is 1 on an un-adjusted canvas whose reference matches the batch", () => {
+    expect(newTileCanvasFactor({ compositionScaleFactor: 1, batchRef: 20, canvasRef: 20 })).toBe(1);
+  });
+  it("follows the composition adjustment (1\"=20' adjusted to 1\"=40' halves new sheets too)", () => {
+    expect(newTileCanvasFactor({ compositionScaleFactor: 0.5, batchRef: 20, canvasRef: 20 })).toBe(0.5);
+  });
+  it("re-roots a batch expressed at a different feet-per-inch onto the canvas reference", () => {
+    // Poses at 1"=40' onto a canvas that keeps 1"=20': everything is twice as big.
+    expect(newTileCanvasFactor({ compositionScaleFactor: 1, batchRef: 40, canvasRef: 20 })).toBe(2);
+  });
+  it("combines both, and ignores a broken factor or reference", () => {
+    expect(newTileCanvasFactor({ compositionScaleFactor: 0.5, batchRef: 40, canvasRef: 20 })).toBe(1);
+    expect(newTileCanvasFactor({ compositionScaleFactor: NaN, batchRef: 0, canvasRef: 20 })).toBe(1);
   });
 });

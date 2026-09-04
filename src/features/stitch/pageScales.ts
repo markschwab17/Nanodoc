@@ -85,3 +85,32 @@ export function compositionFeetPerInch(opts: {
     : 1;
   return base / factor;
 }
+
+/**
+ * What a tile sized at the composition's reference scale must be multiplied by to
+ * land on the canvas AS IT STANDS.
+ *
+ * "Adjusted 1\"=" shrinks or grows every sheet already on the canvas by
+ * `compositionScaleFactor` (1"=20' adjusted to 1"=40' halves them all). A sheet
+ * added afterwards was still sized for the un-adjusted composition, so it came in
+ * twice the size of its neighbours — Mark: "it comes in pre-adjust". The same
+ * factor applies to a sheet whose batch was rooted on a different feet-per-inch
+ * than the canvas keeps (`batchRef` vs `canvasRef`), which is what the solver's
+ * `rootFtPerIn` can be on a canvas that already has sheets.
+ */
+export function newTileCanvasFactor(opts: {
+  compositionScaleFactor: number;
+  /** Feet per inch the batch's sizes/positions are expressed in. */
+  batchRef: number;
+  /** Feet per inch the canvas keeps (after this commit decides it). */
+  canvasRef: number;
+}): number {
+  const { compositionScaleFactor, batchRef, canvasRef } = opts;
+  const comp =
+    Number.isFinite(compositionScaleFactor) && compositionScaleFactor > 0 ? compositionScaleFactor : 1;
+  const ref =
+    Number.isFinite(batchRef) && batchRef > 0 && Number.isFinite(canvasRef) && canvasRef > 0
+      ? batchRef / canvasRef
+      : 1;
+  return comp * ref;
+}
