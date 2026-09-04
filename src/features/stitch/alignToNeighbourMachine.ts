@@ -22,7 +22,7 @@
  * refusal (a sentence naming what went wrong, then the step hint).
  */
 
-import type { CanvasPoint } from "./stitchGeometry";
+import { hitTestTileAtPoint, type CanvasPoint, type TilePose } from "./stitchGeometry";
 
 /** Where the mode is: which click it is waiting for. */
 export type AlignStep = "idle" | "pickMoving" | "A1" | "A2" | "B1" | "B2";
@@ -188,6 +188,24 @@ export function alignPickTargets<T extends { id: string }>(
   return { preferred: tiles.filter((t) => !placed.has(t.id)), fallback: [...tiles] };
 }
 
+/**
+ * The sheet a press at STEP 0 picks, out of everything under the cursor.
+ *
+ * Two passes, unplaced first: the top-most unplaced sheet wins even when a placed one
+ * is drawn over it, and a placed sheet is only picked when nothing else is there. That
+ * ordering is the fix for the chaining bug — an aligned sheet lands on top of the grid
+ * slot the next sheet is still sitting in, and a single top-most test handed it the
+ * click.
+ */
+export function alignHitForPick<T extends TilePose & { id: string }>(
+  coords: CanvasPoint,
+  state: AlignMachine,
+  tiles: readonly T[]
+): { tile: T; point: CanvasPoint } | null {
+  const { preferred, fallback } = alignPickTargets(state, tiles);
+  return hitTestTileAtPoint(coords, preferred, true) ?? hitTestTileAtPoint(coords, fallback, true);
+}
+
 export type AlignPointerEvent = Extract<AlignEvent, { type: "click" } | { type: "miss" }>;
 
 /**
@@ -233,10 +251,21 @@ function backToPick(state: AlignMachine, over: Partial<AlignMachine> = {}): Alig
 export function reduceAlign(state: AlignMachine, event: AlignEvent): AlignTransition {
   switch (event.type) {
     case "enter":
-      // The toggle is a preference, not a step: it survives leaving and re-entering.
-      return { state: { ...IDLE_ALIGN, step: "pickMoving", twoPoint: state.twoPoint } };
+      // The toggle is a preference, not a step, and the GROUP is a fact about the
+      // canvas — both survive leaving and re-entering, so a chain interrupted by a
+      // pan-tool detour resumes with the sheets it had already placed still fixed.
+      // Ids of sheets that have since been deleted are inert: nothing looks them up
+      // except the pick order and the outline, and both skip an id with no tile.
+      return {
+        state: {
+          ...IDLE_ALIGN,
+          step: "pickMoving",
+          twoPoint: state.twoPoint,
+          placedTileIds: state.placedTileIds,
+        },
+      };
     case "exit":
-      return { state: { ...IDLE_ALIGN, twoPoint: state.twoPoint } };
+      return { state: { ...IDLE_ALIGN, twoPoint: state.twoPoint, placedTileIds: state.placedTileIds } };
     case "setTwoPoint": {
       if (state.twoPoint === event.value) return { state };
       const next = { ...state, twoPoint: event.value };
@@ -252,7 +281,9 @@ export function reduceAlign(state: AlignMachine, event: AlignEvent): AlignTransi
     case "confirm":
       // Enter is Done: it finishes the session between moves. Mid-sequence it is not a
       // shortcut for the click the user still owes us.
-      return state.step === "pickMoving" ? { state: { ...IDLE_ALIGN, twoPoint: state.twoPoint } } : { state };
+      return state.step === "pickMoving"
+        ? { state: { ...IDLE_ALIGN, twoPoint: state.twoPoint, placedTileIds: state.placedTileIds } }
+        : { state };
     case "escape":
       return reduceEscape(state);
     case "miss":
@@ -268,7 +299,7 @@ function reduceEscape(state: AlignMachine): AlignTransition {
       return { state };
     case "pickMoving":
       // Nothing left to back out of — Esc here leaves the mode.
-      return { state: { ...IDLE_ALIGN, twoPoint: state.twoPoint } };
+      return { state: { ...IDLE_ALIGN, twoPoint: state.twoPoint, placedTileIds: state.placedTileIds } };
     case "A1":
       return { state: backToPick(state) };
     case "A2":
@@ -291,14 +322,29 @@ function reduceEscape(state: AlignMachine): AlignTransition {
   }
 }
 
-/** The move is done: the sheet joins the placed group and step 0 comes back. */
+const withPlaced = (placed: readonly string[], ids: (string | null)[]): string[] => {
+  const next = [...placed];
+  for (const id of ids) if (id && !next.includes(id)) next.push(id);
+  return next;
+};
+
+/**
+ * The move is done: step 0 comes back and BOTH sheets join the placed group.
+ *
+ * Both, because the anchor is as much part of the built composition as the sheet that
+ * just moved — usually more so, it is the foundation. Leaving it out kept sheet 1
+ * un-outlined and top of the pick order, so a click aimed at sheet 3 could land on it
+ * and slide the very thing everything else had been aligned to.
+ *
+ * Undo does not take a sheet back OUT of the group. That is deliberate and
+ * self-correcting: the group only orders the pick (every sheet stays clickable), and
+ * the next move re-adds whatever it touches.
+ */
 function applied(state: AlignMachine, movingTileId: string, apply: AlignApply): AlignTransition {
   return {
     state: backToPick(state, {
       lastMovedTileId: movingTileId,
-      placedTileIds: state.placedTileIds.includes(movingTileId)
-        ? state.placedTileIds
-        : [...state.placedTileIds, movingTileId],
+      placedTileIds: withPlaced(state.placedTileIds, [movingTileId, apply.fixedTileId]),
     }),
     apply,
   };

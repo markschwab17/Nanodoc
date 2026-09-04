@@ -44,3 +44,31 @@ export function withSessionSource<T extends CtoDocLike>(
   } as T;
   return [entry, ...list];
 }
+
+/** Copy for the reloaded-iframe case. */
+export const STITCH_SESSION_LOST =
+  "Session lost — close this window and reopen from Civiltakeoff.";
+
+/**
+ * Has the embedded session lost its handoff?
+ *
+ * The takeoff panel hands the source PDF over in memory (`ctoStitchInitialStore`), so
+ * reloading the iframe — a browser refresh, a devtools reload, an errored frame
+ * recovering — leaves stitch running inside CTO with no source, no plan and no sheets.
+ * What it showed then was the marketing hero ("Stitch PDFs Together… Add PDF"), which
+ * invites the user to start a standalone session that CTO can never save back.
+ *
+ * True only in the embed, only when nothing arrived AND nothing is on the canvas AND
+ * nothing is in flight — outside the embed the hero is exactly right, and mid-commit
+ * the canvas is about to fill.
+ */
+export function isStitchSessionLost(opts: {
+  embed: boolean;
+  /** An initial handoff was present on this mount. */
+  hasInitial: boolean;
+  tileCount: number;
+  /** A plan commit is running, or the page picker is open. */
+  busy: boolean;
+}): boolean {
+  return opts.embed && !opts.hasInitial && opts.tileCount === 0 && !opts.busy;
+}

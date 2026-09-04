@@ -21,6 +21,7 @@ import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
+import { STITCH_SESSION_LOST, isStitchSessionLost } from "@/features/stitch/ctoSessionSource";
 import { shutdownOcr } from "@/features/stitch/autostitch/ocrService";
 import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
@@ -135,6 +136,63 @@ export default function StitchView() {
     });
   }, []);
 
+  /**
+   * Zoom-to-fit as soon as the viewport HAS a size.
+   *
+   * `handleRecenter` measures the container and gives up when it is 0x0, and twice in
+   * the browser the editor opened at 100% on a 4-sheet plan because that is exactly
+   * what happened: the two-frame wait after the commit fired while the CTO panel (an
+   * iframe that animates in) was still unmeasured, the fit bailed, and nothing tried
+   * again — leaving the zoom the empty-canvas fit had set on mount.
+   *
+   * So the fit RETRIES: up to `maxFrames` animation frames waiting for a measurable
+   * container, then a one-shot ResizeObserver for the case where the panel takes
+   * longer than that (a slow animation, a tab opened in the background). Returns a
+   * cancel function; calling it twice is safe.
+   */
+  const fitWhenMeasured = useCallback((maxFrames = 10) => {
+    let raf = 0;
+    let frames = 0;
+    let observer: ResizeObserver | null = null;
+    let cancelled = false;
+
+    const measured = () => {
+      const rect = canvasContainerRef.current?.getBoundingClientRect();
+      return !!rect && rect.width > 0 && rect.height > 0;
+    };
+    const stop = () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      observer?.disconnect();
+      observer = null;
+    };
+    const attempt = () => {
+      if (cancelled) return;
+      if (measured()) {
+        handleRecenter();
+        stop();
+        return;
+      }
+      if (++frames <= maxFrames) {
+        raf = requestAnimationFrame(attempt);
+        return;
+      }
+      // Out of frames and still unmeasured: wait for the size to arrive instead of
+      // spinning. One shot — the fit is a first-paint decision, not a live behaviour.
+      const el = canvasContainerRef.current;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      observer = new ResizeObserver(() => {
+        if (!measured()) return;
+        handleRecenter();
+        stop();
+      });
+      observer.observe(el);
+    };
+    raf = requestAnimationFrame(attempt);
+    return stop;
+  }, [handleRecenter]);
+
   // Leaving stitch ends the session's worker budget: the PNG encode worker and
   // tesseract's scheduler both survive individual commits on purpose (they are
   // reused across them) and both rebuild lazily, so releasing them here costs
@@ -145,18 +203,7 @@ export default function StitchView() {
   }, []);
 
   // Center the canvas in the viewport when first opening stitch mode
-  useEffect(() => {
-    let cancelled = false;
-    const id = requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (!cancelled) handleRecenter();
-      });
-    });
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(id);
-    };
-  }, [handleRecenter]);
+  useEffect(() => fitWhenMeasured(), [fitWhenMeasured]);
 
   // CTO stitch preload: when opened from CTO with stitch=1, either commit the sheets
   // straight onto the canvas (CTO sent a stitch plan) or open the Add PDF modal on the
@@ -194,6 +241,13 @@ export default function StitchView() {
   /** Flipped by the overlay's Cancel button; the commit polls it between page
    *  renders (and hands it to the solver) and throws AutoStitchAborted. */
   const planAbortRef = useRef(false);
+  /** True when this embedded session has no handoff to work from — the iframe was
+   *  reloaded and the source PDF, which only ever lived in memory, is gone. */
+  const [sessionLost, setSessionLost] = useState(false);
+  /** Set the instant a handoff is taken, so StrictMode's second effect pass (which
+   *  finds the store already drained) does not read the first pass's work as a lost
+   *  session. */
+  const receivedInitialRef = useRef(false);
 
   /**
    * What an auto-align run — the earned button's, or the Add PDF modal's — leaves
@@ -231,9 +285,9 @@ export default function StitchView() {
           .getState()
           .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
       }
-      requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
+      fitWhenMeasured();
     },
-    [handleRecenter],
+    [fitWhenMeasured],
   );
 
   /** The background feasibility check behind the step strip's Auto-align offer. */
@@ -253,7 +307,24 @@ export default function StitchView() {
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
-    if (!ctx || !initial) return;
+    if (!ctx || !initial) {
+      // Nothing was handed over. Inside the CTO panel that is a RELOADED IFRAME, not a
+      // fresh standalone visit: the source PDF lived in memory and went with it, so the
+      // "Stitch PDFs Together / Add PDF" hero would invite a session CTO can never save
+      // back. Say what happened instead.
+      const tiles = useStitchStore.getState().tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+      setSessionLost(
+        isStitchSessionLost({
+          embed: !!ctx?.embed,
+          hasInitial: receivedInitialRef.current,
+          tileCount: tiles.length,
+          busy: false,
+        }),
+      );
+      return;
+    }
+    receivedInitialRef.current = true;
+    setSessionLost(false);
     const source = { pdfBytes: initial.pdfBytes, fileName: initial.fileName };
     setSessionSourcePdf(source);
     // Retained even when the plan turns out to be unusable and the picker opens
@@ -351,9 +422,11 @@ export default function StitchView() {
         // mostly off an 8.5×11 default. (commitPages already does this when the user has
         // not chosen a size; this call covers the case where they have. It is idempotent.)
         useStitchStore.getState().fitCanvasToTiles();
-        // Two frames, as on first mount: the tiles must be laid out before
-        // recenter can measure the canvas against them.
-        requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
+        // The first paint of a plan open MUST be zoom-to-fit. The tiles are already in
+        // the store (the fit reads them from there, not from the DOM), so the only
+        // thing to wait for is a measurable viewport — which in the CTO panel can be a
+        // few frames away. `fitWhenMeasured` waits for it instead of giving up.
+        fitWhenMeasured();
         // Start the background check. It reads the sheets straight off the canvas and
         // runs in the probe worker, so the canvas above stays interactive the whole
         // time; the strip shows a chip and, if the check clears the gate, an Auto-align
@@ -387,7 +460,7 @@ export default function StitchView() {
         }
       }
     })();
-  }, [handleRecenter, earnedCheck]);
+  }, [fitWhenMeasured, earnedCheck]);
 
   const navigate = useNavigate();
   const { loadPDF } = usePDF();
@@ -1123,7 +1196,17 @@ export default function StitchView() {
         takeoffMode={takeoffMode}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
-        {tileCount === 0 && (
+        {tileCount === 0 && sessionLost && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50 px-6">
+            <div className="max-w-sm rounded-lg border bg-background px-5 py-4 text-center shadow-sm">
+              <p className="text-sm font-medium text-foreground">{STITCH_SESSION_LOST}</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={handleCancel}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+        {tileCount === 0 && !sessionLost && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50">
             <FilePlus className="h-16 w-16 text-muted-foreground mb-4" />
             <h2 className="text-2xl font-bold mb-2 text-foreground">Stitch PDFs Together</h2>

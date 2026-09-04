@@ -30,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { ABSOLUTE_MIN_ZOOM, RULER_SIZE } from "./stitchConstants";
 import { hitTestTileAtPoint, tileLocalToCanvas, type CanvasPoint } from "./stitchGeometry";
-import { alignPointerEvent } from "./alignToNeighbourMachine";
+import { alignHitForPick, alignPointerEvent } from "./alignToNeighbourMachine";
 import { AlignLoupe } from "./AlignLoupe";
 import { useLoupeRender } from "./useLoupeRender";
 import type { AlignToNeighbour } from "./useAlignToNeighbour";
@@ -126,14 +126,11 @@ export function AlignToNeighbourMode({
    * mode peeled the sheet it had just placed instead of bringing in the next one.
    */
   const hitForStep = useCallback(
-    (coords: CanvasPoint) => {
-      if (align.state.step === "pickMoving") {
-        const { preferred, fallback } = align.pickTargets(tiles);
-        return hitTestTileAtPoint(coords, preferred, true) ?? hitTestTileAtPoint(coords, fallback, true);
-      }
-      return hitTestTileAtPoint(coords, clickable, true);
-    },
-    [align, clickable, tiles]
+    (coords: CanvasPoint) =>
+      align.state.step === "pickMoving"
+        ? alignHitForPick(coords, align.state, tiles)
+        : hitTestTileAtPoint(coords, clickable, true),
+    [align.state, clickable, tiles]
   );
 
   /** Only the steps that draw a rubber band need the live cursor. In one-point mode
@@ -245,10 +242,13 @@ export function AlignToNeighbourMode({
               />
             ) : null
           )}
-          {/* The group so far: sheets this session has already placed. Outlined at
-              step 0 so "what is already done" is visible, and a click prefers a sheet
-              that is NOT one of them. */}
-          {align.state.step === "pickMoving" &&
+          {/* The group so far: sheets this session has already placed (the sheet that
+              moved AND the one it was aligned to). Outlined while picking and while the
+              matching point is being placed — that is exactly when the user is looking
+              for the group — and a pick prefers a sheet that is NOT one of them.
+              Undo does not remove a sheet from the group; it only orders the pick, and
+              the next move re-adds whatever it touches. */}
+          {(align.state.step === "pickMoving" || align.state.step === "B1" || align.state.step === "B2") &&
             tiles.map((tile) =>
               align.isPlaced(tile.id) ? (
                 <polygon

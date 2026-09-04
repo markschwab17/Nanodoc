@@ -244,9 +244,20 @@ export function StitchBottomToolbar({
   return (
     <footer className="flex items-center justify-center gap-3 border-t shrink-0 px-3 py-2 bg-muted/30" data-tour="stitch-canvas-controls">
       <div className="flex items-center gap-2 flex-wrap justify-center text-xs">
-        <div className="flex items-center gap-1.5" role="group" aria-label="Canvas size">
+        <div className="flex items-center gap-1.5" role="group" aria-label="Page size">
+          {/* The control read as a bare "11 × 17"" or "Custom" with nothing saying what
+              it was FOR. The label is the fix; it also names the trigger for a screen
+              reader, which previously heard only the value. */}
+          <span id="stitch-page-size-label" className="text-xs text-muted-foreground shrink-0">
+            Page size
+          </span>
           <Select value={currentSizeKey} onValueChange={handleCanvasSizeChange}>
-            <SelectTrigger className="w-[100px] h-7 text-xs" title="Canvas size (e.g. 11×17, 17×22)">
+            <SelectTrigger
+              id="stitch-page-size"
+              aria-labelledby="stitch-page-size-label stitch-page-size"
+              className="w-[100px] h-7 text-xs"
+              title="Page size — the sheet the composition is laid out on (e.g. 11×17, 17×22), or Fit to sheets"
+            >
               <SelectValue placeholder="Size" />
             </SelectTrigger>
             <SelectContent>

@@ -67,12 +67,12 @@ export function tileLocalToCanvas(
  * Hit-test: find the first tile (in reverse draw order = top-most first) that contains the canvas point.
  * Returns tile and canvas point, or null if no tile hit.
  */
-export function hitTestTileAtPoint(
+export function hitTestTileAtPoint<T extends TilePose>(
   canvasPoint: CanvasPoint,
-  tiles: StitchTile[],
+  tiles: readonly T[],
   /** If true, iterate tiles in reverse order (top-most first). Default true. */
   topMostFirst = true
-): { tile: StitchTile; point: CanvasPoint } | null {
+): { tile: T; point: CanvasPoint } | null {
   const order = topMostFirst ? [...tiles].reverse() : tiles;
   for (const tile of order) {
     const local = canvasToTileLocal(canvasPoint, tile);

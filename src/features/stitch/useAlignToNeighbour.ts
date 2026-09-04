@@ -27,7 +27,6 @@ import {
   IDLE_ALIGN,
   alignClickableTiles,
   alignHint,
-  alignPickTargets,
   isLockedForAlign,
   isPlacedInAlign,
   loupeActive,
@@ -65,11 +64,6 @@ export interface AlignToNeighbour {
   isPlaced: (tileId: string) => boolean;
   /** The sheets this step accepts a click on — what the hit test must search. */
   clickableTiles: <T extends { id: string }>(tiles: readonly T[]) => T[];
-  /** At step 0, which sheets a pick should try first (never a placed one) and which
-   *  are the fallback. */
-  pickTargets: <T extends { id: string }>(
-    tiles: readonly T[]
-  ) => { preferred: T[]; fallback: T[] };
   enter: () => void;
   exit: () => void;
   /** A click on a sheet, in canvas space (already snapped by the caller). */
@@ -206,10 +200,6 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     <T extends { id: string }>(tiles: readonly T[]) => alignClickableTiles(state, tiles),
     [state]
   );
-  const pickTargets = useCallback(
-    <T extends { id: string }>(tiles: readonly T[]) => alignPickTargets(state, tiles),
-    [state]
-  );
   const setTwoPoint = useCallback(
     (value: boolean) => dispatch({ type: "setTwoPoint", value }),
     [dispatch]
@@ -233,7 +223,6 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       isLocked,
       isPlaced,
       clickableTiles,
-      pickTargets,
       enter,
       exit,
       click,
@@ -241,7 +230,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     }),
     [
       active, state, refusal, seamNote, matchScale, snapToLines,
-      setTwoPoint, isLocked, isPlaced, clickableTiles, pickTargets, enter, exit, click, miss,
+      setTwoPoint, isLocked, isPlaced, clickableTiles, enter, exit, click, miss,
     ]
   );
 }

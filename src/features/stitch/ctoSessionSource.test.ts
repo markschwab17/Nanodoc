@@ -1,5 +1,12 @@
 import { describe, expect, test } from "vitest";
-import { SESSION_SOURCE_DOC_TYPE, sessionSourceLabel, withSessionSource, type CtoDocLike } from "./ctoSessionSource";
+import {
+  SESSION_SOURCE_DOC_TYPE,
+  STITCH_SESSION_LOST,
+  isStitchSessionLost,
+  sessionSourceLabel,
+  withSessionSource,
+  type CtoDocLike,
+} from "./ctoSessionSource";
 
 const realDoc: CtoDocLike = { type: "pdf", displayName: "Grading Plan.pdf", token: "tok-1" };
 
@@ -24,5 +31,27 @@ describe("withSessionSource", () => {
     const result = withSessionSource<CtoDocLike>([], session);
     expect(result).toHaveLength(1);
     expect(result[0].displayName).toContain("Selected takeoff sheets");
+  });
+});
+
+describe("isStitchSessionLost", () => {
+  const base = { embed: true, hasInitial: false, tileCount: 0, busy: false };
+
+  test("is true when the embedded iframe reloaded: no handoff, no sheets, nothing running", () => {
+    expect(isStitchSessionLost(base)).toBe(true);
+    expect(STITCH_SESSION_LOST).toBe("Session lost — close this window and reopen from Civiltakeoff.");
+  });
+
+  test("is false outside the embed — the standalone hero is exactly right there", () => {
+    expect(isStitchSessionLost({ ...base, embed: false })).toBe(false);
+  });
+
+  test("is false while the handoff is being processed", () => {
+    expect(isStitchSessionLost({ ...base, hasInitial: true })).toBe(false);
+    expect(isStitchSessionLost({ ...base, busy: true })).toBe(false);
+  });
+
+  test("is false once there are sheets on the canvas", () => {
+    expect(isStitchSessionLost({ ...base, tileCount: 3 })).toBe(false);
   });
 });

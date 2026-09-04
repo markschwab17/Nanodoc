@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ALIGN_NEXT_SHEET_HINT,
+  alignHitForPick,
   ALIGN_ONE_POINT_HINTS,
   ALIGN_STEP_HINTS,
   IDLE_ALIGN,
@@ -99,6 +100,28 @@ describe("alignToNeighbour state machine — one point by default", () => {
 });
 
 describe("chaining onto the group", () => {
+  it("BOTH sheets join the group — the anchor is the foundation, not a spare", () => {
+    // Leaving the anchor out left sheet 1 un-outlined and top of the pick order, so a
+    // click aimed at sheet 3 could pick it up and slide the thing everything else had
+    // been aligned to.
+    const afterFirst = run(oneMove).state;
+    expect([...afterFirst.placedTileIds].sort()).toEqual(["a", "b"]);
+    expect(isPlacedInAlign(afterFirst, "a")).toBe(true);
+    expect(isPlacedInAlign(afterFirst, "b")).toBe(true);
+  });
+
+  it("the group survives leaving and re-entering the mode mid-chain", () => {
+    const afterFirst = run(oneMove).state;
+    const left = reduceAlign(afterFirst, { type: "exit" }).state;
+    expect(left.step).toBe("idle");
+    expect([...left.placedTileIds].sort()).toEqual(["a", "b"]);
+    const back = reduceAlign(left, enter).state;
+    expect(back.step).toBe("pickMoving");
+    expect([...back.placedTileIds].sort()).toEqual(["a", "b"]);
+    // A fresh session's wording, though: this is not "the next sheet" any more.
+    expect(back.lastMovedTileId).toBeNull();
+  });
+
   it("the sheet that just moved becomes FIXED, and the next click picks a new mover", () => {
     // Mark's bug: after sheet 2 locked on, going for sheet 3 peeled sheet 2 off and
     // walked it over instead of bringing sheet 3 into the group.
@@ -135,7 +158,7 @@ describe("chaining onto the group", () => {
     expect(done.apply?.movingTileId).not.toBe("2");
     // Both are placed now, and the mode is ready for a fourth sheet.
     expect(done.state.step).toBe("pickMoving");
-    expect(done.state.placedTileIds).toEqual(["2", "3"]);
+    expect([...done.state.placedTileIds].sort()).toEqual(["1", "2", "3"]);
     expect(done.state.movingTileId).toBeNull();
   });
 
@@ -145,8 +168,9 @@ describe("chaining onto the group", () => {
     const afterFirst = run([enter, click("2", 0, 0), click("2", 1, 1), click("1", 9, 9)]).state;
     const tiles = [{ id: "1" }, { id: "2" }, { id: "3" }];
     const { preferred, fallback } = alignPickTargets(afterFirst, tiles);
-    expect(preferred.map((t) => t.id)).toEqual(["1", "3"]);
-    // Still reachable: a click that only lands on the placed sheet can re-pick it.
+    // Sheets 1 and 2 are both placed now (mover and anchor), so only 3 is preferred.
+    expect(preferred.map((t) => t.id)).toEqual(["3"]);
+    // Still reachable: a click that only lands on a placed sheet can re-pick it.
     expect(fallback.map((t) => t.id)).toEqual(["1", "2", "3"]);
     // And every sheet remains clickable at step 0.
     expect(alignClickableTiles(afterFirst, tiles)).toHaveLength(3);
@@ -155,7 +179,21 @@ describe("chaining onto the group", () => {
   it("re-picking a placed sheet does not list it twice in the group", () => {
     const afterFirst = run(oneMove).state;
     const again = run([click("a", 5, 5), click("a", 6, 6), click("b", 7, 7)], afterFirst);
-    expect(again.state.placedTileIds).toEqual(["a"]);
+    expect(again.state.placedTileIds).toEqual(["a", "b"]);
+  });
+
+  it("picks the unplaced sheet even when a placed one is drawn on top of it", () => {
+    // The literal failure: sheet "2", once aligned, covers the grid slot sheet "3" is
+    // still in — and it is LATER in the array, so a plain top-most test finds it first.
+    const placed = { id: "2", x: 0, y: 0, width: 400, height: 400, rotation: 0 };
+    const unplaced = { id: "3", x: 100, y: 100, width: 100, height: 100, rotation: 0 };
+    const state: AlignMachine = { ...IDLE_ALIGN, step: "pickMoving", placedTileIds: ["1", "2"] };
+    const tiles = [unplaced, placed]; // placed drawn last = on top
+    expect(alignHitForPick({ x: 150, y: 150 }, state, tiles)?.tile.id).toBe("3");
+    // Where only the placed sheet is, it is still pickable — a placement can be redone.
+    expect(alignHitForPick({ x: 20, y: 20 }, state, tiles)?.tile.id).toBe("2");
+    // And nothing under the cursor is still nothing.
+    expect(alignHitForPick({ x: 900, y: 900 }, state, tiles)).toBeNull();
   });
 });
 
@@ -298,7 +336,10 @@ describe("finishing", () => {
     const midway = run([enter, click("a", 0, 0)]).state;
     expect(reduceAlign(midway, { type: "confirm" }).state).toBe(midway);
     const afterMove = run(oneMove).state;
-    expect(reduceAlign(afterMove, { type: "confirm" }).state).toEqual(IDLE_ALIGN);
+    const done = reduceAlign(afterMove, { type: "confirm" }).state;
+    expect(done.step).toBe("idle");
+    // Done leaves the mode; the group it built is remembered for a re-entry.
+    expect([...done.placedTileIds].sort()).toEqual(["a", "b"]);
   });
 
   it("exit from anywhere returns to idle", () => {
