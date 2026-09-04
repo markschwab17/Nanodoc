@@ -130,6 +130,52 @@ export function hiddenPagesSentence(numbers: readonly number[]): string | null {
   return `${list.length === 1 ? "Page" : "Pages"} ${joined} will be hidden from the page list`;
 }
 
+// ── The earned Auto-align offer (takeoff step strip) ─────────────────────────
+/**
+ * Auto-align is EARNED: the sheets open in a grid, a background probe walks just
+ * those sheets, and only a probe that clears the gate puts a button in the strip.
+ * These three strings are that whole conversation, so they live together.
+ *
+ * The note deliberately says what is missing rather than "it failed": each reason
+ * calls for a different response — nothing readable on the sheets (no amount of
+ * retrying helps), readable but not neighbours (wrong sheets), or matched but
+ * unproven (the one case where the user's own eyes are the next step).
+ */
+export const AUTO_ALIGN_CHECKING = "Checking whether these sheets can be auto-aligned…";
+
+export type AutoAlignUnavailableReason = "no_refs" | "no_matchline" | "unverified";
+
+export const AUTO_ALIGN_UNAVAILABLE_REASONS: Record<AutoAlignUnavailableReason, string> = {
+  no_refs: "no sheet numbers or matchline callouts were found",
+  no_matchline: "they don't share a matchline",
+  unverified: "the seams couldn't be verified",
+};
+
+/** The primary action's label. `n` is the number of sheets the run would CLAIM —
+ *  along-anchored, past the demotion — not the number selected. */
+export function autoAlignButtonLabel(n: number): string {
+  return `Auto-align ${n} sheet${n === 1 ? "" : "s"}`;
+}
+
+/** The strip note when the gate said no. */
+export function autoAlignUnavailableNote(reason: AutoAlignUnavailableReason): string {
+  return `Auto-align isn't available for these sheets — ${AUTO_ALIGN_UNAVAILABLE_REASONS[reason]}`;
+}
+
+/**
+ * The longer sentence behind the note, for the tooltip.
+ *
+ * The along-matchline case is the reason this exists: it maps to "the seams couldn't
+ * be verified", which is true but loses the one fact the user would act on — the
+ * sheets DO meet on the right line and are only free to slide along it. `detail` (the
+ * feasibility gate's own reason string) carries that; when there is none the tooltip
+ * is just the note.
+ */
+export function autoAlignUnavailableTitle(reason: AutoAlignUnavailableReason, detail?: string): string {
+  const note = autoAlignUnavailableNote(reason);
+  return detail && detail !== AUTO_ALIGN_UNAVAILABLE_REASONS[reason] ? `${note} — ${detail}.` : `${note}.`;
+}
+
 /**
  * Why an auto-align run did not place everything, in the words the user needs.
  *

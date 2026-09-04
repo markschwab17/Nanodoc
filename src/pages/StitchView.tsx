@@ -13,14 +13,15 @@ import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
-import { commitPlainAdd, commitAutoAlign } from "@/features/stitch/commitPages";
+import { commitPlainAdd, type CommitResult } from "@/features/stitch/commitPages";
 import { parseStitchPlan } from "@/features/stitch/stitchPlan";
 import { autoAlignExplanation } from "@/features/stitch/addToProjectCopy";
 import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
+import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
-import { recognize, shutdownOcr } from "@/features/stitch/autostitch/ocrService";
+import { shutdownOcr } from "@/features/stitch/autostitch/ocrService";
 import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
 import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
@@ -181,9 +182,10 @@ export default function StitchView() {
    *  stays pinned under the step strip until they retry or dismiss it. */
   const [addToProjectError, setAddToProjectError] = useState<string | null>(null);
   /** Non-null while a CTO stitch plan is being committed — drives the entry
-   *  overlay. `done/total` is the commit's own page progress. */
+   *  overlay. `done/total` is the commit's own page progress. The plan path always
+   *  PLACES (a grid) now; aligning is the earned button's job and has its own
+   *  overlay, so there is no longer a mode to say. */
   const [planRun, setPlanRun] = useState<{
-    mode: "auto" | "manual";
     done: number;
     total: number;
     cancelling: boolean;
@@ -191,6 +193,52 @@ export default function StitchView() {
   /** Flipped by the overlay's Cancel button; the commit polls it between page
    *  renders (and hands it to the solver) and throws AutoStitchAborted. */
   const planAbortRef = useRef(false);
+
+  /**
+   * What an auto-align run — the earned button's, or the Add PDF modal's — leaves
+   * behind: the strip's "needs placing" count and the coach mark's explanation of WHY
+   * anything was held back. Shared so both paths describe the LAST run identically.
+   */
+  const handleAlignResult = useCallback(
+    (result: CommitResult) => {
+      setUnplacedCount(result.unalignedIds.length);
+      // Nothing to explain when the run was clean AND nothing was held back — the mark
+      // would then be pure noise on a successful align. Page numbers are 1-based.
+      const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
+      setAlignExplanation(
+        autoAlignExplanation(
+          worthExplaining
+            ? {
+                reason: result.reason!,
+                pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
+                skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
+                worstAlongUncertaintyFt: result.worstAlongUncertaintyFt,
+                // From the commit, which knows which pages it actually PLACED —
+                // subtracting the anchored set from the whole plan named pages the run
+                // never touched as "meeting the matchline".
+                alongUnresolvedPages: result.alongUnresolvedPages?.map((i) => i + 1),
+              }
+            : null,
+        ),
+      );
+      setCoachDismissed(false);
+      if (result.message) {
+        useNotificationStore
+          .getState()
+          .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
+      }
+      requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
+    },
+    [handleRecenter],
+  );
+
+  /** The background feasibility check behind the step strip's Auto-align offer. */
+  const earned = useEarnedAutoAlign({
+    onAligned: handleAlignResult,
+    onError: (message) => useNotificationStore.getState().showNotification(message, "error"),
+  });
+  const earnedCheck = earned.check;
+  const earnedReset = earned.reset;
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
@@ -253,7 +301,7 @@ export default function StitchView() {
           return;
         }
         planAbortRef.current = false;
-        setPlanRun({ mode: parsed.mode, done: 0, total: parsed.pageIndices.length, cancelling: false });
+        setPlanRun({ done: 0, total: parsed.pageIndices.length, cancelling: false });
         renderer = new PDFRenderer(mupdf);
         const input = {
           mupdf,
@@ -263,63 +311,30 @@ export default function StitchView() {
           selected: parsed.pageIndices,
           pageScales: parsed.pageScales,
           uniformScale: parsed.uniformScale,
-          // Sheet identity CTO already resolved (the plan labels). Free, and it is
-          // exactly what the aligner otherwise has to OCR out of a title block.
-          pageCodes: parsed.pageCodes,
           // The Add PDF modal's own default, so a plan-driven open and a
           // hand-picked one produce identical tiles.
           removeWhiteBackground: true,
           renderer,
-          // Monotonic: commitAutoAlign feeds the same callback from its raster
-          // loop AND from the solver, so a raw assignment would visibly restart
-          // the counter halfway through.
+          // Monotonic: the callback is fed from more than one phase, so a raw
+          // assignment would visibly restart the counter halfway through.
           onProgress: (done: number, total: number) =>
             setPlanRun((p) => (p ? { ...p, done: Math.max(p.done, done), total } : p)),
           shouldAbort: () => planAbortRef.current,
         };
-        // `recognize` is the main-thread OCR entry point and stands alone —
-        // `attachOcrRpc` exists only to bridge the modal's probe WORKER to it,
-        // and this path runs the aligner inline with no probe worker.
-        const result =
-          parsed.mode === "auto"
-            ? await commitAutoAlign({ ...input, ocr: recognize })
-            : await commitPlainAdd(input);
+        // ALWAYS the grid, whatever the plan says. Auto-align is EARNED: the sheets
+        // have to be on screen and draggable within a frame of the commit, and the
+        // probe that decides whether they CAN be aligned runs behind them. A legacy
+        // plan carrying `mode: 'auto'` takes this path too — a plan is not allowed to
+        // skip the gate, only the gate can.
+        const result = await commitPlainAdd(input);
         setPlanRun(null);
-        // What the coach mark and the step strip's "need placing" count read.
-        // A fresh run re-arms the mark: these are new strays, not the ones the
-        // user already waved away.
-        setUnplacedCount(result.unalignedIds.length);
-        // WHY it could not place everything. Without this the mark says a number and
-        // nothing else, which reads as a broken feature rather than a set the
-        // aligner honestly cannot match. Page numbers are 1-based for the reader.
-        // Nothing to explain when the run was clean AND nothing was held back — the
-        // mark would then be pure noise on a successful align.
-        const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
-        setAlignExplanation(
-          autoAlignExplanation(
-            worthExplaining
-              ? {
-                  reason: result.reason!,
-                  pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
-                  skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
-                  worstAlongUncertaintyFt: result.worstAlongUncertaintyFt,
-                  // From the commit, which knows which pages it actually PLACED —
-                  // subtracting the anchored set from the whole plan here named
-                  // pages the run never touched as "meeting the matchline".
-                  alongUnresolvedPages: result.alongUnresolvedPages?.map((i) => i + 1),
-                }
-              : null,
-          ),
-        );
-        setCoachDismissed(false);
-        // Auto-align reports its own seam/alignment line; a plain placement has
-        // no report of its own, so say what happened.
-        const message =
-          result.message ??
-          `Placed ${result.added} sheet${result.added === 1 ? "" : "s"}.`;
+        // A grid placement holds nothing back and has nothing to explain; the coach
+        // mark speaks only for an ALIGN run (see handleAlignResult).
+        setUnplacedCount(0);
+        setAlignExplanation(null);
         useNotificationStore
           .getState()
-          .showNotification(message, result.unalignedIds.length > 0 ? "info" : "success");
+          .showNotification(`Placed ${result.added} sheet${result.added === 1 ? "" : "s"}.`, "success");
         // A plan commit always re-fits the paper to the sheets it just placed — that is
         // the whole point of the plan path, and it is what stops a plan set from landing
         // mostly off an 8.5×11 default. (commitPages already does this when the user has
@@ -328,6 +343,24 @@ export default function StitchView() {
         // Two frames, as on first mount: the tiles must be laid out before
         // recenter can measure the canvas against them.
         requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
+        // Hand the SAME pages to the background check. It runs in the probe worker,
+        // so the canvas above stays interactive the whole time; the strip shows a chip
+        // and, if the check clears the gate, an Auto-align button. The grid tile ids
+        // travel with it so a later align can replace them rather than duplicate them.
+        // Only in the embedded takeoff flow: the step strip is the only surface the
+        // offer has, and a probe nobody can see is pure cost.
+        if (!ctx.embed) return;
+        const placed = useStitchStore.getState().tiles;
+        earnedCheck({
+          pdfBytes: source.pdfBytes,
+          fileName: source.fileName || undefined,
+          pageIndices: parsed.pageIndices,
+          pageScales: parsed.pageScales,
+          uniformScale: parsed.uniformScale,
+          pageCodes: parsed.pageCodes,
+          tileIds: placed.slice(Math.max(0, placed.length - result.added)).map((t) => t.id),
+          removeWhiteBackground: true,
+        });
       } catch (e) {
         // Cancelled by the user: the commit threw before writing anything, so
         // the canvas is untouched. No error copy — just hand them the picker.
@@ -342,9 +375,9 @@ export default function StitchView() {
         fallBackToPicker();
       } finally {
         renderer?.dispose();
-        // The plan path runs the aligner inline with `recognize`, so tesseract's
-        // 160-240 MB of workers are ours to release when the run ends.
-        void shutdownOcr();
+        // NO shutdownOcr here any more: the grid placement never OCRs, and the
+        // background check started just above is about to need the scheduler. The
+        // check hands tesseract back itself when it finishes or is superseded.
         try {
           doc?.destroy?.();
         } catch {
@@ -352,7 +385,7 @@ export default function StitchView() {
         }
       }
     })();
-  }, [handleRecenter]);
+  }, [handleRecenter, earnedCheck]);
 
   const navigate = useNavigate();
   const { loadPDF } = usePDF();
@@ -451,7 +484,34 @@ export default function StitchView() {
   const handleAutoAlignResult = useCallback((unalignedCount: number) => {
     setUnplacedCount(unalignedCount);
     setCoachDismissed(false);
-  }, []);
+    // The modal aligned these sheets itself, so whatever the strip was offering is
+    // spent — it described a canvas that no longer exists.
+    earnedReset();
+  }, [earnedReset]);
+
+  /**
+   * A PLAIN add from the Add PDF modal. The new sheets are on the canvas and nothing
+   * has decided whether they can be auto-aligned, so re-probe: the strip's offer, if
+   * any, was about the sheets that were there before. Only in takeoff mode — the
+   * strip is the only place the offer appears.
+   */
+  const handlePagesAdded = useCallback(
+    (added: {
+      pdfBytes: Uint8Array;
+      fileName?: string;
+      pageIndices: number[];
+      pageScales: Map<number, number>;
+      uniformScale: number | null;
+      tileIds: string[];
+      removeWhiteBackground: boolean;
+    }) => {
+      if (!useCiviltakeoffContextStore.getState().context?.embed) return;
+      setUnplacedCount(0);
+      setAlignExplanation(null);
+      earnedCheck(added);
+    },
+    [earnedCheck],
+  );
 
   const handlePointAlignModeChange = (active: boolean) => {
     if (active) {
@@ -974,6 +1034,13 @@ export default function StitchView() {
           unplacedCount={unplacedCount}
           canAdd={sheetTileCount > 0 && !isSaving}
           onAddToProject={handleSaveToCto}
+          autoAlign={{
+            status: earned.status,
+            sheets: earned.sheets,
+            reason: earned.reason,
+            detail: earned.detail,
+            onRun: () => void earned.run(),
+          }}
         />
       )}
       {takeoffMode && addToProjectError && (
@@ -1132,9 +1199,7 @@ export default function StitchView() {
           <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-8 py-6 shadow-lg">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
             <span className="text-sm font-medium text-foreground">
-              {planRun.mode === "auto"
-                ? `Aligning ${planRun.total} sheet${planRun.total === 1 ? "" : "s"}…`
-                : `Placing ${planRun.total} sheet${planRun.total === 1 ? "" : "s"}…`}
+              {`Placing ${planRun.total} sheet${planRun.total === 1 ? "" : "s"}…`}
             </span>
             <span className="text-xs text-muted-foreground tabular-nums">
               {planRun.done} of {planRun.total} done
@@ -1156,6 +1221,35 @@ export default function StitchView() {
           </div>
         </div>
       )}
+      {earned.status === "aligning" && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-background/80 backdrop-blur-[2px]"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-8 py-6 shadow-lg">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <span className="text-sm font-medium text-foreground">
+              {`Aligning ${earned.sheets} sheet${earned.sheets === 1 ? "" : "s"}…`}
+            </span>
+            {earned.progress && (
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {earned.progress.done} of {earned.progress.total} done
+              </span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-1 h-7"
+              disabled={earned.cancelling}
+              onClick={earned.cancelRun}
+            >
+              {earned.cancelling ? "Cancelling…" : "Cancel"}
+            </Button>
+          </div>
+        </div>
+      )}
       <AddPdfModal
         open={showAddPdf}
         onClose={() => setShowAddPdf(false)}
@@ -1163,6 +1257,7 @@ export default function StitchView() {
         onInitialConsumed={() => setCtoInitialPdf(null)}
         sessionSourcePdf={sessionSourcePdf}
         onAutoAlignResult={handleAutoAlignResult}
+        onPagesAdded={handlePagesAdded}
       />
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveFeasibility, UNVERIFIED_REASON } from "./feasibility";
+import { deriveFeasibility, autoAlignGate, UNVERIFIED_REASON } from "./feasibility";
 
 describe("deriveFeasibility", () => {
   it("keymap, all selected aligned -> confident", () => {
@@ -234,5 +234,92 @@ describe("along-matchline gate", () => {
 
   it("a fully along-anchored set is offered", () => {
     expect(deriveFeasibility({ ...base, alongAnchored: [0, 1, 2, 3] }, sel).status).toBe("confident");
+  });
+});
+
+// ── The earned Auto-align gate ───────────────────────────────────────────────
+describe("autoAlignGate", () => {
+  const sel = [0, 1, 2, 3];
+  /** A probe that clears every bar; each case below breaks exactly one. */
+  const good = {
+    method: "geometric" as const,
+    alignedPageIndices: [0, 1, 2, 3],
+    alongAnchored: [0, 1, 2, 3],
+    refPageIndices: [0, 1, 2, 3],
+    worstResidFt: 1.33,
+    alignmentVerdict: "partial" as const,
+    seamReport: [{ status: "verified" as const }, { status: "plausible" as const }],
+  };
+
+  it("offers, and names the CLAIMED sheet count", () => {
+    expect(autoAlignGate(good, sel)).toEqual({ offered: true, sheets: 4 });
+  });
+
+  it("counts only the along-anchored sheets in the offer", () => {
+    // Two of the four are free to slide; the button must not promise them.
+    expect(autoAlignGate({ ...good, alongAnchored: [0, 1] }, sel)).toEqual({ offered: true, sheets: 2 });
+  });
+
+  // The gate-rule table below breaks exactly ONE bar per case.
+  it("a `verified` verdict is offered too", () => {
+    expect(autoAlignGate({ ...good, alignmentVerdict: "verified" }, sel).offered).toBe(true);
+  });
+
+  it("an `unverified` verdict withdraws the offer", () => {
+    const g = autoAlignGate({ ...good, alignmentVerdict: "unverified" }, sel);
+    expect(g).toMatchObject({ offered: false, reason: "unverified" });
+  });
+
+  it("an ABSENT verdict withdraws the offer — a strip button cannot be backward-compatible", () => {
+    const { alignmentVerdict, ...noVerdict } = good;
+    void alignmentVerdict;
+    expect(autoAlignGate(noVerdict, sel)).toMatchObject({ offered: false, reason: "unverified" });
+  });
+
+  it("ONE suspect seam withdraws the offer even when the verdict is partial", () => {
+    const g = autoAlignGate({ ...good, seamReport: [{ status: "verified" }, { status: "suspect" }] }, sel);
+    expect(g).toMatchObject({ offered: false, reason: "unverified" });
+  });
+
+  it("an along axis that fails the bars withdraws the offer, and keeps the slide in `detail`", () => {
+    const g = autoAlignGate({ ...good, alongAnchored: [0], worstAlongUncertaintyFt: 48 }, sel);
+    expect(g).toMatchObject({ offered: false, reason: "unverified" });
+    expect((g as { detail?: string }).detail).toContain("48 ft");
+  });
+
+  it("no along data at all withdraws the offer — an old probe cannot earn the button", () => {
+    const { alongAnchored, ...noAlong } = good;
+    void alongAnchored;
+    // deriveFeasibility passes it for backward compat (it only greys out a button);
+    // the strip will not offer on evidence that was never sent.
+    expect(autoAlignGate(noAlong, sel)).toMatchObject({ offered: false, reason: "unverified" });
+  });
+
+  it("a residual above the ceiling withdraws the offer", () => {
+    expect(autoAlignGate({ ...good, worstResidFt: 40 }, sel)).toMatchObject({ offered: false, reason: "unverified" });
+  });
+
+  it("fewer than two claimed sheets withdraws the offer", () => {
+    expect(autoAlignGate({ ...good, alignedPageIndices: [0], alongAnchored: [0] }, sel)).toMatchObject({
+      offered: false,
+    });
+  });
+
+  it("a keymap probe is never offered here — it carries no seam or along evidence", () => {
+    expect(
+      autoAlignGate({ ...good, method: "keymap", alignmentVerdict: "verified" }, sel),
+    ).toMatchObject({ offered: false, reason: "unverified" });
+  });
+
+  it("nothing placed and fewer than two readable sheets -> no_refs", () => {
+    expect(
+      autoAlignGate({ ...good, method: "none", alignedPageIndices: [], refPageIndices: [0] }, sel),
+    ).toEqual({ offered: false, reason: "no_refs" });
+  });
+
+  it("nothing placed but the sheets ARE readable -> no_matchline", () => {
+    expect(
+      autoAlignGate({ ...good, method: "none", alignedPageIndices: [], refPageIndices: [0, 1, 2, 3] }, sel),
+    ).toEqual({ offered: false, reason: "no_matchline" });
   });
 });

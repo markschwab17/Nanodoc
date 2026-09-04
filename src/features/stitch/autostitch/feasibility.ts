@@ -6,7 +6,8 @@
  *      a "pile" reports a high count but a large residual).
  *   2. confident vs partial — did EVERY selected page make it in.
  */
-import type { StitchMethod, AlignmentVerdict } from "./stitchCore";
+import type { StitchMethod, AlignmentVerdict, SeamStatus } from "./stitchCore";
+import type { AutoAlignUnavailableReason } from "../addToProjectCopy";
 
 export const KEYMAP_COVERAGE = 0.6;
 export const GEOM_RATIO_FLOOR = 0.5;
@@ -131,4 +132,70 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
     alignedInSelection: claimedInSelection,
     selectedCount,
   };
+}
+
+// ── The earned Auto-align gate (takeoff step strip) ──────────────────────────
+/**
+ * Whether the step strip may OFFER Auto-align, and if not, what to say.
+ *
+ * Mark's rule for round 3, verbatim: "if the system says it can auto-align I want it
+ * to work otherwise it doesn't even have it as an option." So this is deliberately
+ * stricter than the modal's enable/disable, which is a hint on a button the user can
+ * still weigh up. Here the button's existence IS the claim, and every bar has to
+ * clear at once:
+ *
+ *   1. the method is `geometric` — the keymap path carries none of the honesty
+ *      machinery below (no seam report, no along anchoring), so however good its
+ *      coverage looks there is nothing to stand behind the claim with;
+ *   2. `deriveFeasibility` passes — ratio, residual ceiling, and the along-anchored
+ *      count against the same two bars as the aligned count;
+ *   3. the verdict is `verified` or `partial`, and `alongAnchored` was reported at
+ *      all — ABSENT is not a pass here. `deriveFeasibility` treats both as backward
+ *      compat because it only greys out a button; a button that exists solely to
+ *      promise "this will work" cannot be offered on evidence that was never sent;
+ *   4. no seam is `suspect` — one seam the engine positively believes is wrong is
+ *      enough to withdraw the offer, even if the rest verify;
+ *   5. at least two sheets survive to be claimed.
+ *
+ * `sheets` is the CLAIMED count (aligned ∩ along-anchored) — what the button says and
+ * what the commit will actually keep aligned after its demotion.
+ */
+export interface AutoAlignGateInput extends FeasibilityInput {
+  /** Post-solve seam verification. Only `status` is read. */
+  seamReport?: readonly { status: SeamStatus }[];
+}
+
+export type AutoAlignGate =
+  | { offered: true; sheets: number }
+  /** `detail` is the fuller sentence (e.g. the along-axis slide) for a tooltip; the
+   *  three short reasons are the strip note's own vocabulary. */
+  | { offered: false; reason: AutoAlignUnavailableReason; detail?: string };
+
+export function autoAlignGate(probe: AutoAlignGateInput, selectedPageIndices: number[]): AutoAlignGate {
+  const f = deriveFeasibility(probe, selectedPageIndices);
+  const suspect = (probe.seamReport ?? []).filter((s) => s.status === "suspect").length;
+  const verdictOk = probe.alignmentVerdict === "verified" || probe.alignmentVerdict === "partial";
+  if (
+    probe.method === "geometric" &&
+    f.status !== "unstitchable" &&
+    verdictOk &&
+    probe.alongAnchored != null &&
+    suspect === 0 &&
+    f.alignedInSelection >= 2
+  ) {
+    return { offered: true, sheets: f.alignedInSelection };
+  }
+  // Nothing was placed at all: say WHICH kind of nothing. Fewer than two of the
+  // selected sheets carried a usable adjacency signal → there was never anything to
+  // match by; otherwise they are readable and simply are not neighbours.
+  if (probe.method === "none") {
+    const refs = new Set(probe.refPageIndices ?? []);
+    const readable = selectedPageIndices.reduce((n, i) => n + (refs.has(i) ? 1 : 0), 0);
+    return { offered: false, reason: readable < 2 ? "no_refs" : "no_matchline" };
+  }
+  // Everything else — an unverified verdict, a suspect seam, an unpinned along axis,
+  // a fit below the ratio floor, a keymap probe — is one sentence to the user: the
+  // sheets were matched but the seams could not be stood behind. `f.reason` keeps the
+  // specific wording (notably the along-axis slide) for the tooltip.
+  return { offered: false, reason: "unverified", detail: f.reason };
 }

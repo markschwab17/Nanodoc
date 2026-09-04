@@ -10,8 +10,31 @@
  * canvas.
  */
 
-import { Check } from "lucide-react";
+import { Check, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  AUTO_ALIGN_CHECKING,
+  autoAlignButtonLabel,
+  autoAlignUnavailableNote,
+  autoAlignUnavailableTitle,
+  type AutoAlignUnavailableReason,
+} from "./addToProjectCopy";
+
+/**
+ * The earned Auto-align offer. The sheets are already on the canvas in a grid; this is
+ * the background check's answer about them, and it is the whole reason the strip has a
+ * second action. `"idle"` renders nothing at all — no chip, no greyed-out button — so a
+ * canvas the check has nothing to say about is not cluttered by it.
+ */
+export interface TakeoffModeAutoAlign {
+  status: "idle" | "checking" | "offer" | "unavailable" | "aligning";
+  /** Sheets the offer would claim. */
+  sheets: number;
+  reason?: AutoAlignUnavailableReason;
+  /** The fuller sentence behind the short reason (the tooltip). */
+  detail?: string;
+  onRun: () => void;
+}
 
 export interface TakeoffModeStripProps {
   /** Sheets currently on the canvas (scale stamps excluded). */
@@ -21,6 +44,7 @@ export interface TakeoffModeStripProps {
   /** False when there is nothing to add — the primary action goes disabled. */
   canAdd: boolean;
   onAddToProject: () => void;
+  autoAlign?: TakeoffModeAutoAlign;
 }
 
 /** One step pill. `state` drives the marker and whether it reads as current. */
@@ -64,11 +88,50 @@ function Step({
   );
 }
 
+/** The chip / button / note the background check turns into. */
+function AutoAlignOffer({ status, sheets, reason, detail, onRun }: TakeoffModeAutoAlign) {
+  if (status === "idle") return null;
+  if (status === "checking") {
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground" aria-live="polite">
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+        {AUTO_ALIGN_CHECKING}
+      </span>
+    );
+  }
+  if (status === "unavailable" && reason) {
+    return (
+      <span
+        className="text-xs text-muted-foreground"
+        title={autoAlignUnavailableTitle(reason, detail)}
+        aria-live="polite"
+      >
+        {autoAlignUnavailableNote(reason)}
+      </span>
+    );
+  }
+  if (status === "offer" || status === "aligning") {
+    const aligning = status === "aligning";
+    return (
+      <Button size="sm" className="h-8 shrink-0" disabled={aligning} onClick={onRun}>
+        {aligning ? (
+          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
+        ) : (
+          <Sparkles className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+        )}
+        {aligning ? "Aligning…" : autoAlignButtonLabel(sheets)}
+      </Button>
+    );
+  }
+  return null;
+}
+
 export function TakeoffModeStrip({
   sheetCount,
   unplacedCount,
   canAdd,
   onAddToProject,
+  autoAlign,
 }: TakeoffModeStripProps) {
   // While anything is unplaced that is the only number worth showing — the
   // sheet count is reassurance, the unplaced count is a task.
@@ -86,8 +149,14 @@ export function TakeoffModeStrip({
       <Step state="now" marker="2" label="Arrange" suffix={arrangeSuffix} />
       <Step state="todo" marker="3" label="Trim title blocks" suffix=" · optional" />
       <span className="flex-1" />
+      {autoAlign && (
+        <div className="mr-3 flex min-w-0 items-center">
+          <AutoAlignOffer {...autoAlign} />
+        </div>
+      )}
       <Button
         size="sm"
+        variant={autoAlign?.status === "offer" ? "outline" : "default"}
         className="h-8 shrink-0"
         disabled={!canAdd}
         title={canAdd ? "Add this site sheet to the project" : "Place at least one sheet first"}

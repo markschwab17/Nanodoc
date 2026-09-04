@@ -4,6 +4,10 @@ import {
   siteSheetTitlePreview,
   hiddenPagesSentence,
   autoAlignExplanation,
+  AUTO_ALIGN_CHECKING,
+  autoAlignButtonLabel,
+  autoAlignUnavailableNote,
+  autoAlignUnavailableTitle,
   type TileForPlan,
 } from "./addToProjectCopy";
 
@@ -236,5 +240,45 @@ describe("autoAlignExplanation — the along-matchline case", () => {
 
   it("falls back to 'these sheets' when no page is named", () => {
     expect(autoAlignExplanation({ reason: "along_unresolved" })!).toContain("These sheets meet the matchline correctly");
+  });
+});
+
+describe("the earned Auto-align copy", () => {
+  it("the chip says what is being checked, not that something is loading", () => {
+    expect(AUTO_ALIGN_CHECKING).toBe("Checking whether these sheets can be auto-aligned…");
+  });
+
+  it("the button names the sheet count and agrees in number", () => {
+    expect(autoAlignButtonLabel(5)).toBe("Auto-align 5 sheets");
+    expect(autoAlignButtonLabel(1)).toBe("Auto-align 1 sheet");
+  });
+
+  it("each reason completes the note as one sentence", () => {
+    expect(autoAlignUnavailableNote("no_refs")).toBe(
+      "Auto-align isn't available for these sheets — no sheet numbers or matchline callouts were found",
+    );
+    expect(autoAlignUnavailableNote("no_matchline")).toBe(
+      "Auto-align isn't available for these sheets — they don't share a matchline",
+    );
+    expect(autoAlignUnavailableNote("unverified")).toBe(
+      "Auto-align isn't available for these sheets — the seams couldn't be verified",
+    );
+  });
+
+  it("the tooltip keeps the fuller sentence the short reason drops", () => {
+    // The along-matchline case maps to "the seams couldn't be verified", which is
+    // true and loses the fact the user would act on: they DO meet the line.
+    const title = autoAlignUnavailableTitle(
+      "unverified",
+      "sheets can be lined up across the matchline but not along it — they may slide up to 48 ft",
+    );
+    expect(title).toContain("the seams couldn't be verified");
+    expect(title).toContain("slide up to 48 ft");
+  });
+
+  it("the tooltip is just the note when there is nothing more to say", () => {
+    expect(autoAlignUnavailableTitle("no_matchline")).toBe(
+      "Auto-align isn't available for these sheets — they don't share a matchline.",
+    );
   });
 });

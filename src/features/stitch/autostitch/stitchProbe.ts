@@ -19,6 +19,12 @@ export interface ProbeRequest {
    *  assumption — a probe run with mixed scales could be reused for a selection whose
    *  cached poses no longer match a fresh per-page-scale-aware run. */
   pageScales?: [number, number][];
+  /** Sheet identity the caller already knows (CTO's plan labels), page index → code.
+   *  Free — CTO ran its own extraction on these pages — and it is exactly what the
+   *  aligner otherwise has to OCR out of a title block. The takeoff plan path sends
+   *  it so the probe answers the same question the commit will; AddPdfModal has no
+   *  plan and sends nothing. */
+  pageCodes?: [number, string][];
 }
 
 export interface ProbeResult {

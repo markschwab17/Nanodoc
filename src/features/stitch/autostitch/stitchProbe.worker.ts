@@ -43,7 +43,7 @@ let latestDocId = 0;
 let queue: Promise<void> = Promise.resolve();
 
 async function handle(req: ProbeRequest) {
-  const { docId, pdfBytes, pageIndices, userScale, pageScales } = req;
+  const { docId, pdfBytes, pageIndices, userScale, pageScales, pageCodes } = req;
   if (docId !== latestDocId) return; // superseded before we started — skip
   try {
     await ensureMupdf();
@@ -53,6 +53,7 @@ async function handle(req: ProbeRequest) {
       res = await autoStitch(mupdf, doc, pageIndices, {
         userScale,
         pageScales: pageScales ? new Map(pageScales) : undefined,
+        pageCodes: pageCodes ? new Map(pageCodes) : undefined,
         ocr: ocrViaMain,
         shouldAbort: () => abortDocId === docId,
         onOcrStart: () => self.postMessage({ kind: "ocrPhase", docId }),
