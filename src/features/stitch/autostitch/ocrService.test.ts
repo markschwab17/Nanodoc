@@ -1,41 +1,52 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { RawImage } from "./ocrService";
 
 /**
- * ocrService now runs the tesseract scheduler on the MAIN thread (nested workers
- * aren't portable to WKWebView/WebKitGTK) and offloads only the raster→Blob
- * conversion to ocr.worker.ts. Tests therefore mock BOTH:
- *   - tesseract.js (via vi.mock) — a fake scheduler whose addJob behaviour is
- *     swappable per test through the hoisted `h.addJob`.
+ * ocrService runs tesseract on the MAIN thread (nested workers aren't portable
+ * to WKWebView/WebKitGTK), queues jobs through the shared pool in ocrPool.ts,
+ * and offloads only the raster→Blob conversion to ocr.worker.ts. Tests mock
+ * BOTH:
+ *   - tesseract.js (via vi.mock) — fake workers whose recognize() behaviour is
+ *     swappable per test through the hoisted `h.recognize`, each recorded in
+ *     `h.workers` so a test can see how many were built and which were killed.
  *   - `Worker` (the conversion worker) — a controllable FakeWorker.
  * OffscreenCanvas is stubbed so the conversion-worker path is taken; one test
  * removes it to prove the main-thread fallback path is used instead.
- * Module state (lazy scheduler/worker singletons, id seq, pending/forward maps)
- * is reset per test via vi.resetModules().
+ * `navigator.hardwareConcurrency` is stubbed too, because it sizes the pool.
+ * Module state (lazy pool/worker singletons, id seq, pending maps) is reset per
+ * test via vi.resetModules().
  */
+
+interface FakeTessWorker {
+  terminateCalls: number;
+  seen: string[];
+  setParameters(p: unknown): Promise<void>;
+  recognize(blob: any): Promise<any>;
+  terminate(): Promise<void>;
+}
 
 const h = vi.hoisted(() => ({
   // Default: succeed, echoing the blob's tag as the recognized word so tests can
   // trace which request produced which words.
-  addJob: async (_cmd: string, blob: any): Promise<any> => ({
+  recognize: async (blob: any): Promise<any> => ({
     data: { words: [{ text: blob?.__tag ?? "ok", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] },
   }),
-  // Every scheduler createScheduler() hands out, in creation order, so tests
-  // can assert how many schedulers were spun up and whether each was terminated.
-  schedulersCreated: [] as { terminateCalls: number }[],
+  // Every worker createWorker() hands out, in creation order.
+  workers: [] as FakeTessWorker[],
 }));
 
 vi.mock("tesseract.js", () => ({
-  createScheduler: () => {
-    const record = { terminateCalls: 0 };
-    h.schedulersCreated.push(record);
-    return {
-      addWorker: () => {},
-      addJob: (cmd: string, blob: any) => h.addJob(cmd, blob),
-      terminate: async () => { record.terminateCalls++; },
+  createWorker: async () => {
+    const w: FakeTessWorker = {
+      terminateCalls: 0,
+      seen: [],
+      setParameters: async () => {},
+      recognize: (blob: any) => { w.seen.push(blob?.__tag); return h.recognize(blob); },
+      terminate: async () => { w.terminateCalls++; },
     };
+    h.workers.push(w);
+    return w;
   },
-  createWorker: async () => ({ setParameters: async () => {}, terminate: async () => {} }),
   PSM: { SPARSE_TEXT: 10 },
 }));
 
@@ -60,31 +71,39 @@ class FakeWorker {
 const IMG = (): RawImage => ({ width: 2, height: 2, data: new Uint8ClampedArray(2 * 2 * 4) });
 const fakeBlob = (tag: string) => ({ __tag: tag }) as unknown as Blob;
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const WORD = (text: string) => ({ text, confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } });
+/** Pool size is clamp(hardwareConcurrency - 1, 2, 4), so cores ⇒ workers. */
+const setCores = (n: number) =>
+  Object.defineProperty(globalThis.navigator, "hardwareConcurrency", { value: n, configurable: true });
+/** Answer the conversion worker's Nth (0-based) request with a tagged blob. */
+const convReply = (n: number, tag: string) => {
+  const conv = FakeWorker.instances[0];
+  conv.emit({ ocrId: conv.posted[n].ocrId, blob: fakeBlob(tag) });
+};
 
 beforeEach(() => {
   FakeWorker.instances.length = 0;
   (globalThis as any).Worker = FakeWorker;
   (globalThis as any).OffscreenCanvas = class {}; // present ⇒ conversion-worker path
-  h.addJob = async (_cmd: string, blob: any) => ({
-    data: { words: [{ text: blob?.__tag ?? "ok", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] },
-  });
-  h.schedulersCreated.length = 0;
+  setCores(3); // ⇒ a 2-worker pool unless a test says otherwise
+  h.recognize = async (blob: any) => ({ data: { words: [WORD(blob?.__tag ?? "ok")] } });
+  h.workers.length = 0;
   vi.resetModules();
 });
 
+afterEach(() => { vi.useRealTimers(); });
+
 describe("ocrService.recognize (main-thread tesseract + conversion worker)", () => {
-  it("converts in the worker then resolves the scheduler's words", async () => {
+  it("converts in the worker then resolves the pool's words", async () => {
     const { recognize } = await import("./ocrService");
     const p = recognize(IMG());
     // The conversion worker was spawned and received the raster.
     const conv = FakeWorker.instances[0];
     expect(conv).toBeTruthy();
     expect(conv.posted[0]).toHaveProperty("ocrId");
-    // Reply with a tagged blob; the mocked scheduler echoes the tag as a word.
-    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("SEE SHEET 9") });
-    await expect(p).resolves.toEqual([
-      { text: "SEE SHEET 9", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
-    ]);
+    // Reply with a tagged blob; the mocked tesseract worker echoes the tag.
+    convReply(0, "SEE SHEET 9");
+    await expect(p).resolves.toEqual([WORD("SEE SHEET 9")]);
   });
 
   it("resolves [] when the conversion worker reports failure", async () => {
@@ -95,95 +114,12 @@ describe("ocrService.recognize (main-thread tesseract + conversion worker)", () 
     await expect(p).resolves.toEqual([]);
   });
 
-  it("resolves [] when the tesseract scheduler fails", async () => {
-    h.addJob = async () => { throw new Error("recognize blew up"); };
+  it("resolves [] when tesseract's recognize rejects", async () => {
+    h.recognize = async () => { throw new Error("recognize blew up"); };
     const { recognize } = await import("./ocrService");
     const p = recognize(IMG());
-    const conv = FakeWorker.instances[0];
-    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("x") });
+    convReply(0, "x");
     await expect(p).resolves.toEqual([]);
-  });
-
-  it("resolves [] and recycles the scheduler when a recognize job hangs (timeout)", async () => {
-    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
-    __setOcrJobTimeoutMsForTest(20); // shortened-for-test; never resolves for real.
-    h.addJob = () => new Promise(() => { /* hang forever */ });
-
-    const p = recognize(IMG());
-    const conv = FakeWorker.instances[0];
-    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("hang") });
-
-    await expect(p).resolves.toEqual([]);
-    // Recycled: the hung scheduler was terminated and the singleton cleared.
-    expect(h.schedulersCreated.length).toBe(1);
-    expect(h.schedulersCreated[0].terminateCalls).toBe(1);
-
-    // The next call must build a brand-new scheduler (singleton was reset).
-    // The conversion worker is a separate singleton that never hung, so it's
-    // reused (same FakeWorker instance) — its 2nd queued postMessage is this call.
-    h.addJob = async (_cmd: string, blob: any) => ({
-      data: { words: [{ text: blob?.__tag ?? "ok", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }] },
-    });
-    const p2 = recognize(IMG());
-    const conv2 = FakeWorker.instances[0];
-    conv2.emit({ ocrId: conv2.posted[1].ocrId, blob: fakeBlob("fresh") });
-    await expect(p2).resolves.toEqual([
-      { text: "fresh", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
-    ]);
-    expect(h.schedulersCreated.length).toBe(2);
-  });
-
-  it("identity guard: a stale timeout does not terminate a newer scheduler", async () => {
-    vi.useFakeTimers();
-    try {
-      const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
-      h.addJob = () => new Promise(() => { /* every job in this test hangs */ });
-
-      // The conversion worker is a separate, never-hung singleton — every call
-      // reuses the SAME FakeWorker instance, one queued postMessage each.
-      const conv = () => FakeWorker.instances[0];
-
-      // Call A: long-lived timeout. It shares the ORIGINAL scheduler and will
-      // still be pending when that scheduler gets recycled by someone else.
-      __setOcrJobTimeoutMsForTest(100_000);
-      const pA = recognize(IMG());
-      await vi.advanceTimersByTimeAsync(0);
-      conv().emit({ ocrId: conv().posted[0].ocrId, blob: fakeBlob("a") });
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Call B: shares the same (not-yet-recycled) scheduler singleton, but
-      // with a short timeout — it times out first and recycles scheduler #1.
-      __setOcrJobTimeoutMsForTest(10);
-      const pB = recognize(IMG());
-      await vi.advanceTimersByTimeAsync(0);
-      conv().emit({ ocrId: conv().posted[1].ocrId, blob: fakeBlob("b") });
-      await vi.advanceTimersByTimeAsync(0);
-
-      await vi.advanceTimersByTimeAsync(10); // fire B's timeout
-      await expect(pB).resolves.toEqual([]);
-      expect(h.schedulersCreated.length).toBe(1);
-      expect(h.schedulersCreated[0].terminateCalls).toBe(1); // recycled by B
-
-      // Call C: ensureScheduler() now builds a fresh scheduler #2.
-      __setOcrJobTimeoutMsForTest(100_000);
-      const pC = recognize(IMG());
-      await vi.advanceTimersByTimeAsync(0);
-      conv().emit({ ocrId: conv().posted[2].ocrId, blob: fakeBlob("c") });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(h.schedulersCreated.length).toBe(2);
-
-      // Fire A's stale 100s timeout (started long before B's recycle). A
-      // captured scheduler #1's promise — by now the singleton points at
-      // scheduler #2, so the identity guard must skip recycling entirely.
-      await vi.advanceTimersByTimeAsync(100_000 - 10);
-      await expect(pA).resolves.toEqual([]);
-      expect(h.schedulersCreated[0].terminateCalls).toBe(1); // unchanged
-      expect(h.schedulersCreated[1].terminateCalls).toBe(0); // #2 untouched
-
-      void pC; // C's own (100s, still pending) hang is irrelevant to this assertion.
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("falls back to the main thread (no conversion worker) when OffscreenCanvas is absent", async () => {
@@ -196,31 +132,144 @@ describe("ocrService.recognize (main-thread tesseract + conversion worker)", () 
   });
 });
 
+describe("ocrService.recognize — pool concurrency", () => {
+  it("runs concurrent calls on separate workers", async () => {
+    const { recognize } = await import("./ocrService");
+    const inflight: (() => void)[] = [];
+    h.recognize = (blob: any) => new Promise((res) => { inflight.push(() => res({ data: { words: [WORD(blob.__tag)] } })); });
+
+    const pA = recognize(IMG());
+    const pB = recognize(IMG());
+    convReply(0, "a");
+    convReply(1, "b");
+    await flush();
+
+    // Both jobs are in flight at once — two workers, one job each.
+    expect(h.workers.length).toBe(2);
+    expect(inflight.length).toBe(2);
+    expect(h.workers.map((w) => w.seen)).toEqual([["a"], ["b"]]);
+
+    inflight[1]();
+    inflight[0]();
+    await expect(pA).resolves.toEqual([WORD("a")]);
+    await expect(pB).resolves.toEqual([WORD("b")]);
+  });
+
+  it("sizes the pool from hardwareConcurrency, clamped to [2, 4]", async () => {
+    setCores(16);
+    const { recognize } = await import("./ocrService");
+    h.recognize = () => new Promise(() => { /* hold every worker */ });
+
+    const jobs = [recognize(IMG()), recognize(IMG()), recognize(IMG()), recognize(IMG()), recognize(IMG()), recognize(IMG())];
+    for (let i = 0; i < 6; i++) convReply(i, `j${i}`);
+    await flush();
+
+    expect(h.workers.length).toBe(4); // clamped, not 15
+    void jobs;
+  });
+});
+
+describe("ocrService.recognize — per-job dispatch-time timeout", () => {
+  it("resolves [] on a hang, retires only that worker, and the sibling still answers", async () => {
+    vi.useFakeTimers();
+    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(100);
+    const settlers: Record<string, () => void> = {};
+    h.recognize = (blob: any) => new Promise((res) => { settlers[blob.__tag] = () => res({ data: { words: [WORD(blob.__tag)] } }); });
+
+    const pHang = recognize(IMG());
+    const pOk = recognize(IMG());
+    convReply(0, "hang");
+    convReply(1, "ok");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.workers.length).toBe(2);
+
+    settlers["ok"]();
+    await expect(pOk).resolves.toEqual([WORD("ok")]);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pHang).resolves.toEqual([]);
+    expect(h.workers[0].terminateCalls).toBe(1); // the hung one
+    expect(h.workers[1].terminateCalls).toBe(0); // its sibling, untouched
+
+    // OCR still works afterwards — the survivor takes the next job.
+    h.recognize = async (blob: any) => ({ data: { words: [WORD(blob.__tag)] } });
+    const pNext = recognize(IMG());
+    await vi.advanceTimersByTimeAsync(0);
+    convReply(2, "fresh");
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(pNext).resolves.toEqual([WORD("fresh")]);
+  });
+
+  it("does not charge a job for the time it spent queued", async () => {
+    vi.useFakeTimers();
+    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(100);
+    // Every job takes 80ms of real work — inside the budget, but the third one
+    // only starts once a worker frees up at t=80.
+    h.recognize = (blob: any) =>
+      new Promise((res) => { setTimeout(() => res({ data: { words: [WORD(blob.__tag)] } }), 80); });
+
+    const jobs = [recognize(IMG()), recognize(IMG()), recognize(IMG())];
+    convReply(0, "a");
+    convReply(1, "b");
+    convReply(2, "c");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.workers.length).toBe(2); // "c" is queued, not running
+
+    await vi.advanceTimersByTimeAsync(300);
+    // Under a queue-time timeout "c" would have expired at t=100 while waiting.
+    await expect(Promise.all(jobs)).resolves.toEqual([[WORD("a")], [WORD("b")], [WORD("c")]]);
+    expect(h.workers.every((w) => w.terminateCalls === 0)).toBe(true);
+  });
+
+  it("an aborted signal drops a queued job before it ever reaches a worker", async () => {
+    const { recognize } = await import("./ocrService");
+    h.recognize = () => new Promise(() => { /* both workers stay busy */ });
+
+    const ac = new AbortController();
+    const pA = recognize(IMG());
+    const pB = recognize(IMG());
+    const pC = recognize(IMG(), { signal: ac.signal }); // queued behind A and B
+    convReply(0, "a");
+    convReply(1, "b");
+    convReply(2, "c");
+    await flush();
+    expect(h.workers.flatMap((w) => w.seen)).toEqual(["a", "b"]);
+
+    ac.abort();
+    await expect(pC).resolves.toEqual([]);
+    await flush();
+    expect(h.workers.flatMap((w) => w.seen)).toEqual(["a", "b"]); // "c" never ran
+    expect(h.workers.every((w) => w.terminateCalls === 0)).toBe(true);
+    void pA; void pB;
+  });
+});
+
 describe("ocrService.shutdownOcr", () => {
-  it("terminates the scheduler and the conversion worker, then rebuilds lazily", async () => {
+  it("terminates the pool's workers and the conversion worker, then rebuilds lazily", async () => {
     const { recognize, shutdownOcr } = await import("./ocrService");
 
     const p = recognize(IMG());
     const conv = FakeWorker.instances[0];
-    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("first") });
+    convReply(0, "first");
     await expect(p).resolves.toHaveLength(1);
-    expect(h.schedulersCreated.length).toBe(1);
+    expect(h.workers.length).toBe(1);
 
     await shutdownOcr();
-    expect(h.schedulersCreated[0].terminateCalls).toBe(1);
+    expect(h.workers[0].terminateCalls).toBe(1);
     expect(conv.terminated).toBe(true);
 
-    // Lazy recreate: the next recognize builds a fresh scheduler and a fresh
+    // Lazy recreate: the next recognize builds a fresh pool and a fresh
     // conversion worker, and still answers.
     const p2 = recognize(IMG());
     const conv2 = FakeWorker.instances[1];
     expect(conv2).toBeTruthy();
     expect(conv2).not.toBe(conv);
     conv2.emit({ ocrId: conv2.posted[0].ocrId, blob: fakeBlob("second") });
-    await expect(p2).resolves.toEqual([
-      { text: "second", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
-    ]);
-    expect(h.schedulersCreated.length).toBe(2);
+    await expect(p2).resolves.toEqual([WORD("second")]);
+    expect(h.workers.length).toBe(2);
+    expect(h.workers[1].terminateCalls).toBe(0);
   });
 
   it("a recognize starting mid-teardown gets fresh workers, not the dying ones", async () => {
@@ -228,13 +277,12 @@ describe("ocrService.shutdownOcr", () => {
 
     const p0 = recognize(IMG());
     const conv0 = FakeWorker.instances[0];
-    conv0.emit({ ocrId: conv0.posted[0].ocrId, blob: fakeBlob("a") });
+    convReply(0, "a");
     await p0;
 
-    // Terminating the scheduler is async. A recognize that starts inside that
-    // window must find the singletons already detached and build its own —
-    // otherwise it adopts the scheduler and conversion worker that are about to
-    // be terminated underneath it.
+    // Terminating the pool is async. A recognize that starts inside that window
+    // must find the singletons already detached and build its own — otherwise it
+    // adopts the workers that are about to be terminated underneath it.
     const teardown = shutdownOcr();
     const p1 = recognize(IMG());
     await flush();
@@ -245,21 +293,35 @@ describe("ocrService.shutdownOcr", () => {
     conv1.emit({ ocrId: conv1.posted[0].ocrId, blob: fakeBlob("b") });
 
     await teardown;
-    await expect(p1).resolves.toEqual([
-      { text: "b", confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } },
-    ]);
-    // The teardown killed the first scheduler and left the newcomer alone.
-    expect(h.schedulersCreated.length).toBe(2);
-    expect(h.schedulersCreated[0].terminateCalls).toBe(1);
-    expect(h.schedulersCreated[1].terminateCalls).toBe(0);
+    await expect(p1).resolves.toEqual([WORD("b")]);
+    // The teardown killed the first worker and left the newcomer alone.
+    expect(h.workers.length).toBe(2);
+    expect(h.workers[0].terminateCalls).toBe(1);
+    expect(h.workers[1].terminateCalls).toBe(0);
     expect(conv1.terminated).toBe(false);
+  });
+
+  it("releases a job still queued behind a hung one", async () => {
+    const { recognize, shutdownOcr } = await import("./ocrService");
+    h.recognize = () => new Promise(() => { /* hang */ });
+
+    const pA = recognize(IMG());
+    const pB = recognize(IMG());
+    const pC = recognize(IMG()); // queued behind the two busy workers
+    for (let i = 0; i < 3; i++) convReply(i, `j${i}`);
+    await flush();
+
+    await shutdownOcr();
+    await expect(pC).resolves.toEqual([]); // released, not left hanging
+    expect(h.workers.map((w) => w.terminateCalls)).toEqual([1, 1]);
+    void pA; void pB;
   });
 
   it("is safe when nothing was ever initialised, and is idempotent", async () => {
     const { shutdownOcr } = await import("./ocrService");
     await expect(shutdownOcr()).resolves.toBeUndefined();
     await expect(shutdownOcr()).resolves.toBeUndefined();
-    expect(h.schedulersCreated.length).toBe(0);
+    expect(h.workers.length).toBe(0);
     expect(FakeWorker.instances.length).toBe(0);
   });
 });
@@ -281,7 +343,7 @@ describe("ocrService.attachOcrRpc (forwarding)", () => {
     expect(c100.ocrId).not.toBe(c200.ocrId);
 
     // Complete OUT OF ORDER: probe 200's conversion first, then 100's. The tagged
-    // blob flows through the scheduler into the recognized word.
+    // blob flows through the pool into the recognized word.
     conv.emit({ ocrId: c200.ocrId, blob: fakeBlob("b") });
     conv.emit({ ocrId: c100.ocrId, blob: fakeBlob("a") });
     await flush();

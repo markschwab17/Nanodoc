@@ -72,6 +72,11 @@ function encodePNG(width, height, rgba) {
 }
 
 // ── OCR (tesseract.js) with the shared disk cache ────────────────────────────
+// Recognition runs through the SAME pool the app uses (ocrPool.ts) — FIFO queue,
+// per-job timeout measured from dispatch, one worker retired on a hang — so the
+// harness exercises the production queueing code rather than a private copy of
+// it. Three workers here (the app sizes its pool off hardwareConcurrency, which
+// a headless run has no business inheriting).
 // STITCH_EVAL_NO_OCR_CACHE=1 bypasses the cache entirely (read AND write) — every
 // image is re-OCR'd fresh and scratch-diag/ocr-cache.json is left untouched. Used
 // to take a cache-free timing baseline without clobbering the shared cache file
@@ -88,22 +93,37 @@ function hashImage(image) {
   h.update(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength));
   return h.digest("hex");
 }
-let worker = null;
-async function ensureWorker() {
-  if (worker) return worker;
+const OCR_POOL_SIZE = 3;
+const OCR_JOB_TIMEOUT_MS = 20_000;
+let pool = null, NO_RESULT = null;
+async function ensurePool() {
+  if (pool) return pool;
+  const { createOcrPool, OCR_NO_RESULT } = await import("../src/features/stitch/autostitch/ocrPool.ts");
   const { createWorker, PSM } = await import("tesseract.js");
-  worker = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
-  await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-  return worker;
+  NO_RESULT = OCR_NO_RESULT;
+  pool = createOcrPool({
+    size: OCR_POOL_SIZE,
+    createWorker: async () => {
+      const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
+      try { await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT }); }
+      catch (err) { try { await w.terminate(); } catch { /* ignore */ } throw err; }
+      return w;
+    },
+    timeoutMs: () => OCR_JOB_TIMEOUT_MS,
+    onTimeout: () => console.warn("[stitch-eval] OCR job timed out — retiring that worker"),
+  });
+  return pool;
 }
 async function ocr(image) {
   const key = hashImage(image);
   if (!NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
   ocrCalls++;
-  const w = await ensureWorker();
-  const { data } = await w.recognize(encodePNG(image.width, image.height, image.data));
+  const p = await ensurePool();
+  const res = await p.run(encodePNG(image.width, image.height, image.data));
+  // A timed-out job is a non-answer, not an empty sheet — never cache it.
+  if (res === NO_RESULT) return [];
   const words = [];
-  for (const wd of data.words ?? []) { if (wd.text?.trim()) words.push({ text: wd.text.trim(), confidence: wd.confidence, bbox: { ...wd.bbox } }); }
+  for (const wd of res.data.words ?? []) { if (wd.text?.trim()) words.push({ text: wd.text.trim(), confidence: wd.confidence, bbox: { ...wd.bbox } }); }
   if (!NO_OCR_CACHE) { cache[key] = words; cacheDirty = true; if (ocrCalls % 20 === 0) flushCache(); }
   return words;
 }
@@ -288,7 +308,7 @@ for (const set of sets) {
   rows.push(row);
 }
 flushCache();
-if (worker) await worker.terminate();
+if (pool) await pool.terminate();
 
 if (AS_JSON) {
   console.log(JSON.stringify({ manifest: MANIFEST, rows }, null, 2));
