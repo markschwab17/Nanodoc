@@ -120,10 +120,35 @@ export interface SheetRef { text: string; at: Pt; angle: number; sheet: number |
  * ordinary drawing text cannot match: the leading \b keeps "USE SHEET" out, and
  * MATCH/LINE must still appear in order.
  */
-export const SEE_SHEET_SRC = String.raw`\bSE{1,3}\.?\s+SHE{1,3}T\b`;
+export const SEE_SHEET_SRC = String.raw`\bSE{1,3}[.,:;]?\s+SHE{1,3}T\b`;
+/** The same phrase with every space removed — tesseract splits a WORD as readily as
+ *  it joins two ("S EE SHEET" for "SEE SHEET"), and a de-spaced test catches that
+ *  without loosening the spaced one. The trailing guard keeps "SHEETING" out. */
+export const SEE_SHEET_DESPACED = /SE{1,3}[.,:;]?SHE{1,3}T(?![A-Z])/i;
+/** "MATCHLINE" once spaces are removed — covers "MATCH LINE", "MA TCH LINE" and the
+ *  N-read-as-M misread in one test. */
+export const MATCHLINE_DESPACED = /MA\s?T\s?C\s?H\s*LI[NM]E/i;
 export const REF_NUMBER_SRC = SEE_SHEET_SRC + String.raw`\s+(?:NO\.?\s*)?(\d+)\b`;
 export const REF_CODE_SRC = SEE_SHEET_SRC + String.raw`\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)`;
 const MATCHLINE_RE = /\bMA\s?T\s?C\s?H\s*LI[NM]E/i;
+/**
+ * Is this text a MATCHLINE callout? Three readings, because tesseract mangles the
+ * phrase three different ways on outlined CAD text:
+ *   • the phrase itself, spaces and all ("MATCH LINE", "MA TCH LINE", "MATCH LIME");
+ *   • the same phrase with the spaces gone, which catches a word split anywhere
+ *     inside it;
+ *   • "LINE" sitting immediately against "SEE SHEET" — what is left when OCR eats the
+ *     "MATCH" (the Coast Guard sheets read their left-edge callout as "LINE S EE
+ *     SHEET", the word MATCH having been clipped into the neighbouring band). The two
+ *     halves must be adjacent: "LINE" and a reference far apart in one label is an
+ *     ordinary annotation, not a matchline.
+ */
+export function isMatchlineText(text: string): boolean {
+  if (MATCHLINE_RE.test(text)) return true;
+  const despaced = text.replace(/\s+/g, "");
+  if (MATCHLINE_DESPACED.test(despaced)) return true;
+  return /LI[NM]E.{0,3}SE{1,3}[.,:;]?SHE{1,3}T(?![A-Z])/i.test(despaced);
+}
 const SEE_SHEET_RE = new RegExp(SEE_SHEET_SRC, "i");
 const REF_NUMBER_RE = new RegExp(REF_NUMBER_SRC, "i");
 const REF_CODE_RE = new RegExp(REF_CODE_SRC, "i");
@@ -271,7 +296,7 @@ export function parseSheetRefs(
     // numeric ("SEE SHEET 12") or alphanumeric discipline code ("SEE SHEET C5.4")
     const mSheet = l.text.match(REF_NUMBER_RE);
     const mCode = l.text.match(REF_CODE_RE);
-    const mMatch = l.text.match(MATCHLINE_STATION_RE);
+    const mMatch = isMatchlineText(l.text) ? (l.text.match(MATCHLINE_STATION_RE) ?? [""]) : null;
     const mStrip = l.text.match(/SEE[\s_]+(ABOVE|BELOW)(?:[\s_]+(LEFT|RIGHT))?/i);
     if (!mSheet && !mCode && !mMatch && !mStrip) continue;
     const c = center(l);

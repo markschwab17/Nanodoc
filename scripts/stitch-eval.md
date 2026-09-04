@@ -30,6 +30,7 @@ meant to run on a machine that has only part of the corpus.
 | PG_SITE 1A (22 pp) | The reference set: 11 plan units placed, verdict at least `partial`, no suspect seam. Ground truth for placement error is `scripts/fixtures/pg-site-1a.groundtruth.json`. |
 | Belcourt Grading Plans (4 pp) | Identity and callouts are OCR-only (all text outlined) and the sheets are printed 5–8, not 1–4. Aligned 0/4 before T0. |
 | El Centro (12 pp) | The NEGATIVE set. Notes, details and single plans that share no ground: nothing may be placed. Produced 3 false pairs before T0. |
+| Coast Guard pair (2 pp) | Outlined CAD callouts, OCR-only. Unalignable from the signals present (the one directional reference's target reads as "HEET CD1"), so nothing may be placed — but both pages must still be seen to CARRY a callout, so the app says "these sheets don't share a matchline" rather than "no callouts were found". |
 
 The runner also prints, per set, which pages are **along-anchored** (pinned along the
 matchline, not just across it) and which placed pages are **demoted** — connected, but
@@ -47,6 +48,7 @@ Each set may set any of:
 | `maxSeconds` | wall-clock ceiling (unset by default — the first run is cold) |
 | `groundTruth` | a hand-verified placement fixture to measure against |
 | `maxTileErrorFt` | the bar for a unit the solver CLAIMS (see below) |
+| `minRefPages` | the fewest pages that must carry a detected edge ref — the difference between "these sheets don't share a matchline" and "no callouts were found" |
 
 ## Ground truth, and what "claimed" means
 

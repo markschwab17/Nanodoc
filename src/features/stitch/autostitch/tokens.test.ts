@@ -197,3 +197,37 @@ describe("edge classification against the drawing frame", () => {
     expect(parseSheetRefs(l, view, frame)[0].edge).toBe("left");
   });
 });
+
+describe("callout vocabulary — the Coast Guard misreads", () => {
+  const view: [number, number, number, number] = [0, 0, 2448, 1584];
+  const at = (text: string, cx: number, cy: number): Label =>
+    ({ text, x: cx - 100, y: cy - 6, endX: cx + 100, endY: cy + 6, angle: 0, h: 12, font: "ocr" });
+
+  // Every string below is verbatim tesseract output from the CD102/CD103 pair.
+  it("'SEE, SHEET CD101' (comma) still yields the code", () => {
+    const r = parseSheetRefs([at("MATCH LINE SEE, SHEET CD101", 1067, 1525)], view)[0];
+    expect(r.matchline).toBe(true);
+    expect(r.sheetCode).toBe("CD101");
+  });
+
+  it("'MATCH' and 'LINE' read as one label is a matchline", () => {
+    expect(parseSheetRefs([at("MATCH LINE", 207, 526)], view)[0].matchline).toBe(true);
+  });
+
+  it("'LINE S EE SHEET' — MATCH eaten, SEE split — is still a matchline", () => {
+    // The left-edge vertical callout of CD102: OCR loses the word MATCH into the
+    // neighbouring band and splits SEE in two. What is left is LINE against SEE
+    // SHEET, which is a matchline and nothing else.
+    const r = parseSheetRefs([at("LINE S EE SHEET", 47, 800)], view)[0];
+    expect(r).toBeDefined();
+    expect(r.matchline).toBe(true);
+    expect(r.edge).toBe("left");
+  });
+
+  it("does not call ordinary text a matchline", () => {
+    expect(parseSheetRefs([at("CLEAR & GRUB VEGETATION", 500, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("GRAPHIC SCALE IN FEET", 500, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("SAWCUT LINE PER PLAN", 500, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("PHASE SHEETING DETAIL", 500, 800)], view)).toHaveLength(0);
+  });
+});

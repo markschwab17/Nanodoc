@@ -199,6 +199,80 @@ export function resolvePrintedNos(
  *  caller (CTO's sheet identity), OCR of the title cell, then page order. */
 export type PrintedNoSource = "text" | "cto" | "ocr" | "fallback";
 
+/**
+ * Decide each page's sheet CODE from two sources that disagree.
+ *
+ * A caller (CTO) can hand us a code per page, and it is the best identity we can get
+ * for free — when it is right. It is not always right: a project's extraction had
+ * written "A1" and "B3" for two sheets whose title blocks read CD102 and CD103, and
+ * a wrong code is worse than none, because every "SEE SHEET X" that resolves through
+ * it anchors the wrong pair of sheets. So a caller's code is TRUSTED only when the
+ * drawings themselves corroborate it, in one of three ways:
+ *   • the page's own title-block read agrees with it; or
+ *   • another selected page's matchline callout names it; or
+ *   • it appears as a code token somewhere on the page AND on no other page in the
+ *     set. That last clause is the whole difference between evidence and noise: every
+ *     CAD sheet prints a border coordinate grid — A1, B1, B2, B3 — so "A1" is found
+ *     on a sheet the way the letter E is found in a paragraph. On the very set that
+ *     motivated this, both sheets carry A1 AND B3, and only the sheet's real code
+ *     (CD102 / CD103, which OCR reads out of the DWG path in the margin) is unique
+ *     to one page.
+ * Otherwise the supplied code is dropped, loudly.
+ *
+ * Then a second pass: a code claimed by TWO pages identifies neither. That happens
+ * for real — the same two Coast Guard sheets both yield "A1" from the title-block
+ * picker — and leaving it in place lets one callout anchor two different pages.
+ * Both claimants lose it, exactly as a colliding printed number does.
+ *
+ * Pure, and exported for tests. Returns pageIndex → code (absent = no code).
+ */
+export function resolveSheetCodes(
+  pages: {
+    pageIndex: number;
+    /** The caller's code for this page, if any. */
+    ctoCode: string | null;
+    /** The page's own title-block read. */
+    titleCode: string | null;
+    /** Every code-shaped token in this page's text + recovered OCR. */
+    ownTokens: readonly string[];
+    /** Codes this page's matchline callouts point AT. */
+    refTargets: readonly string[];
+  }[],
+  warn: (msg: string) => void = (m) => console.warn(m),
+): Map<number, string> {
+  const namedByAnother = new Set<string>();
+  for (const p of pages) for (const t of p.refTargets) if (t) namedByAnother.add(normCode(t));
+  // How many pages carry each code token: a token on more than one sheet is the
+  // border grid or a boilerplate detail bubble, never this sheet's identity.
+  const tokenPages = new Map<string, number>();
+  for (const p of pages) {
+    for (const t of new Set(p.ownTokens.map(normCode))) tokenPages.set(t, (tokenPages.get(t) ?? 0) + 1);
+  }
+  const chosen = new Map<number, string>();
+  for (const p of pages) {
+    let code = p.titleCode ? normCode(p.titleCode) : null;
+    if (p.ctoCode) {
+      const want = normCode(p.ctoCode);
+      const titleAgrees = code === want;
+      const uniqueOnThisPage = tokenPages.get(want) === 1 && p.ownTokens.some((t) => normCode(t) === want);
+      const referenced = namedByAnother.has(want);
+      if (titleAgrees || uniqueOnThisPage || referenced) code = want;
+      else {
+        warn(`[autoStitch] page ${p.pageIndex}: ignoring supplied sheet code "${p.ctoCode}" — it appears nowhere on the sheet and no other selected sheet references it`);
+      }
+    }
+    if (code) chosen.set(p.pageIndex, code);
+  }
+  const holders = new Map<string, number[]>();
+  for (const [pageIndex, code] of chosen) (holders.get(code) ?? holders.set(code, []).get(code)!).push(pageIndex);
+  for (const [code, pgs] of holders) {
+    if (pgs.length < 2) continue;
+    warn(`[autoStitch] sheet code "${code}" is claimed by pages ${pgs.join(", ")} — dropping it from all of them`);
+    for (const pageIndex of pgs) chosen.delete(pageIndex);
+  }
+  return chosen;
+}
+
 interface Unit {
   pageIndex: number;
   frame: Frame | null;      // null = whole page
@@ -218,6 +292,10 @@ interface PageRec {
   pageIndex: number; extract: PageExtract; printedNo: number; printedNoSource: PrintedNoSource;
   /** Discipline code supplied by the caller for this page, if any. */
   ctoCode: string | null;
+  /** The code the engine will actually USE for this page: the caller's, once it has
+   *  been corroborated, else the title-block read — and null when neither survives
+   *  (see `resolveSheetCodes`). */
+  sheetCode: string | null;
   /** The page's ruled DRAWING frame when one was detected — every edge rule (OCR
    *  band clips, edge-vs-interior classification) is measured against it. Null on a
    *  sheet drawn edge to edge. */
@@ -367,7 +445,7 @@ export async function autoStitch(
 
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
-      title, statedFtPerIn, role: "tile", ctoCode,
+      title, statedFtPerIn, role: "tile", ctoCode, sheetCode: null,
       pageLabel: pageLabel ?? { sheetCode: null, discipline: null, title: null, sheetNo: null, sheetOf: null, confidence: "none", source: "none" },
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
@@ -382,6 +460,22 @@ export async function autoStitch(
     pageIndices.length
   );
   for (const p of pages) p.printedNo = resolvedNos.get(p.pageIndex)!;
+
+  // ── SHEET CODES: the caller's, but only where the drawings agree ────────────
+  // Code-shaped tokens. No leading letter and no trailing letter/digit, so "CD102"
+  // is found inside the DWG path CAD stamps in the margin ("…5072024CD102.DWG") —
+  // often the only place a sheet's real code survives — without "CADD" or "C5000"
+  // matching.
+  const CODE_TOKEN_RE = /(?<![A-Z])[A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?(?![A-Z0-9])/gi;
+  const codes = resolveSheetCodes(pages.map((p) => {
+    const text = [...p.extract.shxLabels, ...p.extract.labels];
+    const ownTokens: string[] = [];
+    for (const l of text) for (const m of l.text.matchAll(CODE_TOKEN_RE)) ownTokens.push(m[0]);
+    const refTargets = parseSheetRefs(text, p.extract.view, p.drawingFrame)
+      .map((r) => r.sheetCode).filter((c): c is string => c != null);
+    return { pageIndex: p.pageIndex, ctoCode: p.ctoCode, titleCode: p.pageLabel.sheetCode, ownTokens, refTargets };
+  }));
+  for (const p of pages) p.sheetCode = codes.get(p.pageIndex) ?? null;
 
   // ── SHEET ROLE + SCALE-NOTE CROSS-CHECK ─────────────────────────────────────
   // Which pages are TILES. An overall/key plan covers the tiles' ground at a
@@ -436,7 +530,7 @@ export async function autoStitch(
     const codeOf = new Map<number, string | null>();
     const byCode = new Map<string, PageRec[]>();
     for (const p of pages) {
-      const code = p.ctoCode ?? p.pageLabel.sheetCode;
+      const code = p.sheetCode;
       const n = code ? normCode(code) : null;
       codeOf.set(p.pageIndex, n);
       if (n) (byCode.get(n) || byCode.set(n, []).get(n)!).push(p);
@@ -729,10 +823,10 @@ export async function autoStitch(
         // A strip's extract is frame-LOCAL, so its drawing frame is recomputed in
         // those coordinates rather than inherited from the page.
         const ex = sliceExtract(p.extract, f);
-        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role, sheetCode: p.ctoCode });
+        units.push({ pageIndex: p.pageIndex, frame: f, extract: ex, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: detectDrawingFrame(ex.geometry, ex.view), role: p.role, sheetCode: p.sheetCode });
       }
     } else {
-      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role, sheetCode: p.ctoCode });
+      units.push({ pageIndex: p.pageIndex, frame: null, extract: p.extract, sizePt: { w, h }, scale: scaleOf(p.pageIndex), printedNo: p.printedNo, key: 0, drawingFrame: p.drawingFrame, role: p.role, sheetCode: p.sheetCode });
     }
   }
 

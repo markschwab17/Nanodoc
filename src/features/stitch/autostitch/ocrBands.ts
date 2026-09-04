@@ -7,7 +7,7 @@
  */
 import type { Label } from "./types";
 import type { OcrWord, RawImage } from "./ocrService";
-import { REF_NUMBER_SRC, REF_CODE_SRC } from "./tokens";
+import { REF_NUMBER_SRC, REF_CODE_SRC, isMatchlineText } from "./tokens";
 
 export interface BandSpec { edge: "top" | "bottom" | "left" | "right"; clip: [number, number, number, number] }
 
@@ -165,13 +165,19 @@ const bboxUnion = (ws: OcrWord[]) => ({
 const REF_PHRASE_RE = new RegExp(`(?:${REF_NUMBER_SRC})|(?:${REF_CODE_SRC})`, "i");
 
 /**
- * Reference phrases found by sliding a short window over CONSECUTIVE same-line
- * words, independently of `mergeWords`. `mergeWords` decides by geometry alone and
- * gets it wrong in both directions on dense civil sheets; this pass decides by
- * CONTENT — a run of ≤ `maxWords` words that reads as a complete "SEE SHEET n"
- * callout is one, whatever the gaps looked like. The shortest match wins at each
- * start and its words are consumed, so one callout yields one phrase. Pure;
- * exported for tests.
+ * Callout phrases found by sliding a short window over CONSECUTIVE same-line words,
+ * independently of `mergeWords`. `mergeWords` decides by geometry alone and gets it
+ * wrong in both directions on dense civil sheets; this pass decides by CONTENT — a
+ * run of ≤ `maxWords` words that READS as a callout is one, whatever the gaps looked
+ * like. The shortest match wins at each start and its words are consumed, so one
+ * callout yields one phrase.
+ *
+ * Two shapes qualify. A complete reference ("SEE SHEET 6", "SEE SHEET C-302") is the
+ * obvious one. A bare MATCHLINE is the other, and it matters as much: a matchline
+ * with no readable target is still the fact that this edge abuts something, which is
+ * what `matchlinePrior` pairs on and what `hasEdgeRefs` counts — and outlined CAD
+ * text routinely arrives as "MATCH" + "LINE" in two words, or with the MATCH clipped
+ * away entirely ("LINE S EE SHEET"). Pure; exported for tests.
  */
 export function refPhraseWindows(words: OcrWord[], maxWords = 4): OcrWord[] {
   const { sorted, lineOf } = clusterLines(words);
@@ -181,7 +187,7 @@ export function refPhraseWindows(words: OcrWord[], maxWords = 4): OcrWord[] {
       const win = sorted.slice(i, i + n);
       if (lineOf.get(win[n - 1]) !== lineOf.get(win[0])) break; // window left the line
       const text = win.map((w) => w.text).join(" ");
-      if (!REF_PHRASE_RE.test(text)) continue;
+      if (!REF_PHRASE_RE.test(text) && !isMatchlineText(text)) continue;
       out.push({ text, confidence: Math.min(...win.map((w) => w.confidence)), bbox: bboxUnion(win) });
       i += n - 1; // consume the window
       break;

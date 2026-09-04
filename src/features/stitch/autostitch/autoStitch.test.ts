@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolvePrintedNos, autoStitch, AutoStitchAborted } from "./autoStitch";
+import { resolvePrintedNos, autoStitch, AutoStitchAborted, resolveSheetCodes } from "./autoStitch";
 
 // autoStitch's per-page capture and band raster are mupdf-bound; mock them so the
 // abort-checkpoint behaviour is testable without wasm. Pages carry NO edge refs,
@@ -409,6 +409,22 @@ describe("sheet identity supplied by the caller (the CTO hand-off)", () => {
     expect(debug.inputs.map((i: any) => i.printedNo)).toEqual([5, 6]);
   });
 
+  it("a supplied code nothing corroborates is ignored end to end", async () => {
+    // The sheets reference each other as CD102/CD103; the caller says A1/B3. Trusting
+    // the caller would make "SEE SHEET CD103" resolve to nothing AND put a bogus code
+    // on each page — worse than having none.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pages = [
+      codeless("MATCH LINE SEE SHEET CD103", [910, 400]),
+      codeless("MATCH LINE SEE SHEET CD102", [90, 400]),
+    ];
+    const good = await run(pages, new Map([[0, "CD102"], [1, "CD103"]]));
+    expect(good.anchors).toHaveLength(1); // corroborated by the neighbours' callouts
+    const bad = await run(pages, new Map([[0, "A1"], [1, "B3"]]));
+    expect(bad.anchors).toHaveLength(0);
+    expect(warn.mock.calls.flat().join(" ")).toContain('ignoring supplied sheet code "A1"');
+  });
+
   it("a supplied number is trusted as given, outside the OCR sanity range", async () => {
     // Two pages committed out of a 30-sheet set are legitimately sheets 21 and 22 —
     // the [1, 2*pageCount] rule that catches an OCR misread must not apply here.
@@ -416,5 +432,81 @@ describe("sheet identity supplied by the caller (the CTO hand-off)", () => {
     const debug = await run(pages, new Map([[0, "21"], [1, "22"]]));
     expect(debug.inputs.map((i: any) => i.printedNo)).toEqual([21, 22]);
     expect(debug.anchors).toHaveLength(1);
+  });
+});
+
+describe("resolveSheetCodes — a supplied code has to be corroborated", () => {
+  const page = (pageIndex: number, over: Partial<Parameters<typeof resolveSheetCodes>[0][0]> = {}) =>
+    ({ pageIndex, ctoCode: null, titleCode: null, ownTokens: [] as string[], refTargets: [] as string[], ...over });
+  const warn = () => { /* silent */ };
+
+  it("trusts a supplied code the sheet itself carries, uniquely", () => {
+    const out = resolveSheetCodes([
+      page(0, { ctoCode: "CD102", ownTokens: ["CD102", "G-007"] }),
+      page(1, { ownTokens: ["G-007"] }),
+    ], warn);
+    expect(out.get(0)).toBe("CD102");
+  });
+
+  it("a token every sheet carries is NOT corroboration", () => {
+    // Every CAD sheet prints a border coordinate grid — A1, B1, B2, B3 — so finding
+    // "A1" on a sheet says nothing about which sheet it is. Both Coast Guard sheets
+    // carry A1 AND B3, which is exactly the pair the extraction had guessed.
+    const msgs: string[] = [];
+    const out = resolveSheetCodes([
+      page(0, { ctoCode: "A1", ownTokens: ["A1", "B1", "B2", "B3"] }),
+      page(1, { ctoCode: "B3", ownTokens: ["A1", "A3", "B1", "B3", "C1"] }),
+    ], (m) => msgs.push(m));
+    expect(out.size).toBe(0);
+    expect(msgs.join(" ")).toContain('ignoring supplied sheet code "A1"');
+    expect(msgs.join(" ")).toContain('ignoring supplied sheet code "B3"');
+  });
+
+  it("trusts a supplied code its own title block agrees with", () => {
+    const out = resolveSheetCodes([page(0, { ctoCode: "CD-102", titleCode: "CD102", ownTokens: [] })], warn);
+    expect(out.get(0)).toBe("CD102");
+  });
+
+  it("trusts a supplied code another selected sheet points at", () => {
+    // The sheet's own title block is unreadable, but its neighbour's matchline names
+    // it — that is corroboration from the drawings too.
+    const out = resolveSheetCodes([
+      page(0, { ctoCode: "CD102" }),
+      page(1, { titleCode: "CD103", refTargets: ["CD-102"] }),
+    ], warn);
+    expect(out.get(0)).toBe("CD102");
+  });
+
+  it("IGNORES a supplied code nothing on the drawings agrees with, and says so", () => {
+    // The real case: an extraction wrote "B3" for a sheet whose title block reads
+    // CD103. A wrong code is worse than none — every callout resolving through it
+    // anchors the wrong pair.
+    const msgs: string[] = [];
+    const out = resolveSheetCodes([page(0, { ctoCode: "B3", titleCode: "CD103", ownTokens: ["CD103"] })], (m) => msgs.push(m));
+    expect(out.get(0)).toBe("CD103"); // falls back to what the sheet says
+    expect(msgs.join(" ")).toContain('ignoring supplied sheet code "B3"');
+  });
+
+  it("falls back to nothing when the sheet says nothing either", () => {
+    const out = resolveSheetCodes([page(0, { ctoCode: "B3" })], warn);
+    expect(out.has(0)).toBe(false);
+  });
+
+  it("compares separator-insensitively", () => {
+    expect(resolveSheetCodes([page(0, { ctoCode: "CD-102", ownTokens: ["CD 102"] })], warn).get(0)).toBe("CD102");
+  });
+
+  it("drops a code two pages both claim", () => {
+    // The Coast Guard pair: the title-block picker returns "A1" for BOTH sheets. One
+    // callout resolving through it would anchor two different pages.
+    const msgs: string[] = [];
+    const out = resolveSheetCodes([page(0, { titleCode: "A1" }), page(1, { titleCode: "A1" })], (m) => msgs.push(m));
+    expect(out.size).toBe(0);
+    expect(msgs.join(" ")).toContain("claimed by pages 0, 1");
+  });
+
+  it("leaves distinct codes alone", () => {
+    const out = resolveSheetCodes([page(0, { titleCode: "C-1" }), page(1, { titleCode: "C-2" })], warn);
+    expect([...out.values()].sort()).toEqual(["C1", "C2"]);
   });
 });

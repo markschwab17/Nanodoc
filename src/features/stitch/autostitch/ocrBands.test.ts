@@ -245,3 +245,27 @@ describe("pageEdgeBands with a drawing frame", () => {
     expect(pageEdgeBands(view).map((s) => [s.edge, s.clip])).toEqual(pageOnly);
   });
 });
+
+describe("refPhraseWindows recovers a split MATCHLINE", () => {
+  const W = (text: string, x0: number, y0: number, x1: number, y1: number, confidence = 90): OcrWord =>
+    ({ text, confidence, bbox: { x0, y0, x1, y1 } });
+
+  test("'MATCH' + 'LINE' as two words is one matchline callout", () => {
+    // A matchline with no readable target is still the fact that this edge abuts
+    // something — which is what matchlinePrior pairs on and hasEdgeRefs counts.
+    const w = refPhraseWindows([W("MATCH", 0, 0, 60, 12), W("LINE", 200, 0, 240, 12)]);
+    expect(w.map((x) => x.text)).toEqual(["MATCH LINE"]);
+  });
+
+  test("'LINE' + 'S' + 'EE' + 'SHEET' is recovered too", () => {
+    const w = refPhraseWindows([
+      W("LINE", 0, 0, 40, 12), W("S", 50, 0, 58, 12), W("EE", 66, 0, 84, 12), W("SHEET", 92, 0, 140, 12),
+    ]);
+    expect(w).toHaveLength(1);
+    expect(w[0].text).toBe("LINE S EE SHEET");
+  });
+
+  test("ordinary words on a line are not a callout", () => {
+    expect(refPhraseWindows([W("GRAPHIC", 0, 0, 70, 12), W("SCALE", 80, 0, 130, 12), W("IN", 140, 0, 155, 12)])).toHaveLength(0);
+  });
+});

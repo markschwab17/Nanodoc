@@ -216,6 +216,7 @@ for (const set of sets) {
   row.suspect = (res.seamReport ?? []).filter((s) => s.status === "suspect").length;
   row.seams = (res.seamReport ?? []).length;
   row.skippedSheets = (res.skipped ?? []).length;
+  row.refPages = res.refPageIndices.length;
   // ALONG-anchored pages, and the placed pages that are NOT (they are connected but
   // free to slide along their seams, so the commit demotes them to unaligned).
   const placedPages = [...new Set(res.poses.filter((p) => p.posFt).map((p) => p.pageIndex))].sort((a, b) => a - b);
@@ -241,6 +242,9 @@ for (const set of sets) {
   if (set.maxWorstResidFt != null && row.worstResidFt > set.maxWorstResidFt) fail(`worstResid ${row.worstResidFt} ft > ${set.maxWorstResidFt} ft`);
   if (set.maxSuspectSeams != null && row.suspect > set.maxSuspectSeams) fail(`${row.suspect} suspect seams > ${set.maxSuspectSeams}`);
   if (set.maxSeconds != null && row.seconds > set.maxSeconds) fail(`${row.seconds.toFixed(1)}s > ${set.maxSeconds}s`);
+  // Ref-bearing pages: the difference between "these sheets don't share a matchline"
+  // and "no callouts were found at all", which are very different things to be told.
+  if (set.minRefPages != null && row.refPages < set.minRefPages) fail(`${row.refPages} ref-bearing pages < ${set.minRefPages}`);
   // GROUND TRUTH. The bar applies to the units the solver CLAIMS: an along-anchored
   // unit is offered as aligned, so it must actually be where it belongs. A unit that
   // is not along-anchored is demoted to unaligned by the commit, so a large error
@@ -273,14 +277,15 @@ if (AS_JSON) {
   console.log(JSON.stringify({ manifest: MANIFEST, rows }, null, 2));
 } else {
   const pad = (s, n) => String(s).padEnd(n);
+  const NAMEW = 32;
   console.log(`\nstitch-eval · ${MANIFEST}\n`);
-  console.log(`${pad("set", 26)}${pad("aligned", 9)}${pad("method", 11)}${pad("verdict", 12)}${pad("worstResid", 12)}${pad("suspect", 9)}${pad("skipped", 9)}${pad("ocr", 6)}time`);
+  console.log(`${pad("set", NAMEW)}${pad("aligned", 9)}${pad("method", 11)}${pad("verdict", 12)}${pad("worstResid", 12)}${pad("suspect", 9)}${pad("skipped", 9)}${pad("refPg", 7)}${pad("ocr", 6)}time`);
   console.log("-".repeat(110));
   for (const r of rows) {
-    if (r.skipped) { console.log(`${pad(r.name, 26)}SKIPPED — ${r.skipped}`); continue; }
+    if (r.skipped) { console.log(`${pad(r.name, NAMEW)}SKIPPED — ${r.skipped}`); continue; }
     console.log(
-      `${pad(r.name, 26)}${pad(r.aligned, 9)}${pad(r.method, 11)}${pad(r.verdict, 12)}` +
-      `${pad(`${r.worstResidFt.toFixed(2)} ft`, 12)}${pad(`${r.suspect}/${r.seams}`, 9)}${pad(r.skippedSheets, 9)}${pad(r.ocrCalls, 6)}${r.seconds.toFixed(1)}s`,
+      `${pad(r.name, NAMEW)}${pad(r.aligned, 9)}${pad(r.method, 11)}${pad(r.verdict, 12)}` +
+      `${pad(`${r.worstResidFt.toFixed(2)} ft`, 12)}${pad(`${r.suspect}/${r.seams}`, 9)}${pad(r.skippedSheets, 9)}${pad(r.refPages, 7)}${pad(r.ocrCalls, 6)}${r.seconds.toFixed(1)}s`,
     );
   }
   console.log("");

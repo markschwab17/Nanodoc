@@ -50,6 +50,15 @@
       "scale": 20,
       "maxAligned": 0,
       "notes": "Notes, details and single plans that share no ground. NOTHING may be placed: any placement here is a false pair. Produced 3 before T0."
+    },
+    {
+      "name": "Coast Guard pair (CD102-CD103)",
+      "pdf": "~/Downloads/CoastGuard CD102-CD103.pdf",
+      "pages": "0-1",
+      "scale": 30,
+      "maxAligned": 0,
+      "notes": "Two 36x24 CAD sheets, 1\"=30', all callouts OUTLINED (0 text-channel matchline hits on either page) so identity and adjacency are OCR-only. It CANNOT be aligned from the signals present and must not be forced: CD103 never references CD102 (its callouts name CD101 and CD104), so the only link is one-directional CD102 -> CD103, and OCR returns that target as the truncated \"HEET CD1\". Both pages' matchlines land on the SAME (left) edge, so no facing pair exists either. What IS asserted: both pages carry a detected edge ref (so the app says \"these sheets don't share a matchline\", not \"no callouts were found\"), and no false pair is invented. If a future OCR change makes this pair align, verify the placement by eye and RAISE maxAligned.",
+      "minRefPages": 2
     }
   ]
 }
