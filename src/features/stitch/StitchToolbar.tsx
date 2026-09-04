@@ -483,7 +483,7 @@ export function StitchToolbar({
           variant={alignNeighbourMode ? "secondary" : "outline"}
           title="Align to neighbour: pick the sheet you want to move, click one anchor point on it, then the matching point on the sheet it joins — it slides there. Turn on 'Rotate too' for a sheet that is also turned (two points each side)."
           label="Align to neighbour"
-          tooltipDescription={"Pick the sheet you want to MOVE — every other sheet locks and dims.\nClick one anchor point on it, then the matching point on a fixed sheet: it slides there, unrotated and unresized.\nFor a sheet that IS turned, switch on \"Rotate too (2 points)\" and click two points each side.\nA magnifier follows the cursor so you can hit the line, not near it."}
+          tooltipDescription={"Pick the sheet you want to MOVE — every other sheet locks, and whichever sheets you cannot click at each step fade back.\nClick one anchor point on it, then the matching point on a fixed sheet: it slides there, unrotated and unresized.\nFor a sheet that IS turned, switch on \"Rotate too (2 points)\" and click two points each side.\nA magnifier follows the cursor so you can hit the line, not near it."}
           disabled={!hasTiles && !alignNeighbourMode}
           onClick={() => onAlignNeighbourModeChange(!alignNeighbourMode)}
         >

@@ -3,8 +3,10 @@
  *
  * One full-viewport overlay (portaled to the body, like the other stitch modes so the
  * markers are never clipped) that does four things:
- *   • dims every sheet except the one being moved, which IS the lock — there is no lock
- *     icon to find any more, and nothing else can be dragged while the mode is up;
+ *   • fades whatever the current step will not take a click on — the fixed sheets while
+ *     the mover's points go down, the mover itself while the matching points do — which
+ *     IS the lock: there is no lock icon to find any more, and nothing else can be
+ *     dragged while the mode is up;
  *   • takes the point clicks — one each side by default, four with **Rotate too** —
  *     snapping each to captured linework when **Snap to lines** is on, and paints the
  *     markers with their connecting lines;
@@ -231,17 +233,22 @@ export function AlignToNeighbourMode({
           viewBox={`0 0 ${containerRect.width} ${containerRect.height}`}
           preserveAspectRatio="none"
         >
-          {/* Locked sheets are dimmed to 40% — that dimming IS the lock. */}
-          {tiles.map((tile) =>
-            align.isLocked(tile.id) ? (
+          {/* A scrim over the sheets this step will NOT take a click on — the fixed
+              sheets while the mover's points go down, the MOVER while the matching
+              points do. The second half is the one Mark caught: aiming at a sheet the
+              mode had greyed out meant reading the faint half of the picture. The
+              markers are drawn after this, so they stay legible above it. */}
+          {tiles.map((tile) => {
+            const opacity = align.sheetOpacity(tile.id);
+            return opacity < 1 ? (
               <polygon
                 key={`dim-${tile.id}`}
                 points={tilePolygon(tile)}
                 fill="hsl(var(--background))"
-                opacity={0.6}
+                opacity={1 - opacity}
               />
-            ) : null
-          )}
+            ) : null;
+          })}
           {/* The group so far: sheets this session has already placed (the sheet that
               moved AND the one it was aligned to). Outlined while picking and while the
               matching point is being placed — that is exactly when the user is looking

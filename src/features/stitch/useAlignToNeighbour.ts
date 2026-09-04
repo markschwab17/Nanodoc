@@ -27,6 +27,7 @@ import {
   IDLE_ALIGN,
   alignClickableTiles,
   alignHint,
+  alignSheetOpacity,
   isLockedForAlign,
   isPlacedInAlign,
   loupeActive,
@@ -60,6 +61,8 @@ export interface AlignToNeighbour {
   showLoupe: boolean;
   movingTileId: string | null;
   isLocked: (tileId: string) => boolean;
+  /** How faded to draw a sheet at this step — the sheets a click cannot take. */
+  sheetOpacity: (tileId: string) => number;
   /** Already placed by this session: part of the fixed group. */
   isPlaced: (tileId: string) => boolean;
   /** The sheets this step accepts a click on — what the hit test must search. */
@@ -196,6 +199,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
 
   const isLocked = useCallback((tileId: string) => isLockedForAlign(state, tileId), [state]);
   const isPlaced = useCallback((tileId: string) => isPlacedInAlign(state, tileId), [state]);
+  const sheetOpacity = useCallback((tileId: string) => alignSheetOpacity(state, tileId), [state]);
   const clickableTiles = useCallback(
     <T extends { id: string }>(tiles: readonly T[]) => alignClickableTiles(state, tiles),
     [state]
@@ -221,6 +225,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       showLoupe: loupeActive(state),
       movingTileId: state.movingTileId,
       isLocked,
+      sheetOpacity,
       isPlaced,
       clickableTiles,
       enter,
@@ -230,7 +235,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     }),
     [
       active, state, refusal, seamNote, matchScale, snapToLines,
-      setTwoPoint, isLocked, isPlaced, clickableTiles, enter, exit, click, miss,
+      setTwoPoint, isLocked, sheetOpacity, isPlaced, clickableTiles, enter, exit, click, miss,
     ]
   );
 }

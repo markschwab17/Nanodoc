@@ -138,6 +138,37 @@ export function isLockedForAlign(state: AlignMachine, tileId: string): boolean {
   return state.movingTileId != null && tileId !== state.movingTileId;
 }
 
+/** How faded a sheet is drawn at this step. 1 = untouched. */
+export const ALIGN_DIM_FIXED = 0.4;
+export const ALIGN_DIM_MOVER = 0.25;
+
+/**
+ * The opacity a sheet should be drawn at, for the step the mode is on.
+ *
+ * The rule is "fade what you cannot click", not "fade everything but the mover". Mark
+ * hit the difference immediately: while placing the MATCHING point he was aiming at a
+ * sheet the mode had greyed out, and its linework — the thing he had to hit — was the
+ * faint half of the picture.
+ *
+ *   pickMoving  nothing fades; every sheet is a candidate (the group is outlined).
+ *   A1 / A2     the fixed sheets fade to 40 %: only the mover takes a click.
+ *   B1 / B2     the fixed sheets come back to FULL, and the mover fades further (25 %)
+ *               — it is the sheet lying over the one being read, and it is not
+ *               clickable at this step either.
+ */
+export function alignSheetOpacity(state: AlignMachine, tileId: string): number {
+  switch (state.step) {
+    case "A1":
+    case "A2":
+      return state.movingTileId != null && tileId !== state.movingTileId ? ALIGN_DIM_FIXED : 1;
+    case "B1":
+    case "B2":
+      return tileId === state.movingTileId ? ALIGN_DIM_MOVER : 1;
+    default:
+      return 1;
+  }
+}
+
 /** Has this sheet already been placed in this session? (Part of the fixed group.) */
 export function isPlacedInAlign(state: AlignMachine, tileId: string): boolean {
   return state.placedTileIds.includes(tileId);

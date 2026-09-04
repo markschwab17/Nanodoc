@@ -1,7 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, test, expect } from "vitest";
 import {
+  ALIGN_DIM_FIXED,
+  ALIGN_DIM_MOVER,
   ALIGN_NEXT_SHEET_HINT,
   alignHitForPick,
+  alignSheetOpacity,
   ALIGN_ONE_POINT_HINTS,
   ALIGN_STEP_HINTS,
   IDLE_ALIGN,
@@ -353,5 +356,47 @@ describe("finishing", () => {
       expect(loupeActive({ ...IDLE_ALIGN, step })).toBe(true);
     }
     expect(loupeActive(IDLE_ALIGN)).toBe(false);
+  });
+});
+
+describe("what is faded at each step", () => {
+  // Mark: "When you go to select the 2nd point on the other pdf page the other pdf is
+  // dimmed." The rule is "fade what you cannot click", not "fade everything but the
+  // mover" — otherwise the sheet you are aiming at is the faint half of the picture.
+  const picking = run([enter]).state;
+  const placingA = run([enter, click("a", 0, 0)]).state;
+  const placingB = run([enter, click("a", 0, 0), click("a", 1, 1)]).state;
+
+  test("nothing fades while a sheet is being picked — every one is a candidate", () => {
+    expect(alignSheetOpacity(picking, "a")).toBe(1);
+    expect(alignSheetOpacity(picking, "b")).toBe(1);
+  });
+
+  test("the fixed sheets fade while the mover's own point goes down", () => {
+    expect(placingA.step).toBe("A1");
+    expect(alignSheetOpacity(placingA, "a")).toBe(1);
+    expect(alignSheetOpacity(placingA, "b")).toBe(ALIGN_DIM_FIXED);
+    expect(ALIGN_DIM_FIXED).toBe(0.4);
+  });
+
+  test("the fixed sheets come BACK while the matching point goes down, and the mover fades", () => {
+    expect(placingB.step).toBe("B1");
+    expect(alignSheetOpacity(placingB, "b")).toBe(1); // the sheet being read
+    expect(alignSheetOpacity(placingB, "a")).toBe(ALIGN_DIM_MOVER);
+    expect(ALIGN_DIM_MOVER).toBeLessThan(ALIGN_DIM_FIXED);
+  });
+
+  test("the same holds on the two-point flow's second pair", () => {
+    const atA2 = run([enter, rotateToo, click("a", 0, 0), click("a", 1, 1)]).state;
+    expect(atA2.step).toBe("A2");
+    expect(alignSheetOpacity(atA2, "b")).toBe(ALIGN_DIM_FIXED);
+    const atB2 = run([enter, rotateToo, click("a", 0, 0), click("a", 1, 1), click("a", 2, 2), click("b", 3, 3)]).state;
+    expect(atB2.step).toBe("B2");
+    expect(alignSheetOpacity(atB2, "b")).toBe(1);
+    expect(alignSheetOpacity(atB2, "a")).toBe(ALIGN_DIM_MOVER);
+  });
+
+  test("outside the mode nothing is faded", () => {
+    expect(alignSheetOpacity(IDLE_ALIGN, "a")).toBe(1);
   });
 });
