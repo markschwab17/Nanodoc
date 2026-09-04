@@ -1,5 +1,6 @@
 import { describe, it, test, expect } from "vitest";
 import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
+import { makeGeom } from "./types";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -41,7 +42,7 @@ describe("stitchSheets", () => {
 
   it("stitches two sheets by geometry alone (no tokens/matchlines) past identical boilerplate", () => {
     const VIEW: [number, number, number, number] = [0, 0, 3024, 2160];
-    const seg = (id: string, x1: number, y1: number, x2: number, y2: number): Geom => ({ id, pts: [[x1, y1], [x2, y2]], closed: false });
+    const seg = (_id: string, x1: number, y1: number, x2: number, y2: number): Geom => makeGeom([[x1, y1], [x2, y2]]);
     // A distinctive drawing shape — VARIED lengths/angles so each segment's
     // (len,angle) signature is unique and segVote matches by index (each ≥8ft).
     const SHAPE: [number, number][] = [[90, 0], [0, 70], [110, 35], [45, -55], [75, 25], [0, 95], [60, 60], [130, 15], [30, 80], [85, -40], [50, 50], [0, 120], [100, 65], [40, -70], [95, 30], [70, 90], [120, -25], [55, 45]];
@@ -141,8 +142,8 @@ describe("matchline label single-axis integration", () => {
     // Modest overlap linework (true world offset 30,430) that segVote's wrong
     // window misses — proves the loose axis can't be pinned from the label prior.
     const world: [number, number][] = [[60, 440], [95, 470], [130, 435], [170, 465], [120, 450], [200, 475]];
-    const geomAt = (id: string, ox: number, oy: number): Geom =>
-      ({ id, closed: false, pts: world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]) });
+    const geomAt = (_id: string, ox: number, oy: number): Geom =>
+      makeGeom(world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]));
     const mk = (no: number, labels: Label[], g: Geom): SheetInput => ({
       id: String(no), no, scale: 20, view: VIEW,
       extract: { view: VIEW, shxLabels: labels, labels, words: labels, geometry: [g] } as PageExtract,
@@ -220,7 +221,7 @@ describe("bandSeamPrior abutment floor", () => {
 describe("matchlineStrokePrior", () => {
   it("takes the perpendicular offset from the matchline STROKES, not the labels", () => {
     const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
-    const hstroke = (id: string, y: number): Geom => ({ id, pts: [[40, y], [2550, y]], closed: false });
+    const hstroke = (_id: string, y: number): Geom => makeGeom([[40, y], [2550, y]]);
     // Sheet 1: matchline near the y1 edge (label at y=1600), stroke at y=1550.
     // Sheet 2: matchline near the y0 edge (label at y=120), stroke at y=170.
     // Labels sit at DIFFERENT offsets from their strokes (50 vs 50 but opposite),
@@ -236,7 +237,7 @@ describe("matchlineStrokePrior", () => {
 
   it("returns null when the matchlines don't cross-reference", () => {
     const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
-    const hstroke = (id: string, y: number): Geom => ({ id, pts: [[40, y], [2550, y]], closed: false });
+    const hstroke = (_id: string, y: number): Geom => makeGeom([[40, y], [2550, y]]);
     const s1 = { no: 1, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 99)", 1200, 1600)], view: VIEW, geometry: [hstroke("a", 1550)] } };
     const s2 = { no: 2, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 88)", 1200, 120)], view: VIEW, geometry: [hstroke("b", 170)] } };
     expect(matchlineStrokePrior(s1, s2)).toBeNull();
@@ -248,7 +249,7 @@ describe("buildGeomFurnitureFilter", () => {
     const boilerPts: [number, number][] = [[100, 100], [300, 100], [300, 200]];
     const sheet = (key: number, unique: [number, number][]) => ({
       key,
-      raw: { geometry: [{ id: "b", pts: boilerPts.map((p) => [...p] as [number, number]), closed: false }, { id: "u", pts: unique, closed: false }] },
+      raw: { geometry: [makeGeom(boilerPts), makeGeom(unique)] },
     });
     const sheets = [
       sheet(1, [[500, 500], [600, 600]]),
@@ -257,8 +258,8 @@ describe("buildGeomFurnitureFilter", () => {
       sheet(4, [[120, 700], [220, 760]]),
     ];
     const gf = buildGeomFurnitureFilter(sheets, 3);
-    expect(gf.isFurniture({ id: "x", pts: boilerPts.map((p) => [...p] as [number, number]), closed: false })).toBe(true);
-    expect(gf.isFurniture({ id: "y", pts: [[500, 500], [600, 600]], closed: false })).toBe(false);
+    expect(gf.isFurniture(makeGeom(boilerPts))).toBe(true);
+    expect(gf.isFurniture(makeGeom([[500, 500], [600, 600]]))).toBe(false);
   });
 
   // Regression (Bug A): visible-text sets carry stray render-mode-3 glyphs, so
@@ -388,8 +389,8 @@ describe("stitchSheets anchor channel", () => {
   };
   const Z = zigFt();
   // Materialize Z shifted by (dxFt,dyFt) in local feet, converted to page pts.
-  const shifted = (dxFt: number, dyFt: number, id: string): Geom =>
-    ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]) });
+  const shifted = (dxFt: number, dyFt: number, _id: string): Geom =>
+    makeGeom(Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]));
   const mk = (no: number, geometry: Geom[]): SheetInput => ({
     id: String(no), no, scale: SCALE, view: VIEW,
     extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -499,7 +500,7 @@ describe("stitchSheets anchor channel", () => {
 
 describe("seamCrossings + crossingConsensus", () => {
   // A vertical matchline at x=cross; a horizontal (transverse) segment crosses it.
-  const seg = (id: string, pts: [number, number][]): Geom => ({ id, closed: false, pts });
+  const seg = (_id: string, pts: [number, number][]): Geom => makeGeom(pts);
 
   it("records a transverse crossing's along-station and excludes parallel linework", () => {
     // Vertical matchline (axis "v") at x=1000 pt. A horizontal street segment ending
@@ -591,8 +592,8 @@ describe("stitchSheets fully-2D-precise (crossing) anchor", () => {
     return pts;
   };
   const Z = zigFt();
-  const shifted = (dxFt: number, dyFt: number, id: string): Geom =>
-    ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]) });
+  const shifted = (dxFt: number, dyFt: number, _id: string): Geom =>
+    makeGeom(Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]));
   const mk = (no: number, geometry: Geom[]): SheetInput => ({
     id: String(no), no, scale: SCALE, view: VIEW,
     extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -702,8 +703,8 @@ describe("scale-invariance (pt-derived windows)", () => {
   };
   const Zpt = zigPt();
   const OFFSET_PT = 900; // fixed page-point separation between the two sheets' copies
-  const shiftPt = (dxPt: number, dyPt: number, id: string): Geom =>
-    ({ id, closed: false, pts: Zpt.map(([x, y]): [number, number] => [x - dxPt, y - dyPt]) });
+  const shiftPt = (dxPt: number, dyPt: number, _id: string): Geom =>
+    makeGeom(Zpt.map(([x, y]): [number, number] => [x - dxPt, y - dyPt]));
   const mk = (no: number, scale: number, geometry: Geom[]): SheetInput => ({
     id: String(no), no, scale, view: VIEW,
     extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -784,10 +785,9 @@ describe("unit stitching (frames + printed numbers + strip refs)", () => {
     return pts;
   };
   /** Materialize a world-ft polyline into a unit whose frame origin sits at (ox, oy) world-ft. */
-  const geomFor = (id: string, world: [number, number][], ox: number, oy: number) => [{
-    id, closed: false,
-    pts: world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]),
-  }];
+  const geomFor = (_id: string, world: [number, number][], ox: number, oy: number) => [
+    makeGeom(world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)])),
+  ];
   const zA = zig(175, 15, 1);  // in the unit1/unit2 overlap band
   const zB = zig(345, 25, 2);  // in the unit2/unit3 overlap band
   const unit1: SheetInput = {
@@ -847,9 +847,9 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
   // the matchline-strength floor). Different dash lengths across sheets keep segVote
   // from matching, so the pair resolves via the precise stroke anchor alone.
   const VIEW: [number, number, number, number] = [0, 0, 1600, 1080]; // W=444ft @20
-  const vDash = (x: number, tag: string, dashLen: number): Geom[] => {
+  const vDash = (x: number, _tag: string, dashLen: number): Geom[] => {
     const g: Geom[] = [];
-    for (let y = 100; y < 900; y += 50) g.push({ id: `${tag}${y}`, pts: [[x, y], [x, y + dashLen]], closed: false });
+    for (let y = 100; y < 900; y += 50) g.push(makeGeom([[x, y], [x, y + dashLen]]));
     return g;
   };
   const mkG = (no: number, geometry: Geom[]): SheetInput => ({
@@ -898,7 +898,7 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
       return pts;
     };
     const Z = zig();
-    const geomAt = (ox: number, id: string): Geom => ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - ox), y]) });
+    const geomAt = (ox: number, _id: string): Geom => makeGeom(Z.map(([x, y]): [number, number] => [ftToPt(x - ox), y]));
     const s1: SheetInput = {
       id: "1", no: 1, printedNo: 1, scale: 20, view: V,
       extract: { view: V, shxLabels: [], words: [], labels: [lbl2("MATCHLINE (SEE SHEET 2)", 2450, 850)], geometry: [geomAt(0, "z1")] } as PageExtract,
@@ -921,9 +921,9 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
   // the matchline, so a seam whose own strokes agree to 0.00 ft was reported as
   // 4-192 ft off and the whole reference set came back `unverified`.
   const decoyView: [number, number, number, number] = [0, 0, 1600, 1080]; // 444x300 ft @20
-  const vDashN = (x: number, tag: string, dashLen: number): Geom[] => {
+  const vDashN = (x: number, _tag: string, dashLen: number): Geom[] => {
     const g: Geom[] = [];
-    for (let y = 100; y < 900; y += 50) g.push({ id: `${tag}${y}`, pts: [[x, y], [x, y + dashLen]], closed: false });
+    for (let y = 100; y < 900; y += 50) g.push(makeGeom([[x, y], [x, y + dashLen]]));
     return g;
   };
   const mkDecoy = (no: number, geometry: Geom[]): SheetInput => ({
@@ -1028,11 +1028,11 @@ describe("oneSidedStrokeAnchor", () => {
   // A full-width DASHED horizontal matchline at cross-y=Y (dashes sum well past the
   // matchline-strength floor and span most of the width), plus a couple of vertical
   // "streets" that terminate at the line (seam crossings).
-  const matchlineH = (Y: number, tag: string): Geom[] => {
+  const matchlineH = (Y: number, _tag: string): Geom[] => {
     const g: Geom[] = [];
-    for (let x = 150; x < 950; x += 50) g.push({ id: `${tag}m${x}`, pts: [[x, Y], [x + 32, Y]], closed: false });
-    g.push({ id: `${tag}s1`, pts: [[320, Y], [320, Y + 220]], closed: false }); // street crossing
-    g.push({ id: `${tag}s2`, pts: [[640, Y], [640, Y + 220]], closed: false });
+    for (let x = 150; x < 950; x += 50) g.push(makeGeom([[x, Y], [x + 32, Y]]));
+    g.push(makeGeom([[320, Y], [320, Y + 220]])); // street crossing
+    g.push(makeGeom([[640, Y], [640, Y + 220]]));
     return g;
   };
 
@@ -1068,15 +1068,15 @@ describe("sheet roles and the band-seam gate", () => {
   const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720 x 480 ft @20
   const ftToPt = (ft: number) => ft * 3.6;
   /** 14 distinctly-signatured segments on one horizontal line at `cyFt` (feet). */
-  const seamCluster = (cyFt: number, tag: string): Geom[] => {
+  const seamCluster = (cyFt: number, _tag: string): Geom[] => {
     const g: Geom[] = [];
     for (let i = 0; i < 14; i++) {
       const cx = 120 + i * 40, len = 12 + i * 2, ang = ((i * 13) % 170) + 5;
       const r = (ang * Math.PI) / 180;
       const dx = (Math.cos(r) * len) / 2, dy = (Math.sin(r) * len) / 2;
-      g.push({ id: `${tag}${i}`, closed: false, pts: [
+      g.push(makeGeom([
         [ftToPt(cx - dx), ftToPt(cyFt - dy)], [ftToPt(cx + dx), ftToPt(cyFt + dy)],
-      ] });
+      ]));
     }
     return g;
   };

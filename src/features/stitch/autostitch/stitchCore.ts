@@ -123,10 +123,15 @@ export function buildFurnitureFilter(sheets: any[], minSheets: number): { size: 
 export function buildGeomFurnitureFilter(sheets: any[], minSheets: number): { size: number; isFurniture(g: Geom): boolean } {
   const sigOf = (g: Geom): string => {
     const pts = g.pts;
+    const n = pts.length / 2;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of pts) { if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0]; if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; }
+    for (let i = 0; i < pts.length; i += 2) {
+      const x = pts[i], y = pts[i + 1];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
     const q = (v: number) => Math.round(v / 8); // 8pt page bins
-    return `${q((minX + maxX) / 2)},${q((minY + maxY) / 2)},${q(maxX - minX)},${q(maxY - minY)},${pts.length}`;
+    return `${q((minX + maxX) / 2)},${q((minY + maxY) / 2)},${q(maxX - minX)},${q(maxY - minY)},${n}`;
   };
   const seen = new Map<string, Set<any>>();
   for (const s of sheets) {
@@ -153,17 +158,19 @@ export function segFeats(s: any, minLenFt = 8): SegFeat[] {
   const out: SegFeat[] = [];
   for (const g of s.raw.geometry as Geom[]) {
     const pts = g.pts;
-    if (!pts || pts.length < 2) continue;
-    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
     for (let i = 0; i < n; i++) {
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      const ax = pts[ai], ay = pts[ai + 1], bx = pts[bi], by = pts[bi + 1];
+      const dx = bx - ax, dy = by - ay;
       const len = Math.hypot(dx, dy);
       if (FT(len, s.scale) < minLenFt) continue;
       let ang = (Math.atan2(dy, dx) * 180) / Math.PI;
       ang = ((ang % 180) + 180) % 180;
       out.push({
-        mx: FT((a[0] + b[0]) / 2, s.scale), my: FT((a[1] + b[1]) / 2, s.scale),
+        mx: FT((ax + bx) / 2, s.scale), my: FT((ay + by) / 2, s.scale),
         len: FT(len, s.scale), ang,
       });
     }
@@ -256,20 +263,22 @@ export function findEdgeStroke(
   const spans = new Map<number, number>(); // rounded cross-coord -> summed dash span
   const ext = new Map<number, { lo: number; hi: number }>(); // dash ALONG-extent per bin
   for (const g of geometry) {
-    const pts = g.pts; if (!pts || pts.length < 2) continue;
-    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    const pts = g.pts; if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
     for (let i = 0; i < n; i++) {
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      const cc = axis === "h" ? (a[1] + b[1]) / 2 : (a[0] + b[0]) / 2;
-      if (Math.abs((axis === "h" ? b[1] - a[1] : b[0] - a[0])) > 3) continue; // must be axis-aligned
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      const ax = pts[ai], ay = pts[ai + 1], bx = pts[bi], by = pts[bi + 1];
+      const cc = axis === "h" ? (ay + by) / 2 : (ax + bx) / 2;
+      if (Math.abs((axis === "h" ? by - ay : bx - ax)) > 3) continue; // must be axis-aligned
       if (Math.abs(cc - cross) > band) continue;
-      const span = axis === "h" ? Math.abs(b[0] - a[0]) : Math.abs(b[1] - a[1]);
+      const span = axis === "h" ? Math.abs(bx - ax) : Math.abs(by - ay);
       const k = Math.round(cc / BIN);
       spans.set(k, (spans.get(k) || 0) + span);
       // Track the dash extent (min/max along-coord) at this cross-bin — the
       // matchline's endpoints, reported (not gated) by the diag as a cross-check.
-      const al0 = axis === "h" ? Math.min(a[0], b[0]) : Math.min(a[1], b[1]);
-      const al1 = axis === "h" ? Math.max(a[0], b[0]) : Math.max(a[1], b[1]);
+      const al0 = axis === "h" ? Math.min(ax, bx) : Math.min(ay, by);
+      const al1 = axis === "h" ? Math.max(ax, bx) : Math.max(ay, by);
       const e = ext.get(k);
       if (e) { if (al0 < e.lo) e.lo = al0; if (al1 > e.hi) e.hi = al1; }
       else ext.set(k, { lo: al0, hi: al1 });
@@ -324,18 +333,20 @@ export function bandStrokeCandidates(
   const spans = new Map<number, number>();
   const ext = new Map<number, { lo: number; hi: number }>();
   for (const g of geometry) {
-    const pts = g.pts; if (!pts || pts.length < 2) continue;
-    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    const pts = g.pts; if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
     for (let i = 0; i < n; i++) {
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      const cc = axis === "h" ? (a[1] + b[1]) / 2 : (a[0] + b[0]) / 2;
-      if (Math.abs((axis === "h" ? b[1] - a[1] : b[0] - a[0])) > 3) continue; // axis-aligned only
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      const ax = pts[ai], ay = pts[ai + 1], bx = pts[bi], by = pts[bi + 1];
+      const cc = axis === "h" ? (ay + by) / 2 : (ax + bx) / 2;
+      if (Math.abs((axis === "h" ? by - ay : bx - ax)) > 3) continue; // axis-aligned only
       if (cc < lo || cc > hi) continue;
-      const span = axis === "h" ? Math.abs(b[0] - a[0]) : Math.abs(b[1] - a[1]);
+      const span = axis === "h" ? Math.abs(bx - ax) : Math.abs(by - ay);
       const k = Math.round(cc / BIN);
       spans.set(k, (spans.get(k) || 0) + span);
-      const al0 = axis === "h" ? Math.min(a[0], b[0]) : Math.min(a[1], b[1]);
-      const al1 = axis === "h" ? Math.max(a[0], b[0]) : Math.max(a[1], b[1]);
+      const al0 = axis === "h" ? Math.min(ax, bx) : Math.min(ay, by);
+      const al1 = axis === "h" ? Math.max(ax, bx) : Math.max(ay, by);
       const e = ext.get(k);
       if (e) { if (al0 < e.lo) e.lo = al0; if (al1 > e.hi) e.hi = al1; }
       else ext.set(k, { lo: al0, hi: al1 });
@@ -487,15 +498,17 @@ export function seamCrossings(
 ): Crossing[] {
   const raw: Crossing[] = [];
   for (const g of geometry) {
-    const pts = g.pts; if (!pts || pts.length < 2) continue;
-    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    const pts = g.pts; if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
     for (let i = 0; i < n; i++) {
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      const ca = axis === "h" ? a[1] : a[0]; // cross-coord of the two endpoints
-      const cb = axis === "h" ? b[1] : b[0];
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      const ax = pts[ai], ay = pts[ai + 1], bx = pts[bi], by = pts[bi + 1];
+      const ca = axis === "h" ? ay : ax; // cross-coord of the two endpoints
+      const cb = axis === "h" ? by : bx;
       if (ca === cb) continue;                        // parallel on the cross axis (no unique crossing)
       if (Math.min(Math.abs(ca - cross), Math.abs(cb - cross)) > band) continue; // doesn't reach the seam
-      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const dx = bx - ax, dy = by - ay;
       const len = Math.hypot(dx, dy);
       if (FT(len, scale) < minLenFt) continue;        // drop text fragments / short interior clutter
       // Absolute segment orientation (0..180). Carried on the crossing so a station
@@ -507,7 +520,7 @@ export function seamCrossings(
       const fromAxis = axis === "h" ? Math.min(ang, 180 - ang) : Math.abs(ang - 90);
       if (fromAxis < minAngleDeg) continue;           // near-parallel to matchline → exclude
       const t = (cross - ca) / (cb - ca);             // crossing param (interp or short extrapolation)
-      const along = axis === "h" ? a[0] + t * (b[0] - a[0]) : a[1] + t * (b[1] - a[1]);
+      const along = axis === "h" ? ax + t * (bx - ax) : ay + t * (by - ay);
       raw.push({ along: FT(along, scale), ang });
     }
   }

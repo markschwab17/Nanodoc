@@ -11,9 +11,13 @@ const cy = (l: Label) => (l.y + l.endY) / 2;
 /** Iterate a page's straight segments (endpoints), calling back with each. */
 function eachSegment(geometry: Geom[], cb: (ax: number, ay: number, bx: number, by: number) => void) {
   for (const g of geometry) {
-    const pts = g.pts; if (!pts || pts.length < 2) continue;
-    const n = pts.length - 1 + (g.closed ? 1 : 0);
-    for (let i = 0; i < n; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; cb(a[0], a[1], b[0], b[1]); }
+    const pts = g.pts; if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      cb(pts[ai], pts[ai + 1], pts[bi], pts[bi + 1]);
+    }
   }
 }
 

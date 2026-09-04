@@ -46,10 +46,20 @@ export function sliceExtract(extract: PageExtract, frame: Frame, marginPt = 36):
   const keepL = (l: Label) => inside((l.x + l.endX) / 2, (l.y + l.endY) / 2);
   const geometry: typeof extract.geometry = [];
   for (const g of extract.geometry) {
+    const src = g.pts;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of g.pts) { if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0]; if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; }
+    for (let i = 0; i < src.length; i += 2) {
+      const x = src[i], y = src[i + 1];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
     if (maxX < gx0 || minX > gx1 || maxY < gy0 || minY > gy1) continue;
-    geometry.push({ ...g, pts: g.pts.map((p) => [p[0] - fx0, p[1] - fy0] as [number, number]) });
+    const shifted = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i += 2) {
+      shifted[i] = src[i] - fx0;
+      shifted[i + 1] = src[i + 1] - fy0;
+    }
+    geometry.push({ ...g, pts: shifted });
   }
   return {
     view: [0, 0, fx1 - fx0, fy1 - fy0],
@@ -87,7 +97,7 @@ export function sliceExtract(extract: PageExtract, frame: Frame, marginPt = 36):
  * different, simpler question of where the sheet's own ruled frame is.
  */
 export function detectDrawingFrame(
-  geometry: { pts: [number, number][]; closed?: boolean }[],
+  geometry: { pts: Float32Array; closed?: boolean }[],
   view: [number, number, number, number],
   { spanFrac = 0.9, minExtent = 0.55, minArea = 0.5, minInsetFrac = 0.02 } = {},
 ): [number, number, number, number] | null {
@@ -99,16 +109,18 @@ export function detectDrawingFrame(
   const hSpans = new Map<number, number>(); // y-bin -> summed horizontal length
   for (const g of geometry) {
     const pts = g.pts;
-    if (!pts || pts.length < 2) continue;
-    const n = pts.length - 1 + (g.closed ? 1 : 0);
+    if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
     for (let i = 0; i < n; i++) {
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      const ax = pts[ai], ay = pts[ai + 1], bx = pts[bi], by = pts[bi + 1];
+      const dx = bx - ax, dy = by - ay;
       if (Math.abs(dx) <= 3 && Math.abs(dy) > 3) {
-        const k = Math.round(((a[0] + b[0]) / 2) / BIN);
+        const k = Math.round(((ax + bx) / 2) / BIN);
         vSpans.set(k, (vSpans.get(k) || 0) + Math.abs(dy));
       } else if (Math.abs(dy) <= 3 && Math.abs(dx) > 3) {
-        const k = Math.round(((a[1] + b[1]) / 2) / BIN);
+        const k = Math.round(((ay + by) / 2) / BIN);
         hSpans.set(k, (hSpans.get(k) || 0) + Math.abs(dx));
       }
     }

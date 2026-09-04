@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { sliceExtract, stripFrames, detectDrawingFrame } from "./frameDetect";
+import { makeGeom } from "./types";
 import type { Geom, PageExtract } from "./types";
 
 const page = (geometry: Geom[], extra: Partial<PageExtract> = {}): PageExtract => ({
@@ -32,22 +33,22 @@ describe("sliceExtract", () => {
   test("filters and normalizes to frame-local coordinates", () => {
     const inLbl  = { text: "SEE SHEET 9", x: 500, y: 770, endX: 580, endY: 778, angle: 0, h: 8, font: null };
     const outLbl = { text: "ELSEWHERE 1", x: 100, y: 100, endX: 180, endY: 108, angle: 0, h: 8, font: null };
-    const inG: Geom  = { id: "a", pts: [[600, 900], [700, 900]], closed: false };
-    const outG: Geom = { id: "b", pts: [[100, 100], [200, 100]], closed: false };
+    const inG: Geom  = makeGeom([[600, 900], [700, 900]]);
+    const outG: Geom = makeGeom([[100, 100], [200, 100]]);
     const s = sliceExtract(page([inG, outG], { labels: [inLbl, outLbl] }), { bbox: [60, 760, 2300, 1560] });
     expect(s.view).toEqual([0, 0, 2240, 800]);
     expect(s.labels).toHaveLength(1);
     expect(s.labels[0].x).toBeCloseTo(440); // 500 - 60
     expect(s.labels[0].y).toBeCloseTo(10);  // 770 - 760
     expect(s.geometry).toHaveLength(1);
-    expect(s.geometry[0].pts[0]).toEqual([540, 140]);
+    expect(Array.from(s.geometry[0].pts.slice(0, 2))).toEqual([540, 140]);
   });
 });
 
 describe("detectDrawingFrame", () => {
   const view: [number, number, number, number] = [0, 0, 1000, 800];
-  const vline = (id: string, x: number, y0 = 0, y1 = 800) => ({ id, closed: false, pts: [[x, y0], [x, y1]] as [number, number][] });
-  const hline = (id: string, y: number, x0 = 0, x1 = 1000) => ({ id, closed: false, pts: [[x0, y], [x1, y]] as [number, number][] });
+  const vline = (_id: string, x: number, y0 = 0, y1 = 800) => makeGeom([[x, y0], [x, y1]]);
+  const hline = (_id: string, y: number, x0 = 0, x1 = 1000) => makeGeom([[x0, y], [x1, y]]);
 
   test("finds a frame whose right border is inset 28% behind a notes column", () => {
     // The failure-D shape: the drawing is ruled [20,20]-[720,780] and the right 28%

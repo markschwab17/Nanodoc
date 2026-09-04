@@ -10,6 +10,9 @@ const CURVE_STEPS = 8; // chords per bezier when flattening
 // so sub-threshold paths (hatching, glyph detail, tiny symbols) are pure noise.
 // On heavy sheets this drops ~90% of captured paths → no OOM, faster downstream.
 const MIN_GEOM_EXTENT_PT = 3;
+// Floats per geometry arena chunk (see `intern`). 64 k floats = 256 KB, i.e. one
+// buffer per ~16 k short paths.
+const ARENA_FLOATS = 1 << 16;
 
 /** fz matrix concat: result = m * n, both [a,b,c,d,e,f]. */
 function matMul(m: number[], n: number[]): number[] {
@@ -22,10 +25,8 @@ function matMul(m: number[], n: number[]): number[] {
     m[4] * n[1] + m[5] * n[3] + n[5],
   ];
 }
-const apply = (m: number[], x: number, y: number): [number, number] => [
-  m[0] * x + m[2] * y + m[4],
-  m[1] * x + m[3] * y + m[5],
-];
+const applyX = (m: number[], x: number, y: number): number => m[0] * x + m[2] * y + m[4];
+const applyY = (m: number[], x: number, y: number): number => m[1] * x + m[3] * y + m[5];
 
 /**
  * Run a page through a capture Device, returning glyphs (visible + invisible
@@ -74,26 +75,49 @@ export function capturePage(mupdf: any, page: any): PageExtract {
     flushSpan();
   };
 
+  // Points accumulate FLAT (x,y,x,y,...) in one reused scratch array, so a path
+  // costs one Float32Array at flush() instead of one JS array per point. Reused
+  // across paths because a dense sheet walks hundreds of thousands of them.
+  const cur: number[] = [];
+
+  // Kept paths are copied into a CHUNKED arena and handed out as subarray views.
+  // A dense sheet keeps ~67 k paths; a private Float32Array each means 67 k
+  // ArrayBuffers, and the per-buffer bookkeeping (view + buffer object + a
+  // rounded-up backing store) outweighs the ~40 B of floats a short path holds.
+  // One buffer per ARENA_FLOATS instead costs a view per path and nothing else.
+  // Only paths that SURVIVE the prune are written, so no chunk is kept alive by
+  // geometry that was thrown away.
+  let arena = new Float32Array(ARENA_FLOATS);
+  let arenaUsed = 0;
+  const intern = (n: number): Float32Array => {
+    if (arenaUsed + n > arena.length) {
+      arena = new Float32Array(Math.max(ARENA_FLOATS, n));
+      arenaUsed = 0;
+    }
+    const view = arena.subarray(arenaUsed, arenaUsed + n);
+    for (let i = 0; i < n; i++) view[i] = cur[i];
+    arenaUsed += n;
+    return view;
+  };
   const walkPath = (path: any, ctm: number[]) => {
-    let cur: [number, number][] = [];
     let closed = false;
     let px = 0, py = 0;
     // Track the page-space bbox as we go so flush() can reject a tiny path in O(1).
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const push = (x: number, y: number) => {
-      const p = apply(ctm, x, y);
-      cur.push(p);
-      if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
-      if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+      const wx = applyX(ctm, x, y), wy = applyY(ctm, x, y);
+      cur.push(wx, wy);
+      if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
+      if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
     };
     const flush = () => {
       // Drop tiny paths: no stitch segment (≥8ft) or cleanup border (full-span)
       // can live in a sub-MIN_GEOM_EXTENT_PT bounding box. ~90% of paths on a
       // heavy sheet, so this is the memory/throughput win.
-      if (cur.length >= 2 && Math.hypot(maxX - minX, maxY - minY) >= MIN_GEOM_EXTENT_PT) {
-        geometry.push({ id: `g${gid++}`, pts: cur, closed });
+      if (cur.length >= 4 && Math.hypot(maxX - minX, maxY - minY) >= MIN_GEOM_EXTENT_PT) {
+        geometry.push({ id: gid++, pts: intern(cur.length), closed });
       }
-      cur = []; closed = false; minX = minY = Infinity; maxX = maxY = -Infinity;
+      cur.length = 0; closed = false; minX = minY = Infinity; maxX = maxY = -Infinity;
     };
     path.walk({
       moveTo(x: number, y: number) { flush(); px = x; py = y; push(x, y); },
@@ -109,7 +133,7 @@ export function capturePage(mupdf: any, page: any): PageExtract {
         }
         px = x3; py = y3;
       },
-      closePath() { closed = true; if (cur.length) cur.push(cur[0]); },
+      closePath() { closed = true; if (cur.length >= 2) cur.push(cur[0], cur[1]); },
     });
     flush();
   };
