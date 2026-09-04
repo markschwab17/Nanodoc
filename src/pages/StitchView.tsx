@@ -330,9 +330,13 @@ export default function StitchView() {
       // Nothing was handed over — but the URL may still say WHICH document this was.
       // The handoff only ever lived in memory, so a reload lost it; `/view` owns the
       // fetch, so bounce back through it once and it will hand over and return here.
+      // Decided from the URL and the empty canvas ALONE: after a hard reload the CTO
+      // context is gone too (it is in-memory, written only by `/view`), so `lost` —
+      // which needs `embed` — is false exactly when the bounce is needed. `/view`
+      // rebuilds that context from the same query parameters.
       // Once per page load, so a fetch that fails cannot become a redirect loop.
       const recovery = stitchHandoffRecovery(window.location.search);
-      if (lost && recovery && !handoffRecoveryAttempted) {
+      if (!receivedInitialRef.current && tiles.length === 0 && recovery && !handoffRecoveryAttempted) {
         handoffRecoveryAttempted = true;
         navigateRef.current?.({ pathname: "/view", search: recovery.search }, { replace: true });
         return;

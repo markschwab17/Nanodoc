@@ -109,3 +109,12 @@ export function badgePlacement(
 ): "above" | "inside" {
   return boxTopScreenPx - badgeHeightPx < 0 ? "inside" : "above";
 }
+
+/**
+ * How far (screen px) a label anchored to the LEFT of a box must shift right to stay
+ * on screen. Zero normally; the overflow when the box starts left of the viewport —
+ * the badge was still clipped there after the top edge got its clamp.
+ */
+export function badgeLeftInset(boxLeftScreenPx: number): number {
+  return boxLeftScreenPx < 0 ? -boxLeftScreenPx : 0;
+}

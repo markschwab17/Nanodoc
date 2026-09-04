@@ -16,6 +16,7 @@ import {
   OVERLAY_PAPER,
   OVERLAY_PILL_STYLE,
   RING_SCREEN_PX,
+  badgeLeftInset,
   badgePlacement,
   screenPx,
 } from "./canvasOverlayStyle";
@@ -86,7 +87,10 @@ export function GroupSelectionOverlay() {
   /** Where the label goes: above the box, or inside it when the box's top is off the
    *  top of the viewport (the badge used to be clipped away up there). */
   const panOffsetY = useStitchStore((s) => s.panOffset.y);
+  const panOffsetX = useStitchStore((s) => s.panOffset.x);
   const badgeSpot = badgePlacement(panOffsetY + (bounds.y + RULER_SIZE) * scale);
+  /** Same idea for the left edge, in canvas units (this layer is scaled by `scale`). */
+  const badgeLeft = badgeLeftInset(panOffsetX + (bounds.x + RULER_SIZE) * scale) / scale;
 
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
@@ -295,7 +299,7 @@ export function GroupSelectionOverlay() {
       <div
         className="absolute flex items-center gap-1.5 whitespace-nowrap rounded px-1.5 py-0.5 font-medium shadow"
         style={{
-          left: 0,
+          left: badgeLeft,
           top: 0,
           // Above the box, unless the box's top edge is off the top of the viewport —
           // then inside it, because a badge above that is simply clipped away.

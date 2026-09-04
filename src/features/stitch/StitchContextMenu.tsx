@@ -14,7 +14,7 @@
  * worse than no row.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { cn } from "@/lib/utils";
 import { useStitchStore } from "@/shared/stores/stitchStore";
@@ -68,7 +68,14 @@ export function StitchContextMenu({
     acting: string[];
   } | null>(null);
 
+  /** Radix hands the app handler straight through while `disabled`, so the guard is
+   *  ours: in an align/cleanup mode a right-click must neither move the selection
+   *  (the moving sheet IS the selection there) nor build a menu that never opens. */
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    if (disabledRef.current) return;
     const el = (e.target as HTMLElement | null)?.closest?.("[data-stitch-tile-id]");
     const id = el?.getAttribute("data-stitch-tile-id") ?? null;
     const store = useStitchStore.getState();

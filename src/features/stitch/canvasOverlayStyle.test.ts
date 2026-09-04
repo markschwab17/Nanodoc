@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  badgeLeftInset,
   OVERLAY_ACCENT,
   OVERLAY_INK,
   OVERLAY_PAPER,
@@ -81,5 +82,15 @@ describe("badges stay on screen", () => {
     // The reported case: a sheet at the top of the canvas had its badge clipped away.
     expect(badgePlacement(10, 22)).toBe("inside");
     expect(badgePlacement(-200, 22)).toBe("inside");
+  });
+});
+
+describe("badgeLeftInset", () => {
+  it("is zero when the box starts on screen", () => {
+    expect(badgeLeftInset(0)).toBe(0);
+    expect(badgeLeftInset(120)).toBe(0);
+  });
+  it("shifts the label right by exactly the overflow when the box starts off the left edge", () => {
+    expect(badgeLeftInset(-75)).toBe(75);
   });
 });
