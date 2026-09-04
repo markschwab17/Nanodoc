@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseScaleNotes, parseDistanceTokens, parseStations, parseBearings, parseSheetRefs } from "./tokens";
+import { parseScaleNotes, parseDistanceTokens, parseStations, parseBearings, parseSheetRefs, mergeMatchlineRefLabels } from "./tokens";
 import type { Label } from "./types";
 
 const L = (text: string, x = 0, y = 0, endX = 0, endY = 0): Label =>
@@ -84,5 +84,56 @@ describe("strip refs", () => {
     expect(refs[0].strip).toBe("below");
     expect(refs[0].stripSide).toBeNull();
     expect(refs[0].matchline).toBe(true);
+  });
+});
+
+describe("split matchline callouts (CAD emits two runs)", () => {
+  const view: [number, number, number, number] = [0, 0, 2592, 1728];
+  // One run per text, positioned by its CENTRE, so co-location is explicit.
+  const run = (text: string, cx: number, cy: number, w = 60, h = 10, angle = 0): Label =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle, h, font: null });
+
+  it("merges a co-located MATCH LINE run with its SEE SHEET run into ONE ref", () => {
+    const labels = [run("MATCH LINE", 100, 800), run("SEE SHEET C-302", 175, 800)];
+    const refs = parseSheetRefs(labels, view);
+    expect(refs).toHaveLength(1);                    // one callout, not two
+    expect(refs[0].matchline).toBe(true);            // the flag matchlineStrokePrior needs
+    expect(refs[0].sheetCode).toBe("C-302");         // and the reference, on the SAME ref
+    expect(refs[0].edge).toBe("left");
+  });
+
+  it("merges a numeric split callout too", () => {
+    const refs = parseSheetRefs([run("MATCH LINE", 100, 800), run("SEE SHEET 6", 170, 800)], view);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].matchline).toBe(true);
+    expect(refs[0].sheet).toBe(6);
+  });
+
+  it("does NOT merge runs that are far apart", () => {
+    // 900 pt apart, ~90x the text height: two unrelated callouts.
+    const refs = parseSheetRefs([run("MATCH LINE", 100, 800), run("SEE SHEET 6", 1000, 800)], view);
+    expect(refs).toHaveLength(2);
+    expect(refs.find((r) => r.matchline && r.sheet != null)).toBeUndefined();
+  });
+
+  it("does NOT merge runs drawn at different angles", () => {
+    const refs = parseSheetRefs([run("MATCH LINE", 100, 800, 60, 10, 0), run("SEE SHEET 6", 170, 800, 60, 10, 90)], view);
+    expect(refs).toHaveLength(2);
+  });
+
+  it("leaves an already-complete callout and unrelated labels untouched", () => {
+    const labels = [run("MATCH LINE SEE SHEET 6", 100, 800), run("TC 347.33", 120, 810)];
+    expect(mergeMatchlineRefLabels(labels)).toBe(labels); // same array, no copy
+  });
+
+  it("consumes each run at most once (two callouts, two refs)", () => {
+    const labels = [
+      run("MATCH LINE", 100, 200), run("SEE SHEET 6", 170, 200),
+      run("MATCH LINE", 100, 1500), run("SEE SHEET 8", 170, 1500),
+    ];
+    const refs = parseSheetRefs(labels, view);
+    expect(refs).toHaveLength(2);
+    expect(refs.map((r) => r.sheet).sort()).toEqual([6, 8]);
+    expect(refs.every((r) => r.matchline)).toBe(true);
   });
 });

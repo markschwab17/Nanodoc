@@ -144,3 +144,85 @@ describe("resolvePrintedNos", () => {
     expect(map.get(1)).toBe(4); // only OCR-sourced collisions are repaired
   });
 });
+
+describe("discipline-code reciprocal anchors", () => {
+  // The reciprocal-anchor pass used to resolve NUMERIC refs only, so a set whose
+  // sheets reference each other by discipline code ("MATCH LINE SEE SHEET C-302")
+  // never reached the strong anchor channels. Each page's own code comes from its
+  // title block, exactly as stitchCore already resolves code cross-references.
+  const VIEW: [number, number, number, number] = [0, 0, 1000, 800];
+  const lab = (text: string, cx: number, cy: number, w = 70, h = 10) =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
+  // Title-block code in the bottom-right corner (what extractPageLabel scores), plus
+  // a facing matchline callout on the shared edge.
+  const page = (ownCode: string | null, refText: string, refAt: [number, number]) => ({
+    view: VIEW, words: [], geometry: [],
+    shxLabels: [],
+    labels: [
+      ...(ownCode ? [lab(ownCode, 900, 720, 40, 14)] : []),
+      lab(refText, refAt[0], refAt[1], 120, 10),
+    ],
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const run = async (pages: ReturnType<typeof page>[]) => {
+    const { capturePage } = await import("./captureDevice");
+    let n = 0;
+    (capturePage as any).mockImplementation(() => pages[n++]);
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    let debug: any = null;
+    await autoStitch({} as any, fakeDoc as any, [0, 1], {
+      ocr: async () => [], userScale: 20, onDebug: (d) => { debug = d; },
+    });
+    return debug;
+  };
+
+  it("anchors two sheets that reference each other by discipline code", async () => {
+    const debug = await run([
+      page("C-301", "MATCH LINE SEE SHEET C-302", [910, 400]), // right edge
+      page("C-302", "MATCH LINE SEE SHEET C-301", [90, 400]),  // left edge
+    ]);
+    expect(debug.anchors).toHaveLength(1);
+    expect(debug.anchors[0].perp).toBe("x"); // a left/right ref pins x
+  });
+
+  it("normalises the separator: 'C302' in the title block matches 'SEE SHEET C-302'", async () => {
+    const debug = await run([
+      page("C301", "MATCH LINE SEE SHEET C-302", [910, 400]),
+      page("C302", "MATCH LINE SEE SHEET C-301", [90, 400]),
+    ]);
+    expect(debug.anchors).toHaveLength(1);
+  });
+
+  it("no anchor when the pages carry no title-block code to resolve the refs against", async () => {
+    const debug = await run([
+      page(null, "MATCH LINE SEE SHEET C-302", [910, 400]),
+      page(null, "MATCH LINE SEE SHEET C-301", [90, 400]),
+    ]);
+    expect(debug.anchors).toHaveLength(0);
+  });
+
+  it("no anchor when the codes do not reciprocate", async () => {
+    const debug = await run([
+      page("C-301", "MATCH LINE SEE SHEET C-999", [910, 400]),
+      page("C-302", "MATCH LINE SEE SHEET C-888", [90, 400]),
+    ]);
+    expect(debug.anchors).toHaveLength(0);
+  });
+
+  it("a SPLIT code callout (two runs) still anchors", async () => {
+    // CAD emitted "MATCH LINE" and "SEE SHEET C-302" as separate runs; the
+    // pre-parse merge rejoins them so the ref carries both facts.
+    const split = (ownCode: string, refCode: string, cx: number) => ({
+      view: VIEW, words: [], geometry: [], shxLabels: [],
+      labels: [lab(ownCode, 900, 720, 40, 14), lab("MATCH LINE", cx, 400, 60, 10), lab(`SEE SHEET ${refCode}`, cx + 75, 400, 80, 10)],
+    });
+    const debug = await run([split("C-301", "C-302", 880), split("C-302", "C-301", 60)]);
+    expect(debug.anchors).toHaveLength(1);
+  });
+});

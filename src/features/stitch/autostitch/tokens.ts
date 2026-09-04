@@ -111,11 +111,110 @@ export function parseBearings(labels: Label[]): { az: number; ft: number | null;
 /** Sheet cross-references at page edges + matchline callouts. */
 export interface SheetRef { text: string; at: Pt; angle: number; sheet: number | null; sheetCode: string | null; matchline: boolean; station: string | null; edge: string; edgeDist: number; strip: "above" | "below" | null; stripSide: "left" | "right" | null; }
 
+const MATCHLINE_RE = /MATCH\s*LINE/i;
+const SEE_SHEET_RE = /SEE\s+SHEET/i;
+const labelHeight = (l: Label): number => (l.h != null && l.h > 0 ? l.h : Math.abs((l.endY ?? 0) - (l.y ?? 0)) || 1);
+const angleGap = (a: number, b: number): number => {
+  const d = Math.abs((a ?? 0) - (b ?? 0)) % 360;
+  return d > 180 ? 360 - d : d;
+};
+
+/**
+ * Merge a matchline callout that CAD emitted as TWO separate text runs.
+ *
+ * A civil matchline reads "MATCH LINE SEE SHEET C-302", but plenty of exporters
+ * write it as two runs — one "MATCH LINE", one "SEE SHEET C-302" — sitting side by
+ * side on the same line. Everything downstream wants ONE ref carrying both facts:
+ * `matchlineStrokePrior` requires the matchline flag AND the reference on the SAME
+ * label, and a bare "SEE SHEET n" run (matchline:false) never reaches the matchline
+ * priors at all. A split callout therefore drops the pair from the strong
+ * `anchor`/`matchline-stroke` channels to a windowed segment vote.
+ *
+ * Two runs merge when one carries only "MATCH LINE", the other only "SEE SHEET …",
+ * they are drawn at the same angle (≤5°), and their BOXES sit within 2× the taller
+ * run's text height of each other — i.e. they are physically one callout. The gap is
+ * measured edge-to-edge, not centre-to-centre: two adjacent words of one phrase are
+ * separated by roughly half their combined WIDTH, so a centre-distance rule at text-
+ * height scale would never fire on the very case this exists for. Each run is
+ * consumed at most once (nearest first) and the pair is REPLACED by the merged label,
+ * so ref counts and anchor emission are unchanged. Everything else passes through
+ * untouched, in order. Pure; exported for tests.
+ */
+// Memo of the merge, keyed by the label array's identity. `parseSheetRefs` is called
+// once per PAIR by stitchCore's prior channels (O(n²) over the set) against each
+// sheet's stable label array, so without this the extra scan showed up as ~25% of a
+// 12-page harness run. Purely a cache of a pure function — same input array, same
+// output — and label arrays are never mutated after capture.
+const mergeCache = new WeakMap<Label[], Label[]>();
+
+export function mergeMatchlineRefLabels(labels: Label[]): Label[] {
+  const memo = mergeCache.get(labels);
+  if (memo) return memo;
+  const out = computeMatchlineRefMerge(labels);
+  mergeCache.set(labels, out);
+  return out;
+}
+
+function computeMatchlineRefMerge(labels: Label[]): Label[] {
+  const matchIdx: number[] = [], refIdx: number[] = [];
+  for (let i = 0; i < labels.length; i++) {
+    const t = labels[i]?.text;
+    if (typeof t !== "string") continue;
+    const isMatch = MATCHLINE_RE.test(t), isRef = SEE_SHEET_RE.test(t);
+    if (isMatch && !isRef) matchIdx.push(i);
+    else if (isRef && !isMatch) refIdx.push(i);
+  }
+  if (!matchIdx.length || !refIdx.length) return labels;
+  const box = (l: Label) => ({
+    x0: Math.min(l.x, l.endX), x1: Math.max(l.x, l.endX),
+    y0: Math.min(l.y, l.endY), y1: Math.max(l.y, l.endY),
+  });
+  /** Edge-to-edge gap between two axis-aligned boxes (0 when they overlap). */
+  const boxGap = (a: ReturnType<typeof box>, b: ReturnType<typeof box>) => Math.hypot(
+    Math.max(0, Math.max(a.x0, b.x0) - Math.min(a.x1, b.x1)),
+    Math.max(0, Math.max(a.y0, b.y0) - Math.min(a.y1, b.y1)),
+  );
+  const used = new Set<number>();
+  const merged = new Map<number, Label>();
+  for (const mi of matchIdx) {
+    const m = labels[mi];
+    const mb = box(m), mh = labelHeight(m);
+    let bestI = -1, bestD = Infinity;
+    for (const ri of refIdx) {
+      if (used.has(ri)) continue;
+      const s = labels[ri];
+      if (angleGap(m.angle, s.angle) > 5) continue;
+      const tol = 2 * Math.max(mh, labelHeight(s));
+      const d = boxGap(mb, box(s));
+      if (d <= tol && d < bestD) { bestD = d; bestI = ri; }
+    }
+    if (bestI < 0) continue;
+    used.add(bestI); used.add(mi);
+    const s = labels[bestI];
+    merged.set(mi, {
+      ...m,
+      text: `${m.text} ${s.text}`,
+      x: Math.min(m.x, s.x, m.endX, s.endX), endX: Math.max(m.x, s.x, m.endX, s.endX),
+      y: Math.min(m.y, s.y, m.endY, s.endY), endY: Math.max(m.y, s.y, m.endY, s.endY),
+      h: Math.max(mh, labelHeight(s)),
+    });
+  }
+  if (!merged.size) return labels;
+  const out: Label[] = [];
+  for (let i = 0; i < labels.length; i++) {
+    const mg = merged.get(i);
+    if (mg) { out.push(mg); continue; }
+    if (used.has(i)) continue; // consumed into a merged callout
+    out.push(labels[i]);
+  }
+  return out;
+}
+
 export function parseSheetRefs(labels: Label[], view: [number, number, number, number]): SheetRef[] {
   const [x0, y0, x1, y1] = view;
   const W = x1 - x0, H = y1 - y0;
   const out: SheetRef[] = [];
-  for (const l of labels) {
+  for (const l of mergeMatchlineRefLabels(labels)) {
     // numeric ("SEE SHEET 12") or alphanumeric discipline code ("SEE SHEET C5.4")
     const mSheet = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)\b/i);
     const mCode = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)/i);

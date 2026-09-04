@@ -9,6 +9,7 @@ import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./la
 import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
 import { parseSheetRefs, type SheetRef } from "./tokens";
+import { extractPageLabel } from "./pageLabels";
 import type { OcrWord, RawImage } from "./ocrService";
 import { DEFAULT_SCALE_FT_PER_IN as DEFAULT_SCALE } from "../pageScales";
 
@@ -272,11 +273,54 @@ export async function autoStitch(
   if (ocr) {
     const byPrinted = new Map<number, PageRec[]>();
     for (const p of pages) (byPrinted.get(p.printedNo) || byPrinted.set(p.printedNo, []).get(p.printedNo)!).push(p);
-    const edgeRefsOf = (p: PageRec): SheetRef[] =>
-      parseSheetRefs([...p.extract.shxLabels, ...p.extract.labels], p.extract.view)
-        .filter((r) => r.edge !== "interior" && r.sheet != null);
+    // ── DISCIPLINE-CODE identity ("MATCH LINE SEE SHEET C-302") ────────────────
+    // The reciprocal-anchor pass used to be NUMERIC-only, so a set that references
+    // its neighbours by discipline code never reached the strong anchor channels at
+    // all. Each page's own code comes from its title block (`extractPageLabel`),
+    // exactly as stitchCore already resolves `SEE SHEET C2.01` cross-references.
+    // Codes are compared with separators stripped so "C-302" ≡ "C302" ≡ "C 302".
+    const normCode = (c: string): string => c.toUpperCase().replace(/[\s-]/g, "");
+    const codeOf = new Map<number, string | null>();
+    const byCode = new Map<string, PageRec[]>();
+    for (const p of pages) {
+      const code = extractPageLabel({ labels: p.extract.labels, shxLabels: p.extract.shxLabels, view: p.extract.view }).sheetCode;
+      const n = code ? normCode(code) : null;
+      codeOf.set(p.pageIndex, n);
+      if (n) (byCode.get(n) || byCode.set(n, []).get(n)!).push(p);
+    }
+    // Cached per page: the mutual-facing and reciprocal-search loops call this
+    // O(pages²) times, and a fresh concatenated array each time would defeat
+    // parseSheetRefs' own memo.
+    const edgeRefCache = new Map<number, SheetRef[]>();
+    const edgeRefsOf = (p: PageRec): SheetRef[] => {
+      const hit = edgeRefCache.get(p.pageIndex);
+      if (hit) return hit;
+      const refs = parseSheetRefs([...p.extract.shxLabels, ...p.extract.labels], p.extract.view)
+        .filter((r) => r.edge !== "interior" && (r.sheet != null || r.sheetCode != null));
+      edgeRefCache.set(p.pageIndex, refs);
+      return refs;
+    };
+    /** The pages a ref points at — by printed number, or by discipline code. */
+    const refTargets = (r: SheetRef): PageRec[] =>
+      r.sheet != null ? (byPrinted.get(r.sheet) ?? [])
+        : r.sheetCode ? (byCode.get(normCode(r.sheetCode)) ?? [])
+        : [];
+    /** Does ref `r` (on some other page) name page `p`? */
+    const refNames = (r: SheetRef, p: PageRec): boolean =>
+      (r.sheet != null && r.sheet === p.printedNo) ||
+      (r.sheetCode != null && codeOf.get(p.pageIndex) != null && normCode(r.sheetCode) === codeOf.get(p.pageIndex));
     const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
     const RE = /SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)/i;
+    const RE_CODE = /SEE\s+SHEET\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)/i;
+    /** Does an OCR-recovered interior label reference page `p`? Number first (the
+     *  original, unchanged rule), then the discipline code. */
+    const ocrRefNames = (text: string, p: PageRec): boolean => {
+      const m = text.match(RE);
+      if (m && Number(m[1]) === p.printedNo) return true;
+      const c = text.match(RE_CODE);
+      const own = codeOf.get(p.pageIndex);
+      return !!(c && own && normCode(c[1]) === own);
+    };
 
     /**
      * Register a matchline seam on BOTH axes from geometry. (1) PERP axis: both
@@ -394,7 +438,7 @@ export async function autoStitch(
     const searchReciprocal = async (iPage: PageRec, jPage: PageRec, refJ: SheetRef): Promise<RawAnchor | null> => {
       const [x0, y0, x1, y1] = iPage.extract.view;
       const W = x1 - x0, H = y1 - y0;
-      const expected = jPage.printedNo;
+      // The reciprocal label may name j by printed NUMBER or by discipline CODE.
       const horiz = refJ.edge === "left" || refJ.edge === "right"; // vertical matchline → pins x
       // A ref that ORIGINATES on a split-page STRIP is the case the narrow one-sided
       // band gets wrong: the strip's neighbour carries its "SEE SHEET n" at the FAR
@@ -420,8 +464,7 @@ export async function autoStitch(
             for (const rot of [90, 270] as const) {
               const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
               for (const lab of labels) {
-                const m = lab.text.match(RE);
-                if (m && Number(m[1]) === expected) {
+                if (ocrRefNames(lab.text, jPage)) {
                   const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
                   // i's reciprocal label is INTERIOR (no outer edge → strongest); j's is at refJ.edge.
                   const reg = seamRegister(iPage, cx, cy, jPage, refJ.at.x, refJ.at.y, "x");
@@ -444,8 +487,7 @@ export async function autoStitch(
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
             const labels = wordsToLabels(await ocr!(image), { edge: "top", clip }, bandScale, image.width, image.height, 0);
             for (const lab of labels) {
-              const m = lab.text.match(RE);
-              if (m && Number(m[1]) === expected) {
+              if (ocrRefNames(lab.text, jPage)) {
                 const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
                 const reg = seamRegister(iPage, cy, cx, jPage, refJ.at.y, refJ.at.x, "y");
                 return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
@@ -478,9 +520,9 @@ export async function autoStitch(
     // basin, and a wrong sign simply yields no segment inliers (anchor dropped).
     for (const jPage of pages) {
       for (const r of edgeRefsOf(jPage)) {
-        for (const iPage of byPrinted.get(r.sheet!) || []) {
+        for (const iPage of refTargets(r)) {
           if (iPage.pageIndex >= jPage.pageIndex) continue; // emit each unordered pair once
-          const ri = edgeRefsOf(iPage).find((x) => x.sheet === jPage.printedNo && x.edge === OPP[r.edge]);
+          const ri = edgeRefsOf(iPage).find((x) => refNames(x, jPage) && x.edge === OPP[r.edge]);
           if (!ri) continue;
           const horiz = r.edge === "left" || r.edge === "right";
           if (horiz) {
@@ -506,10 +548,10 @@ export async function autoStitch(
         // bottom pins dy. Both are one-sided (the referenced sheet's matching label
         // sits interior, outside every edge band) and need the targeted interior scan.
         if (r.edge !== "left" && r.edge !== "right" && r.edge !== "top" && r.edge !== "bottom") continue;
-        for (const iPage of byPrinted.get(r.sheet!) || []) {
+        for (const iPage of refTargets(r)) {
           if (iPage.pageIndex === jPage.pageIndex) continue;
           // Skip if i ALREADY has a reciprocal edge ref (opposite edge → j's #).
-          if (edgeRefsOf(iPage).some((ri) => ri.sheet === jPage.printedNo && ri.edge === OPP[r.edge])) continue;
+          if (edgeRefsOf(iPage).some((ri) => refNames(ri, jPage) && ri.edge === OPP[r.edge])) continue;
           // Prune raster/low-geometry pages here (unlike the OCR gate): the anchor
           // confirms via a vector segment vote, which a page with no geometry can't feed.
           if ((iPage.extract.geometry?.length ?? 0) < PLAN_GEOMETRY_MIN) continue;
