@@ -55,7 +55,7 @@ export interface StitchToolbarProps {
   onClearCrop: () => void;
   onSaveAndFlatten: (openInEditor: boolean) => void;
   isSaving: boolean;
-  /** When true, show "Save to Civiltakeoff" button (CTO session). */
+  /** When true, show "Save to Pursuit" button (CTO session). */
   showSaveToCto?: boolean;
   onSaveToCto?: () => void;
   onDownloadForTraining?: () => void;
@@ -667,7 +667,7 @@ export function StitchToolbar({
             <Save className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
           {showSaveToCto && onSaveToCto && (
-            <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Save stitched PDF to Civiltakeoff" label="Save to Civiltakeoff" onClick={onSaveToCto}>
+            <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Save stitched PDF to Pursuit" label="Save to Pursuit" onClick={onSaveToCto}>
               <Upload className="h-3.5 w-3.5 shrink-0" />
             </IconButtonWithTooltip>
           )}

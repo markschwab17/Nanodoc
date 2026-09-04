@@ -64,7 +64,7 @@ export function AddPdfModal({
    *  cover plan sheets and added sheets as one composite. */
   onPagesAdded?: () => void;
   /** The site-sheet source PDF for the life of the stitch session (unlike `initialPdf`,
-   *  which is consumed once). Offered as an extra entry in the "From Civiltakeoff" list
+   *  which is consumed once). Offered as an extra entry in the "From Pursuit" list
    *  so switching to a project document doesn't lose the user's selected takeoff sheets. */
   sessionSourcePdf?: { pdfBytes: Uint8Array; fileName: string } | null;
 }) {
@@ -107,7 +107,7 @@ export function AddPdfModal({
   const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
   const [ctoDocumentsError, setCtoDocumentsError] = useState<string | null>(null);
   const ctoDocumentsRespondedRef = useRef(false);
-  // The site-sheet source, kept selectable as the first "From Civiltakeoff" entry for the
+  // The site-sheet source, kept selectable as the first "From Pursuit" entry for the
   // life of the stitch session — never sent to the CTO document-list request.
   const ctoDocumentsWithSession = useMemo(
     () => withSessionSource(ctoDocuments, sessionSourcePdf),
@@ -425,7 +425,7 @@ export function AddPdfModal({
     // and click "Choose file" themselves for a clearer flow.
   }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed, releaseDoc, stopProbe]);
 
-  // From Civiltakeoff: request document list from opener and listen for nanodoc-cto-documents
+  // From Pursuit: request document list from opener and listen for nanodoc-cto-documents
   useEffect(() => {
     if (!open || !ctoContext || sourceTab !== "cto") {
       setCtoDocuments([]);
@@ -440,7 +440,7 @@ export function AddPdfModal({
     }
     const target = resolveCtoTarget({ parent: window.parent, opener: window.opener, self: window });
     if (!target) {
-      setCtoDocumentsError("Open stitch from Civiltakeoff to see project documents.");
+      setCtoDocumentsError("Open stitch from Pursuit to see project documents.");
       return;
     }
     setCtoDocumentsLoading(true);
@@ -451,7 +451,7 @@ export function AddPdfModal({
 
     const timeoutId = window.setTimeout(() => {
       if (!ctoDocumentsRespondedRef.current) {
-        setCtoDocumentsError("Request timed out. Open stitch from Civiltakeoff project documents.");
+        setCtoDocumentsError("Request timed out. Open stitch from Pursuit project documents.");
         setCtoDocumentsLoading(false);
       }
     }, 12000);
@@ -510,7 +510,7 @@ export function AddPdfModal({
     [ctoContext, loadPdfFromResult]
   );
 
-  /** Selecting an entry from the merged "From Civiltakeoff" list: the synthetic
+  /** Selecting an entry from the merged "From Pursuit" list: the synthetic
    *  session-source entry loads its retained bytes directly (no network); any
    *  other entry is a real CTO document fetched by token as before. */
   const handleSelectCtoDoc = useCallback(
@@ -524,7 +524,7 @@ export function AddPdfModal({
     [sessionSourcePdf, loadPdfFromResult, loadCtoDocument]
   );
 
-  // From Civiltakeoff: postMessage listener for nanodoc-add-cto-doc (legacy: CTO pushes one doc)
+  // From Pursuit: postMessage listener for nanodoc-add-cto-doc (legacy: CTO pushes one doc)
   useEffect(() => {
     if (!open || !ctoContext || sourceTab !== "cto") return;
     setCtoListening(true);
@@ -724,7 +724,7 @@ export function AddPdfModal({
                 setProbeState("idle");
               }}
             >
-              From Civiltakeoff
+              From Pursuit
             </Button>
           </div>
         )}

@@ -219,7 +219,7 @@ export default function StitchView() {
   // initial PDF so the user picks the pages themselves (no plan / the plan failed).
   const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
   // Kept for the life of the stitch session (unlike ctoInitialPdf, which is consumed once the
-  // modal loads it) so "From Civiltakeoff" can still offer the site-sheet source after the user
+  // modal loads it) so "From Pursuit" can still offer the site-sheet source after the user
   // switches tabs and loads a different project document.
   const [sessionSourcePdf, setSessionSourcePdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
   /** The RAW stitch plan CTO sent, kept for the whole session (the initial store
@@ -365,7 +365,7 @@ export default function StitchView() {
     // the stitch store outlives that, so committing again would duplicate every
     // sheet on top of the ones already placed. Sheets on the canvas means this
     // plan has already run: keep the canvas exactly as the user left it (the
-    // session source is set above, so "From Civiltakeoff" still offers it).
+    // session source is set above, so "From Pursuit" still offers it).
     const alreadyStitched = useStitchStore
       .getState()
       .tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
@@ -1004,7 +1004,7 @@ export default function StitchView() {
       displayName?: string
     ): Promise<{ ok: boolean; message?: string }> => {
       const ctx = useCiviltakeoffContextStore.getState().getContext();
-      if (!ctx) return { ok: false, message: "Not connected to Civiltakeoff." };
+      if (!ctx) return { ok: false, message: "Not connected to Pursuit." };
       setShowSaveToCtoDialog(false);
       setIsSaving(true);
       try {
@@ -1040,7 +1040,7 @@ export default function StitchView() {
           resultJson && typeof resultJson === "object" && typeof (resultJson as { pageUuid?: unknown }).pageUuid === "string"
             ? (resultJson as { pageUuid: string }).pageUuid
             : null;
-        showNotification("Saved to Civiltakeoff.", "success");
+        showNotification("Saved to Pursuit.", "success");
         postToCto(
           { type: "nanodoc-stitch-saved", success: true, destination, manifest, pageUuid },
           ctx.api_origin
@@ -1049,7 +1049,7 @@ export default function StitchView() {
       } catch (e) {
         console.error(e);
         const message =
-          e instanceof Error && e.message ? e.message : "Failed to save to Civiltakeoff.";
+          e instanceof Error && e.message ? e.message : "Failed to save to Pursuit.";
         showNotification(message, "error");
         return { ok: false, message };
       } finally {
@@ -1446,7 +1446,7 @@ export default function StitchView() {
         <Dialog open={showSaveToCtoDialog} onOpenChange={setShowSaveToCtoDialog}>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Save to Civiltakeoff</DialogTitle>
+              <DialogTitle>Save to Pursuit</DialogTitle>
             </DialogHeader>
             <p className="text-sm text-muted-foreground pb-3">
               Choose how to save the stitched PDF in your project.

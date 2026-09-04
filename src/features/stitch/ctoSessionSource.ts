@@ -47,7 +47,7 @@ export function withSessionSource<T extends CtoDocLike>(
 
 /** Copy for the reloaded-iframe case. */
 export const STITCH_SESSION_LOST =
-  "Session lost — close this window and reopen from Civiltakeoff.";
+  "Session lost — close this window and reopen from Pursuit.";
 
 /**
  * Has the embedded session lost its handoff?

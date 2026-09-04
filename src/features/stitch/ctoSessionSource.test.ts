@@ -40,7 +40,7 @@ describe("isStitchSessionLost", () => {
 
   test("is true when the embedded iframe reloaded: no handoff, no sheets, nothing running", () => {
     expect(isStitchSessionLost(base)).toBe(true);
-    expect(STITCH_SESSION_LOST).toBe("Session lost — close this window and reopen from Civiltakeoff.");
+    expect(STITCH_SESSION_LOST).toBe("Session lost — close this window and reopen from Pursuit.");
   });
 
   test("is false outside the embed — the standalone hero is exactly right there", () => {
