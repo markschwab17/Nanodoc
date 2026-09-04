@@ -3,6 +3,7 @@ import {
   planEntriesForTiles,
   siteSheetTitlePreview,
   hiddenPagesSentence,
+  autoAlignExplanation,
   type TileForPlan,
 } from "./addToProjectCopy";
 
@@ -163,5 +164,57 @@ describe("hiddenPagesSentence", () => {
     expect(hiddenPagesSentence([9, 5, 6, 5])).toBe(
       "Pages 5, 6 and 9 will be hidden from the page list",
     );
+  });
+});
+
+describe("autoAlignExplanation", () => {
+  it("says nothing for a clean run", () => {
+    expect(autoAlignExplanation({ reason: "ok" })).toBeNull();
+    expect(autoAlignExplanation(null)).toBeNull();
+  });
+
+  it("no_refs names the pages that carry no identity", () => {
+    expect(autoAlignExplanation({ reason: "no_refs", pagesWithoutRefs: [7, 5] })).toBe(
+      "No sheet numbers or matchline callouts were found on pages 5 and 7, so there was nothing to line these sheets up by.",
+    );
+    expect(autoAlignExplanation({ reason: "no_refs", pagesWithoutRefs: [5] })).toContain("on page 5,");
+    expect(autoAlignExplanation({ reason: "no_refs" })).toBe(
+      "No sheet numbers or matchline callouts were found, so there was nothing to line these sheets up by.",
+    );
+  });
+
+  it("not_adjacent says the sheets are simply not neighbours", () => {
+    expect(autoAlignExplanation({ reason: "not_adjacent" })).toBe(
+      "These sheets don't share a matchline, so there is nothing to line them up along.",
+    );
+  });
+
+  it("unverified points at the seams rather than claiming failure", () => {
+    expect(autoAlignExplanation({ reason: "unverified" })).toBe(
+      "Alignment could not be verified — check the seams before adding.",
+    );
+  });
+
+  it("names the sheets that were left out of the tiling, and what they are", () => {
+    expect(autoAlignExplanation({ reason: "ok", skipped: [{ pageNumber: 2, role: "notes" }] })).toBe(
+      "Page 2 is a notes sheet and was left out of the alignment.",
+    );
+    expect(autoAlignExplanation({
+      reason: "ok",
+      skipped: [{ pageNumber: 3, role: "notes" }, { pageNumber: 1, role: "notes" }],
+    })).toBe("Pages 1 and 3 are a notes sheet and were left out of the alignment.");
+    expect(autoAlignExplanation({
+      reason: "ok",
+      skipped: [{ pageNumber: 1, role: "notes" }, { pageNumber: 5, role: "overall" }],
+    })).toBe("Pages 1 and 5 are not a tiled plan sheet and were left out of the alignment.");
+  });
+
+  it("a reason and a skip read as one explanation", () => {
+    const s = autoAlignExplanation({
+      reason: "not_adjacent",
+      skipped: [{ pageNumber: 5, role: "overall" }],
+    })!;
+    expect(s.startsWith("These sheets don't share a matchline")).toBe(true);
+    expect(s.endsWith("Page 5 is an overall plan and was left out of the alignment.")).toBe(true);
   });
 });

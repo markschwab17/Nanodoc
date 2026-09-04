@@ -129,3 +129,70 @@ export function hiddenPagesSentence(numbers: readonly number[]): string | null {
       : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
   return `${list.length === 1 ? "Page" : "Pages"} ${joined} will be hidden from the page list`;
 }
+
+/**
+ * Why an auto-align run did not place everything, in the words the user needs.
+ *
+ * The run drops what it cannot match below the composition rather than failing,
+ * which on its own reads as "it didn't work" with no clue why. Each reason names a
+ * DIFFERENT thing to do about it: nothing to match by (the sheets carry no readable
+ * identity — nothing the user can drag will fix that), nothing shared (the sheets
+ * simply are not neighbours), or matched but unproven (it may well be right; look at
+ * the seams). Pages are named 1-based, ascending, because that is the order the user
+ * will scan them in.
+ *
+ * Returns null when there is nothing to explain — a clean run, or a caller that has
+ * no outcome to report.
+ */
+export type AutoAlignReason = "ok" | "no_refs" | "not_adjacent" | "unverified";
+
+export interface AutoAlignOutcome {
+  reason: AutoAlignReason;
+  /** 1-based page numbers with no readable sheet number or matchline callout. */
+  pagesWithoutRefs?: readonly number[];
+  /** 1-based page numbers deliberately kept out of the tiling, with their role. */
+  skipped?: readonly { pageNumber: number; role: string }[];
+}
+
+function pageList(numbers: readonly number[]): string {
+  const list = Array.from(new Set(numbers.filter((n) => Number.isInteger(n) && n > 0))).sort((a, b) => a - b);
+  if (list.length === 0) return "";
+  if (list.length === 1) return `page ${list[0]}`;
+  return `pages ${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+const ROLE_NOUN: Record<string, string> = {
+  overall: "an overall plan",
+  keyplan: "a key plan",
+  index: "a sheet index",
+  notes: "a notes sheet",
+  details: "a details sheet",
+};
+
+export function autoAlignExplanation(outcome: AutoAlignOutcome | null | undefined): string | null {
+  if (!outcome) return null;
+  const parts: string[] = [];
+  switch (outcome.reason) {
+    case "no_refs": {
+      const where = outcome.pagesWithoutRefs?.length ? ` on ${pageList(outcome.pagesWithoutRefs)}` : "";
+      parts.push(`No sheet numbers or matchline callouts were found${where}, so there was nothing to line these sheets up by.`);
+      break;
+    }
+    case "not_adjacent":
+      parts.push("These sheets don't share a matchline, so there is nothing to line them up along.");
+      break;
+    case "unverified":
+      parts.push("Alignment could not be verified — check the seams before adding.");
+      break;
+    case "ok":
+      break;
+  }
+  const skipped = outcome.skipped ?? [];
+  if (skipped.length) {
+    const roles = new Set(skipped.map((s) => ROLE_NOUN[s.role]).filter(Boolean));
+    const what = roles.size === 1 ? [...roles][0] : "not a tiled plan sheet";
+    const nums = pageList(skipped.map((s) => s.pageNumber));
+    parts.push(`${nums.charAt(0).toUpperCase()}${nums.slice(1)} ${skipped.length === 1 ? "is" : "are"} ${what} and ${skipped.length === 1 ? "was" : "were"} left out of the alignment.`);
+  }
+  return parts.length ? parts.join(" ") : null;
+}

@@ -15,6 +15,7 @@ import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
 import { commitPlainAdd, commitAutoAlign } from "@/features/stitch/commitPages";
 import { parseStitchPlan } from "@/features/stitch/stitchPlan";
+import { autoAlignExplanation } from "@/features/stitch/addToProjectCopy";
 import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
@@ -161,6 +162,7 @@ export default function StitchView() {
   /** Sheets the last auto-align run could not place. Drives the step strip's
    *  "· K need placing" and the coach mark; zeroed when the mark is dismissed. */
   const [unplacedCount, setUnplacedCount] = useState(0);
+  const [alignExplanation, setAlignExplanation] = useState<string | null>(null);
   const [coachDismissed, setCoachDismissed] = useState(false);
   const [showAddToProject, setShowAddToProject] = useState(false);
   /** Persistent "Add to project" failure. A toast alone left the user back on the
@@ -276,6 +278,20 @@ export default function StitchView() {
         // A fresh run re-arms the mark: these are new strays, not the ones the
         // user already waved away.
         setUnplacedCount(result.unalignedIds.length);
+        // WHY it could not place everything. Without this the mark says a number and
+        // nothing else, which reads as a broken feature rather than a set the
+        // aligner honestly cannot match. Page numbers are 1-based for the reader.
+        setAlignExplanation(
+          autoAlignExplanation(
+            result.reason
+              ? {
+                  reason: result.reason,
+                  pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
+                  skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
+                }
+              : null,
+          ),
+        );
         setCoachDismissed(false);
         // Auto-align reports its own seam/alignment line; a plain placement has
         // no report of its own, so say what happened.
@@ -1044,12 +1060,14 @@ export default function StitchView() {
           onRelocateCleanupRegion={handleRelocateCleanupRegion}
           onCleanupManualBox={handleCleanupManualBox}
         />
-        {takeoffMode && unplacedCount > 0 && !coachDismissed && !showAddToProject && !cleanupReviewMode && (
+        {takeoffMode && (unplacedCount > 0 || alignExplanation) && !coachDismissed && !showAddToProject && !cleanupReviewMode && (
           <AlignCoachMark
             count={unplacedCount}
+            explanation={alignExplanation}
             onDismiss={() => {
               setCoachDismissed(true);
               setUnplacedCount(0);
+              setAlignExplanation(null);
             }}
           />
         )}

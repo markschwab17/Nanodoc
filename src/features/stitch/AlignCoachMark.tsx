@@ -15,12 +15,18 @@
 import { X } from "lucide-react";
 
 export interface AlignCoachMarkProps {
-  /** Sheets the run could not auto-align — always ≥ 1 when this is rendered. */
+  /** Sheets the run could not auto-align. May be 0: a run can place every sheet and
+   *  still be unable to VERIFY the seams, which the user needs telling about before
+   *  they press Add to project. */
   count: number;
+  /** WHY, in plain words (see `autoAlignExplanation`). Shown above the what-to-do
+   *  line, because "it didn't work" without a reason reads as a broken feature — and
+   *  the three reasons call for three different responses from the user. */
+  explanation?: string | null;
   onDismiss: () => void;
 }
 
-export function AlignCoachMark({ count, onDismiss }: AlignCoachMarkProps) {
+export function AlignCoachMark({ count, explanation, onDismiss }: AlignCoachMarkProps) {
   return (
     <div
       role="status"
@@ -31,16 +37,23 @@ export function AlignCoachMark({ count, onDismiss }: AlignCoachMarkProps) {
         className="grid h-7 w-7 flex-none place-items-center rounded-full bg-amber-50 text-sm font-bold text-amber-700 dark:bg-amber-400/15 dark:text-amber-300"
         aria-hidden
       >
-        {count}
+        {count > 0 ? count : "!"}
       </span>
       <div className="text-xs text-popover-foreground">
         <b className="block text-[13px] font-semibold">
-          {count} sheet{count === 1 ? "" : "s"} could not be auto-aligned
+          {count > 0
+            ? `${count} sheet${count === 1 ? "" : "s"} could not be auto-aligned`
+            : "Check the alignment before adding"}
         </b>
-        <span className="text-muted-foreground">
-          {count === 1
-            ? "It is placed below. Drag it into position, or pick Two-point align and click two matching points on each sheet. Then press Add to project."
-            : "They are placed below. Drag them into position, or pick Two-point align and click two matching points on each sheet. Then press Add to project."}
+        {explanation ? (
+          <span className="mt-0.5 block text-muted-foreground">{explanation}</span>
+        ) : null}
+        <span className="mt-0.5 block text-muted-foreground">
+          {count === 0
+            ? "Every sheet was placed. Look along the seams — if they line up, press Add to project; if not, drag a sheet or use Two-point align."
+            : count === 1
+              ? "It is placed below. Drag it into position, or pick Two-point align and click two matching points on each sheet. Then press Add to project."
+              : "They are placed below. Drag them into position, or pick Two-point align and click two matching points on each sheet. Then press Add to project."}
         </span>
       </div>
       <button

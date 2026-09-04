@@ -19,6 +19,8 @@ import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
 import { autoStitch, AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
+import type { AlignmentVerdict, SeamStatus, SeamReportEntry } from "@/features/stitch/autostitch/stitchCore";
+import type { AutoAlignReason } from "./addToProjectCopy";
 import type { recognize } from "./autostitch/ocrService";
 import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline } from "./pageScales";
 
@@ -71,6 +73,18 @@ export interface CommitResult {
   added: number;
   unalignedIds: string[];
   message: string | null;
+  /** Auto-align only. The honesty verdict from the post-solve seam verification,
+   *  and WHY the run did not place everything (`'ok'` when it did). */
+  verdict?: AlignmentVerdict;
+  reason?: AutoAlignReason;
+  /** Per-seam quality, for the UI: which pages, how the seam rated, and how far it
+   *  sits from what its own measurement said. */
+  seams?: { pageIndexes: [number, number]; status: SeamStatus; residFt?: number; perpDeltaFt?: number }[];
+  /** Pages deliberately kept out of the tiling (overall/key/notes/index/details). */
+  skipped?: { pageIndex: number; role: string }[];
+  /** 0-based indices of committed pages carrying no readable sheet number or
+   *  matchline callout — the pages `reason: 'no_refs'` is about. */
+  pagesWithoutRefs?: number[];
 }
 
 /** Row flow used by the plain add: `TILES_PER_ROW` tiles per row, `GAP` between
@@ -247,6 +261,11 @@ export async function commitAutoAlign(
   let placements: TilePlacement[];
   let rootFtPerIn: number;
   let worstResidFt: number;
+  let verdict: AlignmentVerdict | undefined;
+  let seamReport: SeamReportEntry[] | undefined;
+  let skipped: { pageIndex: number; role: string }[] = [];
+  let refPageIndices: number[] = [];
+  let method: string = "none";
   if (cached) {
     // The cached path skips the solver entirely, so its own abort checkpoints
     // never run — check here instead.
@@ -266,6 +285,39 @@ export async function commitAutoAlign(
     placements = result.placements;
     rootFtPerIn = result.rootFtPerIn;
     worstResidFt = result.worstResidFt;
+    verdict = result.alignmentVerdict;
+    seamReport = result.seamReport;
+    skipped = result.skipped.map((s) => ({ pageIndex: s.pageIndex, role: s.role }));
+    refPageIndices = result.refPageIndices;
+    method = result.method;
+  }
+
+  // ── HONESTY GATE ON THE COMMIT ──────────────────────────────────────────────
+  // A placement the solver could not physically verify must not be presented as an
+  // alignment. Two cases are demoted to "unaligned" — placed below, selected, and
+  // counted in the coach mark — rather than committed into the composite:
+  //   • a unit every one of whose seams is SUSPECT (a seam is suspect only on
+  //     positive evidence it is wrong; one verified seam elsewhere still anchors it);
+  //   • a unit bonded ONLY through the band-seam channel, the weakest in the ladder.
+  // This is what the CTO plan path was missing: the modal has always refused to
+  // offer auto-align on an unverified set, while `commitAutoAlign` committed it.
+  const demoted = new Set<number>();
+  if (seamReport?.length) {
+    const status = new Map<number, { verified: number; suspect: number; seamOnly: number; total: number }>();
+    for (const s of seamReport) {
+      for (const pageIndex of s.pageIndexes) {
+        const e = status.get(pageIndex) ?? { verified: 0, suspect: 0, seamOnly: 0, total: 0 };
+        e.total++;
+        if (s.status === "verified") e.verified++;
+        if (s.status === "suspect") e.suspect++;
+        if (s.detail.channel === "seam") e.seamOnly++;
+        status.set(pageIndex, e);
+      }
+    }
+    for (const [pageIndex, e] of status) {
+      if (e.verified > 0) continue;
+      if (e.suspect === e.total || e.seamOnly === e.total) demoted.add(pageIndex);
+    }
   }
 
   // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
@@ -302,14 +354,33 @@ export async function commitAutoAlign(
 
   // 4. Leave unaligned tiles selected so the user can place them manually.
   const added = useStitchStore.getState().tiles.slice(-newTiles.length);
-  const alignedSet = new Set(placements.filter((p) => p.aligned).map((p) => p.pageIndex));
+  const alignedSet = new Set(
+    placements.filter((p) => p.aligned && !demoted.has(p.pageIndex)).map((p) => p.pageIndex),
+  );
   const unalignedIds = added.filter((t) => !alignedSet.has(t.sourcePageIndex)).map((t) => t.id);
   if (unalignedIds.length) useStitchStore.getState().setSelectedTileIds(unalignedIds);
 
-  // 5. Report.
+  // 5. Report — including WHY, when it did not place everything.
+  //   no_refs       nothing on these sheets says which sheet they are or what they
+  //                 adjoin, so there was never anything to match by;
+  //   not_adjacent  the sheets are readable but reference no one another — they are
+  //                 simply not neighbours;
+  //   unverified    they were matched, but the seams could not be confirmed.
+  const refSet = new Set(refPageIndices);
+  const pagesWithoutRefs = selected.filter((p) => !refSet.has(p));
+  let reason: AutoAlignReason = "ok";
+  if (method === "none") reason = refPageIndices.length < 2 ? "no_refs" : "not_adjacent";
+  else if (verdict === "unverified" || demoted.size > 0) reason = "unverified";
   const alignedCount = selected.length - unalignedIds.length;
   const message = unalignedIds.length > 0
     ? `Aligned ${alignedCount} of ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft. ${unalignedIds.length} placed below for manual alignment.`
     : `Aligned ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft.`;
-  return { added: newTiles.length, unalignedIds, message };
+  return {
+    added: newTiles.length, unalignedIds, message,
+    verdict, reason, skipped, pagesWithoutRefs,
+    seams: seamReport?.map((s) => ({
+      pageIndexes: s.pageIndexes, status: s.status,
+      residFt: s.detail.residFt, perpDeltaFt: s.detail.perpDeltaFt,
+    })),
+  };
 }

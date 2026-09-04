@@ -1,5 +1,12 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { gridLayout, finalReferenceScale, MARGIN, GAP, TILES_PER_ROW, commitPlainAdd } from "./commitPages";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { gridLayout, finalReferenceScale, MARGIN, GAP, TILES_PER_ROW, commitPlainAdd, commitAutoAlign } from "./commitPages";
+
+// commitAutoAlign's honesty gate is a pure function of what the solver reported, so
+// the solver is stubbed and the real thing under test is the demotion + reason logic.
+vi.mock("./autostitch/autoStitch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./autostitch/autoStitch")>();
+  return { ...actual, autoStitch: vi.fn() };
+});
 import { AutoStitchAborted } from "./autostitch/autoStitch";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 
@@ -157,5 +164,90 @@ describe("commitPlainAdd cooperative abort", () => {
     const result = await run(() => false);
     expect(result.added).toBe(3);
     expect(useStitchStore.getState().tiles).toHaveLength(3);
+  });
+});
+
+describe("commitAutoAlign honesty gate", () => {
+  const fakeDoc = { loadPage: () => ({ getBounds: () => [0, 0, 612, 792], destroy() {} }) };
+  const fakeRenderer = { renderPage: async () => ({ imageData: null }), dispose() {} } as any;
+  const placement = (pageIndex: number, aligned: boolean) =>
+    ({ pageIndex, x: pageIndex * 100, y: 0, width: 100, height: 100, aligned });
+  const seam = (a: number, b: number, status: string, channel = "anchor+segment") =>
+    ({ i: a + 1, j: b + 1, pageIndexes: [a, b] as [number, number], status, detail: { channel } });
+
+  const solverSays = async (over: Record<string, unknown>) => {
+    const { autoStitch } = await import("./autostitch/autoStitch");
+    (autoStitch as any).mockResolvedValue({
+      placements: [], rootFtPerIn: 20, alignedCount: 0, unplacedCount: 0, worstResidFt: 0,
+      method: "geometric", poses: [], refPageIndices: [0, 1, 2], skipped: [], scaleWarnings: [],
+      ...over,
+    });
+  };
+  const run = (selected: number[]) =>
+    commitAutoAlign({
+      mupdf: {}, doc: fakeDoc, pdfBytes: new Uint8Array([1]), fileName: "plan.pdf",
+      selected, pageScales: new Map(), uniformScale: 20,
+      removeWhiteBackground: false, renderer: fakeRenderer,
+    });
+
+  beforeEach(() => { useStitchStore.getState().reset(); vi.clearAllMocks(); });
+
+  it("a fully verified run reports ok and aligns everything", async () => {
+    await solverSays({
+      placements: [placement(0, true), placement(1, true)],
+      alignmentVerdict: "verified", seamReport: [seam(0, 1, "verified")],
+    });
+    const res = await run([0, 1]);
+    expect(res.reason).toBe("ok");
+    expect(res.verdict).toBe("verified");
+    expect(res.unalignedIds).toHaveLength(0);
+  });
+
+  it("a sheet whose ONLY seam is suspect is left unaligned, not committed as aligned", async () => {
+    await solverSays({
+      placements: [placement(0, true), placement(1, true), placement(2, true)],
+      alignmentVerdict: "unverified",
+      seamReport: [seam(0, 1, "verified"), seam(1, 2, "suspect")],
+    });
+    const res = await run([0, 1, 2]);
+    // Page 2 has one seam and it is suspect. Page 1 also touches that seam but is
+    // anchored by a verified one, so it stays aligned.
+    expect(res.unalignedIds).toHaveLength(1);
+    expect(res.reason).toBe("unverified");
+  });
+
+  it("a sheet bonded only through the band-seam channel is left unaligned", async () => {
+    await solverSays({
+      placements: [placement(0, true), placement(1, true)],
+      alignmentVerdict: "partial",
+      seamReport: [seam(0, 1, "plausible", "seam")],
+    });
+    const res = await run([0, 1]);
+    expect(res.unalignedIds).toHaveLength(2);
+    expect(res.reason).toBe("unverified");
+  });
+
+  it("nothing placed and no page carrying a reference -> no_refs", async () => {
+    await solverSays({ placements: [placement(0, false), placement(1, false)], method: "none", refPageIndices: [] });
+    const res = await run([0, 1]);
+    expect(res.reason).toBe("no_refs");
+    expect(res.pagesWithoutRefs).toEqual([0, 1]);
+  });
+
+  it("nothing placed but the sheets ARE readable -> not_adjacent", async () => {
+    await solverSays({ placements: [placement(0, false), placement(1, false)], method: "none", refPageIndices: [0, 1] });
+    expect((await run([0, 1])).reason).toBe("not_adjacent");
+  });
+
+  it("carries the skipped sheets and the per-seam quality through to the caller", async () => {
+    await solverSays({
+      placements: [placement(0, true), placement(1, true)],
+      alignmentVerdict: "partial",
+      seamReport: [{ ...seam(0, 1, "plausible"), detail: { channel: "anchor+segment", residFt: 1.25, perpDeltaFt: 0.13 } }],
+      skipped: [{ pageIndex: 4, role: "overall", reason: "an overall plan" }],
+    });
+    const res = await run([0, 1]);
+    expect(res.skipped).toEqual([{ pageIndex: 4, role: "overall" }]);
+    expect(res.seams).toEqual([{ pageIndexes: [0, 1], status: "plausible", residFt: 1.25, perpDeltaFt: 0.13 }]);
   });
 });
