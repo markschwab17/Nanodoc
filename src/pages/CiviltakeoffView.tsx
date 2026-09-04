@@ -88,6 +88,7 @@ export default function CiviltakeoffView() {
               doc: "document_file",
               token,
               api_origin: apiOrigin,
+              embed: params.embed === "1",
             });
           }
           const url = `${apiOrigin}/api/nanodoc/pdf?token=${encodeURIComponent(token)}`;
@@ -202,6 +203,7 @@ export default function CiviltakeoffView() {
             token: params.token,
             api_origin: params.api_origin,
             project_name: params.project_name ?? undefined,
+            embed: params.embed === "1",
           });
         }
 

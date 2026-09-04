@@ -12,6 +12,8 @@ export interface CiviltakeoffContext {
   api_origin: string;
   /** Optional project display name (for stitch save default filename). */
   project_name?: string | null;
+  /** True when Nanodoc is hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1, `embed=1`). */
+  embed: boolean;
 }
 
 interface CiviltakeoffContextState {

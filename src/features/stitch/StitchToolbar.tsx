@@ -80,6 +80,10 @@ export interface StitchToolbarProps {
   cleanupActive?: boolean;
   /** True while a clean-up detection pass is in flight (before review opens). */
   cleanupBusy?: boolean;
+  /** True when hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1, `embed=1`): hides the Back-to-editor link, replacing it with a Cancel button that calls `onCancel`. */
+  embed?: boolean;
+  /** Called when Cancel is clicked in embed mode. */
+  onCancel?: () => void;
 }
 
 const POINT_ALIGN_STEP_LABELS = [
@@ -157,6 +161,8 @@ export function StitchToolbar({
   onCleanup,
   cleanupActive,
   cleanupBusy,
+  embed,
+  onCancel,
 }: StitchToolbarProps) {
   // Shallow-picked subscription: avoids re-rendering the whole toolbar on
   // store changes it doesn't use (e.g. panOffset during panning). Tile
@@ -362,9 +368,15 @@ export function StitchToolbar({
     <header className="flex flex-col gap-1.5 border-b shrink-0 px-2.5 py-2 bg-muted/30">
       <div className="flex items-center gap-1.5 flex-wrap text-xs">
         <div className="flex items-center gap-1.5">
-          <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
-            <ArrowLeft className="h-3.5 w-3.5" />
-          </Link>
+          {embed ? (
+            <Button variant="ghost" size="sm" className="h-7 shrink-0" title="Cancel and close" onClick={onCancel}>
+              Cancel
+            </Button>
+          ) : (
+            <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </Link>
+          )}
           <span className="font-semibold text-sm">Stitch PDFs</span>
         </div>
         <div className="h-5 w-px bg-border" aria-hidden />

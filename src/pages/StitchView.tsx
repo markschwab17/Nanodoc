@@ -8,6 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { useStitchStore, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
+import { postToCto } from "@/shared/ctoBridge";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
@@ -555,6 +556,11 @@ export default function StitchView() {
     [loadPDF, navigate, showNotification]
   );
 
+  const handleCancel = useCallback(() => {
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    postToCto({ type: "nanodoc-stitch-cancel" }, ctx?.api_origin);
+  }, []);
+
   const handleSaveToCto = useCallback(() => {
     if (tileCount === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
@@ -605,17 +611,16 @@ export default function StitchView() {
           const text = await res.text();
           throw new Error(text || `Save failed (${res.status})`);
         }
+        const resultJson = await res.json().catch(() => null);
+        const pageUuid =
+          resultJson && typeof resultJson === "object" && typeof (resultJson as { pageUuid?: unknown }).pageUuid === "string"
+            ? (resultJson as { pageUuid: string }).pageUuid
+            : null;
         showNotification("Saved to Civiltakeoff.", "success");
-        if (typeof window !== "undefined" && window.opener) {
-          try {
-            window.opener.postMessage(
-              { type: "nanodoc-stitch-saved", success: true, destination, manifest },
-              ctx.api_origin
-            );
-          } catch {
-            // ignore
-          }
-        }
+        postToCto(
+          { type: "nanodoc-stitch-saved", success: true, destination, manifest, pageUuid },
+          ctx.api_origin
+        );
       } catch (e) {
         console.error(e);
         showNotification(
@@ -691,6 +696,8 @@ export default function StitchView() {
         onCleanup={handleCleanup}
         cleanupActive={cleanupReviewMode}
         cleanupBusy={cleanupBusy}
+        embed={!!ctoContext?.embed}
+        onCancel={handleCancel}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
         {tileCount === 0 && (
@@ -815,38 +822,44 @@ export default function StitchView() {
             <DialogTitle>Save to Civiltakeoff</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground pb-3">
-            Choose how to save the stitched PDF in your project.
+            {ctoContext?.embed
+              ? "Adds the stitched sheet as a new page on this project."
+              : "Choose how to save the stitched PDF in your project."}
           </p>
           <div className="grid gap-2">
-            <Button
-              variant="outline"
-              className="justify-start"
-              onClick={() => doSaveToCto("overwrite")}
-            >
-              Overwrite current file
-            </Button>
-            <div className="flex flex-col gap-2">
-              <Button
-                variant="outline"
-                className="justify-start"
-                onClick={() => {
-                  const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
-                  const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
-                  doSaveToCto("new_file", finalName);
-                }}
-              >
-                Save as new document
-              </Button>
-              <label className="text-xs text-muted-foreground pl-2">
-                File name (you can edit)
-              </label>
-              <Input
-                value={saveToCtoNewFileName}
-                onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
-                placeholder="Project name - Stitched"
-                className="font-mono text-sm"
-              />
-            </div>
+            {!ctoContext?.embed && (
+              <>
+                <Button
+                  variant="outline"
+                  className="justify-start"
+                  onClick={() => doSaveToCto("overwrite")}
+                >
+                  Overwrite current file
+                </Button>
+                <div className="flex flex-col gap-2">
+                  <Button
+                    variant="outline"
+                    className="justify-start"
+                    onClick={() => {
+                      const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
+                      const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+                      doSaveToCto("new_file", finalName);
+                    }}
+                  >
+                    Save as new document
+                  </Button>
+                  <label className="text-xs text-muted-foreground pl-2">
+                    File name (you can edit)
+                  </label>
+                  <Input
+                    value={saveToCtoNewFileName}
+                    onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
+                    placeholder="Project name - Stitched"
+                    className="font-mono text-sm"
+                  />
+                </div>
+              </>
+            )}
             <Button
               variant="outline"
               className="justify-start"
