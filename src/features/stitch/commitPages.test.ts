@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { gridLayout, finalReferenceScale, MARGIN, GAP, TILES_PER_ROW } from "./commitPages";
+import { describe, it, expect, beforeEach } from "vitest";
+import { gridLayout, finalReferenceScale, MARGIN, GAP, TILES_PER_ROW, commitPlainAdd } from "./commitPages";
+import { AutoStitchAborted } from "./autostitch/autoStitch";
+import { useStitchStore } from "@/shared/stores/stitchStore";
 
 describe("gridLayout", () => {
   it("returns nothing for an empty selection", () => {
@@ -94,5 +96,66 @@ describe("finalReferenceScale", () => {
     expect(finalReferenceScale({ ...base, existingRef: 40, hasTiles: true }).write).toBe(false);
     expect(finalReferenceScale({ ...base, existingRef: 40, hasTiles: false }).write).toBe(false);
     expect(finalReferenceScale({ ...base, uniformScale: 30, existingRef: 40, hasTiles: true }).write).toBe(true);
+  });
+});
+
+describe("commitPlainAdd cooperative abort", () => {
+  const fakeDoc = {
+    loadPage: () => ({ getBounds: () => [0, 0, 612, 792], destroy() {} }),
+  };
+  const fakeRenderer = {
+    renderPage: async () => ({ imageData: null }),
+    dispose() {},
+  } as any;
+
+  const run = (shouldAbort: () => boolean) =>
+    commitPlainAdd({
+      mupdf: {},
+      doc: fakeDoc,
+      pdfBytes: new Uint8Array([1]),
+      fileName: "plan.pdf",
+      selected: [0, 1, 2],
+      pageScales: new Map(),
+      uniformScale: 20,
+      removeWhiteBackground: false,
+      renderer: fakeRenderer,
+      shouldAbort,
+    });
+
+  beforeEach(() => useStitchStore.getState().reset());
+
+  it("throws AutoStitchAborted and adds NOTHING when aborted mid-run", async () => {
+    let rendered = 0;
+    const renderer = {
+      renderPage: async () => {
+        rendered++;
+        return { imageData: null };
+      },
+    } as any;
+    await expect(
+      commitPlainAdd({
+        mupdf: {},
+        doc: fakeDoc,
+        pdfBytes: new Uint8Array([1]),
+        fileName: "plan.pdf",
+        selected: [0, 1, 2],
+        pageScales: new Map(),
+        uniformScale: 20,
+        removeWhiteBackground: false,
+        renderer,
+        // Abort once the first page has been rendered.
+        shouldAbort: () => rendered >= 1,
+      })
+    ).rejects.toBeInstanceOf(AutoStitchAborted);
+    // The whole point of aborting BEFORE addTiles: a cancelled run must not
+    // leave a half-placed batch behind.
+    expect(useStitchStore.getState().tiles).toEqual([]);
+    expect(rendered).toBe(1);
+  });
+
+  it("commits every page when shouldAbort never fires (control)", async () => {
+    const result = await run(() => false);
+    expect(result.added).toBe(3);
+    expect(useStitchStore.getState().tiles).toHaveLength(3);
   });
 });

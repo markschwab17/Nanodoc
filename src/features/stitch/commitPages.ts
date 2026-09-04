@@ -17,7 +17,7 @@ import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
-import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
+import { autoStitch, AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
 import type { recognize } from "./autostitch/ocrService";
 import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline } from "./pageScales";
@@ -57,6 +57,11 @@ export interface CommitInput {
   renderer: PDFRenderer;
   onProgress?: (done: number, total: number) => void;
   ocr?: typeof recognize;
+  /** Cooperative abort, checked between page renders and handed straight to
+   *  `autoStitch`. When it goes true the commit throws `AutoStitchAborted`
+   *  BEFORE `addTiles`, so an aborted run leaves the canvas untouched — the
+   *  caller can treat that error as "cancelled", not "failed". */
+  shouldAbort?: () => boolean;
 }
 
 export interface CommitResult {
@@ -122,7 +127,8 @@ type TileData = {
  *  already on the canvas. Throws on render failure; the caller owns the error
  *  copy. */
 export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> {
-  const { doc, pdfBytes, fileName, selected, pageScales, uniformScale, removeWhiteBackground, renderer, onProgress } = input;
+  const { doc, pdfBytes, fileName, selected, pageScales, uniformScale, removeWhiteBackground, renderer, onProgress, shouldAbort } = input;
+  const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
 
   const newTiles: Array<TileData & { x: number; y: number }> = [];
   // ONE reference scale for the whole commit: the typed set scale wins; else a
@@ -146,6 +152,7 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
   for (let idx = 0; idx < selected.length; idx++) {
     const pageIndex = selected[idx];
     await yieldToMain();
+    checkAbort();
     const page = doc.loadPage(pageIndex);
     const bounds = page.getBounds();
     page.destroy?.();
@@ -174,6 +181,8 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
     sizes.push({ w: tileW, h: tileH });
     onProgress?.(idx + 1, selected.length);
   }
+  // Last checkpoint before anything is written: past here the commit lands.
+  checkAbort();
   const positions = gridLayout(sizes, startY);
   for (let i = 0; i < newTiles.length; i++) {
     newTiles[i].x = positions[i].x;
@@ -196,14 +205,16 @@ export async function commitAutoAlign(
 ): Promise<CommitResult> {
   const {
     mupdf, doc, pdfBytes, fileName, selected, pageScales, uniformScale,
-    removeWhiteBackground, renderer, onProgress, ocr, cached,
+    removeWhiteBackground, renderer, onProgress, ocr, cached, shouldAbort,
   } = input;
+  const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
 
   // 1. Render rasters for the selected pages (same as the plain add).
   const rasters = new Map<number, string>();
   for (let i = 0; i < selected.length; i++) {
     const pageIndex = selected[i];
     await new Promise<void>((r) => setTimeout(r, 0));
+    checkAbort();
     const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE });
     const imageData = rendered.imageData as ImageData;
     if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
@@ -221,6 +232,9 @@ export async function commitAutoAlign(
   let rootFtPerIn: number;
   let worstResidFt: number;
   if (cached) {
+    // The cached path skips the solver entirely, so its own abort checkpoints
+    // never run — check here instead.
+    checkAbort();
     placements = cached.placements;
     rootFtPerIn = cached.rootFtPerIn;
     worstResidFt = cached.worstResidFt;
@@ -230,6 +244,7 @@ export async function commitAutoAlign(
       pageScales,
       onProgress,
       ocr,
+      shouldAbort,
     });
     placements = result.placements;
     rootFtPerIn = result.rootFtPerIn;
@@ -258,6 +273,8 @@ export async function commitAutoAlign(
   // have sheets" reflects what was there before this batch, not this batch itself.
   const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
   const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+  // Last checkpoint before anything is written: past here the commit lands.
+  checkAbort();
   useStitchStore.getState().addTiles(newTiles);
   const refScale = referenceScaleFor(selected, pageScales, uniformScale);
   const { value: finalRef, write } = finalReferenceScale({

@@ -21,6 +21,10 @@ describe("parseStitchPlan", () => {
     expect(parsed?.pageIndices).toEqual([0, 1]);
   });
 
+  it("round-trips the auto mode", () => {
+    expect(parseStitchPlan(plan([takeoff(20)], "auto"), 1)?.mode).toBe("auto");
+  });
+
   it("collapses a uniformly-scaled plan to one uniform scale", () => {
     const parsed = parseStitchPlan(plan([takeoff(20), takeoff(20), takeoff(20)]), 3);
     expect(parsed?.uniformScale).toBe(20);
@@ -80,11 +84,21 @@ describe("parseStitchPlan", () => {
     expect(parseStitchPlan(plan(["not an entry"]), 3)).toBeNull();
   });
 
-  it("returns null for an unusable scale rather than guessing", () => {
-    expect(parseStitchPlan(plan([takeoff(0)]), 1)).toBeNull();
-    expect(parseStitchPlan(plan([takeoff(-20)]), 1)).toBeNull();
-    expect(parseStitchPlan(plan([takeoff(Number.NaN)]), 1)).toBeNull();
-    expect(parseStitchPlan(plan([{ kind: "takeoff", pageUuid: "u", scaleFeetPerInch: "20" }]), 1)).toBeNull();
+  it("treats an unusable scale as no scale instead of rejecting the plan", () => {
+    // One bad scale in a big plan must not throw the whole set back to the picker;
+    // the page simply resolves its scale the way any uncalibrated page does.
+    for (const bad of [0, -20, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const parsed = parseStitchPlan(plan([takeoff(20), takeoff(bad as number)]), 2);
+      expect(parsed?.pageIndices).toEqual([0, 1]);
+      expect(parsed?.pageScales).toEqual(new Map([[0, 20]]));
+      expect(parsed?.uniformScale).toBeNull();
+    }
+    const strung = parseStitchPlan(
+      plan([{ kind: "takeoff", pageUuid: "u", scaleFeetPerInch: "20" }]),
+      1
+    );
+    expect(strung?.pageIndices).toEqual([0]);
+    expect(strung?.pageScales.size).toBe(0);
   });
 
   it("ignores a malformed entry that the page count truncates away", () => {

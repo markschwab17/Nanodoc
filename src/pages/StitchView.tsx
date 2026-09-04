@@ -16,6 +16,7 @@ import { AddPdfModal } from "@/features/stitch/AddPdfModal";
 import { commitPlainAdd, commitAutoAlign } from "@/features/stitch/commitPages";
 import { parseStitchPlan } from "@/features/stitch/stitchPlan";
 import { recognize } from "@/features/stitch/autostitch/ocrService";
+import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
@@ -123,7 +124,15 @@ export default function StitchView() {
   const [sessionSourcePdf, setSessionSourcePdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
   /** Non-null while a CTO stitch plan is being committed — drives the entry
    *  overlay. `done/total` is the commit's own page progress. */
-  const [planRun, setPlanRun] = useState<{ mode: "auto" | "manual"; done: number; total: number } | null>(null);
+  const [planRun, setPlanRun] = useState<{
+    mode: "auto" | "manual";
+    done: number;
+    total: number;
+    cancelling: boolean;
+  } | null>(null);
+  /** Flipped by the overlay's Cancel button; the commit polls it between page
+   *  renders (and hands it to the solver) and throws AutoStitchAborted. */
+  const planAbortRef = useRef(false);
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
@@ -139,8 +148,19 @@ export default function StitchView() {
       return;
     }
 
+    // Re-entry guard. Browser Back inside the CTO iframe re-runs CiviltakeoffView
+    // with the same token, which re-seeds the store and remounts this view — but
+    // the stitch store outlives that, so committing again would duplicate every
+    // sheet on top of the ones already placed. Sheets on the canvas means this
+    // plan has already run: keep the canvas exactly as the user left it (the
+    // session source is set above, so "From Civiltakeoff" still offers it).
+    const alreadyStitched = useStitchStore
+      .getState()
+      .tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+    if (alreadyStitched) return;
+
     /** Hand the source to the picker — exactly what a planless open does. Used
-     *  for an unusable plan and for a commit that threw. */
+     *  for an unusable plan, for a cancelled run, and for a commit that threw. */
     const fallBackToPicker = () => {
       setPlanRun(null);
       setCtoInitialPdf(source);
@@ -156,10 +176,12 @@ export default function StitchView() {
     // its container ref is gone.
 
     (async () => {
-      const mupdf = await import("mupdf").then((m) => m.default);
       let doc: any = null;
       let renderer: PDFRenderer | null = null;
       try {
+        // Inside the try: a chunk-load failure here is as recoverable as any
+        // other — toast, then the picker.
+        const mupdf = await import("mupdf").then((m) => m.default);
         // ONE document for the whole run: the plan is validated against this
         // doc's real page count and the commit renders from the same handle.
         doc = mupdf.Document.openDocument(source.pdfBytes, "application/pdf");
@@ -168,7 +190,8 @@ export default function StitchView() {
           fallBackToPicker();
           return;
         }
-        setPlanRun({ mode: parsed.mode, done: 0, total: parsed.pageIndices.length });
+        planAbortRef.current = false;
+        setPlanRun({ mode: parsed.mode, done: 0, total: parsed.pageIndices.length, cancelling: false });
         renderer = new PDFRenderer(mupdf);
         const input = {
           mupdf,
@@ -182,8 +205,12 @@ export default function StitchView() {
           // hand-picked one produce identical tiles.
           removeWhiteBackground: true,
           renderer,
+          // Monotonic: commitAutoAlign feeds the same callback from its raster
+          // loop AND from the solver, so a raw assignment would visibly restart
+          // the counter halfway through.
           onProgress: (done: number, total: number) =>
-            setPlanRun((p) => (p ? { ...p, done, total } : p)),
+            setPlanRun((p) => (p ? { ...p, done: Math.max(p.done, done), total } : p)),
+          shouldAbort: () => planAbortRef.current,
         };
         // `recognize` is the main-thread OCR entry point and stands alone —
         // `attachOcrRpc` exists only to bridge the modal's probe WORKER to it,
@@ -193,15 +220,24 @@ export default function StitchView() {
             ? await commitAutoAlign({ ...input, ocr: recognize })
             : await commitPlainAdd(input);
         setPlanRun(null);
-        if (result.message) {
-          useNotificationStore
-            .getState()
-            .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
-        }
+        // Auto-align reports its own seam/alignment line; a plain placement has
+        // no report of its own, so say what happened.
+        const message =
+          result.message ??
+          `Placed ${result.added} sheet${result.added === 1 ? "" : "s"}.`;
+        useNotificationStore
+          .getState()
+          .showNotification(message, result.unalignedIds.length > 0 ? "info" : "success");
         // Two frames, as on first mount: the tiles must be laid out before
         // recenter can measure the canvas against them.
         requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
       } catch (e) {
+        // Cancelled by the user: the commit threw before writing anything, so
+        // the canvas is untouched. No error copy — just hand them the picker.
+        if (e instanceof AutoStitchAborted) {
+          fallBackToPicker();
+          return;
+        }
         console.error(e);
         useNotificationStore
           .getState()
@@ -892,6 +928,20 @@ export default function StitchView() {
             <span className="text-xs text-muted-foreground tabular-nums">
               {planRun.done} of {planRun.total} done
             </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-1 h-7"
+              disabled={planRun.cancelling}
+              onClick={() => {
+                // The commit only notices at its next checkpoint (after the page
+                // it is mid-render on), so say so rather than looking inert.
+                planAbortRef.current = true;
+                setPlanRun((p) => (p ? { ...p, cancelling: true } : p));
+              }}
+            >
+              {planRun.cancelling ? "Cancelling…" : "Cancel"}
+            </Button>
           </div>
         </div>
       )}
