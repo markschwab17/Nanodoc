@@ -1,10 +1,12 @@
 /**
  * "Align to neighbour" — the React side of the mode.
  *
- * Owns the pure machine (`alignToNeighbourMachine`), the two toggles, the keyboard
- * (Esc backs up one click, Enter confirms), and the one write to the store: the 4th
- * click applies translation + rotation (+ uniform scale when **Match scale** is on) to
- * the moving tile through `updateTile`, which is a SINGLE undo step.
+ * Owns the pure machine (`alignToNeighbourMachine`), the toggles, the keyboard (Esc
+ * backs up one click, Enter confirms), and the one write to the store: the click that
+ * completes a move applies it to the moving tile through `updateTile`, which is a
+ * SINGLE undo step. By default that is a translation — one anchor each side, nothing
+ * rotated or resized; with **Rotate too (2 points)** it is the two-point similarity
+ * (+ uniform scale when **Match scale** is also on).
  *
  * The moving sheet is also made the selection when it is picked, which is what gives
  * the mode its arrow-key nudges for free — `useStitchKeyboard` already nudges the
@@ -13,14 +15,21 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
-import { computeAlignToNeighbour, seamMissFt, type CanvasPoint } from "./stitchGeometry";
+import {
+  computeAlignToNeighbour,
+  computeAlignTranslation,
+  seamMissFt,
+  type CanvasPoint,
+} from "./stitchGeometry";
 import { compositionFeetPerInch } from "./pageScales";
 import { isTypingTarget } from "./useStitchKeyboard";
 import {
   IDLE_ALIGN,
   alignClickableTiles,
   alignHint,
+  alignPickTargets,
   isLockedForAlign,
+  isPlacedInAlign,
   loupeActive,
   reduceAlign,
   type AlignApply,
@@ -39,6 +48,11 @@ export interface AlignToNeighbour {
   /** "Seam: second point lands 0.4 ft off" — this move's own miss. Null while no move
    *  has been made, and while **Match scale** is on (it is 0 by construction there). */
   seamNote: string | null;
+  /** **Rotate too (2 points)** — off by default: one anchor each side, translation
+   *  only. On, it is the two-points-each-side flow with rotation. */
+  twoPoint: boolean;
+  setTwoPoint: (v: boolean) => void;
+  /** Only meaningful (and only shown) while `twoPoint` is on. */
   matchScale: boolean;
   setMatchScale: (v: boolean) => void;
   snapToLines: boolean;
@@ -47,8 +61,15 @@ export interface AlignToNeighbour {
   showLoupe: boolean;
   movingTileId: string | null;
   isLocked: (tileId: string) => boolean;
+  /** Already placed by this session: part of the fixed group. */
+  isPlaced: (tileId: string) => boolean;
   /** The sheets this step accepts a click on — what the hit test must search. */
   clickableTiles: <T extends { id: string }>(tiles: readonly T[]) => T[];
+  /** At step 0, which sheets a pick should try first (never a placed one) and which
+   *  are the fallback. */
+  pickTargets: <T extends { id: string }>(
+    tiles: readonly T[]
+  ) => { preferred: T[]; fallback: T[] };
   enter: () => void;
   exit: () => void;
   /** A click on a sheet, in canvas space (already snapped by the caller). */
@@ -74,13 +95,20 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     const store = useStitchStore.getState();
     const moving = store.tiles.find((t) => t.id === apply.movingTileId);
     if (!moving) return;
+    const [a1, a2] = apply.movingPoints;
+    const [b1, b2] = apply.fixedPoints;
+
+    // The default: one anchor each side, so the sheet SLIDES. No rotation is derived
+    // from a single point, and none is invented.
+    if (!a2 || !b2) {
+      if (!a1 || !b1) return;
+      store.updateTile(apply.movingTileId, computeAlignTranslation(moving, a1, b1));
+      setSeamNote(null);
+      return;
+    }
+
     const matchScaleOn = matchScaleRef.current;
-    const pose = computeAlignToNeighbour(
-      moving,
-      apply.movingPoints,
-      apply.fixedPoints,
-      matchScaleOn
-    );
+    const pose = computeAlignToNeighbour(moving, [a1, a2], [b1, b2], matchScaleOn);
     store.updateTile(
       apply.movingTileId,
       matchScaleOn ? pose : { x: pose.x, y: pose.y, rotation: pose.rotation }
@@ -99,7 +127,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       compositionScaleFactor: store.compositionScaleFactor,
       tileScaleFeetPerInch: moving.scaleFeetPerInch,
     });
-    const miss = seamMissFt(apply.movingPoints, apply.fixedPoints, feetPerInch);
+    const miss = seamMissFt([a1, a2], [b1, b2], feetPerInch);
     setSeamNote(
       Number.isFinite(miss) ? `Seam: second point lands ${miss.toFixed(1)} ft off` : null
     );
@@ -119,7 +147,12 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       setRefusal(next.refusal ?? null);
       // The note describes the move that was just made; entering, leaving, or starting
       // the next sheet all retire it.
-      if (event.type === "enter" || next.state.step === "idle" || event.type === "click") {
+      if (
+        event.type === "enter" ||
+        event.type === "setTwoPoint" ||
+        next.state.step === "idle" ||
+        event.type === "click"
+      ) {
         setSeamNote(null);
       }
       // …and then the apply, which sets the note for the move it just made.
@@ -168,9 +201,18 @@ export function useAlignToNeighbour(): AlignToNeighbour {
   }, [active, dispatch]);
 
   const isLocked = useCallback((tileId: string) => isLockedForAlign(state, tileId), [state]);
+  const isPlaced = useCallback((tileId: string) => isPlacedInAlign(state, tileId), [state]);
   const clickableTiles = useCallback(
     <T extends { id: string }>(tiles: readonly T[]) => alignClickableTiles(state, tiles),
     [state]
+  );
+  const pickTargets = useCallback(
+    <T extends { id: string }>(tiles: readonly T[]) => alignPickTargets(state, tiles),
+    [state]
+  );
+  const setTwoPoint = useCallback(
+    (value: boolean) => dispatch({ type: "setTwoPoint", value }),
+    [dispatch]
   );
 
   return useMemo(
@@ -180,6 +222,8 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       hint: alignHint(state),
       refusal,
       seamNote,
+      twoPoint: state.twoPoint,
+      setTwoPoint,
       matchScale,
       setMatchScale,
       snapToLines,
@@ -187,12 +231,17 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       showLoupe: loupeActive(state),
       movingTileId: state.movingTileId,
       isLocked,
+      isPlaced,
       clickableTiles,
+      pickTargets,
       enter,
       exit,
       click,
       miss,
     }),
-    [active, state, refusal, seamNote, matchScale, snapToLines, isLocked, clickableTiles, enter, exit, click, miss]
+    [
+      active, state, refusal, seamNote, matchScale, snapToLines,
+      setTwoPoint, isLocked, isPlaced, clickableTiles, pickTargets, enter, exit, click, miss,
+    ]
   );
 }

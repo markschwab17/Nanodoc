@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 import {
   canvasToTileLocal,
   computeAlignToNeighbour,
+  computeAlignTranslation,
   seamMissFt,
   computeResizedPose,
   computeTwoPointAlignment,
@@ -378,5 +379,42 @@ describe("seamMissFt", () => {
       { x: 72, y: 0 },
     ];
     expect(seamMissFt(a, b, 20)).toBeCloseTo(seamMissFt(b, a, 20), 9);
+  });
+});
+
+describe("computeAlignTranslation — the default one-point move", () => {
+  const moving = makeTile({ id: "m", x: 40, y: 25, width: 200, height: 100, rotation: 0 });
+
+  test("slides the tile so the clicked point lands on the target point", () => {
+    const pose = computeAlignTranslation(moving, { x: 60, y: 45 }, { x: 500, y: 300 });
+    expect(pose).toEqual({ x: 480, y: 280 });
+    // The clicked point really is on the target now.
+    expect(pose.x + (60 - moving.x)).toBe(500);
+    expect(pose.y + (45 - moving.y)).toBe(300);
+  });
+
+  test("leaves rotation and size ALONE — that is the whole point of one-point mode", () => {
+    const rotated = makeTile({ id: "r", x: 0, y: 0, width: 200, height: 100, rotation: 12 });
+    const pose = computeAlignTranslation(rotated, { x: 10, y: 10 }, { x: 60, y: 90 });
+    // The helper returns a position only; nothing else can change.
+    expect(Object.keys(pose).sort()).toEqual(["x", "y"]);
+    expect(pose).toEqual({ x: 50, y: 80 });
+  });
+
+  test("carries a point on a rotated tile exactly onto the target", () => {
+    const rotated = makeTile({ id: "r", x: 10, y: 20, width: 200, height: 100, rotation: 37 });
+    const clicked = tileLocalToCanvas(150, 30, rotated);
+    const target = { x: 900, y: 400 };
+    const pose = computeAlignTranslation(rotated, clicked, target);
+    const placed = { ...rotated, ...pose };
+    const landed = tileLocalToCanvas(150, 30, placed);
+    expect(landed.x).toBeCloseTo(target.x, 9);
+    expect(landed.y).toBeCloseTo(target.y, 9);
+    expect(placed.rotation).toBe(37);
+  });
+
+  test("a point already on the target moves nothing", () => {
+    const pose = computeAlignTranslation(moving, { x: 100, y: 100 }, { x: 100, y: 100 });
+    expect(pose).toEqual({ x: moving.x, y: moving.y });
   });
 });

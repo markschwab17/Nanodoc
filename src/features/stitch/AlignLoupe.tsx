@@ -71,6 +71,11 @@ export const AlignLoupe = memo(function AlignLoupe({
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size, size);
+    // Literal white, in both themes, on purpose: what the loupe shows is PAPER. The
+    // sheets themselves stay white under `.dark` for the same reason (see StitchCanvas)
+    // — the linework is black, and a themed ground would swallow it. The crosshair and
+    // snap ring below are fixed red/blue for the same reason: they are drawn on paper,
+    // not on the app's surface.
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, size, size);
 

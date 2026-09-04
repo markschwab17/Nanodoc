@@ -5,14 +5,17 @@
  * markers are never clipped) that does four things:
  *   • dims every sheet except the one being moved, which IS the lock — there is no lock
  *     icon to find any more, and nothing else can be dragged while the mode is up;
- *   • takes the four clicks, snapping each to captured linework when **Snap to lines**
- *     is on, and paints A1/A2/B1/B2 with their connecting lines;
+ *   • takes the point clicks — one each side by default, four with **Rotate too** —
+ *     snapping each to captured linework when **Snap to lines** is on, and paints the
+ *     markers with their connecting lines;
  *   • carries the loupe under the cursor for the four point clicks;
  *   • shows the step hint, the two toggles and — after a move — how far the second
  *     point actually landed from where it was asked to.
  *
- * A finished move returns to step 0 ("Pick the next sheet to move, or press Done"), so a
- * plan set is aligned neighbour by neighbour without leaving and re-entering the mode.
+ * A finished move returns to step 0 ("Pick the next sheet to move, or press Done") and
+ * the sheet that moved JOINS THE GROUP, so a plan set is aligned neighbour by neighbour
+ * without leaving the mode — and the next click brings the next sheet in rather than
+ * picking up the one just placed.
  *
  * Middle-drag pan, the space-bar pan and the wheel zoom all keep working: pointerdown is
  * offered to the canvas's shared pan first (`beginPan` takes the middle button, and the
@@ -33,7 +36,9 @@ import { useLoupeRender } from "./useLoupeRender";
 import type { AlignToNeighbour } from "./useAlignToNeighbour";
 import type { StitchTile } from "./stitchTypes";
 
-const POINT_LABELS = ["A1", "A2", "B1", "B2"] as const;
+const POINT_LABELS_2 = ["A1", "A2", "B1", "B2"] as const;
+/** One point each side: there is no "1" and "2" to distinguish. */
+const POINT_LABELS_1 = ["A", "", "B", ""] as const;
 
 export interface AlignToNeighbourModeProps {
   align: AlignToNeighbour;
@@ -112,8 +117,31 @@ export function AlignToNeighbourMode({
   /** The sheets THIS step accepts — the hit test never looks at any other. */
   const clickable = useMemo(() => align.clickableTiles(tiles), [align, tiles]);
 
-  /** Only the steps that draw a rubber band need the live cursor. */
-  const wantsCursor = align.state.step === "A2" || align.state.step === "B2";
+  /**
+   * The sheet a press lands on for the CURRENT step.
+   *
+   * At step 0 the sheets this session has already placed are tried last: aligning
+   * sheet 2 onto sheet 1 routinely leaves it covering the grid slot sheet 3 is still
+   * in, and a plain top-most test then handed the next click back to sheet 2 — the
+   * mode peeled the sheet it had just placed instead of bringing in the next one.
+   */
+  const hitForStep = useCallback(
+    (coords: CanvasPoint) => {
+      if (align.state.step === "pickMoving") {
+        const { preferred, fallback } = align.pickTargets(tiles);
+        return hitTestTileAtPoint(coords, preferred, true) ?? hitTestTileAtPoint(coords, fallback, true);
+      }
+      return hitTestTileAtPoint(coords, clickable, true);
+    },
+    [align, clickable, tiles]
+  );
+
+  /** Only the steps that draw a rubber band need the live cursor. In one-point mode
+   *  that band is the move itself — anchor to cursor — which is worth seeing. */
+  const wantsCursor =
+    align.state.step === "A2" ||
+    align.state.step === "B2" ||
+    (!align.twoPoint && align.state.step === "B1");
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
@@ -122,12 +150,12 @@ export function AlignToNeighbourMode({
       // Hit-test ONLY the step's own sheets: along a matchline the sheets overlap, and
       // testing all of them let the neighbour on top swallow the click and blank the
       // loupe exactly where the work happens.
-      const hit = coords ? hitTestTileAtPoint(coords, clickable, true) : null;
+      const hit = coords ? hitForStep(coords) : null;
       setHoverTileId(align.state.step === "pickMoving" ? hit?.tile.id ?? null : null);
       if (!align.showLoupe) return;
       track(hit?.tile ?? null, hit?.point ?? null, { x: e.clientX, y: e.clientY });
     },
-    [align.showLoupe, align.state.step, clickable, clientToCanvas, track, wantsCursor]
+    [align.showLoupe, align.state.step, clientToCanvas, hitForStep, track, wantsCursor]
   );
 
   const handlePointerDown = useCallback(
@@ -137,7 +165,7 @@ export function AlignToNeighbourMode({
       e.preventDefault();
       e.stopPropagation();
       const coords = clientToCanvas(e.clientX, e.clientY);
-      const scoped = coords ? hitTestTileAtPoint(coords, clickable, true) : null;
+      const scoped = coords ? hitForStep(coords) : null;
       // A press that missed the step's own sheets may still have landed on another
       // one: that is a WRONG SHEET, and it must be refused by name rather than read as
       // a click into empty space.
@@ -155,7 +183,7 @@ export function AlignToNeighbourMode({
       const point = scoped && align.showLoupe ? resolveClick(scoped.tile, event.point) : event.point;
       align.click(event.tileId, point);
     },
-    [align, beginPan, clickable, clientToCanvas, resolveClick, tiles]
+    [align, beginPan, clientToCanvas, hitForStep, resolveClick, tiles]
   );
 
   const markerZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
@@ -164,8 +192,13 @@ export function AlignToNeighbourMode({
   const dash = Math.max(4, 5 * markerZoom);
 
   const pts = align.state.points;
+  const pointLabels = align.twoPoint ? POINT_LABELS_2 : POINT_LABELS_1;
   const liveFrom =
-    align.state.step === "A2" ? pts[0] : align.state.step === "B2" ? pts[2] : null;
+    align.state.step === "A2" || (!align.twoPoint && align.state.step === "B1")
+      ? pts[0]
+      : align.state.step === "B2"
+        ? pts[2]
+        : null;
 
   const loupeSubjectTile = useMemo(
     () => (loupe.view ? tiles.find((t) => t.id === loupe.view!.tileId) ?? null : null),
@@ -212,6 +245,22 @@ export function AlignToNeighbourMode({
               />
             ) : null
           )}
+          {/* The group so far: sheets this session has already placed. Outlined at
+              step 0 so "what is already done" is visible, and a click prefers a sheet
+              that is NOT one of them. */}
+          {align.state.step === "pickMoving" &&
+            tiles.map((tile) =>
+              align.isPlaced(tile.id) ? (
+                <polygon
+                  key={`placed-${tile.id}`}
+                  points={tilePolygon(tile)}
+                  fill="none"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={1.5}
+                  opacity={0.45}
+                />
+              ) : null
+            )}
           {/* Step 0: whatever the cursor is over is what a click would pick up. */}
           {align.state.step === "pickMoving" &&
             hoverTileId &&
@@ -260,7 +309,7 @@ export function AlignToNeighbourMode({
               (() => {
                 const o = toOverlay(p);
                 return (
-                  <g key={POINT_LABELS[i]}>
+                  <g key={i}>
                     <circle
                       cx={o.x}
                       cy={o.y}
@@ -279,7 +328,7 @@ export function AlignToNeighbourMode({
                       fontSize={Math.max(11, 10 * markerZoom)}
                       fontWeight="bold"
                     >
-                      {POINT_LABELS[i]}
+                      {pointLabels[i]}
                     </text>
                   </g>
                 );
@@ -289,47 +338,73 @@ export function AlignToNeighbourMode({
         </svg>
 
         {/* Mode bar. Inside the overlay so it moves with the canvas viewport, but it
-            takes its own pointer events so the toggles are clickable. */}
+            takes its own pointer events so the toggles are clickable.
+
+            It WRAPS. On a narrow window (or the CTO takeoff panel, which is narrower
+            still) the single row ran off the side of the screen and the hint was cut
+            in half — so the bar is capped at the viewport, the hint truncates with its
+            full text on hover, and the toggles drop to a second row rather than
+            pushing anything out of sight. */}
         <div
-          className="absolute left-1/2 -translate-x-1/2 bottom-4 flex items-center gap-3 rounded-lg border bg-popover/95 px-3 py-2 text-xs shadow-lg"
-          style={{ pointerEvents: "auto" }}
+          className="absolute left-1/2 -translate-x-1/2 bottom-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1.5 rounded-lg border bg-popover/95 px-3 py-2 text-xs text-popover-foreground shadow-lg"
+          style={{ pointerEvents: "auto", maxWidth: "calc(100vw - 32px)" }}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerMove={(e) => e.stopPropagation()}
         >
-          <span className="font-semibold shrink-0">Align to neighbour</span>
-          <span
-            className={cn("shrink-0", align.refusal ? "text-destructive font-medium" : "text-muted-foreground")}
-            role="status"
-            aria-live="polite"
-          >
-            {align.refusal?.message ?? align.hint}
-          </span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="font-semibold shrink-0">Align to neighbour</span>
+            <span
+              className={cn(
+                "min-w-0 truncate",
+                align.refusal ? "text-destructive font-medium" : "text-muted-foreground"
+              )}
+              title={align.refusal?.message ?? align.hint}
+              role="status"
+              aria-live="polite"
+            >
+              {align.refusal?.message ?? align.hint}
+            </span>
+          </div>
           {align.seamNote && (
-            <span className="shrink-0 rounded bg-primary/10 px-2 py-0.5 font-medium text-primary">
+            <span className="min-w-0 truncate rounded bg-primary/10 px-2 py-0.5 font-medium text-primary" title={align.seamNote}>
               {align.seamNote}
             </span>
           )}
-          <label className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
-              checked={align.matchScale}
-              onChange={(e) => align.setMatchScale(e.target.checked)}
-            />
-            Match scale
-          </label>
-          <label className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
-              checked={align.snapToLines}
-              onChange={(e) => align.setSnapToLines(e.target.checked)}
-            />
-            Snap to lines
-          </label>
-          <Button variant="ghost" size="sm" className="h-6 shrink-0" onClick={align.exit}>
-            {align.state.lastMovedTileId ? "Done" : "Cancel"}
-          </Button>
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+            <label className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                checked={align.twoPoint}
+                onChange={(e) => align.setTwoPoint(e.target.checked)}
+              />
+              Rotate too (2 points)
+            </label>
+            {/* Only meaningful with a second point: scale is the ratio of two spans. */}
+            {align.twoPoint && (
+              <label className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  checked={align.matchScale}
+                  onChange={(e) => align.setMatchScale(e.target.checked)}
+                />
+                Match scale
+              </label>
+            )}
+            <label className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                checked={align.snapToLines}
+                onChange={(e) => align.setSnapToLines(e.target.checked)}
+              />
+              Snap to lines
+            </label>
+            <Button variant="ghost" size="sm" className="h-6 shrink-0" onClick={align.exit}>
+              {align.state.lastMovedTileId ? "Done" : "Cancel"}
+            </Button>
+          </div>
         </div>
       </div>
 

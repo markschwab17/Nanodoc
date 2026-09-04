@@ -129,8 +129,29 @@ export function computeTwoPointAlignment(
 }
 
 /**
- * "Align to neighbour": the moving tile's two clicked points are carried onto the two
- * points clicked on the fixed sheet.
+ * "Align to neighbour", the DEFAULT one-point move: slide the tile so the point clicked
+ * on it lands on the point clicked on the fixed sheet.
+ *
+ * Mark: "sheets rarely rotate, it's mostly stacking and aligning the points." A plan
+ * set comes off one plotter at one orientation, so the second point mostly served to
+ * re-derive a rotation of zero — and any imprecision in it became a real, wrong
+ * rotation. Rotation and size are left exactly as they were; this is a translation and
+ * nothing else.
+ */
+export function computeAlignTranslation(
+  movingTile: TilePose,
+  movingPoint: CanvasPoint,
+  fixedPoint: CanvasPoint
+): { x: number; y: number } {
+  return {
+    x: movingTile.x + (fixedPoint.x - movingPoint.x),
+    y: movingTile.y + (fixedPoint.y - movingPoint.y),
+  };
+}
+
+/**
+ * "Align to neighbour" with **Rotate too**: the moving tile's two clicked points are
+ * carried onto the two points clicked on the fixed sheet.
  *
  * Same two-point maths as `computeTwoPointAlignment` (the moving tile is the target and
  * the fixed sheet's points are the reference), with ONE addition: when `matchScale` is
