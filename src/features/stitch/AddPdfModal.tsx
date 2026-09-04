@@ -25,6 +25,7 @@ import { getTileAABB } from "@/features/stitch/stitchGeometry";
 import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
 import { attachOcrRpc, recognize } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
@@ -351,8 +352,8 @@ export function AddPdfModal({
       setCtoDocumentsError("Project not set.");
       return;
     }
-    const opener = window.opener;
-    if (!opener) {
+    const target = resolveCtoTarget({ parent: window.parent, opener: window.opener, self: window });
+    if (!target) {
       setCtoDocumentsError("Open stitch from Civiltakeoff to see project documents.");
       return;
     }
@@ -360,7 +361,7 @@ export function AddPdfModal({
     setCtoDocumentsError(null);
     setCtoDocuments([]);
     ctoDocumentsRespondedRef.current = false;
-    opener.postMessage({ type: "nanodoc-request-cto-documents", projectId }, ctoContext.api_origin);
+    target.postMessage({ type: "nanodoc-request-cto-documents", projectId }, ctoContext.api_origin);
 
     const timeoutId = window.setTimeout(() => {
       if (!ctoDocumentsRespondedRef.current) {

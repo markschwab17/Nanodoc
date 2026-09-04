@@ -133,3 +133,27 @@ export function hasCiviltakeoffToken(params: CiviltakeoffViewParams): boolean {
     (params.mode === "esign_sign" && params.recipient_token && params.recipient_token.trim().length > 0)
   );
 }
+
+/** Append ".pdf" when the trimmed name doesn't already end with it (case-insensitive). */
+function withPdfExtension(name: string): string {
+  return name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+}
+
+/**
+ * Derive the display name for the PDF fetched via CiviltakeoffView.
+ * `doc=soils_report` / `doc=bid_docs` get fixed names; `document_file` and
+ * `site_sheet_source` (the site-sheet takeoff-panel source PDF) honour CTO's
+ * `file_name` so the stitch modal — and CTO's later tile-name matching — see
+ * the real file name instead of the generic fallback.
+ */
+export function displayNameFor(params: CiviltakeoffViewParams): string {
+  if (params.doc === "soils_report") return "soils_report.pdf";
+  if (params.doc === "bid_docs") return "bid_docs.pdf";
+  if (
+    (params.doc === "document_file" || params.doc === "site_sheet_source") &&
+    params.file_name?.trim()
+  ) {
+    return withPdfExtension(params.file_name.trim());
+  }
+  return "document.pdf";
+}

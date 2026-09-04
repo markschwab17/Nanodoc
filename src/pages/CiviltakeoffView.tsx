@@ -13,6 +13,7 @@ import Editor from "./Editor";
 import {
   parseCiviltakeoffViewParams,
   hasCiviltakeoffToken,
+  displayNameFor,
 } from "@/shared/civiltakeoffViewParams";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { usePDFStore } from "@/shared/stores/pdfStore";
@@ -186,14 +187,7 @@ export default function CiviltakeoffView() {
         }
         const arrayBuffer = await pdfRes.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
-        const name =
-          params.doc === "soils_report"
-            ? "soils_report.pdf"
-            : params.doc === "bid_docs"
-              ? "bid_docs.pdf"
-              : params.doc === "document_file" && params.file_name?.trim()
-                ? (params.file_name.trim().toLowerCase().endsWith(".pdf") ? params.file_name.trim() : params.file_name.trim() + ".pdf")
-                : "document.pdf";
+        const name = displayNameFor(params);
 
         // Persist CTO context so Save / stitch can use it
         if (params.project && params.doc && params.token) {
