@@ -41,8 +41,6 @@ async function createWorker(): Promise<FakeW> {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
-/** The worker currently holding a job tagged `tag`, if any. */
-const holderOf = (tag: string) => created.find((w) => w.jobs.some((j) => j.input === tag && !("done" in j)));
 
 function pool(size: number, timeout = 100_000): OcrPool<string, unknown> {
   return createOcrPool<string, unknown>({ size, createWorker, timeoutMs: () => timeout });
@@ -193,6 +191,53 @@ describe("createOcrPool — timeouts", () => {
       expect(created[1].terminated).toBe(0);
     } finally { vi.useRealTimers(); }
   });
+
+  it("a timeout with an empty queue does not boot a replacement for zero work", async () => {
+    vi.useFakeTimers();
+    try {
+      const p = pool(2, 100);
+      p.prewarm();                 // arms the sticky warm hint
+      const a = p.run("a");        // will hang; nothing queued behind it
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(a).resolves.toBe(OCR_NO_RESULT);
+      expect(created[0].terminated).toBe(1);
+      // The last live worker is gone and there is no pending work: a sticky
+      // `warm` would have booted a fresh wasm heap here for nothing.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createCalls).toBe(1);
+
+      // …and the pool is still usable: the next job builds its own worker.
+      const b = p.run("b");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createCalls).toBe(2);
+      created[1].open.resolve("B");
+      await expect(b).resolves.toBe("B");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("a throwing onTimeout hook cannot break the timeout path", async () => {
+    vi.useFakeTimers();
+    try {
+      const onTimeout = vi.fn(() => { throw new Error("logger blew up"); });
+      const p = createOcrPool<string, unknown>({
+        size: 1, createWorker, timeoutMs: () => 100, onTimeout,
+      });
+      const a = p.run("a"); // hangs
+      const b = p.run("b"); // queued; only the hang can free the single worker
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(onTimeout).toHaveBeenCalledTimes(1);
+      // Settle, retire and pump all still happened despite the hook throwing.
+      await expect(a).resolves.toBe(OCR_NO_RESULT);
+      expect(created[0].terminated).toBe(1);
+      created[1].open.resolve("B");
+      await expect(b).resolves.toBe("B");
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 describe("createOcrPool — abort", () => {
@@ -289,6 +334,5 @@ describe("createOcrPool — failures and teardown", () => {
 
     await expect(p.run("d")).resolves.toBe(OCR_NO_RESULT);
     expect(createCalls).toBe(2); // nothing new was built
-    void holderOf;
   });
 });

@@ -176,10 +176,14 @@ export function createOcrPool<Input, Result>(
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      onTimeout?.();
+      try { onTimeout?.(); } catch { /* logging must never break the timeout path */ }
       settle(job, OCR_NO_RESULT);
       busy--;
       retire(worker);   // only this worker; siblings keep their jobs
+      // Drop the warm hint: with an empty queue this timeout may have retired the
+      // LAST live worker, and a sticky `warm` would have pump() boot a fresh wasm
+      // heap for zero pending work. recognize() re-arms it via prewarm().
+      warm = false;
       pump();           // …and a replacement is created lazily if work remains
     }, timeoutMs());
     // Deliberately NOT clearing the timer when the job is merely ABORTED: the
