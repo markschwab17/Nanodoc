@@ -39,6 +39,9 @@ interface StitchState {
   viewportWidth: number;
   viewportHeight: number;
   tiles: StitchTile[];
+  /** tile id -> `blob:` URL of that tile's committed sheet raster. NOT part of
+   *  the undo snapshots (see the `tileRasters` notes above `pruneTileRasters`). */
+  tileRasters: Record<string, string>;
   panOffset: { x: number; y: number };
   zoomLevel: number;
   /** Multi-select: when non-empty, these tiles are selected. Last item is "primary" for UI. */
@@ -64,7 +67,10 @@ interface StitchState {
   /** Grow the page so it covers every tile with FIT_MARGIN_PT of paper around them.
    *  See the implementation for what it does about tiles at negative coordinates. */
   fitCanvasToTiles: () => void;
-  addTiles: (tiles: Omit<StitchTile, "id">[]) => void;
+  /** Append tiles. `rasterBlob` (the committed sheet PNG) is not stored on the
+   *  tile: it becomes an object URL in `tileRasters` under the generated id, so
+   *  two placements of one page get their OWN revocable URL. */
+  addTiles: (tiles: Array<Omit<StitchTile, "id"> & { rasterBlob?: Blob }>) => void;
   updateTile: (id: string, patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "imageDataUrl" | "locked" | "sourceFileName" | "isScaleStamp" | "scaleStampFeetPerInch" | "imageModified" | "hiddenRegions" | "relocatedRegions">>) => void;
   /** Apply patches to multiple tiles in one update (one undo step). */
   updateTiles: (updates: Array<{ id: string; patch: Partial<Pick<StitchTile, "x" | "y" | "width" | "height" | "rotation" | "locked" | "imageDataUrl" | "imageModified">> }>) => void;
@@ -118,6 +124,77 @@ function generateTileId(): string {
   return `tile_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+// ── tile rasters ────────────────────────────────────────────────────────────
+//
+// A committed sheet's raster is a Blob object URL kept in `tileRasters`, keyed
+// by tile id, DELIBERATELY outside the tiles themselves and outside every undo
+// snapshot: a snapshot is a shallow `{...t}` per tile, so a URL living on the
+// tile would be copied into up to 50 snapshots and there would be no honest
+// moment at which to revoke it.
+//
+// `tile.imageDataUrl` still exists and WINS when set. The two are not two
+// copies of one thing — they are different things:
+//   tileRasters[id]     the sheet as committed (blob:, revocable, not undone)
+//   tile.imageDataUrl   an OVERRIDE — an erase result, a scale stamp, a cleanup
+//                       crop, or a legacy tile — which lives on the tile
+//                       precisely so undo restores it and reveals the original
+//                       underneath again.
+// Read both through `tileRasterUrl` (or the store selector in StitchTile);
+// nothing should reach for either field on its own.
+
+function createRasterUrl(blob: Blob): string | null {
+  try {
+    return URL.createObjectURL(blob);
+  } catch {
+    return null; // no object-URL support (jsdom, ancient webviews)
+  }
+}
+
+function revokeRasterUrl(url: string): void {
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Drop (and revoke) every raster no live tile can reach.
+ *
+ * "Reachable" includes the undo and redo stacks: deleting a sheet and undoing
+ * has to bring its image back, so a raster is only dead once no snapshot
+ * mentions its tile either. A snapshot aging off the end of UNDO_MAX_SIZE can
+ * therefore strand a URL until the next sweep, which is bounded and harmless.
+ */
+function pruneTileRasters(next: {
+  tiles: StitchTile[];
+  undoStack: StitchUndoSnapshot[];
+  redoStack: StitchUndoSnapshot[];
+  tileRasters: Record<string, string>;
+}): Record<string, string> {
+  const live = new Set<string>();
+  for (const t of next.tiles) live.add(t.id);
+  for (const snap of next.undoStack) for (const t of snap.tiles) live.add(t.id);
+  for (const snap of next.redoStack) for (const t of snap.tiles) live.add(t.id);
+  let dropped = false;
+  const kept: Record<string, string> = {};
+  for (const id of Object.keys(next.tileRasters)) {
+    if (live.has(id)) kept[id] = next.tileRasters[id];
+    else { revokeRasterUrl(next.tileRasters[id]); dropped = true; }
+  }
+  return dropped ? kept : next.tileRasters;
+}
+
+/**
+ * The image a tile should draw: its own override if it has one, else the
+ * committed sheet raster. Non-reactive (reads `getState`) — React components
+ * that must re-render when a raster arrives should select `tileRasters[id]`
+ * from the store instead.
+ */
+export function tileRasterUrl(tile: { id: string; imageDataUrl?: string }): string | undefined {
+  return tile.imageDataUrl ?? useStitchStore.getState().tileRasters[tile.id];
+}
+
 function pushUndoAndSet(
   set: (partial: Partial<StitchState> | ((s: StitchState) => Partial<StitchState>)) => void,
   get: () => StitchState,
@@ -138,6 +215,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   canvasSizeTouched: false,
   viewportWidth: 0,
   viewportHeight: 0,
+  tileRasters: {},
   tiles: [],
   panOffset: { x: 0, y: 0 },
   zoomLevel: 1,
@@ -244,12 +322,20 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   addTiles: (newTiles) =>
     set((state) => {
       const snap = snapshotState(state);
-      const tiles = [
-        ...state.tiles,
-        ...newTiles.map((t) => ({ ...t, id: generateTileId() })),
-      ];
+      const rasters = { ...state.tileRasters };
+      const added: StitchTile[] = [];
+      for (const t of newTiles) {
+        const { rasterBlob, ...tile } = t;
+        const id = generateTileId();
+        if (rasterBlob) {
+          const url = createRasterUrl(rasterBlob);
+          if (url) rasters[id] = url;
+        }
+        added.push({ ...tile, id });
+      }
       return {
-        tiles,
+        tiles: [...state.tiles, ...added],
+        tileRasters: rasters,
         selectedTileIds: [],
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
@@ -338,12 +424,13 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   removeTile: (id) =>
     set((state) => {
       const snap = snapshotState(state);
-      return {
+      const next = {
         tiles: state.tiles.filter((t) => t.id !== id),
         selectedTileIds: state.selectedTileIds.filter((i) => i !== id),
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
       };
+      return { ...next, tileRasters: pruneTileRasters({ ...next, tileRasters: state.tileRasters }) };
     }),
 
   removeTiles: (ids) =>
@@ -351,12 +438,13 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       if (ids.length === 0) return state;
       const snap = snapshotState(state);
       const remove = new Set(ids);
-      return {
+      const next = {
         tiles: state.tiles.filter((t) => !remove.has(t.id)),
         selectedTileIds: state.selectedTileIds.filter((i) => !remove.has(i)),
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
       };
+      return { ...next, tileRasters: pruneTileRasters({ ...next, tileRasters: state.tileRasters }) };
     }),
 
   sendTileToBack: (id) =>
@@ -508,12 +596,13 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       if (state.undoStack.length === 0) return state;
       const snap = state.undoStack[state.undoStack.length - 1];
       const currentSnap = snapshotState(state);
-      return {
+      const next = {
         ...snap,
         selectedTileIds: [],
         undoStack: state.undoStack.slice(0, -1),
         redoStack: [...state.redoStack, currentSnap],
       };
+      return { ...next, tileRasters: pruneTileRasters({ ...next, tileRasters: state.tileRasters }) };
     }),
 
   redo: () =>
@@ -521,35 +610,45 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       if (state.redoStack.length === 0) return state;
       const snap = state.redoStack[state.redoStack.length - 1];
       const currentSnap = snapshotState(state);
-      return {
+      const next = {
         ...snap,
         selectedTileIds: [],
         undoStack: [...state.undoStack, currentSnap].slice(-UNDO_MAX_SIZE),
         redoStack: state.redoStack.slice(0, -1),
       };
+      return { ...next, tileRasters: pruneTileRasters({ ...next, tileRasters: state.tileRasters }) };
     }),
 
   canUndo: () => get().undoStack.length > 0,
   canRedo: () => get().redoStack.length > 0,
 
   reset: () =>
-    set({
-      canvasWidth: defaultSize.width,
-      canvasHeight: defaultSize.height,
-      canvasSizeTouched: false,
-      tiles: [],
-      panOffset: { x: 0, y: 0 },
-      zoomLevel: 1,
-      selectedTileIds: [],
-      cropRect: null,
-      snapToEdges: false,
-      resizeLocked: true,
-      referenceScaleFeetPerInch: null,
-      compositionScaleFactor: 1,
-      undoStack: [],
-      redoStack: [],
+    set((state) => {
+      for (const url of Object.values(state.tileRasters)) revokeRasterUrl(url);
+      return resetState();
     }),
 }));
+
+/** The state a fresh stitch session starts from (see `reset`). */
+function resetState(): Partial<StitchState> {
+  return {
+    canvasWidth: defaultSize.width,
+    canvasHeight: defaultSize.height,
+    canvasSizeTouched: false,
+    tiles: [],
+    tileRasters: {},
+    panOffset: { x: 0, y: 0 },
+    zoomLevel: 1,
+    selectedTileIds: [],
+    cropRect: null,
+    snapToEdges: false,
+    resizeLocked: true,
+    referenceScaleFeetPerInch: null,
+    compositionScaleFactor: 1,
+    undoStack: [],
+    redoStack: [],
+  };
+}
 
 /**
  * The zoom floor every user-facing zoom-out must clamp to — the wheel handler, the toolbar's

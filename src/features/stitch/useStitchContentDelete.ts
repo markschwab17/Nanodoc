@@ -8,7 +8,7 @@
  */
 
 import { useState, useCallback, useRef } from "react";
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useStitchStore, tileRasterUrl } from "@/shared/stores/stitchStore";
 import {
   eraseRectFromTile,
   eraseConnectedAt,
@@ -69,7 +69,8 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
       try {
         const updates: Array<{ id: string; patch: { imageDataUrl: string; imageModified: true } }> = [];
         for (const tile of tiles) {
-          const newDataUrl = await eraseRectFromTile(tile, rect);
+          // Resolve the tile's current image (override, else committed raster).
+          const newDataUrl = await eraseRectFromTile({ ...tile, imageDataUrl: tileRasterUrl(tile) }, rect);
           if (newDataUrl) {
             updates.push({ id: tile.id, patch: { imageDataUrl: newDataUrl, imageModified: true } });
           }
@@ -102,7 +103,7 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
           // Single click — use the original async path (one decode, one encode)
           const { x: canvasX, y: canvasY } = path[0];
           for (const tile of tiles) {
-            const result = await eraseConnectedAt(tile, canvasX, canvasY, {
+            const result = await eraseConnectedAt({ ...tile, imageDataUrl: tileRasterUrl(tile) }, canvasX, canvasY, {
               colorTolerance: DELETE_ELEMENT_COLOR_TOLERANCE,
               skipBackground: true,
             });
@@ -136,10 +137,11 @@ export function useStitchContentDelete(showNotification: (msg: string, type: "su
             )
               continue;
 
-            if (!tile.imageDataUrl) continue;
+            const tileRaster = tileRasterUrl(tile);
+            if (!tileRaster) continue;
 
             // Decode ONCE
-            const { imageData, width: imgW, height: imgH } = await decodeTileImage(tile.imageDataUrl);
+            const { imageData, width: imgW, height: imgH } = await decodeTileImage(tileRaster);
             let changed = false;
 
             // Yield to keep UI responsive before heavy loop

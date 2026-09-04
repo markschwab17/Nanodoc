@@ -3,7 +3,7 @@
  */
 
 import JSZip from "jszip";
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useStitchStore, tileRasterUrl } from "@/shared/stores/stitchStore";
 import type { StitchTile } from "@/features/stitch/stitchTypes";
 import { exportStitchToPdf } from "@/features/stitch/stitchExport";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
@@ -193,8 +193,9 @@ export async function getTilePngBlobs(): Promise<Array<{ index: number; blob: Bl
   const blobs: Array<{ index: number; blob: Blob }> = [];
   for (let index = 0; index < tilesInCrop.length; index++) {
     const t = tilesInCrop[index];
-    if (!t.imageDataUrl) continue;
-    blobs.push({ index, blob: await dataUrlToPngBlob(t.imageDataUrl) });
+    const url = tileRasterUrl(t);
+    if (!url) continue;
+    blobs.push({ index, blob: await dataUrlToPngBlob(url) });
   }
   return blobs;
 }
@@ -229,7 +230,10 @@ export async function renderStitchedPng(scale?: number): Promise<Blob> {
   if (!ctx) throw new Error("2d context");
 
   const images = await Promise.all(
-    tilesInCrop.map((t) => (t.imageDataUrl ? loadImage(t.imageDataUrl) : Promise.resolve(null)))
+    tilesInCrop.map((t) => {
+      const url = tileRasterUrl(t);
+      return url ? loadImage(url) : Promise.resolve(null);
+    })
   );
 
   for (let i = 0; i < tilesInCrop.length; i++) {

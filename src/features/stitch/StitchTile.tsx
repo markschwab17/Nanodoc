@@ -37,6 +37,9 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   const isSingleSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length === 1 && s.selectedTileIds[0] === tile.id, [tile.id]));
   const isMultiSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length > 1 && s.selectedTileIds.includes(tile.id), [tile.id]));
   const resizeLocked = useStitchStore((s) => s.resizeLocked);
+  // The committed sheet raster, from the side slice. Subscribed (not read via
+  // getState) so the tile paints as soon as the raster lands.
+  const committedRaster = useStitchStore(useCallback((s) => s.tileRasters[tile.id], [tile.id]));
   const zoomLevel = useStitchStore((s) => s.zoomLevel);
 
   const isLocked = Boolean(tile.locked);
@@ -333,7 +336,9 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // An image-less tile with no explanation is nothing to draw. One that FAILED
   // to encode is drawn as a visible error card: the user has to be able to see
   // and remove it, which an invisible-but-selectable tile made impossible.
-  const rasterSrc = tile.imageDataUrl;
+  // An override on the tile (erase result / scale stamp / cleanup crop / legacy
+  // tile) wins; otherwise the committed sheet raster.
+  const rasterSrc = tile.imageDataUrl ?? committedRaster;
   if (!rasterSrc && !tile.rasterError) return null;
 
   // Display always honors tile.width/height — the export draws at tile size,

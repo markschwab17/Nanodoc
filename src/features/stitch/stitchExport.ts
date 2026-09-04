@@ -12,7 +12,7 @@
  */
 
 import type { PDFDocument as PdfLibDocument, PDFEmbeddedPage } from "pdf-lib";
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useStitchStore, tileRasterUrl } from "@/shared/stores/stitchStore";
 import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
 import { tileRenderScale } from "./rasterEncode";
@@ -32,11 +32,10 @@ async function renderModifiedTileHighRes(
   tile: {
     sourcePdfBytes: Uint8Array;
     sourcePageIndex: number;
-    imageDataUrl?: string;
   },
+  rasterUrl: string,
   mupdfDocCache: Map<Uint8Array, any>
 ): Promise<Uint8Array | null> {
-  if (!tile.imageDataUrl) return null;
   const mupdf = await import("mupdf").then((m) => m.default);
   let doc = mupdfDocCache.get(tile.sourcePdfBytes);
   if (!doc) {
@@ -81,7 +80,7 @@ async function renderModifiedTileHighRes(
     pixmap.destroy?.();
 
     // Replay the user's erases (and any white removal) from the stored raster
-    const mask = await decodeTileImage(tile.imageDataUrl);
+    const mask = await decodeTileImage(rasterUrl);
     applyAlphaMaskNearest(imageData, width, height, mask.imageData, mask.width, mask.height);
 
     const dataUrl = encodeTileImage(imageData);
@@ -509,7 +508,9 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
     }
 
     // ── Raster fallback (erased tiles, scale stamps, vector-fail) ─────
-    if (!tile.imageDataUrl) continue;
+    // The tile's own override if it has one, else its committed sheet raster.
+    const rasterUrl = tileRasterUrl(tile);
+    if (!rasterUrl) continue;
 
     // Erased tiles: the stored raster is only 1.5x — re-render the source
     // page at print DPI and replay the erase mask so one small erase doesn't
@@ -523,7 +524,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       tile.sourcePageIndex >= 0
     ) {
       try {
-        highResBytes = await renderModifiedTileHighRes(tile, mupdfDocCache);
+        highResBytes = await renderModifiedTileHighRes(tile, rasterUrl, mupdfDocCache);
       } catch (e) {
         console.warn("High-DPI re-render failed, using stored raster:", e);
       }
@@ -533,7 +534,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
     if (highResBytes) {
       pdfImage = await pdfDoc.embedPng(highResBytes);
     } else {
-      const raster = await tileRasterBytes(tile.imageDataUrl);
+      const raster = await tileRasterBytes(rasterUrl);
       if (!raster) continue;
       pdfImage = raster.mime === "png"
         ? await pdfDoc.embedPng(raster.bytes)

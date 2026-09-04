@@ -142,7 +142,9 @@ type TileData = {
   sourceFileName?: string;
   width: number;
   height: number;
-  imageDataUrl?: string;
+  /** The committed sheet PNG. `addTiles` turns it into a `tileRasters` entry
+   *  keyed by the new tile id — it never lands on the tile itself. */
+  rasterBlob?: Blob;
   rasterError?: string;
   scaleFeetPerInch?: number;
 };
@@ -213,7 +215,7 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
       sourceFileName: fileName,
       width: tileW,
       height: tileH,
-      imageDataUrl: raster ? URL.createObjectURL(raster) : undefined,
+      rasterBlob: raster ?? undefined,
       rasterError: raster ? undefined : RASTER_ERROR_MESSAGE,
       scaleFeetPerInch: pageScale,
       x: 0,
@@ -252,8 +254,8 @@ export async function commitAutoAlign(
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
 
   // 1. Render rasters for the selected pages (same as the plain add).
-  // Keyed by page index and holding the BLOB, not a URL: a two-strip page
-  // commits twice, and each tile needs its OWN object URL so revoking one
+  // Keyed by page index and holding the BLOB: a two-strip page commits twice,
+  // and `addTiles` gives each resulting tile its OWN object URL so revoking one
   // cannot blank the other.
   const rasters = new Map<number, Blob>();
   for (let i = 0; i < selected.length; i++) {
@@ -344,10 +346,6 @@ export async function commitAutoAlign(
 
   // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
   //    masked to its own frame) and commit as one undo step.
-  const rasterOf = (pageIndex: number): string | undefined => {
-    const blob = rasters.get(pageIndex);
-    return blob ? URL.createObjectURL(blob) : undefined;
-  };
   const newTiles = placements.map((p) => {
     const page = doc.loadPage(p.pageIndex);
     const bounds = page.getBounds();
@@ -359,7 +357,7 @@ export async function commitAutoAlign(
       sourceFileName: fileName,
       x: p.x, y: p.y,
       width: p.width, height: p.height,
-      imageDataUrl: rasterOf(p.pageIndex),
+      rasterBlob: rasters.get(p.pageIndex),
       rasterError: rasters.has(p.pageIndex) ? undefined : RASTER_ERROR_MESSAGE,
       hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
       scaleFeetPerInch: resolvePageScale(p.pageIndex, pageScales, uniformScale),

@@ -21,7 +21,7 @@
  */
 
 import { useRef, useState } from "react";
-import { useStitchStore, type StitchTile } from "@/shared/stores/stitchStore";
+import { useStitchStore, tileRasterUrl, type StitchTile } from "@/shared/stores/stitchStore";
 import type { CleanupRegion } from "./cleanupDetect";
 import { clampOffsetToCanvas, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
 import { cssClipToRect } from "./clipRegions";
@@ -302,7 +302,7 @@ export function CleanupReview({
                 image clipped to the source rect, translated by the offset — the
                 content shows at its new spot while you drag (source still shows
                 via StitchTile until Apply). */}
-            {tile.imageDataUrl && p.regions.map((r, i) => {
+            {tileRasterUrl(tile) && p.regions.map((r, i) => {
               if (!r.move) return null;
               const clip = cssClipToRect(tile.width, tile.height, {
                 x: r.rect.x * tile.width, y: r.rect.y * tile.height,
@@ -311,7 +311,7 @@ export function CleanupReview({
               return (
                 <img
                   key={`reloc-${i}`}
-                  src={tile.imageDataUrl}
+                  src={tileRasterUrl(tile)}
                   alt=""
                   draggable={false}
                   className="absolute inset-0 w-full h-full select-none"

@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStitchStore, selectEffectiveMinZoom, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom, tileRasterUrl, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { postToCto } from "@/shared/ctoBridge";
@@ -64,9 +64,10 @@ function rectsEqual(
  *  (at the source image's resolution) — used to promote a relocated region into
  *  its own tile. Returns null if the tile has no image or the crop is empty. */
 async function cropRegionToDataUrl(tile: StitchTile, rect: CropRect): Promise<string | null> {
-  if (!tile.imageDataUrl) return null;
+  const src = tileRasterUrl(tile);
+  if (!src) return null;
   const img = new Image();
-  img.src = tile.imageDataUrl;
+  img.src = src;
   try {
     await img.decode();
   } catch {
