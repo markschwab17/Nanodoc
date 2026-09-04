@@ -21,6 +21,10 @@ import { MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "./stitchConstants";
 
 /** Sentinel value for the canvas-size Select's fit-to-content entry (not a preset). */
 const FIT_TO_SHEETS_VALUE = "fit-to-sheets";
+/** Placeholder value for a page size that matches no preset (after a fit, or an undo).
+ *  The Select MUST always have a value it owns: left undefined it goes uncontrolled, keeps
+ *  "Fit to sheets" as its internal value, and then silently stops firing onValueChange. */
+const CUSTOM_SIZE_VALUE = "custom";
 
 export interface StitchBottomToolbarProps {
   onRecenter?: () => void;
@@ -137,7 +141,7 @@ export function StitchBottomToolbar({
     canvasHeight,
     setCanvasSize,
     fitCanvasToTiles,
-    setZoomLevel,
+    zoomAboutViewportCenter,
     zoomLevel,
     snapToEdges,
     setSnapToEdges,
@@ -152,7 +156,7 @@ export function StitchBottomToolbar({
       canvasHeight: s.canvasHeight,
       setCanvasSize: s.setCanvasSize,
       fitCanvasToTiles: s.fitCanvasToTiles,
-      setZoomLevel: s.setZoomLevel,
+      zoomAboutViewportCenter: s.zoomAboutViewportCenter,
       zoomLevel: s.zoomLevel,
       snapToEdges: s.snapToEdges,
       setSnapToEdges: s.setSnapToEdges,
@@ -214,7 +218,7 @@ export function StitchBottomToolbar({
   const currentSizeKey =
     currentPresetIndex >= 0
       ? `${CANVAS_PRESETS[currentPresetIndex].width}x${CANVAS_PRESETS[currentPresetIndex].height}-${currentOrientation}`
-      : undefined;
+      : CUSTOM_SIZE_VALUE;
 
   const handleCanvasSizeChange = (value: string) => {
     if (value === FIT_TO_SHEETS_VALUE) {
@@ -249,6 +253,11 @@ export function StitchBottomToolbar({
               <SelectItem value={FIT_TO_SHEETS_VALUE} disabled={tiles.length === 0}>
                 Fit to sheets
               </SelectItem>
+              {/* Never selectable — it exists so a non-preset size (after a fit, or an undo)
+                  still has a value the Select owns, which is what keeps it controlled. */}
+              <SelectItem value={CUSTOM_SIZE_VALUE} disabled>
+                Custom
+              </SelectItem>
               {CANVAS_PRESETS.flatMap((p) => [
                 <SelectItem key={`${p.width}x${p.height}-portrait`} value={`${p.width}x${p.height}-portrait`}>
                   {p.label} Portrait
@@ -273,7 +282,7 @@ export function StitchBottomToolbar({
               // floor, which is how you get out far enough to see every placed sheet.
               const linear = zoomLevel - ZOOM_STEP;
               const next = linear >= MIN_ZOOM ? linear : zoomLevel / 1.5;
-              setZoomLevel(Math.max(effectiveMinZoom, next));
+              zoomAboutViewportCenter(Math.max(effectiveMinZoom, next));
             }}
           >
             <ZoomOut className="h-3 w-3" />
@@ -288,7 +297,7 @@ export function StitchBottomToolbar({
             title="Zoom in"
             onClick={() => {
               const next = zoomLevel < MIN_ZOOM ? zoomLevel * 1.5 : zoomLevel + ZOOM_STEP;
-              setZoomLevel(Math.min(MAX_ZOOM, next));
+              zoomAboutViewportCenter(Math.min(MAX_ZOOM, next));
             }}
           >
             <ZoomIn className="h-3 w-3" />

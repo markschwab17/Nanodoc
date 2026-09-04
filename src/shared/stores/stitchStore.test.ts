@@ -176,3 +176,42 @@ describe("selectEffectiveMinZoom", () => {
     expect(floor).toBeGreaterThanOrEqual(0.02);
   });
 });
+
+describe("zoomAboutViewportCenter", () => {
+  test("holds the point under the viewport centre fixed", () => {
+    const s = useStitchStore.getState();
+    s.setViewportSize(800, 600);
+    s.setPanOffset({ x: -100, y: -50 });
+    s.setZoomLevel(1);
+    // Inner point currently under the centre: (400 - -100)/1 = 500, (300 - -50)/1 = 350.
+    useStitchStore.getState().zoomAboutViewportCenter(2);
+    const after = useStitchStore.getState();
+    expect(after.zoomLevel).toBe(2);
+    expect(after.panOffset.x + 500 * 2).toBeCloseTo(400, 6);
+    expect(after.panOffset.y + 350 * 2).toBeCloseTo(300, 6);
+  });
+
+  test("zooming out and back in returns to the same pan", () => {
+    const s = useStitchStore.getState();
+    s.setViewportSize(1000, 700);
+    s.setPanOffset({ x: 37, y: -12 });
+    s.setZoomLevel(1);
+    useStitchStore.getState().zoomAboutViewportCenter(0.25);
+    useStitchStore.getState().zoomAboutViewportCenter(1);
+    const after = useStitchStore.getState();
+    expect(after.panOffset.x).toBeCloseTo(37, 6);
+    expect(after.panOffset.y).toBeCloseTo(-12, 6);
+  });
+
+  test("a no-op or nonsensical zoom leaves the viewport alone", () => {
+    const s = useStitchStore.getState();
+    s.setViewportSize(800, 600);
+    s.setPanOffset({ x: 5, y: 6 });
+    s.setZoomLevel(1);
+    useStitchStore.getState().zoomAboutViewportCenter(1);
+    useStitchStore.getState().zoomAboutViewportCenter(0);
+    const after = useStitchStore.getState();
+    expect(after.zoomLevel).toBe(1);
+    expect(after.panOffset).toEqual({ x: 5, y: 6 });
+  });
+});

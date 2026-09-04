@@ -5,6 +5,7 @@
 
 import { memo, useRef, useEffect, useCallback, useState } from "react";
 import { createPortal } from "react-dom";
+import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
 import { useStitchStore, selectEffectiveMinZoom } from "@/shared/stores/stitchStore";
 import { StitchTile } from "./StitchTile";
@@ -14,6 +15,10 @@ import { useStitchPanZoom } from "./useStitchPanZoom";
 import { ABSOLUTE_MIN_ZOOM, MIN_ERASE_SIZE, PT_PER_INCH, RULER_SIZE, STROKE_POINT_MIN_DIST } from "./stitchConstants";
 
 const PT_PER_HALF_INCH = PT_PER_INCH / 2;
+/** The inch grid is drawn ON the white page, not on the themed surround, so it is a fixed
+ *  neutral rather than a token — `--muted-foreground` goes pale under `.dark` and the grid
+ *  vanishes against the paper. */
+const INCH_GRID_STROKE = "#9a9a9a";
 
 function rulerLabel(inches: number): string {
   return inches % 1 === 0 ? String(inches) : inches.toFixed(1);
@@ -116,8 +121,8 @@ const InchGrid = memo(function InchGrid({ canvasWidth, canvasHeight }: { canvasW
             y1={0}
             x2={x}
             y2={canvasHeight}
-            stroke="hsl(var(--muted-foreground))"
-            strokeOpacity={0.22}
+            stroke={INCH_GRID_STROKE}
+            strokeOpacity={0.5}
             strokeWidth={1}
           />
         );
@@ -131,8 +136,8 @@ const InchGrid = memo(function InchGrid({ canvasWidth, canvasHeight }: { canvasW
             y1={y}
             x2={canvasWidth}
             y2={y}
-            stroke="hsl(var(--muted-foreground))"
-            strokeOpacity={0.22}
+            stroke={INCH_GRID_STROKE}
+            strokeOpacity={0.5}
             strokeWidth={1}
           />
         );
@@ -250,10 +255,83 @@ export function StitchCanvas({
   const isMiddlePanRef = useRef(false);
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
 
+  /** Detaches the window listeners a live middle-pan installed. */
+  const middlePanCleanupRef = useRef<(() => void) | null>(null);
+
   const endMiddlePan = useCallback(() => {
+    middlePanCleanupRef.current?.();
+    middlePanCleanupRef.current = null;
     if (!isMiddlePanRef.current) return;
     isMiddlePanRef.current = false;
     setIsMiddlePan(false);
+    panStartRef.current = null;
+  }, []);
+
+  // A pan still running when the canvas unmounts would leak its window listeners.
+  useEffect(() => () => endMiddlePan(), [endMiddlePan]);
+
+  /**
+   * Start a middle-button pan. Returns true when it took the event.
+   *
+   * Called from the canvas AND from each body-portaled mode overlay (content-delete,
+   * delete-element, point/scale-align) — those cover the viewport, so without this the
+   * middle button would be dead exactly where the user is doing precise work. Tracking runs
+   * on WINDOW listeners rather than pointer capture precisely because the same code then
+   * works from any of those surfaces, and it gives us a place to hang the blur release.
+   */
+  const beginMiddlePan = useCallback(
+    (e: React.PointerEvent): boolean => {
+      if (e.button !== 1) return false;
+      // preventDefault stops the browser's middle-click autoscroll; stopPropagation keeps
+      // the press off whatever tile or overlay sits underneath.
+      e.preventDefault();
+      e.stopPropagation();
+      if (isMiddlePanRef.current) return true;
+
+      panStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        panX: panOffsetRef.current.x,
+        panY: panOffsetRef.current.y,
+      };
+      isMiddlePanRef.current = true;
+      setIsMiddlePan(true);
+
+      const onMove = (ev: PointerEvent) => {
+        const start = panStartRef.current;
+        if (!start) return;
+        const newPan = {
+          x: start.panX + (ev.clientX - start.x),
+          y: start.panY + (ev.clientY - start.y),
+        };
+        panOffsetRef.current = newPan;
+        setPanOffset(newPan);
+      };
+      const onUp = (ev: PointerEvent) => {
+        if (ev.button === 1) endMiddlePan();
+      };
+      const stop = () => endMiddlePan();
+      // Capture phase so an overlay that swallows pointer events can't strand the pan.
+      window.addEventListener("pointermove", onMove, true);
+      window.addEventListener("pointerup", onUp, true);
+      window.addEventListener("pointercancel", stop, true);
+      // Alt-tabbing away mid-drag must not leave the canvas stuck in grabbing.
+      window.addEventListener("blur", stop);
+      middlePanCleanupRef.current = () => {
+        window.removeEventListener("pointermove", onMove, true);
+        window.removeEventListener("pointerup", onUp, true);
+        window.removeEventListener("pointercancel", stop, true);
+        window.removeEventListener("blur", stop);
+      };
+      return true;
+    },
+    [endMiddlePan, setPanOffset]
+  );
+
+  /** Autoscroll is armed on `mousedown`, and preventing the pointerdown default does not
+   *  reliably suppress it — so every surface that can start a middle-pan blocks it here too. */
+  const preventMiddleAutoscroll = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1) e.preventDefault();
   }, []);
 
   const [deleteSelection, setDeleteSelection] = useState<{
@@ -350,24 +428,10 @@ export function StitchCanvas({
 
   const handlePointerDownCapture = useCallback(
     (e: React.PointerEvent) => {
-      // Middle button pans regardless of the active tool (takeoff v2: `e.button === 1`).
-      // Checked BEFORE the mode guards and the left-button filter so it works while an
-      // edit tool is armed. preventDefault stops the browser's middle-click autoscroll,
-      // and stopPropagation keeps the press from reaching a tile underneath.
-      if (e.button === 1 && containerRef.current) {
-        e.preventDefault();
-        e.stopPropagation();
-        isMiddlePanRef.current = true;
-        setIsMiddlePan(true);
-        panStartRef.current = {
-          x: e.clientX,
-          y: e.clientY,
-          panX: panOffsetRef.current.x,
-          panY: panOffsetRef.current.y,
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
-        return;
-      }
+      // Middle button pans regardless of the active tool (takeoff v2: `e.button === 1`),
+      // checked BEFORE the mode guards and the left-button filter so it works while an
+      // edit tool is armed.
+      if (beginMiddlePan(e)) return;
       if (e.button !== 0) return;
       if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
       const panActive = panMode || isSpacePanRef.current;
@@ -383,7 +447,7 @@ export function StitchCanvas({
         e.stopPropagation();
       }
     },
-    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode]
+    [beginMiddlePan, contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode]
   );
 
   const handlePointerDown = useCallback(
@@ -411,6 +475,7 @@ export function StitchCanvas({
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
+      if (isMiddlePanRef.current) return; // the window listener drives that one
       const start = panStartRef.current;
       if (start) {
         const dx = e.clientX - start.x;
@@ -423,25 +488,21 @@ export function StitchCanvas({
     [setPanOffset]
   );
 
-  const handlePointerUp = useCallback(
-    (e: React.PointerEvent) => {
-      panStartRef.current = null;
-      if (isMiddlePanRef.current) {
-        try {
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        } catch {
-          // capture already gone (element re-rendered / pointer lost)
-        }
-        endMiddlePan();
-      }
-    },
-    [endMiddlePan]
-  );
+  const handlePointerUp = useCallback(() => {
+    if (isMiddlePanRef.current) return; // released by the window pointerup listener
+    panStartRef.current = null;
+  }, []);
 
   return (
     <div
       ref={setContainerRef}
-      className="w-full h-full overflow-hidden bg-muted relative"
+      className={cn(
+        "w-full h-full overflow-hidden relative",
+        // With the canvas hidden there is no white paper under the tiles, and tiles are
+        // background-removed PNGs (black linework, transparent). On a dark themed surround
+        // that linework disappears, so the hidden-canvas ground stays a light neutral.
+        canvasVisible ? "bg-muted" : "bg-neutral-200"
+      )}
       style={{
         cursor: isMiddlePan
           ? "grabbing"
@@ -458,20 +519,16 @@ export function StitchCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onMouseDown={(e) => {
-        // Belt-and-braces against Windows/Linux middle-click autoscroll: that is armed on
-        // `mousedown`, and preventing the pointerdown default does not reliably suppress it.
-        if (e.button === 1) e.preventDefault();
-      }}
+      onMouseDown={preventMiddleAutoscroll}
       onPointerLeave={() => {
-        // A middle-drag holds pointer capture, so leaving the box does not end it —
-        // only a genuinely uncaptured pan (space/pan tool) stops here.
+        // A middle-drag is tracked on the window, so leaving the box does not end it —
+        // only a genuinely element-bound pan (space / pan tool) stops here.
         if (isMiddlePanRef.current) return;
         panStartRef.current = null;
       }}
       onPointerCancel={() => {
+        if (isMiddlePanRef.current) return;
         panStartRef.current = null;
-        endMiddlePan();
       }}
     >
       <div
@@ -609,7 +666,7 @@ export function StitchCanvas({
         createPortal(
           <div
             data-stitch-overlay
-            className="fixed z-[100] cursor-crosshair"
+            className={cn("fixed z-[100]", isMiddlePan ? "cursor-grabbing" : "cursor-crosshair")}
             style={{
               left: containerRect.left,
               top: containerRect.top,
@@ -618,7 +675,9 @@ export function StitchCanvas({
               pointerEvents: "auto",
               touchAction: "none",
             }}
+            onMouseDown={preventMiddleAutoscroll}
             onPointerDown={(e) => {
+              if (beginMiddlePan(e)) return;
               if (e.button === 0 && onContentDeleteRect) {
                 const coords = clientToCanvas(e.clientX, e.clientY);
                 if (coords) {
@@ -670,7 +729,7 @@ export function StitchCanvas({
         createPortal(
           <div
             data-stitch-overlay
-            className="fixed z-[100] cursor-crosshair"
+            className={cn("fixed z-[100]", isMiddlePan ? "cursor-grabbing" : "cursor-crosshair")}
             style={{
               left: containerRect.left,
               top: containerRect.top,
@@ -679,7 +738,9 @@ export function StitchCanvas({
               pointerEvents: "auto",
               touchAction: "none",
             }}
+            onMouseDown={preventMiddleAutoscroll}
             onPointerDown={(e) => {
+              if (beginMiddlePan(e)) return;
               e.preventDefault();
               e.stopPropagation();
               if (e.button !== 0 || !onDeleteElementAlongPath) return;
@@ -741,7 +802,7 @@ export function StitchCanvas({
         createPortal(
           <div
             data-stitch-overlay
-            className="fixed z-[100] cursor-crosshair"
+            className={cn("fixed z-[100]", isMiddlePan ? "cursor-grabbing" : "cursor-crosshair")}
             style={{
               left: containerRect.left,
               top: containerRect.top,
@@ -756,7 +817,9 @@ export function StitchCanvas({
               setPointAlignMouse(coords ?? null);
             }}
             onPointerLeave={() => setPointAlignMouse(null)}
+            onMouseDown={preventMiddleAutoscroll}
             onPointerDown={(e) => {
+              if (beginMiddlePan(e)) return;
               if (e.button !== 0) return;
               e.preventDefault();
               e.stopPropagation();

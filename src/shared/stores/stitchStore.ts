@@ -58,6 +58,9 @@ interface StitchState {
    *  fit-to-sheets path sizes the canvas FOR the user and must not count as a choice). */
   setCanvasSize: (width: number, height: number, options?: { touched?: boolean }) => void;
   setViewportSize: (width: number, height: number) => void;
+  /** Set the zoom while holding the point under the VIEWPORT CENTRE fixed (what the toolbar
+   *  +/- buttons want; the wheel anchors on the cursor instead). */
+  zoomAboutViewportCenter: (nextZoom: number) => void;
   /** Grow the page so it covers every tile with FIT_MARGIN_PT of paper around them.
    *  See the implementation for what it does about tiles at negative coordinates. */
   fitCanvasToTiles: () => void;
@@ -162,6 +165,25 @@ export const useStitchStore = create<StitchState>((set, get) => ({
         ? state
         : { viewportWidth: width, viewportHeight: height }
     ),
+
+  // Screen position of a point is `panOffset + inner * zoom`, so holding a screen point S
+  // fixed is pan' = S - (S - pan) * next/current. The ruler gutter is part of `inner` and
+  // cancels out, which is why none of this needs to know about it.
+  zoomAboutViewportCenter: (nextZoom) =>
+    set((state) => {
+      if (!(state.zoomLevel > 0) || !(nextZoom > 0)) return state;
+      if (nextZoom === state.zoomLevel) return state;
+      const sx = state.viewportWidth / 2;
+      const sy = state.viewportHeight / 2;
+      const ratio = nextZoom / state.zoomLevel;
+      return {
+        zoomLevel: nextZoom,
+        panOffset: {
+          x: sx - (sx - state.panOffset.x) * ratio,
+          y: sy - (sy - state.panOffset.y) * ratio,
+        },
+      };
+    }),
 
   /**
    * Size the page to the sheets: FIT_MARGIN_PT of paper on every side of the tiles' union

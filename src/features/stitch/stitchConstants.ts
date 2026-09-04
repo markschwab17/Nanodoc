@@ -32,7 +32,6 @@ export const RULER_SIZE = 24;
 export const MIN_SCALE = 0.05;
 export const MAX_SCALE = 4;
 export const SCALE_STEP = 0.05;
-export const ZOOM_DELTA = 1.05;
 export const SCROLL_SENSITIVITY = 1.0;
 
 export const HANDLE_SIZE = 18;

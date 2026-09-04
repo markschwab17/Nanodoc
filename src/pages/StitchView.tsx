@@ -107,18 +107,26 @@ export default function StitchView() {
     if (!(rect.width > 0) || !(rect.height > 0)) return;
     const state = useStitchStore.getState();
     const bounds = contentBounds(state.tiles, state.canvasWidth, state.canvasHeight);
+    // Work in the scaled layer's own coordinates, where a canvas point sits at
+    // point + RULER_SIZE and screen = panOffset + inner * zoom. The rulers occupy
+    // inner [0, RULER_SIZE] above and left of the page, so they must be inside the fitted
+    // extent too — otherwise a fit that hugs the content clips them off the edge.
+    const innerMinX = Math.min(0, bounds.x + RULER_SIZE);
+    const innerMinY = Math.min(0, bounds.y + RULER_SIZE);
+    const innerBounds = {
+      x: innerMinX,
+      y: innerMinY,
+      width: bounds.x + bounds.width + RULER_SIZE - innerMinX,
+      height: bounds.y + bounds.height + RULER_SIZE - innerMinY,
+    };
     const zoom = Math.min(
       MAX_ZOOM,
-      Math.max(selectEffectiveMinZoom(state), fitZoomFor(bounds, rect.width, rect.height))
+      Math.max(selectEffectiveMinZoom(state), fitZoomFor(innerBounds, rect.width, rect.height))
     );
-    // Screen position of a canvas point is panOffset + (point + RULER_SIZE) * zoom — the
-    // rulers sit outside the page inside the same scaled layer, so they count.
-    const centerX = bounds.x + bounds.width / 2;
-    const centerY = bounds.y + bounds.height / 2;
     state.setZoomLevel(zoom);
     state.setPanOffset({
-      x: rect.width / 2 - (centerX + RULER_SIZE) * zoom,
-      y: rect.height / 2 - (centerY + RULER_SIZE) * zoom,
+      x: rect.width / 2 - (innerBounds.x + innerBounds.width / 2) * zoom,
+      y: rect.height / 2 - (innerBounds.y + innerBounds.height / 2) * zoom,
     });
   }, []);
 
