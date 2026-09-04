@@ -31,6 +31,11 @@ import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain } from
 
 const THUMB_SCALE = 0.3;
 
+/** How long a page selection must hold still before the probe walks it. Long
+ *  enough that ticking six boxes in a row starts one probe, short enough that a
+ *  settled selection feels immediate. */
+const PROBE_DEBOUNCE_MS = 400;
+
 type SourceTab = "device" | "cto";
 
 export function AddPdfModal({
@@ -85,6 +90,8 @@ export function AddPdfModal({
     return m;
   }, [pageScaleText]);
   const uniformScale = useMemo(() => parseScaleInput(scaleFeetPerInch), [scaleFeetPerInch]);
+  /** The ticked pages, ascending. Drives the commit AND the feasibility probe. */
+  const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const [_ctoListening, setCtoListening] = useState(false);
   /** User-visible error for failed loads/adds (corrupt file, password, etc). */
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -121,12 +128,38 @@ export function AddPdfModal({
    *  explain the longer wait in the "Checking alignment…" copy. */
   const [probeOcr, setProbeOcr] = useState(false);
 
-  /** Stop the currently-running probe (plain add, Skip check, close, Change file).
-   *  Posts an abort for the current docId; the worker throws AutoStitchAborted at
-   *  its next checkpoint and replies `{aborted:true}` (no error toast). */
-  const abortProbe = useCallback(() => {
-    probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+  /** Pending debounce timer for the selection-driven probe (see the probe effect). */
+  const probeTimerRef = useRef<number | null>(null);
+  /** True between posting a ProbeRequest and its terminal reply — the debounce
+   *  window is NOT in flight, so aborting there has nothing to abort. */
+  const probeInFlightRef = useRef(false);
+
+  /**
+   * Stop whatever the probe is doing — the debounced request that has not been
+   * posted yet AND the run already in the worker.
+   *
+   * `"skip"`   the user chose not to wait (Skip check / plain add): the run is
+   *            aborted and reported as skipped, either by the worker's
+   *            `{aborted:true}` reply or — when nothing had been posted yet —
+   *            synchronously here, because no reply is coming.
+   * `"supersede"` a NEW probe is about to replace this one (selection changed,
+   *            new document, modal closed): the docId is bumped so the old run's
+   *            reply, abort or result, is stale and ignored.
+   */
+  const stopProbe = useCallback((mode: "skip" | "supersede") => {
+    if (probeTimerRef.current != null) {
+      window.clearTimeout(probeTimerRef.current);
+      probeTimerRef.current = null;
+    }
+    const inFlight = probeInFlightRef.current;
+    if (inFlight) probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+    probeInFlightRef.current = false;
+    if (mode === "supersede") probeDocIdRef.current++;
+    else if (!inFlight) setProbeState("skipped");
   }, []);
+
+  /** Skip the check and move on (Skip check button, plain add). */
+  const abortProbe = useCallback(() => stopProbe("skip"), [stopProbe]);
 
   const releaseDoc = useCallback(() => {
     try {
@@ -162,6 +195,7 @@ export function AddPdfModal({
       }
       if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
       if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
+      probeInFlightRef.current = false;
       if ("aborted" in msg) {
         // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
         setProbe(null);
@@ -181,6 +215,54 @@ export function AddPdfModal({
     probeWorkerRef.current = w;
     return () => { w.terminate(); probeWorkerRef.current = null; };
   }, []);
+
+  /**
+   * The feasibility probe runs over the TICKED PAGES ONLY, debounced.
+   *
+   * `autoStitch` retains one `PageExtract` per page for the whole solve (~54 MB
+   * average, 115 MB worst on a dense 36x24 in civil sheet), so the page count it
+   * walks is the probe worker's memory. Probing a 22-page document to answer a
+   * question about the 5 sheets the user ticked was ~1.1 GB for ~267 MB of
+   * useful work, plus every unticked page's band OCR.
+   *
+   * Ticking is a rapid-fire interaction, so each change supersedes the last:
+   * the in-flight run is aborted, the pending one is re-timed, and only a
+   * selection that has settled for PROBE_DEBOUNCE_MS is actually probed. The
+   * strip says "checking" from the first tick, not from the post, so the debounce
+   * is invisible.
+   */
+  useEffect(() => {
+    if (!pdfBytes || !mupdfDoc || pageCount === 0) return;
+    stopProbe("supersede");
+    setProbe(null);
+    setProbeOcr(false);
+    if (selectedIndices.length < 2) {
+      setProbeState("idle");
+      return;
+    }
+    setProbeState("running");
+    const bytes = pdfBytes;
+    const pages = selectedIndices;
+    probeTimerRef.current = window.setTimeout(() => {
+      probeTimerRef.current = null;
+      probeInFlightRef.current = true;
+      // userScale is null: placements are scale-invariant for a uniform set, so
+      // the probe outcome is unaffected and the effect needs no scale dep.
+      const req: ProbeRequest = {
+        docId: probeDocIdRef.current,
+        pdfBytes: bytes,
+        pageIndices: pages,
+        userScale: null,
+      };
+      probeWorkerRef.current?.postMessage(req);
+    }, PROBE_DEBOUNCE_MS);
+    return () => {
+      if (probeTimerRef.current != null) {
+        window.clearTimeout(probeTimerRef.current);
+        probeTimerRef.current = null;
+      }
+    };
+  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, stopProbe]);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -232,27 +314,17 @@ export function AddPdfModal({
         setPageCount(count);
         setSelectedPages(new Set());
         setPageScaleText(new Map());
-        // Kick off the background feasibility probe over the WHOLE document.
-        // userScale is null: placements are scale-invariant for a uniform set,
-        // so the probe outcome is unaffected and we avoid a stale-closure dep.
-        // Stop any probe still running for the previous doc (Change file / new load)
-        // so it can't keep the shared OCR worker busy behind this one.
-        abortProbe();
-        const probeDocId = ++probeDocIdRef.current;
+        // NO probe here. The probe used to walk the WHOLE document the moment a
+        // PDF loaded, before the user had ticked anything — on a 22-page set that
+        // is ~1.1 GB of retained page geometry in the worker and minutes of band
+        // OCR nobody asked for. It now runs over the ticked pages only, from the
+        // selection effect below. Stop any probe still running for the previous
+        // document (Change file / new load) so it can't keep the shared OCR
+        // worker busy behind this one.
+        stopProbe("supersede");
         setProbe(null);
         setProbeOcr(false);
-        if (count >= 2) {
-          setProbeState("running");
-          const req: ProbeRequest = {
-            docId: probeDocId,
-            pdfBytes: data,
-            pageIndices: Array.from({ length: count }, (_, i) => i),
-            userScale: null,
-          };
-          probeWorkerRef.current?.postMessage(req);
-        } else {
-          setProbeState("idle");
-        }
+        setProbeState("idle");
         // Show the page grid right away (loading = false), then generate thumbs in background
         setLoading(false);
 
@@ -284,7 +356,7 @@ export function AddPdfModal({
         setLoading(false);
       }
     },
-    [releaseDoc, abortProbe]
+    [releaseDoc, stopProbe]
   );
 
   const handleChooseFile = useCallback(async () => {
@@ -309,8 +381,7 @@ export function AddPdfModal({
       setProbe(null);
       setProbeState("idle");
       setProbeOcr(false);
-      abortProbe(); // stop a probe still running for the just-closed doc
-      probeDocIdRef.current++;
+      stopProbe("supersede"); // stop a probe still running for the just-closed doc
       setCtoListening(false);
       setLoadError(null);
       // Reset the guard so the next open triggers the file picker
@@ -333,7 +404,7 @@ export function AddPdfModal({
     }
     // Don't auto-open file picker — let the user see the modal first
     // and click "Choose file" themselves for a clearer flow.
-  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed, releaseDoc]);
+  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed, releaseDoc, stopProbe]);
 
   // From Civiltakeoff: request document list from opener and listen for nanodoc-cto-documents
   useEffect(() => {
@@ -568,7 +639,6 @@ export function AddPdfModal({
     }
   }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScales, uniformScale, onAutoAlignResult]);
 
-  const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
     () => (probe ? deriveFeasibility(probe, selectedIndices) : null),
     [probe, selectedIndices]
@@ -599,9 +669,9 @@ export function AddPdfModal({
                 setPageScaleText(new Map());
                 setThumbnails({});
                 setLoadError(null);
+                stopProbe("supersede");
                 setProbe(null);
                 setProbeState("idle");
-                probeDocIdRef.current++;
               }}
             >
               From device
@@ -621,9 +691,9 @@ export function AddPdfModal({
                 setPageScaleText(new Map());
                 setThumbnails({});
                 setLoadError(null);
+                stopProbe("supersede");
                 setProbe(null);
                 setProbeState("idle");
-                probeDocIdRef.current++;
               }}
             >
               From Civiltakeoff
