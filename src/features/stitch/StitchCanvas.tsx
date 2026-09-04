@@ -243,7 +243,16 @@ export function StitchCanvas({
 
   const [isSpacePan, setIsSpacePan] = useState(false);
   const isSpacePanRef = useRef(false);
+  /** Middle-button drag pan (takeoff-v2 parity) — state only for the grabbing cursor. */
+  const [isMiddlePan, setIsMiddlePan] = useState(false);
+  const isMiddlePanRef = useRef(false);
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+
+  const endMiddlePan = useCallback(() => {
+    if (!isMiddlePanRef.current) return;
+    isMiddlePanRef.current = false;
+    setIsMiddlePan(false);
+  }, []);
 
   const [deleteSelection, setDeleteSelection] = useState<{
     start: { x: number; y: number };
@@ -334,6 +343,24 @@ export function StitchCanvas({
 
   const handlePointerDownCapture = useCallback(
     (e: React.PointerEvent) => {
+      // Middle button pans regardless of the active tool (takeoff v2: `e.button === 1`).
+      // Checked BEFORE the mode guards and the left-button filter so it works while an
+      // edit tool is armed. preventDefault stops the browser's middle-click autoscroll,
+      // and stopPropagation keeps the press from reaching a tile underneath.
+      if (e.button === 1 && containerRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        isMiddlePanRef.current = true;
+        setIsMiddlePan(true);
+        panStartRef.current = {
+          x: e.clientX,
+          y: e.clientY,
+          panX: panOffsetRef.current.x,
+          panY: panOffsetRef.current.y,
+        };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        return;
+      }
       if (e.button !== 0) return;
       if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
       const panActive = panMode || isSpacePanRef.current;
@@ -389,16 +416,33 @@ export function StitchCanvas({
     [setPanOffset]
   );
 
-  const handlePointerUp = useCallback(() => {
-    panStartRef.current = null;
-  }, []);
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      panStartRef.current = null;
+      if (isMiddlePanRef.current) {
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        } catch {
+          // capture already gone (element re-rendered / pointer lost)
+        }
+        endMiddlePan();
+      }
+    },
+    [endMiddlePan]
+  );
 
   return (
     <div
       ref={setContainerRef}
       className="w-full h-full overflow-hidden bg-muted relative"
       style={{
-        cursor: contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode ? "crosshair" : panMode || isSpacePan ? "grab" : "default",
+        cursor: isMiddlePan
+          ? "grabbing"
+          : contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode
+            ? "crosshair"
+            : panMode || isSpacePan
+              ? "grab"
+              : "default",
         // Pointer-event drags (tile move, pan, erase) on touchscreens get
         // pointercancel'd when the browser claims the gesture — opt out.
         touchAction: "none",
@@ -407,8 +451,20 @@ export function StitchCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      // Belt-and-braces against Windows/Linux middle-click autoscroll: that is armed on
+      // `mousedown`, and preventing the pointerdown default does not reliably suppress it.
+      onMouseDown={(e) => {
+        if (e.button === 1) e.preventDefault();
+      }}
       onPointerLeave={() => {
+        // A middle-drag holds pointer capture, so leaving the box does not end it —
+        // only a genuinely uncaptured pan (space/pan tool) stops here.
+        if (isMiddlePanRef.current) return;
         panStartRef.current = null;
+      }}
+      onPointerCancel={() => {
+        panStartRef.current = null;
+        endMiddlePan();
       }}
     >
       <div

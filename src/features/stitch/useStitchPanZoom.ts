@@ -1,18 +1,45 @@
 /**
- * Pan/zoom for stitch canvas: wheel zoom (Ctrl) and pan, refs kept in sync with store.
+ * Pan/zoom for the stitch canvas.
+ *
+ * Wheel handling follows takeoff v2's conventions (the device heuristic itself
+ * lives in `wheelIntent.ts`): a mouse wheel ZOOMS to the cursor, a trackpad
+ * two-finger swipe PANS, pinch/Ctrl zooms, Shift pans. Before this the wheel
+ * only zoomed with Ctrl/Cmd held and otherwise scrolled — which is why plans
+ * scrolled off the page instead of zooming.
  */
 
 import { useRef, useEffect, useCallback } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
-import { MIN_ZOOM, MAX_ZOOM, ZOOM_DELTA, SCROLL_SENSITIVITY } from "./stitchConstants";
+import { MIN_ZOOM, MAX_ZOOM, SCROLL_SENSITIVITY } from "./stitchConstants";
+import {
+  classifyWheel,
+  initialWheelKindState,
+  panDeltasFor,
+  zoomFactorFor,
+} from "./wheelIntent";
 
-export function useStitchPanZoom(containerRef: React.RefObject<HTMLDivElement | null>) {
+export function useStitchPanZoom(
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  /**
+   * Lower zoom bound, read fresh on every wheel event. Defaults to MIN_ZOOM; the
+   * caller passes a getter so the floor can drop below it when the composition is
+   * bigger than the page (see `effectiveMinZoom`) — otherwise sheets placed far
+   * outside the canvas can never be zoomed out far enough to see.
+   */
+  getMinZoom?: () => number
+) {
   const panOffset = useStitchStore((s) => s.panOffset);
   const zoomLevel = useStitchStore((s) => s.zoomLevel);
   const setPanOffset = useStitchStore((s) => s.setPanOffset);
   const setZoomLevel = useStitchStore((s) => s.setZoomLevel);
   const panOffsetRef = useRef(panOffset);
   const zoomLevelRef = useRef(zoomLevel);
+  /** Which device the recent wheel frames looked like — see classifyWheel. */
+  const wheelKindRef = useRef(initialWheelKindState());
+  // A ref, not a dep: the getter is rebuilt on every container resize / tile move,
+  // and re-subscribing the window listener that often is pointless churn.
+  const getMinZoomRef = useRef(getMinZoom);
+  getMinZoomRef.current = getMinZoom;
 
   useEffect(() => {
     panOffsetRef.current = panOffset;
@@ -37,38 +64,43 @@ export function useStitchPanZoom(containerRef: React.RefObject<HTMLDivElement | 
           (typeof target.closest === "function" && target.closest("[data-stitch-overlay]") != null));
       if (!inScope) return;
 
+      e.preventDefault();
+      e.stopPropagation();
+
       const currentZoom = zoomLevelRef.current;
       const currentPan = panOffsetRef.current;
 
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        const delta = e.deltaY > 0 ? 1 / ZOOM_DELTA : ZOOM_DELTA;
-        const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom * delta));
-        const rect = container.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        const canvasX = (mouseX - currentPan.x) / currentZoom;
-        const canvasY = (mouseY - currentPan.y) / currentZoom;
-        const newPanX = mouseX - canvasX * newZoom;
-        const newPanY = mouseY - canvasY * newZoom;
-        panOffsetRef.current = { x: newPanX, y: newPanY };
-        zoomLevelRef.current = newZoom;
-        setZoomLevel(newZoom);
-        setPanOffset({ x: newPanX, y: newPanY });
+      const { intent, pinch, state } = classifyWheel(e, wheelKindRef.current, Date.now());
+      wheelKindRef.current = state;
+
+      if (intent === "pan") {
+        // Raw OS deltas: the trackpad already reports pixels, so 1:1 feels native.
+        const { dx, dy } = panDeltasFor(e);
+        const newPan = {
+          x: currentPan.x - dx * SCROLL_SENSITIVITY,
+          y: currentPan.y - dy * SCROLL_SENSITIVITY,
+        };
+        panOffsetRef.current = newPan;
+        setPanOffset(newPan);
         return;
       }
 
-      e.preventDefault();
-      e.stopPropagation();
-      const panDeltaX = e.shiftKey ? -e.deltaY * SCROLL_SENSITIVITY : -e.deltaX * SCROLL_SENSITIVITY;
-      const panDeltaY = e.shiftKey ? 0 : -e.deltaY * SCROLL_SENSITIVITY;
-      const newPan = {
-        x: currentPan.x + panDeltaX,
-        y: currentPan.y + panDeltaY,
-      };
-      panOffsetRef.current = newPan;
-      setPanOffset(newPan);
+      // ZOOM to cursor (pinch or mouse wheel).
+      const minZoom = getMinZoomRef.current?.() ?? MIN_ZOOM;
+      const factor = zoomFactorFor(currentZoom, e.deltaY, pinch);
+      const newZoom = Math.max(minZoom, Math.min(MAX_ZOOM, currentZoom * factor));
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      // Hold the canvas-space point under the cursor fixed while the scale changes.
+      const canvasX = (mouseX - currentPan.x) / currentZoom;
+      const canvasY = (mouseY - currentPan.y) / currentZoom;
+      const newPanX = mouseX - canvasX * newZoom;
+      const newPanY = mouseY - canvasY * newZoom;
+      panOffsetRef.current = { x: newPanX, y: newPanY };
+      zoomLevelRef.current = newZoom;
+      setZoomLevel(newZoom);
+      setPanOffset({ x: newPanX, y: newPanY });
     },
     [containerRef, setPanOffset, setZoomLevel]
   );
