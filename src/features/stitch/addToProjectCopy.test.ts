@@ -5,6 +5,7 @@ import {
   hiddenPagesSentence,
   autoAlignExplanation,
   AUTO_ALIGN_CHECKING,
+  AUTO_ALIGN_MOVED,
   autoAlignButtonLabel,
   autoAlignUnavailableNote,
   autoAlignUnavailableTitle,
@@ -241,6 +242,33 @@ describe("autoAlignExplanation — the along-matchline case", () => {
   it("falls back to 'these sheets' when no page is named", () => {
     expect(autoAlignExplanation({ reason: "along_unresolved" })!).toContain("These sheets meet the matchline correctly");
   });
+
+  it("drops the figure when it is only the geometric bound, not a measurement", () => {
+    // A `bound` figure is the sheets' OWN extent along the seam — it means "nothing
+    // measured this". Reading it out as "up to 720 ft" claims a precision the engine
+    // does not have and reads as a bug rather than as honesty.
+    const text = autoAlignExplanation({
+      reason: "along_unresolved",
+      alongUnresolvedPages: [3],
+      worstAlongUncertaintyFt: 720,
+      worstAlongUncertaintySource: "bound",
+    })!;
+    expect(text).not.toContain("720");
+    expect(text).toBe("Page 3 meets the matchline correctly, but nothing fixes where along it the sheet sits.");
+  });
+
+  it("keeps the figure when a vote or a declined sweep actually measured it", () => {
+    for (const source of ["sweep", "vote"] as const) {
+      expect(
+        autoAlignExplanation({
+          reason: "along_unresolved",
+          alongUnresolvedPages: [3],
+          worstAlongUncertaintyFt: 42,
+          worstAlongUncertaintySource: source,
+        })!,
+      ).toContain("up to 42 ft");
+    }
+  });
 });
 
 describe("the earned Auto-align copy", () => {
@@ -274,6 +302,10 @@ describe("the earned Auto-align copy", () => {
     );
     expect(title).toContain("the seams couldn't be verified");
     expect(title).toContain("slide up to 48 ft");
+  });
+
+  it("the moved-since-check line asks for a re-check rather than choosing", () => {
+    expect(AUTO_ALIGN_MOVED).toBe("Sheets were moved since the check — re-check to auto-align");
   });
 
   it("the tooltip is just the note when there is nothing more to say", () => {

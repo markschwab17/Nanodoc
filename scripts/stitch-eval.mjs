@@ -259,6 +259,11 @@ for (const set of sets) {
   if (set.gtMedianCeilFt != null && row.gt && row.gt.medianFt > set.gtMedianCeilFt) {
     fail(`ground-truth median ${row.gt.medianFt.toFixed(1)} ft > ${set.gtMedianCeilFt} ft`);
   }
+  // A fixture key that matched nothing is a REGRESSION, not a note. Either the solver
+  // stopped placing that unit or the two sides disagree about how units are named, and
+  // both silently turn the ground-truth check into a no-op that passes.
+  if (row.gt?.unmatched?.length) fail(`ground-truth keys matched no placed unit: ${row.gt.unmatched.join(", ")}`);
+  if (row.gt?.rootMismatch) fail(`ground-truth scale mismatch — ${row.gt.rootMismatch}`);
   rows.push(row);
 }
 flushCache();
@@ -286,10 +291,6 @@ if (AS_JSON) {
         (r.demoted.length ? `; demoted (placed, free to slide ±${Math.round(r.alongUncertaintyFt)} ft) [${r.demoted.map((p) => p + 1).join(",")}]` : ""));
     }
     if (r.gtMissing) console.log(`${r.name}: ground truth not found (${r.gtMissing})`);
-    // A fixture key nothing matched means the fixture and the solver disagree about
-    // how units are named — the failure mode that silently compares nothing.
-    if (r.gt?.unmatched?.length) console.log(`${r.name}: ground-truth keys matched no placed unit: ${r.gt.unmatched.join(", ")}`);
-    if (r.gt?.rootMismatch) console.log(`${r.name}: ground-truth scale mismatch — ${r.gt.rootMismatch}`);
     if (r.gt?.rows.length) {
       console.log(`${r.name}: ground-truth error median ${r.gt.medianFt.toFixed(1)} ft, 95p ${r.gt.p95Ft.toFixed(1)} ft` +
         (r.gtWorstClaimed != null ? `, worst CLAIMED ${r.gtWorstClaimed.toFixed(1)} ft` : ""));

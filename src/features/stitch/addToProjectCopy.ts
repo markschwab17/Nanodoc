@@ -143,6 +143,11 @@ export function hiddenPagesSentence(numbers: readonly number[]): string | null {
  */
 export const AUTO_ALIGN_CHECKING = "Checking whether these sheets can be auto-aligned…";
 
+/** The offer was earned, then the canvas moved under it. The probe's placements are
+ *  absolute, so applying them now would throw away whatever the user just did and put
+ *  back anything they deleted — say so and offer the check again rather than choose. */
+export const AUTO_ALIGN_MOVED = "Sheets were moved since the check — re-check to auto-align";
+
 export type AutoAlignUnavailableReason = "no_refs" | "no_matchline" | "unverified";
 
 export const AUTO_ALIGN_UNAVAILABLE_REASONS: Record<AutoAlignUnavailableReason, string> = {
@@ -198,8 +203,13 @@ export interface AutoAlignOutcome {
   pagesWithoutRefs?: readonly number[];
   /** 1-based page numbers deliberately kept out of the tiling, with their role. */
   skipped?: readonly { pageNumber: number; role: string }[];
-  /** How far an un-anchored sheet could slide ALONG its matchline, in feet. */
+  /** How far an un-anchored sheet could slide ALONG its matchline, in feet — quoted
+   *  ONLY when it was measured. */
   worstAlongUncertaintyFt?: number;
+  /** Where that figure came from. `"bound"` is the geometric last resort (the sheets'
+   *  own extent along the seam): it means "unknown", so the copy drops the number
+   *  rather than dressing an unknown up as a measurement. */
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
   /** 1-based page numbers placed but not pinned along the matchline. */
   alongUnresolvedPages?: readonly number[];
 }
@@ -243,7 +253,8 @@ export function autoAlignExplanation(outcome: AutoAlignOutcome | null | undefine
       const verb = one ? "meets" : "meet";
       const who = one ? "the sheet sits" : "they sit";
       const ft = outcome.worstAlongUncertaintyFt;
-      const slide = ft && ft >= 1
+      const measured = outcome.worstAlongUncertaintySource !== "bound";
+      const slide = measured && ft && ft >= 1
         ? ` — ${one ? "it" : "they"} could be up to ${Math.round(ft)} ft out along it`
         : "";
       parts.push(`${subject} ${verb} the matchline correctly, but nothing fixes where along it ${who}${slide}.`);

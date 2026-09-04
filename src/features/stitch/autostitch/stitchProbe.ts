@@ -44,6 +44,8 @@ export interface ProbeResult {
    *  un-anchored one could slide. Absent → the along gate is not applied. */
   alongAnchored?: number[];
   worstAlongUncertaintyFt?: number;
+  /** Where that figure came from — `"bound"` means nothing measured it. */
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
 }
 
 export type ProbeMessage =
@@ -67,5 +69,6 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     alignmentVerdict: res.alignmentVerdict,
     alongAnchored: res.alongAnchored,
     worstAlongUncertaintyFt: res.worstAlongUncertaintyFt,
+    worstAlongUncertaintySource: res.worstAlongUncertaintySource,
   };
 }

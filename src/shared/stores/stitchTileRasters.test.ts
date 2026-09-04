@@ -122,3 +122,38 @@ describe("tileRasters", () => {
     expect(Object.keys(snap)).toEqual(["tiles", "canvasWidth", "canvasHeight", "cropRect"]);
   });
 });
+
+describe("replaceTiles", () => {
+  it("swaps one set for another in ONE undo step", () => {
+    // Two calls (removeTiles + addTiles) made the grid→aligned swap two steps, so the
+    // first undo after an auto-align left the grid AND the composite on the canvas.
+    useStitchStore.getState().addTiles([blank(), blank()]);
+    const gridIds = useStitchStore.getState().tiles.map((t) => t.id);
+    const depth = useStitchStore.getState().undoStack.length;
+
+    useStitchStore.getState().replaceTiles(gridIds, [{ ...blank(), x: 500 }, { ...blank(), x: 700 }]);
+    expect(useStitchStore.getState().undoStack.length).toBe(depth + 1);
+    expect(useStitchStore.getState().tiles.map((t) => t.x)).toEqual([500, 700]);
+
+    useStitchStore.getState().undo();
+    expect(useStitchStore.getState().tiles.map((t) => t.id)).toEqual(gridIds);
+  });
+
+  it("keeps the replaced tiles' rasters alive for the undo that brings them back", () => {
+    useStitchStore.getState().addTiles([{ ...blank(), rasterBlob: new Blob(["grid"]) }]);
+    const gridId = useStitchStore.getState().tiles[0].id;
+    const gridUrl = useStitchStore.getState().tileRasters[gridId];
+
+    useStitchStore.getState().replaceTiles([gridId], [{ ...blank(), rasterBlob: new Blob(["aligned"]) }]);
+    // The snapshot still mentions the grid tile, so its image must NOT be revoked —
+    // undoing has to show the sheet, not an error card.
+    expect(revoked).not.toContain(gridUrl);
+    useStitchStore.getState().undo();
+    expect(useStitchStore.getState().tileRasters[gridId]).toBe(gridUrl);
+  });
+
+  it("adding with no removals behaves like addTiles", () => {
+    useStitchStore.getState().replaceTiles([], [blank()]);
+    expect(useStitchStore.getState().tiles).toHaveLength(1);
+  });
+});

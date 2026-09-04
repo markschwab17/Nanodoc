@@ -87,6 +87,13 @@ interface StitchState {
   removeTile: (id: string) => void;
   /** Remove multiple tiles in one update (one undo step). */
   removeTiles: (ids: string[]) => void;
+  /** Swap one set of tiles for another in ONE undo step: `removeIds` go, `newTiles`
+   *  are appended. Two calls would make the swap two steps, so the first undo after
+   *  an auto-align would leave the grid AND the composite on the canvas at once. */
+  replaceTiles: (
+    removeIds: string[],
+    newTiles: Array<Omit<StitchTile, "id"> & { rasterBlob?: Blob }>,
+  ) => void;
   /** Move tile(s) to the back (lowest layer). Pass one id or multiple. */
   sendTileToBack: (id: string) => void;
   sendTilesToBack: (ids: string[]) => void;
@@ -445,6 +452,35 @@ export const useStitchStore = create<StitchState>((set, get) => ({
         redoStack: [],
       };
       return { ...next, tileRasters: pruneTileRasters({ ...next, tileRasters: state.tileRasters }) };
+    }),
+
+  /**
+   * Remove + add as ONE undoable step. The removed tiles' rasters survive as long as
+   * the snapshot that mentions them does — `pruneTileRasters` treats the undo stack as
+   * reachable — so undoing the swap brings the grid back with its images.
+   */
+  replaceTiles: (removeIds, newTiles) =>
+    set((state) => {
+      const snap = snapshotState(state);
+      const remove = new Set(removeIds);
+      const rasters = { ...state.tileRasters };
+      const added: StitchTile[] = [];
+      for (const t of newTiles) {
+        const { rasterBlob, ...tile } = t;
+        const id = generateTileId();
+        if (rasterBlob) {
+          const url = createRasterUrl(rasterBlob);
+          if (url) rasters[id] = url;
+        }
+        added.push({ ...tile, id });
+      }
+      const next = {
+        tiles: [...state.tiles.filter((t) => !remove.has(t.id)), ...added],
+        selectedTileIds: [],
+        undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
+        redoStack: [],
+      };
+      return { ...next, tileRasters: pruneTileRasters({ ...next, tileRasters: rasters }) };
     }),
 
   sendTileToBack: (id) =>

@@ -222,6 +222,16 @@ describe("along-matchline gate", () => {
     expect(f.status).toBe("partial");
   });
 
+  it("drops the slide figure when it is only the geometric bound", () => {
+    // "may slide up to 720 ft" is the sheets' own extent dressed up as a measurement.
+    const f = deriveFeasibility(
+      { ...base, alongAnchored: [0], worstAlongUncertaintyFt: 720, worstAlongUncertaintySource: "bound" },
+      sel,
+    );
+    expect(f.reason).toBe("sheets can be lined up across the matchline but nothing fixes where along it they sit");
+    expect(f.reason).not.toContain("720");
+  });
+
   it("names the along axis ahead of the verdict when both would block", () => {
     const f = deriveFeasibility({ ...base, alignmentVerdict: "unverified", alongAnchored: [], worstAlongUncertaintyFt: 12 }, sel);
     expect(f.reason).toContain("along it");

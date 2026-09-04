@@ -77,9 +77,11 @@ comparing. Comparing frame origins straight against the fixture read PG_SITE's l
 strip as 170.7 ft out when it is 16.6 ft out: a 646 pt inset is 179 ft at 1"=20'.
 
 Strip keys are per page — `<pageIndex>s<n>`, numbered from 1 in ascending frame order
-(top strip first) — so a second split page cannot collide with the first. If a fixture
-key matches no placed unit the runner says so: a renamed key must never turn the
-comparison into a silent no-op.
+(top strip first) — so a second split page cannot collide with the first. A fixture key
+that matches no placed unit is a REGRESSION, not a note: either the solver stopped
+placing that unit or the two sides disagree about naming, and both silently turn the
+ground-truth check into a no-op that passes. A fixture/solve `rootFtPerIn` mismatch
+fails the same way.
 
 An expectation that is absent is not checked. Belcourt has no `verdictFloor` because
 its verdict is honestly `unverified`: every cross-seam axis is confirmed to 0.00 ft,

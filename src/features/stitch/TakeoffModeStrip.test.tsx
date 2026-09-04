@@ -35,6 +35,7 @@ const offer = (over: Partial<TakeoffModeAutoAlign> = {}): TakeoffModeAutoAlign =
   status: "offer",
   sheets: 5,
   onRun: () => {},
+  onRecheck: () => {},
   ...over,
 });
 
@@ -83,18 +84,33 @@ describe("TakeoffModeStrip auto-align offer", () => {
     );
   });
 
-  it("keeps the fuller along-axis sentence in the note's tooltip", () => {
-    render(
+  it("shows the fuller along-axis sentence as VISIBLE text, not only a tooltip", () => {
+    // A fact only a hover reveals is a fact most people never see, and this is the one
+    // the short reason drops: the sheets DO meet the line, they just slide along it.
+    const text = render(
       offer({
         status: "unavailable",
         reason: "unverified",
         detail: "sheets can be lined up across the matchline but not along it — they may slide up to 48 ft",
       }),
     );
+    expect(text).toContain("slide up to 48 ft");
     const note = [...container.querySelectorAll("[title]")].find((el) =>
       el.textContent?.includes("Auto-align isn't available"),
     )!;
     expect(note.getAttribute("title")).toContain("slide up to 48 ft");
+  });
+
+  it("asks for a re-check, never silently applies, when the canvas moved under the offer", () => {
+    const onRecheck = vi.fn();
+    const text = render(offer({ status: "stale", onRecheck }));
+    expect(text).toContain("Sheets were moved since the check — re-check to auto-align");
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.includes("Auto-align"))).toBe(
+      false,
+    );
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent === "Re-check")!;
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onRecheck).toHaveBeenCalledTimes(1);
   });
 
   it("disables the button and says so while the run commits", () => {
@@ -105,7 +121,7 @@ describe("TakeoffModeStrip auto-align offer", () => {
   });
 
   it("Add to project is still there in every state", () => {
-    for (const status of ["idle", "checking", "offer", "unavailable", "aligning"] as const) {
+    for (const status of ["idle", "checking", "offer", "unavailable", "stale", "aligning"] as const) {
       expect(render(offer({ status, reason: "no_refs" }))).toContain("Add to project");
     }
   });

@@ -76,6 +76,9 @@ export interface AutoStitchResult {
    *  to `worstAlongUncertaintyFt`. Absent for keymap/none. */
   alongAnchored?: number[];
   worstAlongUncertaintyFt?: number;
+  /** Where that figure came from: `"sweep"`/`"vote"` are measured, `"bound"` is the
+   *  geometric last resort and must not be quoted as a measurement. */
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
   /** Pages deliberately kept OUT of the tiling (overall/key plans, notes, index,
    *  details). They are still laid out — below the tiles, unaligned — but they never
    *  take part in the pair search, so they cannot be collaged into it. */
@@ -776,6 +779,7 @@ export async function autoStitch(
   let alignmentVerdict: AlignmentVerdict | undefined;
   let alongAnchored: number[] | undefined;
   let worstAlongUncertaintyFt: number | undefined;
+  let worstAlongUncertaintySource: "sweep" | "vote" | "bound" | undefined;
   if (units.length >= 2) {
     const byPage = new Map<number, Unit[]>();
     for (const u of units) (byPage.get(u.pageIndex) || byPage.set(u.pageIndex, []).get(u.pageIndex)!).push(u);
@@ -808,6 +812,7 @@ export async function autoStitch(
     alignmentVerdict = res.alignmentVerdict;
     alongAnchored = res.alongAnchored;
     worstAlongUncertaintyFt = res.worstAlongUncertaintyFt;
+    worstAlongUncertaintySource = res.worstAlongUncertaintySource;
   }
 
   // Per-unit poses for placed units; ONE whole-page null pose per fully-unplaced page.
@@ -828,5 +833,5 @@ export async function autoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, alongAnchored, worstAlongUncertaintyFt, skipped, scaleWarnings };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, alongAnchored, worstAlongUncertaintyFt, worstAlongUncertaintySource, skipped, scaleWarnings };
 }

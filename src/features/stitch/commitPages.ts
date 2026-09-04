@@ -68,6 +68,10 @@ export interface CommitInput {
   renderer: PDFRenderer;
   onProgress?: (done: number, total: number) => void;
   ocr?: typeof recognize;
+  /** Auto-align only: tile ids this commit REPLACES. The store swaps them for the new
+   *  tiles in one undo step, so a single undo after an earned auto-align puts the grid
+   *  back rather than leaving the grid and the composite on the canvas together. */
+  replaceTileIds?: string[];
   /** Cooperative abort, checked between page renders and handed straight to
    *  `autoStitch`. When it goes true the commit throws `AutoStitchAborted`
    *  BEFORE `addTiles`, so an aborted run leaves the canvas untouched — the
@@ -90,6 +94,7 @@ export interface CachedProbePlacement {
   alignmentVerdict?: AlignmentVerdict;
   alongAnchored?: number[];
   worstAlongUncertaintyFt?: number;
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
   refPageIndices?: number[];
 }
 
@@ -105,9 +110,12 @@ export interface CommitResult {
    *  from what its own measurement said, and whether it pinned the along axis. */
   seams?: { pageIndexes: [number, number]; status: SeamStatus; residFt?: number; perpDeltaFt?: number; alongAnchored?: boolean }[];
   /** Page indices pinned along the matchline as well as across it, and how far an
-   *  un-anchored one could slide. */
+   *  un-anchored one could slide. `worstAlongUncertaintySource` says whether that
+   *  figure was MEASURED (`sweep`/`vote`) or is only the geometric bound (`bound`) —
+   *  a bound must not be read out to the user as "up to N ft". */
   alongAnchored?: number[];
   worstAlongUncertaintyFt?: number;
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
   /** 0-based indices of pages the solve PLACED but never pinned along the matchline —
    *  the pages `reason: 'along_unresolved'` is about. Deliberately not "every page in
    *  the run minus the anchored ones": a page that was never placed at all (no refs,
@@ -296,7 +304,7 @@ export async function commitAutoAlign(
 ): Promise<CommitResult> {
   const {
     mupdf, doc, pdfBytes, fileName, selected, pageScales, uniformScale, pageCodes,
-    removeWhiteBackground, renderer, onProgress, ocr, cached, shouldAbort,
+    removeWhiteBackground, renderer, onProgress, ocr, cached, shouldAbort, replaceTileIds,
   } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
 
@@ -348,6 +356,7 @@ export async function commitAutoAlign(
   let method: string = "none";
   let alongAnchored: number[] | undefined;
   let worstAlongUncertaintyFt = 0;
+  let worstAlongUncertaintySource: "sweep" | "vote" | "bound" | undefined;
   if (cached) {
     // The cached path skips the solver entirely, so its own abort checkpoints
     // never run — check here instead.
@@ -362,6 +371,7 @@ export async function commitAutoAlign(
     seamReport = cached.seamReport;
     alongAnchored = cached.alongAnchored;
     worstAlongUncertaintyFt = cached.worstAlongUncertaintyFt ?? 0;
+    worstAlongUncertaintySource = cached.worstAlongUncertaintySource;
     refPageIndices = cached.refPageIndices ?? selected;
   } else {
     const result = await autoStitch(mupdf, doc, selected, {
@@ -382,6 +392,7 @@ export async function commitAutoAlign(
     method = result.method;
     alongAnchored = result.alongAnchored;
     worstAlongUncertaintyFt = result.worstAlongUncertaintyFt ?? 0;
+    worstAlongUncertaintySource = result.worstAlongUncertaintySource;
   }
 
   // ── HONESTY GATE ON THE COMMIT ──────────────────────────────────────────────
@@ -443,7 +454,8 @@ export async function commitAutoAlign(
   const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
   // Last checkpoint before anything is written: past here the commit lands.
   checkAbort();
-  useStitchStore.getState().addTiles(newTiles);
+  if (replaceTileIds?.length) useStitchStore.getState().replaceTiles(replaceTileIds, newTiles);
+  else useStitchStore.getState().addTiles(newTiles);
   fitCanvasIfUntouched();
   const refScale = referenceScaleFor(selected, pageScales, uniformScale);
   const { value: finalRef, write } = finalReferenceScale({
@@ -481,8 +493,13 @@ export async function commitAutoAlign(
   // was ever reported: "1.33 ft across" is the cross-seam residual, "±40 ft along" is
   // how far an un-anchored sheet could slide along the matchline. Quoting only the
   // first is what let a 42-ft error read as a 0.00-ft success.
-  const seamText = worstAlongUncertaintyFt > 0 && demoted.size > 0
-    ? `worst seam ${worstResidFt.toFixed(2)} ft across, ±${Math.round(worstAlongUncertaintyFt)} ft along`
+  // A `bound` figure is the sheets' own extent, not a measurement — quoting "±720 ft"
+  // reads as a precision the engine does not have. Say the axis is unresolved instead.
+  const measuredSlide = worstAlongUncertaintyFt > 0 && worstAlongUncertaintySource !== "bound";
+  const seamText = demoted.size > 0 && worstAlongUncertaintyFt > 0
+    ? measuredSlide
+      ? `worst seam ${worstResidFt.toFixed(2)} ft across, ±${Math.round(worstAlongUncertaintyFt)} ft along`
+      : `worst seam ${worstResidFt.toFixed(2)} ft across, along the matchline unresolved`
     : `worst seam ${worstResidFt.toFixed(2)} ft`;
   const message = unalignedIds.length > 0
     ? `Aligned ${alignedCount} of ${selected.length} pages · ${seamText}. ${unalignedIds.length} placed below for manual alignment.`
@@ -490,7 +507,7 @@ export async function commitAutoAlign(
   return {
     added: newTiles.length, unalignedIds, message,
     verdict, reason, skipped, pagesWithoutRefs,
-    alongAnchored, worstAlongUncertaintyFt, alongUnresolvedPages,
+    alongAnchored, worstAlongUncertaintyFt, worstAlongUncertaintySource, alongUnresolvedPages,
     seams: seamReport?.map((s) => ({
       pageIndexes: s.pageIndexes, status: s.status,
       residFt: s.detail.residFt, perpDeltaFt: s.detail.perpDeltaFt,

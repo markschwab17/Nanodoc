@@ -21,7 +21,6 @@ import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContext
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { attachOcrRpc, recognize, shutdownOcr } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
-import { useStitchStore } from "@/shared/stores/stitchStore";
 import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
@@ -59,17 +58,11 @@ export function AddPdfModal({
    *  goes on claiming everything is placed. */
   onAutoAlignResult?: (unalignedCount: number) => void;
   /** A PLAIN add landed: the pages are on the canvas but nothing has decided whether
-   *  they can be aligned. The takeoff strip re-probes them (auto-align is earned, and
-   *  the sheets it was last offered about are no longer what is on the canvas). */
-  onPagesAdded?: (added: {
-    pdfBytes: Uint8Array;
-    fileName?: string;
-    pageIndices: number[];
-    pageScales: Map<number, number>;
-    uniformScale: number | null;
-    tileIds: string[];
-    removeWhiteBackground: boolean;
-  }) => void;
+   *  they can be aligned. The takeoff strip re-probes the WHOLE canvas — auto-align is
+   *  earned, and the sheets it was last offered about are no longer what is there. No
+   *  payload: the check reads the canvas itself, which is the only way the offer can
+   *  cover plan sheets and added sheets as one composite. */
+  onPagesAdded?: () => void;
   /** The site-sheet source PDF for the life of the stitch session (unlike `initialPdf`,
    *  which is consumed once). Offered as an extra entry in the "From Civiltakeoff" list
    *  so switching to a project document doesn't lose the user's selected takeoff sheets. */
@@ -588,7 +581,7 @@ export function AddPdfModal({
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
-      const res = await commitPlainAdd({
+      await commitPlainAdd({
         mupdf,
         doc: mupdfDoc,
         pdfBytes,
@@ -600,18 +593,7 @@ export function AddPdfModal({
         renderer: rendererRef.current,
         onProgress: (done, total) => setAddingProgress({ done, total }),
       });
-      // The tiles this add created, so a later auto-align can REPLACE them rather
-      // than leave the same sheets on the canvas twice.
-      const placed = useStitchStore.getState().tiles;
-      onPagesAdded?.({
-        pdfBytes,
-        fileName: pdfFileName || undefined,
-        pageIndices: selected,
-        pageScales,
-        uniformScale,
-        tileIds: placed.slice(Math.max(0, placed.length - res.added)).map((t) => t.id),
-        removeWhiteBackground,
-      });
+      onPagesAdded?.();
       onClose();
     } catch (e) {
       console.error(e);

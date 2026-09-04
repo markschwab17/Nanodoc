@@ -21,11 +21,17 @@ export const UNVERIFIED_REASON =
 /** Shown when the ONLY thing stopping auto-align is the along-matchline axis: the
  *  sheets demonstrably abut on the right line, but too few of them are pinned along
  *  it, so the composite would look right and be tens of feet out. */
-export function alongUncertainReason(worstAlongUncertaintyFt?: number): string {
+export function alongUncertainReason(
+  worstAlongUncertaintyFt?: number,
+  source?: "sweep" | "vote" | "bound",
+): string {
   const n = Math.round(worstAlongUncertaintyFt ?? 0);
-  return n > 0
+  // A `bound` figure is the sheets' own extent along the seam, i.e. "we did not
+  // measure this". Quoting it as "may slide up to 720 ft" claims a precision the
+  // engine does not have and reads as a bug; say the axis is unfixed instead.
+  return n > 0 && source !== "bound"
     ? `sheets can be lined up across the matchline but not along it — they may slide up to ${n} ft`
-    : "sheets can be lined up across the matchline but not along it";
+    : "sheets can be lined up across the matchline but nothing fixes where along it they sit";
 }
 
 export type FeasibilityStatus = "confident" | "partial" | "unstitchable";
@@ -51,6 +57,9 @@ export interface FeasibilityInput {
   alongAnchored?: number[];
   /** How far an un-anchored unit could slide, in feet (drives the reason copy). */
   worstAlongUncertaintyFt?: number;
+  /** Where that came from — a `"bound"` figure is not a measurement, so the reason
+   *  copy drops the number. */
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
 }
 
 export interface Feasibility {
@@ -121,7 +130,7 @@ export function deriveFeasibility(probe: FeasibilityInput, selectedPageIndices: 
     // verdict because it is the more concrete thing to say.
     const geomOtherwiseOk = probe.method === "geometric" && geomFitOk && alignedInSelection >= 2;
     const reason = geomOtherwiseOk && !alongOk
-      ? alongUncertainReason(probe.worstAlongUncertaintyFt)
+      ? alongUncertainReason(probe.worstAlongUncertaintyFt, probe.worstAlongUncertaintySource)
       : geomOtherwiseOk && !verified
         ? UNVERIFIED_REASON
         : undefined;

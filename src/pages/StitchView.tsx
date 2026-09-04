@@ -220,6 +220,9 @@ export default function StitchView() {
                 pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
                 skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
                 worstAlongUncertaintyFt: result.worstAlongUncertaintyFt,
+                // Without the SOURCE the copy cannot tell a measured slide from the
+                // geometric bound, and would read "up to 720 ft" of an unknown.
+                worstAlongUncertaintySource: result.worstAlongUncertaintySource,
                 // From the commit, which knows which pages it actually PLACED —
                 // subtracting the anchored set from the whole plan named pages the run
                 // never touched as "meeting the matchline".
@@ -376,24 +379,15 @@ export default function StitchView() {
         // Two frames, as on first mount: the tiles must be laid out before
         // recenter can measure the canvas against them.
         requestAnimationFrame(() => requestAnimationFrame(() => handleRecenter()));
-        // Hand the SAME pages to the background check. It runs in the probe worker,
-        // so the canvas above stays interactive the whole time; the strip shows a chip
-        // and, if the check clears the gate, an Auto-align button. The grid tile ids
-        // travel with it so a later align can replace them rather than duplicate them.
-        // Only in the embedded takeoff flow: the step strip is the only surface the
-        // offer has, and a probe nobody can see is pure cost.
+        // Start the background check. It reads the sheets straight off the canvas and
+        // runs in the probe worker, so the canvas above stays interactive the whole
+        // time; the strip shows a chip and, if the check clears the gate, an Auto-align
+        // button. All the check needs from HERE is what the canvas cannot tell it:
+        // CTO's sheet identity for these pages. Only in the embedded takeoff flow — the
+        // step strip is the only surface the offer has, and a probe nobody can see is
+        // pure cost.
         if (!ctx.embed) return;
-        const placed = useStitchStore.getState().tiles;
-        earnedCheck({
-          pdfBytes: source.pdfBytes,
-          fileName: source.fileName || undefined,
-          pageIndices: parsed.pageIndices,
-          pageScales: parsed.pageScales,
-          uniformScale: parsed.uniformScale,
-          pageCodes: parsed.pageCodes,
-          tileIds: placed.slice(Math.max(0, placed.length - result.added)).map((t) => t.id),
-          removeWhiteBackground: true,
-        });
+        earnedCheck({ pageCodes: parsed.pageCodes, removeWhiteBackground: true });
       } catch (e) {
         // Cancelled by the user: the commit threw before writing anything, so
         // the canvas is untouched. No error copy — just hand them the picker.
@@ -512,7 +506,9 @@ export default function StitchView() {
     scaleAlign.setScaleAlignMode(false);
     alignNeighbourExit();
     exitCleanupReview();
-  }, [pointAlign, scaleAlign, exitCleanupReview, alignNeighbourExit]);
+    // The canvas the offer described is gone.
+    earnedReset();
+  }, [pointAlign, scaleAlign, exitCleanupReview, alignNeighbourExit, earnedReset]);
 
   /** Every auto-align run reports here, whether it came from the CTO plan or
    *  from the Add PDF modal, so the strip and the coach mark always describe the
@@ -531,23 +527,15 @@ export default function StitchView() {
    * any, was about the sheets that were there before. Only in takeoff mode — the
    * strip is the only place the offer appears.
    */
-  const handlePagesAdded = useCallback(
-    (added: {
-      pdfBytes: Uint8Array;
-      fileName?: string;
-      pageIndices: number[];
-      pageScales: Map<number, number>;
-      uniformScale: number | null;
-      tileIds: string[];
-      removeWhiteBackground: boolean;
-    }) => {
-      if (!useCiviltakeoffContextStore.getState().context?.embed) return;
-      setUnplacedCount(0);
-      setAlignExplanation(null);
-      earnedCheck(added);
-    },
-    [earnedCheck],
-  );
+  const handlePagesAdded = useCallback(() => {
+    if (!useCiviltakeoffContextStore.getState().context?.embed) return;
+    setUnplacedCount(0);
+    setAlignExplanation(null);
+    // Over the WHOLE canvas, plan sheets and new ones together. Probing only the
+    // pages just added would offer a button that lays a second composite at the
+    // origin, on top of the grid the plan left behind.
+    earnedCheck();
+  }, [earnedCheck]);
 
   const handlePointAlignModeChange = (active: boolean) => {
     if (active) {
@@ -1096,6 +1084,7 @@ export default function StitchView() {
             reason: earned.reason,
             detail: earned.detail,
             onRun: () => void earned.run(),
+            onRecheck: earned.recheck,
           }}
         />
       )}

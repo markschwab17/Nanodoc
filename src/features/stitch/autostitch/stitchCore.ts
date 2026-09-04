@@ -870,10 +870,19 @@ export interface StitchResult {
    *  unit reached only over seams whose along axis was never resolved is connected
    *  but free to slide along the seam by tens of feet. Absent for keymap/none. */
   alongAnchored?: number[];
-  /** How far a non-along-anchored unit could slide, in feet: the widest gap between
-   *  the winning and runner-up candidates of a joint along-sweep that declined. 0
-   *  when nothing was measured. */
+  /** How far a non-along-anchored unit could slide, in feet. 0 only when nothing is
+   *  free to slide — see `worstAlongUncertaintySource` for where the number came from,
+   *  which is what decides whether it is worth quoting to a user. */
   worstAlongUncertaintyFt?: number;
+  /** Where `worstAlongUncertaintyFt` came from, best evidence first:
+   *  `"sweep"`  a joint along-sweep declined to choose — the winner/runner-up gap;
+   *  `"vote"`   an un-anchored seam's own segment vote had a runner-up basin;
+   *  `"bound"`  NOTHING measured the axis, so the figure is only the geometric bound
+   *             (the sheets' extent along the seam, past which nothing overlaps).
+   *             A `bound` figure must not be quoted as if it were measured — it says
+   *             "unknown", not "up to N ft".
+   *  Absent when there is no uncertainty to report. */
+  worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
 }
 
 /**
@@ -2002,6 +2011,8 @@ export function stitchSheets(
   // un-anchored seam's own vote spread, and only if no seam even voted to the sheet
   // extent past which there is nothing left to match. A declined sweep's separation
   // is the better measurement, so it is never widened by this.
+  let worstAlongUncertaintySource: "sweep" | "vote" | "bound" | undefined =
+    worstAlongUncertaintyFt > 0 ? "sweep" : undefined;
   if (worstAlongUncertaintyFt === 0 && main.some((k) => !anchoredUnits.has(k))) {
     let widestVote = 0, widestBound = 0;
     for (const s of alongSpreads) {
@@ -2012,6 +2023,7 @@ export function stitchSheets(
       if (s.boundFt > widestBound) widestBound = s.boundFt;
     }
     worstAlongUncertaintyFt = widestVote > 0 ? widestVote : widestBound;
+    if (worstAlongUncertaintyFt > 0) worstAlongUncertaintySource = widestVote > 0 ? "vote" : "bound";
   }
 
   const placements = new Map<number, { x: number; y: number }>();
@@ -2021,5 +2033,6 @@ export function stitchSheets(
     root: rootKey, placements, worstResidFt: +worst.toFixed(3), pairs,
     method: main.length ? "geometric" : "none", jointSweeps, seamReport, alignmentVerdict,
     alongAnchored, worstAlongUncertaintyFt: +worstAlongUncertaintyFt.toFixed(2),
+    worstAlongUncertaintySource,
   };
 }

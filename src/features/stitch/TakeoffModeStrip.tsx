@@ -14,6 +14,7 @@ import { Check, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   AUTO_ALIGN_CHECKING,
+  AUTO_ALIGN_MOVED,
   autoAlignButtonLabel,
   autoAlignUnavailableNote,
   autoAlignUnavailableTitle,
@@ -27,13 +28,18 @@ import {
  * canvas the check has nothing to say about is not cluttered by it.
  */
 export interface TakeoffModeAutoAlign {
-  status: "idle" | "checking" | "offer" | "unavailable" | "aligning";
+  status: "idle" | "checking" | "offer" | "unavailable" | "stale" | "aligning";
   /** Sheets the offer would claim. */
   sheets: number;
   reason?: AutoAlignUnavailableReason;
-  /** The fuller sentence behind the short reason (the tooltip). */
+  /** The fuller sentence behind the short reason. Rendered as a SECOND LINE, not a
+   *  tooltip: the along-matchline case ("they may slide up to 48 ft") is the one fact
+   *  the short reason drops, and a fact only a hover reveals is a fact most people
+   *  never see. */
   detail?: string;
   onRun: () => void;
+  /** Re-run the check over the canvas as it now stands (the stale state's action). */
+  onRecheck: () => void;
 }
 
 export interface TakeoffModeStripProps {
@@ -89,7 +95,7 @@ function Step({
 }
 
 /** The chip / button / note the background check turns into. */
-function AutoAlignOffer({ status, sheets, reason, detail, onRun }: TakeoffModeAutoAlign) {
+function AutoAlignOffer({ status, sheets, reason, detail, onRun, onRecheck }: TakeoffModeAutoAlign) {
   if (status === "idle") return null;
   if (status === "checking") {
     return (
@@ -99,14 +105,25 @@ function AutoAlignOffer({ status, sheets, reason, detail, onRun }: TakeoffModeAu
       </span>
     );
   }
+  if (status === "stale") {
+    return (
+      <span className="flex items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
+        {AUTO_ALIGN_MOVED}
+        <Button size="sm" variant="outline" className="h-7 shrink-0" onClick={onRecheck}>
+          Re-check
+        </Button>
+      </span>
+    );
+  }
   if (status === "unavailable" && reason) {
     return (
       <span
-        className="text-xs text-muted-foreground"
+        className="flex flex-col items-end leading-tight text-xs text-muted-foreground"
         title={autoAlignUnavailableTitle(reason, detail)}
         aria-live="polite"
       >
-        {autoAlignUnavailableNote(reason)}
+        <span>{autoAlignUnavailableNote(reason)}</span>
+        {detail && <span className="text-[11px] opacity-80">{detail}</span>}
       </span>
     );
   }
