@@ -192,7 +192,9 @@ export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> 
     // (mixed-scale sets size and align by feet).
     const pageScale = resolvePageScale(pageIndex, pageScales, uniformScale);
     const { width: tileW, height: tileH } = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
-    const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE });
+    // noCache: this raster is copied into a PNG on the next line and never
+    // requested again — caching it would pin 38 MB per sheet for the session.
+    const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE, noCache: true });
     const imageData = rendered.imageData as ImageData;
     if (imageData && imageData.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
     const dataUrl = imageData && imageData.data ? imageDataToDataUrl(imageData) : undefined;
@@ -245,7 +247,8 @@ export async function commitAutoAlign(
     const pageIndex = selected[i];
     await new Promise<void>((r) => setTimeout(r, 0));
     checkAbort();
-    const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE });
+    // noCache — see commitPlainAdd.
+    const rendered = await renderer.renderPage(doc, pageIndex, { scale: TILE_RENDER_SCALE, noCache: true });
     const imageData = rendered.imageData as ImageData;
     if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
     if (imageData?.data) rasters.set(pageIndex, imageDataToDataUrl(imageData));

@@ -264,7 +264,9 @@ export function AddPdfModal({
           await yieldToMain();
           if (thumbGenRef.current !== gen) return;
           try {
-            const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE });
+            // noCache: each thumbnail is encoded to a data URL below and never
+            // re-requested; caching all 22 pages costs ~35 MB for nothing.
+            const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE, noCache: true });
             if (thumbGenRef.current !== gen) return;
             const id = rendered.imageData as ImageData;
             if (id?.data) {
