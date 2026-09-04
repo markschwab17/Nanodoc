@@ -44,7 +44,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { FilePlus, Loader2 } from "lucide-react";
+import { AlertTriangle, FilePlus, Loader2, X } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
 import { useTourStore } from "@/shared/stores/tourStore";
 
@@ -137,6 +137,10 @@ export default function StitchView() {
   const [unplacedCount, setUnplacedCount] = useState(0);
   const [coachDismissed, setCoachDismissed] = useState(false);
   const [showAddToProject, setShowAddToProject] = useState(false);
+  /** Persistent "Add to project" failure. A toast alone left the user back on the
+   *  canvas with the dialog gone and no surviving explanation, so the reason also
+   *  stays pinned under the step strip until they retry or dismiss it. */
+  const [addToProjectError, setAddToProjectError] = useState<string | null>(null);
   /** Non-null while a CTO stitch plan is being committed — drives the entry
    *  overlay. `done/total` is the commit's own page progress. */
   const [planRun, setPlanRun] = useState<{
@@ -735,6 +739,8 @@ export default function StitchView() {
     // Takeoff-v2 mode has exactly one destination — a new project page — so it
     // skips the where-to-save dialog and confirms WHAT will be created instead.
     if (ctx?.embed) {
+      // Re-entering the flow retires the previous failure notice.
+      setAddToProjectError(null);
       setShowAddToProject(true);
       return;
     }
@@ -749,16 +755,16 @@ export default function StitchView() {
     async (
       destination: "overwrite" | "new_file" | "project_page",
       displayName?: string
-    ) => {
+    ): Promise<{ ok: boolean; message?: string }> => {
       const ctx = useCiviltakeoffContextStore.getState().getContext();
-      if (!ctx) return;
+      if (!ctx) return { ok: false, message: "Not connected to Civiltakeoff." };
       setShowSaveToCtoDialog(false);
       setIsSaving(true);
       try {
         const buffer = await exportStitchToPdf();
         if (!buffer) {
           showNotification("Export failed.", "error");
-          return;
+          return { ok: false, message: "Export failed." };
         }
         const copy = new Uint8Array(buffer.length);
         copy.set(buffer);
@@ -792,12 +798,13 @@ export default function StitchView() {
           { type: "nanodoc-stitch-saved", success: true, destination, manifest, pageUuid },
           ctx.api_origin
         );
+        return { ok: true };
       } catch (e) {
         console.error(e);
-        showNotification(
-          e instanceof Error ? e.message : "Failed to save to Civiltakeoff.",
-          "error"
-        );
+        const message =
+          e instanceof Error && e.message ? e.message : "Failed to save to Civiltakeoff.";
+        showNotification(message, "error");
+        return { ok: false, message };
       } finally {
         setIsSaving(false);
       }
@@ -895,6 +902,25 @@ export default function StitchView() {
           canAdd={sheetTileCount > 0 && !isSaving}
           onAddToProject={handleSaveToCto}
         />
+      )}
+      {takeoffMode && addToProjectError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 shrink-0 px-4 py-2 border-b border-destructive/30 bg-destructive/10 text-destructive text-xs"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+          <span className="flex-1 leading-relaxed">
+            Couldn't add to project: {addToProjectError}. Fix the sheets and try again.
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            className="shrink-0 opacity-70 hover:opacity-100"
+            onClick={() => setAddToProjectError(null)}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
       )}
       <StitchToolbar
         onAddPdf={() => setShowAddPdf(true)}
@@ -1165,9 +1191,17 @@ export default function StitchView() {
           onConfirm={() => {
             // Stays open, reading "Adding…", until the upload settles — closing
             // first would drop the user back on the canvas with no sign that
-            // anything was happening, and `doSaveToCto` swallows its own errors
-            // into a toast, so `finally` is the only completion signal.
-            void doSaveToCto("project_page").finally(() => setShowAddToProject(false));
+            // anything was happening. `doSaveToCto` never rejects; it reports
+            // through its result, which decides whether a failure bar stays up.
+            // Retrying retires the last failure notice before a new one can land.
+            setAddToProjectError(null);
+            void doSaveToCto("project_page")
+              .then((r) => {
+                // The dialog is gone by now, so an unexplained close is the one
+                // thing the user must not be left with: pin the reason instead.
+                if (!r.ok) setAddToProjectError(r.message ?? "Something went wrong");
+              })
+              .finally(() => setShowAddToProject(false));
           }}
         />
       )}

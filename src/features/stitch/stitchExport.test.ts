@@ -8,7 +8,8 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds, embedTileSource, exportStitchToPdf } from "./stitchExport";
+import { useStitchStore } from "@/shared/stores/stitchStore";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
 
@@ -193,5 +194,85 @@ describe("canVectorEmbedRotation", () => {
     expect(canVectorEmbedRotation(180)).toBe(false);
     expect(canVectorEmbedRotation(270)).toBe(false); // the Rose Hill case
     expect(canVectorEmbedRotation(-90)).toBe(false);
+  });
+});
+
+
+/**
+ * A one-page PDF whose page has NO /Contents entry — the real-world "blank
+ * sheet" that made pdf-lib throw MissingPageContentsEmbeddingError from inside
+ * `save()`, long after the export's try/catch had returned. `create()` +
+ * `addPage()` alone is not enough (pdf-lib gives that page an empty content
+ * stream), so the entry is deleted outright.
+ */
+async function makeContentlessPdfBytes(): Promise<Uint8Array> {
+  const { PDFDocument, PDFName } = await import("pdf-lib");
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([200, 100]);
+  page.node.delete(PDFName.of("Contents"));
+  return doc.save();
+}
+
+/** A valid 1x1 PNG, so the raster fallback has something real to embed. */
+const ONE_PX_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+describe("embedTileSource", () => {
+  test("returns the embedded page for a normal source page", async () => {
+    const { PDFDocument } = await import("pdf-lib");
+    const src = await PDFDocument.create();
+    src.addPage([200, 100]).drawRectangle({ x: 10, y: 10, width: 50, height: 50 });
+    const sourceDoc = await PDFDocument.load(await src.save());
+
+    const out = await PDFDocument.create();
+    const embedded = await embedTileSource(out, sourceDoc, 0);
+    expect(embedded).not.toBeNull();
+    // Proves the embed really ran (and that save() therefore can't fail on it).
+    expect(embedded!.width).toBe(200);
+  });
+
+  test("returns null for a page with no /Contents, and leaves the doc saveable", async () => {
+    const { PDFDocument } = await import("pdf-lib");
+    const sourceDoc = await PDFDocument.load(await makeContentlessPdfBytes());
+
+    const out = await PDFDocument.create();
+    out.addPage([200, 100]);
+    const embedded = await embedTileSource(out, sourceDoc, 0);
+    expect(embedded).toBeNull();
+
+    // The regression: a failed embed left behind in pdf-lib's pending list makes
+    // save() re-run it and throw. It must not.
+    const bytes = await out.save();
+    expect(bytes.length).toBeGreaterThan(0);
+  });
+});
+
+describe("exportStitchToPdf with an un-embeddable source page", () => {
+  test("falls back to raster instead of aborting the whole export", async () => {
+    const { PDFDocument } = await import("pdf-lib");
+    const bad = await makeContentlessPdfBytes();
+
+    useStitchStore.setState({
+      canvasWidth: 200,
+      canvasHeight: 100,
+      cropRect: null,
+      tiles: [
+        {
+          id: "blank",
+          sourcePdfBytes: bad,
+          sourcePageIndex: 0,
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          imageDataUrl: ONE_PX_PNG,
+        },
+      ],
+    } as never);
+
+    const out = await exportStitchToPdf();
+    expect(out).not.toBeNull();
+    const reloaded = await PDFDocument.load(out!);
+    expect(reloaded.getPageCount()).toBe(1);
   });
 });

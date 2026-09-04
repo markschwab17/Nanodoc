@@ -11,6 +11,7 @@
  * around the drawing origin.
  */
 
+import type { PDFDocument as PdfLibDocument, PDFEmbeddedPage } from "pdf-lib";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
@@ -282,6 +283,49 @@ export function contentExportBounds(
   return { cropX: minX, cropY: minY, cropW: maxX - minX, cropH: maxY - minY };
 }
 
+/**
+ * Embed one source page as a vector XObject, forcing pdf-lib's DEFERRED embed
+ * to run right here.
+ *
+ * `embedPdf` only queues the work: the real embedding happens inside
+ * `PDFEmbeddedPage.embed()`, which pdf-lib does not call until `pdfDoc.save()`.
+ * So a page pdf-lib cannot embed — a blank page with no /Contents throws
+ * `MissingPageContentsEmbeddingError` — used to escape the caller's try/catch
+ * and abort the WHOLE export at save time, instead of demoting that one tile to
+ * the raster path.
+ *
+ * Awaiting `embed()` here moves that failure inside the catch. On failure the
+ * dead entry is dropped from the document's pending-embed list so `save()`
+ * doesn't retry (and re-throw) it, and null is returned so the caller falls
+ * through to the raster path without ever drawing the broken page.
+ *
+ * Exported for tests.
+ */
+export async function embedTileSource(
+  pdfDoc: PdfLibDocument,
+  sourceDoc: PdfLibDocument,
+  pageIndex: number
+): Promise<PDFEmbeddedPage | null> {
+  let embeddedPage: PDFEmbeddedPage | undefined;
+  try {
+    [embeddedPage] = await pdfDoc.embedPdf(sourceDoc, [pageIndex]);
+    if (!embeddedPage) return null;
+    // Force the deferred embed NOW so a failure lands in this catch, not in save().
+    await embeddedPage.embed();
+    return embeddedPage;
+  } catch (e) {
+    console.warn(`Vector embed failed for source page ${pageIndex}, falling back to raster:`, e);
+    // pdf-lib pushed this page onto its private pending list before embedding;
+    // leaving it there would make save() re-run the same failing embed.
+    if (embeddedPage) {
+      const pending = (pdfDoc as unknown as { embeddedPages?: PDFEmbeddedPage[] }).embeddedPages;
+      const idx = pending ? pending.indexOf(embeddedPage) : -1;
+      if (pending && idx >= 0) pending.splice(idx, 1);
+    }
+    return null;
+  }
+}
+
 export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
 
@@ -390,6 +434,9 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       !tile.imageModified;
 
     if (canUseVector) {
+      // Null once the embed is known to have failed — the page is drawn ONLY on
+      // a proven-good embed, so nothing dangling ever reaches the output.
+      let embeddedPage: PDFEmbeddedPage | null = null;
       try {
         let sourceDoc = sourceDocCache.get(tile.sourcePdfBytes);
         if (!sourceDoc) {
@@ -402,8 +449,19 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
         const srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
         if (!canVectorEmbedRotation(srcRotation)) throw new Error(`ROTATED_SOURCE:${srcRotation}`);
 
-        const [embeddedPage] = await pdfDoc.embedPdf(sourceDoc, [tile.sourcePageIndex]);
+        // Embeds AND flushes: a page pdf-lib can't embed returns null here rather
+        // than exploding later inside save() (see embedTileSource).
+        embeddedPage = await embedTileSource(pdfDoc, sourceDoc, tile.sourcePageIndex);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Rotated source pages fall to the raster path on purpose — not a failure.
+        if (!msg.startsWith("ROTATED_SOURCE:")) {
+          console.warn("Vector embed failed, falling back to raster:", e);
+        }
+      }
 
+      if (embeddedPage) {
+        const good = embeddedPage;
         const opts: {
           x: number; y: number;
           width: number; height: number;
@@ -416,16 +474,10 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
         };
         if (rotation !== 0) opts.rotate = degrees(rotation);
         openClipped();
-        page.drawPage(embeddedPage, opts);
+        page.drawPage(good, opts);
         page.pushOperators(popGraphicsState());
-        drawRelocations((x, y) => page.drawPage(embeddedPage, { x, y, width: tile.width, height: tile.height }));
+        drawRelocations((x, y) => page.drawPage(good, { x, y, width: tile.width, height: tile.height }));
         continue;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // Rotated source pages fall to the raster path on purpose — not a failure.
-        if (!msg.startsWith("ROTATED_SOURCE:")) {
-          console.warn("Vector embed failed, falling back to raster:", e);
-        }
       }
     }
 
