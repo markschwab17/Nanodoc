@@ -18,6 +18,7 @@ import { Eye, EyeOff, Focus, Lock, Magnet, Unlock, ZoomIn, ZoomOut } from "lucid
 import { useStitchStore, selectEffectiveMinZoom, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
 import { useShallow } from "zustand/react/shallow";
 import { MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "./stitchConstants";
+import { selectionSummary } from "./groups";
 
 /** Sentinel value for the canvas-size Select's fit-to-content entry (not a preset). */
 const FIT_TO_SHEETS_VALUE = "fit-to-sheets";
@@ -148,6 +149,7 @@ export function StitchBottomToolbar({
     resizeLocked,
     selectedTileIds,
     tiles,
+    groups,
     updateTile,
     updateTiles,
   } = useStitchStore(
@@ -163,6 +165,7 @@ export function StitchBottomToolbar({
       resizeLocked: s.resizeLocked,
       selectedTileIds: s.selectedTileIds,
       tiles: s.tiles,
+      groups: s.groups,
       updateTile: s.updateTile,
       updateTiles: s.updateTiles,
     }))
@@ -171,6 +174,9 @@ export function StitchBottomToolbar({
   const effectiveMinZoom = useStitchStore(selectEffectiveMinZoom);
 
   const hasSelection = selectedTileIds.length > 0;
+  /** "3 sheets selected · Group 1" — the bar says in words what the rings say in
+   *  colour, because on a zoomed-out canvas the rings alone were not enough. */
+  const selectionText = selectionSummary(tiles, groups, selectedTileIds);
   const allSelectedLocked =
     hasSelection &&
     selectedTileIds.every((id) => tiles.find((t) => t.id === id)?.locked);
@@ -280,6 +286,14 @@ export function StitchBottomToolbar({
             </SelectContent>
           </Select>
         </div>
+        {selectionText && (
+          <>
+            <div className="h-5 w-px bg-border" aria-hidden />
+            <span className="text-xs font-medium text-foreground" role="status" aria-live="polite">
+              {selectionText}
+            </span>
+          </>
+        )}
         <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-0.5 border rounded-md h-7 bg-background" role="group" aria-label="Zoom">
           <Button

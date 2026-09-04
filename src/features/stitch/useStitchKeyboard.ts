@@ -12,6 +12,7 @@
 import { useEffect, useRef } from "react";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { ABSOLUTE_MIN_ZOOM } from "./stitchConstants";
+import { expandSelectionToGroups, groupOf } from "./groups";
 
 /** Gap (ms) between nudges that starts a new undo step. */
 const NUDGE_BURST_MS = 800;
@@ -68,6 +69,22 @@ export function useStitchKeyboard(options: StitchKeyboardOptions = {}) {
         }
         return;
       }
+      // Cmd/Ctrl+G groups the selection; add Shift to take it apart again.
+      if ((e.ctrlKey || e.metaKey) && key === "g") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (optionsRef.current.selectionEditsDisabled) return;
+        const ids = store.selectedTileIds;
+        if (e.shiftKey) {
+          // Ungroup whatever groups the selection touches — the whole group each time,
+          // because a half-ungrouped group is not what "ungroup" means.
+          const groupIds = [...new Set(ids.map((id) => groupOf(store.tiles, id)).filter((g): g is string => !!g))];
+          for (const groupId of groupIds) store.ungroup(groupId);
+        } else if (ids.length >= 2) {
+          store.createGroup(ids);
+        }
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && key === "z") {
         e.preventDefault();
         e.stopPropagation();
@@ -99,7 +116,10 @@ export function useStitchKeyboard(options: StitchKeyboardOptions = {}) {
         if (e.key === "ArrowLeft") dx = -step;
         if (e.key === "ArrowRight") dx = step;
 
-        const unlockedIds = store.selectedTileIds.filter(
+        // A nudge moves whole groups: selecting one member and pressing an arrow must
+        // not slide it out of the composition it belongs to.
+        const selection = expandSelectionToGroups(store.tiles, store.selectedTileIds);
+        const unlockedIds = selection.filter(
           (id) => !store.tiles.find((t) => t.id === id)?.locked
         );
         if (unlockedIds.length === 0) return;

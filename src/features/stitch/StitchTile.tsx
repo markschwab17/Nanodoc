@@ -13,6 +13,7 @@ import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
 import { computeResizedPose } from "@/features/stitch/stitchGeometry";
+import { expandSelectionToGroups, toggleGroupInSelection } from "@/features/stitch/groups";
 import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
 import { cssClipPathWithHoles, cssClipToRect } from "./cleanup/clipRegions";
 import { Lock, RotateCw, Unlock } from "lucide-react";
@@ -35,12 +36,15 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // Granular selectors — only re-render when THIS tile's selection state changes
   const isSelected = useStitchStore(useCallback((s) => s.selectedTileIds.includes(tile.id), [tile.id]));
   const isSingleSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length === 1 && s.selectedTileIds[0] === tile.id, [tile.id]));
-  const isMultiSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length > 1 && s.selectedTileIds.includes(tile.id), [tile.id]));
   const resizeLocked = useStitchStore((s) => s.resizeLocked);
   // The committed sheet raster, from the side slice. Subscribed (not read via
   // getState) so the tile paints as soon as the raster lands.
   const committedRaster = useStitchStore(useCallback((s) => s.tileRasters[tile.id], [tile.id]));
   const zoomLevel = useStitchStore((s) => s.zoomLevel);
+  /** This sheet's group colour, if it is in a group. */
+  const groupColor = useStitchStore(
+    useCallback((s) => (tile.groupId ? s.groups[tile.groupId]?.color : undefined), [tile.groupId])
+  );
 
   const isLocked = Boolean(tile.locked);
   const dragStartRef = useRef<DragStart | null>(null);
@@ -80,28 +84,36 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      // The right button opens the context menu (StitchContextMenu wraps the canvas);
+      // it must not start a drag or change the selection out from under the menu.
+      if (e.button === 2) return;
       e.stopPropagation();
       e.preventDefault();
       const store = useStitchStore.getState();
       const currentIds = store.selectedTileIds;
+      const currentTiles = store.tiles;
 
       // Snapshot only once the pointer actually moves (see handlePointerMove)
       pendingUndoSnapshotRef.current = true;
 
-      if (e.shiftKey) {
-        const newIds = currentIds.includes(tile.id)
-          ? currentIds.filter((i) => i !== tile.id)
-          : [...currentIds, tile.id];
-        store.setSelectedTileIds(newIds);
-        if (newIds.includes(tile.id)) {
-          const currentTiles = store.tiles;
-          const unlockedIds = newIds.filter(
-            (id) => !currentTiles.find((x) => x.id === id)?.locked
-          );
-          const positions = unlockedIds.map((id) => {
+      /** The unlocked members of a selection, with their start positions. A drag moves
+       *  exactly these, which is how a GROUP keeps its internal spacing: the selection
+       *  was expanded to whole groups before we got here. */
+      const dragPositions = (ids: string[]) =>
+        ids
+          .filter((id) => !currentTiles.find((x) => x.id === id)?.locked)
+          .map((id) => {
             const t = currentTiles.find((x) => x.id === id)!;
             return { id, x: t.x, y: t.y };
           });
+
+      if (e.shiftKey) {
+        // Shift-click toggles the sheet AND its group: half a group in the selection
+        // would come apart on the next drag.
+        const newIds = toggleGroupInSelection(currentTiles, currentIds, tile.id);
+        store.setSelectedTileIds(newIds);
+        if (newIds.includes(tile.id)) {
+          const positions = dragPositions(newIds);
           dragStartRef.current =
             positions.length > 0
               ? { type: "group", x: e.clientX, y: e.clientY, positions }
@@ -110,34 +122,33 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
           dragStartRef.current = null;
         }
       } else {
-        const currentTiles = store.tiles;
         const currentTile = currentTiles.find((x) => x.id === tile.id);
         const locked = Boolean(currentTile?.locked);
-        if (currentIds.length >= 2 && currentIds.includes(tile.id) && !locked) {
-          const unlockedIds = currentIds.filter(
-            (id) => !currentTiles.find((x) => x.id === id)?.locked
-          );
-          const positions = unlockedIds.map((id) => {
-            const t = currentTiles.find((x) => x.id === id)!;
-            return { id, x: t.x, y: t.y };
-          });
+        // Clicking a grouped sheet selects its whole group — that IS the group.
+        const wanted = expandSelectionToGroups(currentTiles, [tile.id]);
+        const keepSelection =
+          currentIds.length >= 2 && currentIds.includes(tile.id) && !locked;
+        const ids = keepSelection ? currentIds : wanted;
+        if (!keepSelection) store.setSelectedTileIds(ids);
+
+        if (locked) {
+          dragStartRef.current = null;
+        } else if (ids.length >= 2) {
+          const positions = dragPositions(ids);
           dragStartRef.current =
             positions.length > 0
               ? { type: "group", x: e.clientX, y: e.clientY, positions }
               : null;
+        } else if (currentTile) {
+          dragStartRef.current = {
+            type: "single",
+            x: e.clientX,
+            y: e.clientY,
+            tileX: currentTile.x,
+            tileY: currentTile.y,
+          };
         } else {
-          store.setSelectedTileIds([tile.id]);
-          if (!locked && currentTile) {
-            dragStartRef.current = {
-              type: "single",
-              x: e.clientX,
-              y: e.clientY,
-              tileX: currentTile.x,
-              tileY: currentTile.y,
-            };
-          } else {
-            dragStartRef.current = null;
-          }
+          dragStartRef.current = null;
         }
       }
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -380,19 +391,40 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   }));
   const hiddenClip = isRotated ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
 
+  // Ring weights in SCREEN pixels: everything here lives inside the zoom-scaled layer,
+  // so a constant on screen means dividing by the zoom.
+  const ringPx = 2.5 / Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
+  const outlineStyle = isSelected
+    ? `${ringPx}px solid hsl(var(--primary))`
+    : groupColor
+      ? `${ringPx * 0.7}px dashed ${groupColor}`
+      : pointerOver
+        ? `${ringPx}px solid hsl(var(--primary) / 0.45)`
+        : undefined;
+  const haloStyle = isSelected
+    ? `0 0 0 ${ringPx * 1.6}px ${groupColor ? `color-mix(in srgb, ${groupColor} 45%, transparent)` : "hsl(var(--primary) / 0.28)"}`
+    : undefined;
+
   return (
     <div
       ref={tileContainerRef}
       data-stitch-tile
-      className="absolute hover:outline hover:outline-2 hover:outline-primary/50"
+      className="absolute"
       style={{
         left: 0,
         top: 0,
         width: displayWidth,
         height: displayHeight,
-        outline: isSelected ? "2px solid hsl(var(--primary))" : undefined,
-        outlineOffset: isSelected ? "-2px" : undefined,
-        boxShadow: isMultiSelected ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
+        // SCREEN-space widths. These used to be plain `2px` inside the zoom-scaled
+        // layer, so at a fit-the-set zoom of 0.3 the selection ring was 0.6 px — Mark:
+        // "it's also very difficult to tell when a pdf is selected". Dividing by the
+        // zoom keeps the ring the same weight however far out the canvas is.
+        outline: outlineStyle,
+        outlineOffset: `${-ringPx}px`,
+        // A soft halo outside the ring, in the GROUP's colour when the sheet is in one,
+        // so a selected group reads as one object and not as n sheets that happen to be
+        // lit up.
+        boxShadow: haloStyle,
         transform: `translate(${tile.x}px, ${tile.y}px)${displayRotation ? ` rotate(${displayRotation}deg)` : ""}`,
         transformOrigin: "center center",
         // Promoted only while the tile is in play — see `pointerOver`. A

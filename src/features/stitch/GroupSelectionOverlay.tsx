@@ -18,6 +18,7 @@ function angleDeg(clientX: number, clientY: number, centerX: number, centerY: nu
 export function GroupSelectionOverlay() {
   const tiles = useStitchStore((s) => s.tiles);
   const selectedTileIds = useStitchStore((s) => s.selectedTileIds);
+  const groups = useStitchStore((s) => s.groups);
   const updateTilesNoUndo = useStitchStore((s) => s.updateTilesNoUndo);
   const zoomLevel = useStitchStore((s) => s.zoomLevel);
   const resizeLocked = useStitchStore((s) => s.resizeLocked);
@@ -40,6 +41,18 @@ export function GroupSelectionOverlay() {
     [selectedTiles]
   );
   const bounds = useMemo(() => getGroupBounds(selectedTiles), [selectedTiles]);
+  /** "3 sheets" — plus the group's name and colour when the selection IS one group. */
+  const groupLabel = useMemo(() => {
+    const text = `${selectedTiles.length} sheet${selectedTiles.length === 1 ? "" : "s"}`;
+    const groupIds = [...new Set(selectedTiles.map((t) => t.groupId).filter((g): g is string => !!g))];
+    const whole =
+      groupIds.length === 1 && selectedTiles.every((t) => t.groupId === groupIds[0])
+        ? groups[groupIds[0]]
+        : undefined;
+    return whole
+      ? { text: `${text} · ${whole.name}`, color: whole.color }
+      : { text, color: "hsl(var(--primary))" };
+  }, [selectedTiles, groups]);
   const groupCenter = useMemo(
     () => ({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }),
     [bounds]
@@ -256,6 +269,23 @@ export function GroupSelectionOverlay() {
         boxShadow: `0 0 0 ${invZoom}px hsl(var(--primary) / 0.3)`,
       }}
     >
+      {/* What is selected, in words, pinned to the box. A ring alone does not survive a
+          zoomed-out canvas full of sheets — Mark could not tell whether one or several
+          were selected. The label sits ABOVE the box and scales down with the zoom so
+          it stays the same size on screen. */}
+      <div
+        className="absolute whitespace-nowrap rounded px-1.5 py-0.5 font-medium text-white shadow"
+        style={{
+          left: 0,
+          top: 0,
+          transform: `translate(0, -100%) translate(0, ${-4 * invZoom}px) scale(${invZoom})`,
+          transformOrigin: "left bottom",
+          fontSize: 11,
+          background: groupLabel.color,
+        }}
+      >
+        {groupLabel.text}
+      </div>
       {!resizeLocked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
         <div
           key={dir}

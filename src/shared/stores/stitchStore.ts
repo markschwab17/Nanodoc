@@ -7,6 +7,15 @@ import { create } from "zustand";
 import type { StitchTile, CropRect, RelocatedRegion, StitchUndoSnapshot } from "@/features/stitch/stitchTypes";
 import { CANVAS_PRESETS, FIT_MARGIN_PT, UNDO_MAX_SIZE } from "@/features/stitch/stitchConstants";
 import { contentBounds, effectiveMinZoomFor, getTileAABB } from "@/features/stitch/stitchGeometry";
+import {
+  addToGroupIn,
+  createGroupIn,
+  detachFromGroupIn,
+  mergeGroupsFor,
+  pruneGroups,
+  ungroupIn,
+  type TileGroups,
+} from "@/features/stitch/groups";
 
 export type { StitchTile, CropRect, RelocatedRegion, StitchUndoSnapshot };
 export { CANVAS_PRESETS };
@@ -18,12 +27,16 @@ function snapshotState(state: {
   canvasWidth: number;
   canvasHeight: number;
   cropRect: CropRect | null;
+  groups: TileGroups;
 }): StitchUndoSnapshot {
   return {
     tiles: state.tiles.map((t) => ({ ...t })),
     canvasWidth: state.canvasWidth,
     canvasHeight: state.canvasHeight,
     cropRect: state.cropRect ? { ...state.cropRect } : null,
+    // Membership rides on the tiles above; this is the names and colours, so undoing an
+    // "Ungroup" restores the group the user knew rather than a fresh one.
+    groups: { ...state.groups },
   };
 }
 
@@ -46,6 +59,9 @@ interface StitchState {
   zoomLevel: number;
   /** Multi-select: when non-empty, these tiles are selected. Last item is "primary" for UI. */
   selectedTileIds: string[];
+  /** Persistent sheet groups, by id. Membership is `tile.groupId`; this holds each
+   *  group's name and colour. See `features/stitch/groups.ts`. */
+  groups: TileGroups;
   cropRect: CropRect | null;
   /** When true, tiles snap to other tiles' edges and canvas edges when dragging/resizing. */
   snapToEdges: boolean;
@@ -100,6 +116,17 @@ interface StitchState {
   /** Move tile(s) to the front (top layer). Pass one id or multiple. */
   bringTileToFront: (id: string) => void;
   bringTilesToFront: (ids: string[]) => void;
+  /** Put these sheets in a new group and select it. No-op for fewer than two. */
+  createGroup: (tileIds: string[]) => string | null;
+  /** Add sheets to an existing group (they leave whatever group they were in). */
+  addToGroup: (groupId: string, tileIds: string[]) => void;
+  /** Take sheets out of their group; a group left with one member dissolves. */
+  detachFromGroup: (tileIds: string[]) => void;
+  /** Dissolve a whole group. */
+  ungroup: (groupId: string) => void;
+  /** Merge every group these sheets belong to (plus the sheets themselves) into one —
+   *  what a completed align pair does. */
+  mergeGroups: (tileIds: string[]) => string | null;
   setSelectedTileId: (id: string | null) => void;
   setSelectedTileIds: (ids: string[]) => void;
   /** Toggle a tile in selection (for shift-click). Adds if not selected, removes if selected. */
@@ -224,6 +251,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   viewportHeight: 0,
   tileRasters: {},
   tiles: [],
+  groups: {},
   panOffset: { x: 0, y: 0 },
   zoomLevel: 1,
   selectedTileIds: [],
@@ -431,8 +459,11 @@ export const useStitchStore = create<StitchState>((set, get) => ({
   removeTile: (id) =>
     set((state) => {
       const snap = snapshotState(state);
+      // A group whose second sheet was just deleted is a group of one — dissolve it.
+      const pruned = pruneGroups(state.tiles.filter((t) => t.id !== id), state.groups);
       const next = {
-        tiles: state.tiles.filter((t) => t.id !== id),
+        tiles: pruned.tiles,
+        groups: pruned.groups,
         selectedTileIds: state.selectedTileIds.filter((i) => i !== id),
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
@@ -445,8 +476,10 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       if (ids.length === 0) return state;
       const snap = snapshotState(state);
       const remove = new Set(ids);
+      const pruned = pruneGroups(state.tiles.filter((t) => !remove.has(t.id)), state.groups);
       const next = {
-        tiles: state.tiles.filter((t) => !remove.has(t.id)),
+        tiles: pruned.tiles,
+        groups: pruned.groups,
         selectedTileIds: state.selectedTileIds.filter((i) => !remove.has(i)),
         undoStack: [...state.undoStack, snap].slice(-UNDO_MAX_SIZE),
         redoStack: [],
@@ -541,6 +574,50 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       };
     }),
 
+  createGroup: (tileIds) => {
+    const state = get();
+    const result = createGroupIn(state.tiles, state.groups, tileIds);
+    if (!result.groupId) return null;
+    pushUndoAndSet(set, get, {
+      tiles: result.tiles,
+      groups: result.groups,
+      // Selecting the group it just made is the confirmation that it worked.
+      selectedTileIds: result.tiles.filter((t) => t.groupId === result.groupId).map((t) => t.id),
+    });
+    return result.groupId;
+  },
+
+  addToGroup: (groupId, tileIds) => {
+    const state = get();
+    const result = addToGroupIn(state.tiles, state.groups, groupId, tileIds);
+    pushUndoAndSet(set, get, {
+      tiles: result.tiles,
+      groups: result.groups,
+      selectedTileIds: result.tiles.filter((t) => t.groupId === groupId).map((t) => t.id),
+    });
+  },
+
+  detachFromGroup: (tileIds) => {
+    const state = get();
+    const result = detachFromGroupIn(state.tiles, state.groups, tileIds);
+    pushUndoAndSet(set, get, { tiles: result.tiles, groups: result.groups });
+  },
+
+  ungroup: (groupId) => {
+    const state = get();
+    if (!state.groups[groupId]) return;
+    const result = ungroupIn(state.tiles, state.groups, groupId);
+    pushUndoAndSet(set, get, { tiles: result.tiles, groups: result.groups });
+  },
+
+  mergeGroups: (tileIds) => {
+    const state = get();
+    const result = mergeGroupsFor(state.tiles, state.groups, tileIds);
+    if (!result.groupId) return null;
+    pushUndoAndSet(set, get, { tiles: result.tiles, groups: result.groups });
+    return result.groupId;
+  },
+
   setSelectedTileId: (id) =>
     set({ selectedTileIds: id != null ? [id] : [] }),
 
@@ -634,6 +711,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       const currentSnap = snapshotState(state);
       const next = {
         ...snap,
+        groups: snap.groups ?? {},
         selectedTileIds: [],
         undoStack: state.undoStack.slice(0, -1),
         redoStack: [...state.redoStack, currentSnap],
@@ -648,6 +726,7 @@ export const useStitchStore = create<StitchState>((set, get) => ({
       const currentSnap = snapshotState(state);
       const next = {
         ...snap,
+        groups: snap.groups ?? {},
         selectedTileIds: [],
         undoStack: [...state.undoStack, currentSnap].slice(-UNDO_MAX_SIZE),
         redoStack: state.redoStack.slice(0, -1),
@@ -673,6 +752,7 @@ function resetState(): Partial<StitchState> {
     canvasSizeTouched: false,
     tiles: [],
     tileRasters: {},
+    groups: {},
     panOffset: { x: 0, y: 0 },
     zoomLevel: 1,
     selectedTileIds: [],

@@ -22,6 +22,11 @@ export interface StitchTile {
   rasterError?: string;
   /** When true, tile cannot be moved, resized, or rotated until unlocked. */
   locked?: boolean;
+  /** The GROUP this sheet belongs to, if any (see `features/stitch/groups.ts`).
+   *  Membership lives on the tile so it travels with every copy, snapshot and undo;
+   *  the group's own name and colour live in the store's `groups` record. Display and
+   *  interaction only — export and the manifest never read it. */
+  groupId?: string;
   /** True for generated scale bar stamps (no PDF source). */
   isScaleStamp?: boolean;
   /** Scale bar only: 1" = this many feet (e.g. 20). Used to render stamp at canonical size so bar is exactly 1". */
@@ -58,4 +63,8 @@ export interface StitchUndoSnapshot {
   canvasWidth: number;
   canvasHeight: number;
   cropRect: CropRect | null;
+  /** Group identities at snapshot time. Membership rides on the tiles; this is the
+   *  names and colours, so an undone "Ungroup" gets its group back intact. Typed
+   *  loosely to keep `stitchTypes` free of a dependency on the groups module. */
+  groups?: Record<string, { id: string; name: string; color: string }>;
 }
