@@ -1,23 +1,22 @@
 /**
  * "Align to neighbour" — the on-canvas surface.
  *
- * One full-viewport overlay (portaled to the body, like the other stitch modes so the
- * markers are never clipped) that does four things:
- *   • fades whatever the current step will not take a click on — the fixed sheets while
- *     the mover's points go down, the mover itself while the matching points do — which
- *     IS the lock: there is no lock icon to find any more, and nothing else can be
- *     dragged while the mode is up;
- *   • takes the point clicks — one each side by default, four with **Rotate too** —
+ * The first click anchors the sheet that STAYS; the second names the sheet that moves
+ * to meet it (Mark: "when you click the first PDF, that should be the PDF that doesn't
+ * move"). One full-viewport overlay (portaled to the body, like the other stitch modes
+ * so the markers are never clipped) that does four things:
+ *   • fades whatever the current step will not take a click on — the anchor, once it
+ *     has been chosen — which IS the lock: there is no lock icon to find any more, and
+ *     nothing else can be dragged while the mode is up;
+ *   • takes the point clicks — one each side by default, two each with **Rotate too** —
  *     snapping each to captured linework when **Snap to lines** is on, and paints the
  *     markers with their connecting lines;
  *   • carries the loupe under the cursor for the four point clicks;
  *   • shows the step hint, the two toggles and — after a move — how far the second
  *     point actually landed from where it was asked to.
  *
- * A finished move returns to step 0 ("Pick the next sheet to move, or press Done") and
- * the sheet that moved JOINS THE GROUP, so a plan set is aligned neighbour by neighbour
- * without leaving the mode — and the next click brings the next sheet in rather than
- * picking up the one just placed.
+ * A finished pair returns to the anchor click with BOTH sheets in the group, so a plan
+ * set is built one neighbour at a time without leaving the mode.
  *
  * Middle-drag pan, the space-bar pan and the wheel zoom all keep working: pointerdown is
  * offered to the canvas's shared pan first (`beginPan` takes the middle button, and the
@@ -32,15 +31,16 @@ import { Button } from "@/components/ui/button";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { ABSOLUTE_MIN_ZOOM, RULER_SIZE } from "./stitchConstants";
 import { hitTestTileAtPoint, tileLocalToCanvas, type CanvasPoint } from "./stitchGeometry";
-import { alignHitForPick, alignPointerEvent } from "./alignToNeighbourMachine";
+import { alignHitForStep, alignPointerEvent } from "./alignToNeighbourMachine";
 import { AlignLoupe } from "./AlignLoupe";
 import { useLoupeRender } from "./useLoupeRender";
 import type { AlignToNeighbour } from "./useAlignToNeighbour";
 import type { StitchTile } from "./stitchTypes";
 
-const POINT_LABELS_2 = ["A1", "A2", "B1", "B2"] as const;
+/** [F1, F2, M1, M2] — F on the sheet that stays, M on the sheet that moves. */
+const POINT_LABELS_2 = ["F1", "F2", "M1", "M2"] as const;
 /** One point each side: there is no "1" and "2" to distinguish. */
-const POINT_LABELS_1 = ["A", "", "B", ""] as const;
+const POINT_LABELS_1 = ["F", "", "M", ""] as const;
 
 export interface AlignToNeighbourModeProps {
   align: AlignToNeighbour;
@@ -111,13 +111,12 @@ export function AlignToNeighbourMode({
     [toOverlay]
   );
 
-  const movingTile = useMemo(
-    () => tiles.find((t) => t.id === align.movingTileId) ?? null,
-    [tiles, align.movingTileId]
+  /** The anchor, once chosen: outlined for the rest of the pair so it is obvious
+   *  which sheet everything is being brought to. */
+  const anchorTile = useMemo(
+    () => tiles.find((t) => t.id === align.state.fixedTileId) ?? null,
+    [tiles, align.state.fixedTileId]
   );
-
-  /** The sheets THIS step accepts — the hit test never looks at any other. */
-  const clickable = useMemo(() => align.clickableTiles(tiles), [align, tiles]);
 
   /**
    * The sheet a press lands on for the CURRENT step.
@@ -128,19 +127,16 @@ export function AlignToNeighbourMode({
    * mode peeled the sheet it had just placed instead of bringing in the next one.
    */
   const hitForStep = useCallback(
-    (coords: CanvasPoint) =>
-      align.state.step === "pickMoving"
-        ? alignHitForPick(coords, align.state, tiles)
-        : hitTestTileAtPoint(coords, clickable, true),
-    [align.state, clickable, tiles]
+    (coords: CanvasPoint) => alignHitForStep(coords, align.state, tiles),
+    [align.state, tiles]
   );
 
   /** Only the steps that draw a rubber band need the live cursor. In one-point mode
-   *  that band is the move itself — anchor to cursor — which is worth seeing. */
+   *  that band runs from the anchor point to the cursor — it IS the move. */
   const wantsCursor =
-    align.state.step === "A2" ||
-    align.state.step === "B2" ||
-    (!align.twoPoint && align.state.step === "B1");
+    align.state.step === "F2" ||
+    align.state.step === "M2" ||
+    (!align.twoPoint && align.state.step === "M1");
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
@@ -150,7 +146,10 @@ export function AlignToNeighbourMode({
       // testing all of them let the neighbour on top swallow the click and blank the
       // loupe exactly where the work happens.
       const hit = coords ? hitForStep(coords) : null;
-      setHoverTileId(align.state.step === "pickMoving" ? hit?.tile.id ?? null : null);
+      // Only the two steps that CHOOSE a sheet need the highlight; on the others the
+      // sheet is already settled and a hover glow is just noise.
+      const choosing = align.state.step === "F1" || align.state.step === "M1";
+      setHoverTileId(choosing ? hit?.tile.id ?? null : null);
       if (!align.showLoupe) return;
       track(hit?.tile ?? null, hit?.point ?? null, { x: e.clientX, y: e.clientY });
     },
@@ -193,9 +192,9 @@ export function AlignToNeighbourMode({
   const pts = align.state.points;
   const pointLabels = align.twoPoint ? POINT_LABELS_2 : POINT_LABELS_1;
   const liveFrom =
-    align.state.step === "A2" || (!align.twoPoint && align.state.step === "B1")
+    align.state.step === "F2" || (!align.twoPoint && align.state.step === "M1")
       ? pts[0]
-      : align.state.step === "B2"
+      : align.state.step === "M2"
         ? pts[2]
         : null;
 
@@ -233,11 +232,11 @@ export function AlignToNeighbourMode({
           viewBox={`0 0 ${containerRect.width} ${containerRect.height}`}
           preserveAspectRatio="none"
         >
-          {/* A scrim over the sheets this step will NOT take a click on — the fixed
-              sheets while the mover's points go down, the MOVER while the matching
-              points do. The second half is the one Mark caught: aiming at a sheet the
-              mode had greyed out meant reading the faint half of the picture. The
-              markers are drawn after this, so they stay legible above it. */}
+          {/* A scrim over the sheet this step will NOT take a click on: the ANCHOR,
+              while the sheet to move is being chosen. Its point is already placed and
+              marked, and it usually lies over the sheets being chosen between — Mark
+              caught the cost of getting this backwards, aiming at a sheet the mode had
+              greyed out. The markers are drawn after this, so they stay legible. */}
           {tiles.map((tile) => {
             const opacity = align.sheetOpacity(tile.id);
             return opacity < 1 ? (
@@ -249,13 +248,13 @@ export function AlignToNeighbourMode({
               />
             ) : null;
           })}
-          {/* The group so far: sheets this session has already placed (the sheet that
-              moved AND the one it was aligned to). Outlined while picking and while the
-              matching point is being placed — that is exactly when the user is looking
-              for the group — and a pick prefers a sheet that is NOT one of them.
-              Undo does not remove a sheet from the group; it only orders the pick, and
-              the next move re-adds whatever it touches. */}
-          {(align.state.step === "pickMoving" || align.state.step === "B1" || align.state.step === "B2") &&
+          {/* The composition so far: every sheet this session has anchored to or
+              moved. Outlined on the two steps that CHOOSE a sheet, which is exactly
+              when the user is asking "what have I already placed" — and the move click
+              prefers a sheet that is NOT one of them.
+              Undo does not remove a sheet from the group; it only orders that
+              preference, and the next pair re-adds whatever it touches. */}
+          {(align.state.step === "F1" || align.state.step === "M1") &&
             tiles.map((tile) =>
               align.isPlaced(tile.id) ? (
                 <polygon
@@ -268,9 +267,8 @@ export function AlignToNeighbourMode({
                 />
               ) : null
             )}
-          {/* Step 0: whatever the cursor is over is what a click would pick up. */}
-          {align.state.step === "pickMoving" &&
-            hoverTileId &&
+          {/* Whatever the cursor is over is what a click would take. */}
+          {hoverTileId &&
             (() => {
               const tile = tiles.find((t) => t.id === hoverTileId);
               if (!tile) return null;
@@ -284,10 +282,10 @@ export function AlignToNeighbourMode({
                 />
               );
             })()}
-          {/* The sheet that is moving stays outlined for the rest of the mode. */}
-          {movingTile && (
+          {/* The anchor stays outlined for the rest of the pair. */}
+          {anchorTile && (
             <polygon
-              points={tilePolygon(movingTile)}
+              points={tilePolygon(anchorTile)}
               fill="none"
               stroke="hsl(var(--primary))"
               strokeWidth={2}
@@ -295,7 +293,7 @@ export function AlignToNeighbourMode({
               opacity={0.9}
             />
           )}
-          {/* A1→A2 and B1→B2, plus the rubber band to the cursor. */}
+          {/* F1→F2 and M1→M2, plus the rubber band to the cursor. */}
           {pts[0] && pts[1] && (() => {
             const a = toOverlay(pts[0]);
             const b = toOverlay(pts[1]);

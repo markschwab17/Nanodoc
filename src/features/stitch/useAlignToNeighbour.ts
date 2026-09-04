@@ -8,7 +8,7 @@
  * rotated or resized; with **Rotate too (2 points)** it is the two-point similarity
  * (+ uniform scale when **Match scale** is also on).
  *
- * The moving sheet is also made the selection when it is picked, which is what gives
+ * The sheet that moves is made the selection when it is named, which is what gives
  * the mode its arrow-key nudges for free — `useStitchKeyboard` already nudges the
  * selection by 1 screen pixel (10 with Shift) and coalesces a burst into one undo step.
  */
@@ -28,7 +28,6 @@ import {
   alignClickableTiles,
   alignHint,
   alignSheetOpacity,
-  isLockedForAlign,
   isPlacedInAlign,
   loupeActive,
   reduceAlign,
@@ -57,10 +56,12 @@ export interface AlignToNeighbour {
   setMatchScale: (v: boolean) => void;
   snapToLines: boolean;
   setSnapToLines: (v: boolean) => void;
-  /** True while the loupe should be up (the four point clicks). */
+  /** True while the loupe should be up (every point click). */
   showLoupe: boolean;
+  /** The sheet that will MOVE, once the second click has named it. */
   movingTileId: string | null;
-  isLocked: (tileId: string) => boolean;
+  /** The anchor: the sheet the first click named, which does not move. */
+  fixedTileId: string | null;
   /** How faded to draw a sheet at this step — the sheets a click cannot take. */
   sheetOpacity: (tileId: string) => number;
   /** Already placed by this session: part of the fixed group. */
@@ -197,7 +198,6 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [active, dispatch]);
 
-  const isLocked = useCallback((tileId: string) => isLockedForAlign(state, tileId), [state]);
   const isPlaced = useCallback((tileId: string) => isPlacedInAlign(state, tileId), [state]);
   const sheetOpacity = useCallback((tileId: string) => alignSheetOpacity(state, tileId), [state]);
   const clickableTiles = useCallback(
@@ -224,7 +224,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
       setSnapToLines,
       showLoupe: loupeActive(state),
       movingTileId: state.movingTileId,
-      isLocked,
+      fixedTileId: state.fixedTileId,
       sheetOpacity,
       isPlaced,
       clickableTiles,
@@ -235,7 +235,7 @@ export function useAlignToNeighbour(): AlignToNeighbour {
     }),
     [
       active, state, refusal, seamNote, matchScale, snapToLines,
-      setTwoPoint, isLocked, sheetOpacity, isPlaced, clickableTiles, enter, exit, click, miss,
+      setTwoPoint, sheetOpacity, isPlaced, clickableTiles, enter, exit, click, miss,
     ]
   );
 }
