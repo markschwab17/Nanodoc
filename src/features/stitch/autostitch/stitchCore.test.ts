@@ -914,6 +914,113 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
     expect(seam!.status).toBe("plausible");
     expect(res.alignmentVerdict).toBe("unverified");
   });
+
+  // ── T0 Task 1: the honesty gate measures the seam's OWN matchline ────────────
+  // The failure the gate had: `facingStroke` re-picked the STRONGEST dashed line in
+  // the facing band. On a real civil sheet that is a parking row or a border, not
+  // the matchline, so a seam whose own strokes agree to 0.00 ft was reported as
+  // 4-192 ft off and the whole reference set came back `unverified`.
+  const decoyView: [number, number, number, number] = [0, 0, 1600, 1080]; // 444x300 ft @20
+  const vDashN = (x: number, tag: string, dashLen: number): Geom[] => {
+    const g: Geom[] = [];
+    for (let y = 100; y < 900; y += 50) g.push({ id: `${tag}${y}`, pts: [[x, y], [x, y + dashLen]], closed: false });
+    return g;
+  };
+  const mkDecoy = (no: number, geometry: Geom[]): SheetInput => ({
+    id: String(no), no, scale: 20, view: decoyView,
+    extract: { view: decoyView, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+  // Sheet 1: its matchline at x=1280 (dash total 0.40 of the width) PLUS a stronger
+  // "parking row" at x=1424 — 40 ft further out (FT(144pt,20)) at 0.70 of the width,
+  // so it wins any strength-ranked pick of the facing band. Sheet 2's matchline is at
+  // x=200. At the anchor's dx=300 ft the two matchlines coincide exactly
+  // (FT(1280)=355.6 == 300+FT(200)); the parking row sits 40 ft away.
+  const decoySheets = () => [
+    mkDecoy(1, [...vDashN(1280, "match-i", 40), ...vDashN(1424, "parking-i", 70)]),
+    mkDecoy(2, vDashN(200, "match-j", 56)),
+  ];
+
+  it("(d) the band's strongest line is a decoy 40ft off — the anchor's own strokes agree -> verified", () => {
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true,
+      along: 0, alongPrecise: true,           // along pinned by crossing consensus
+      strokeI: 1280, strokeJ: 200,            // the seam's OWN located matchlines
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("own");
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.status).toBe("verified");
+    expect(res.alignmentVerdict).toBe("verified");
+  });
+
+  it("(d2) the SAME geometry with no stroke picks falls back to ALL band candidates", () => {
+    // Regression guard for the old behaviour: with no located matchline to compare
+    // against, all the gate can do is match the two bands' candidates — and it must
+    // consider ALL of them (the decoy is only ONE of sheet 1's candidates; its true
+    // matchline is in the same band), so the seam is not condemned on the decoy.
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true, along: 0, alongPrecise: true,
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("band");
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.status).toBe("verified");
+  });
+
+  it("(d3) a seam with NO matchline near the other sheet's line is still suspect", () => {
+    // The gate must not become vacuous. Here sheet 1 draws only the parking row
+    // (x=1424) — at the solved dx=300 nothing on sheet 1 lies within 3 ft of sheet
+    // 2's matchline and nothing on sheet 2 lies within 3 ft of sheet 1's line, so
+    // the two sheets demonstrably do not share a seam: suspect.
+    const res = stitchSheets([mkDecoy(1, vDashN(1424, "parking-i", 70)), mkDecoy(2, vDashN(200, "match-j", 56))],
+      undefined, [{
+        i: 1, j: 2, dx: 300, perp: "x", precise: true, along: 0, alongPrecise: true,
+        strokeI: 1424, strokeJ: 200,
+      }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("own");
+    expect(seam.detail.perpDeltaFt!).toBeGreaterThan(3);
+    expect(seam.status).toBe("suspect");
+    expect(res.alignmentVerdict).toBe("unverified");
+  });
+
+  it("(d4) an alias-ambiguous along vote no longer condemns a stroke-verified seam", () => {
+    // Margin < 1.3 on the ALONG axis used to mark the seam suspect outright. When the
+    // cross-seam axis is confirmed by coincident matchline strokes only the slide
+    // along the line is unproven — that is `plausible` (alongDecisive: false), not a
+    // red flag. (PG_SITE p3-p4: strokes agree to 0.00 ft, along margin 1.04.)
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true, strokeI: 1280, strokeJ: 200,
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.detail.alongDecisive).toBe(false);
+    expect(seam.status).toBe("plausible");
+  });
+
+  it("(e) worstResidFt is reported on a matchline-only set (was always 0 without tokens)", () => {
+    // A 2x2 block of fully-2D-precise anchors whose loop does NOT close: 1->2->4 puts
+    // unit 4 at x=370, 1->3->4 puts it at x=350. There is not a token pair in the
+    // set, so the old token-only computation reported 0.00 ft however badly the block
+    // was placed; the honest number is the seams' own disagreement with the solve.
+    const mk4 = (no: number): SheetInput => ({
+      id: String(no), no, scale: 20, view: decoyView,
+      extract: { view: decoyView, shxLabels: [], labels: [], words: [], geometry: [] } as PageExtract,
+    });
+    const A = (i: number, j: number, perp: "x" | "y", d: number, along: number) =>
+      (perp === "x" ? { i, j, dx: d, perp, precise: true, along, alongPrecise: true }
+                    : { i, j, dy: d, perp, precise: true, along, alongPrecise: true });
+    const res = stitchSheets([mk4(1), mk4(2), mk4(3), mk4(4)], undefined, [
+      A(1, 2, "x", 350, 0), A(3, 4, "x", 350, 0),
+      A(1, 3, "y", 250, 0), A(2, 4, "y", 250, 20),
+    ]);
+    expect(res.placements.size).toBe(4);
+    expect(res.worstResidFt).toBeGreaterThan(0);
+    const seams = res.seamReport!;
+    expect(seams.length).toBe(4);
+    expect(seams.every((s) => s.detail.residFt != null)).toBe(true);
+    expect(seams.some((s) => (s.detail.residFt ?? 0) > 0)).toBe(true);
+  });
 });
 
 describe("oneSidedStrokeAnchor", () => {

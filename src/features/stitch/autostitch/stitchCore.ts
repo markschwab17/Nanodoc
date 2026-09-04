@@ -578,8 +578,14 @@ export function crossingConsensus(
  * from the line); the PARALLEL component is a coarse label estimate (segVote,
  * windowed tight on the perp axis, refines it). Returns { dx, dy, perp } where
  * `perp` is the precise axis ("y" for a top/bottom matchline, "x" for left/right).
+ *
+ * `strokeI`/`strokeJ` are the two picked strokes' own cross-coordinates in each
+ * sheet's PAGE POINTS. They are the seam's OWN, label-located matchline — carried
+ * so the post-solve honesty gate (`verifySeams`) can check the facing band against
+ * THIS line instead of re-picking the band's strongest stroke (which on a dense
+ * civil sheet is a parking row or a border, not the matchline — failure J).
  */
-export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number; perp: "x" | "y" } | null {
+export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number; perp: "x" | "y"; strokeI: number; strokeJ: number } | null {
   const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
   const refsI = parseSheetRefs(si.raw.shxLabels, si.raw.view).filter((r) => r.matchline && r.edge !== "interior");
   const refsJ = parseSheetRefs(sj.raw.shxLabels, sj.raw.view).filter((r) => r.matchline && r.edge !== "interior");
@@ -595,8 +601,8 @@ export function matchlineStrokePrior(si: any, sj: any): { dx: number; dy: number
     const bs = findEdgeStroke(sj.raw.geometry, axis, horiz ? b.at.y : b.at.x, sj.raw.view);
     if (as == null || bs == null) continue;
     return horiz
-      ? { dx: FT(a.at.x, si.scale) - FT(b.at.x, sj.scale), dy: FT(as, si.scale) - FT(bs, sj.scale), perp: "y" }
-      : { dx: FT(as, si.scale) - FT(bs, sj.scale), dy: FT(a.at.y, si.scale) - FT(b.at.y, sj.scale), perp: "x" };
+      ? { dx: FT(a.at.x, si.scale) - FT(b.at.x, sj.scale), dy: FT(as, si.scale) - FT(bs, sj.scale), perp: "y", strokeI: as, strokeJ: bs }
+      : { dx: FT(as, si.scale) - FT(bs, sj.scale), dy: FT(a.at.y, si.scale) - FT(b.at.y, sj.scale), perp: "x", strokeI: as, strokeJ: bs };
   }
   return null;
 }
@@ -813,9 +819,19 @@ export interface SeamReportEntry {
   i: number; j: number; pageIndexes: [number, number]; status: SeamStatus;
   detail: {
     channel: string | null; perpAxis?: "x" | "y";
-    /** Independent post-solve gap between the two sheets' matchline strokes at the
-     *  SOLVED positions (ft), when both were found. >3 ⇒ the seam draws off-line. */
+    /** Post-solve gap between the two sheets' matchline strokes at the SOLVED
+     *  positions (ft), when both were found. >3 ⇒ the seam draws off-line. */
     perpDeltaFt?: number;
+    /** Which line `perpDeltaFt` was measured against: `own` = the seam's OWN
+     *  label-located matchline (the trustworthy case); `band` = a re-pick of the
+     *  facing bands' matchline-strength candidates (no located matchline). */
+    strokeSource?: "own" | "band";
+    /** This seam's own residual against the solved layout (ft), over the axes the
+     *  constraint drives. Surfaced per seam for the UI. */
+    residFt?: number;
+    /** The residual restricted to the CROSS-SEAM axis (ft) — the "does the shared
+     *  matchline draw once or twice" number. Undefined when the seam has no perp. */
+    perpResidFt?: number;
     /** Along-axis vote decisiveness ratio (votes / secondVotes) where measured. */
     marginRatio?: number;
     alongDecisive?: boolean;
@@ -960,6 +976,12 @@ interface DriverSheet {
  * endpoint deltas), ignored by the solver.
  */
 export interface StitchAnchor { i: number; j: number; dx?: number; dy?: number; perp?: "x" | "y"; precise?: boolean; along?: number; alongPrecise?: boolean; strokeLoDelta?: number; strokeHiDelta?: number;
+  /** The anchor's OWN matchline stroke pick on each unit, as a cross-coordinate on
+   *  the perp axis in that unit's PAGE POINTS (frame-local for a strip). Set only
+   *  when `precise` (both strokes were located). Carried purely for the post-solve
+   *  honesty gate: it lets `verifySeams` verify the facing band against the seam's
+   *  located matchline rather than the band's strongest line (failure J). */
+  strokeI?: number; strokeJ?: number;
   /** Seam-crossing station sets (world ft + orientation) on unit i / unit j, collected
    *  at the matchline stroke line. Carried so `stitchSheets` can run the JOINT along-
    *  sweep across a floating unit's several precise-perp seams (see `jointAlongSweep`). */
@@ -1002,7 +1024,7 @@ export function stitchSheets(
   // Reciprocal interior-matchline anchors (keyed by unit `no`), dx in feet with
   // convention d = posFt_j - posFt_i. `anchorFor` resolves either stored
   // direction, flipping the sign when the pair is stored as (j,i).
-  type AnchorRec = { d: number; perp: "x" | "y"; precise: boolean; along: number | null; alongPrecise: boolean };
+  type AnchorRec = { d: number; perp: "x" | "y"; precise: boolean; along: number | null; alongPrecise: boolean; strokeI?: number; strokeJ?: number };
   const anchorMap = new Map<string, AnchorRec>();
   for (const a of anchors ?? []) {
     const perp = a.perp ?? "x";
@@ -1010,11 +1032,14 @@ export function stitchSheets(
       d: (perp === "y" ? a.dy : a.dx) ?? 0, perp, precise: !!a.precise,
       along: a.alongPrecise ? (a.along ?? (perp === "y" ? a.dx : a.dy) ?? 0) : null,
       alongPrecise: !!a.alongPrecise,
+      strokeI: a.strokeI, strokeJ: a.strokeJ,
     });
   }
   const anchorFor = (ni: number, nj: number): AnchorRec | null => {
     if (anchorMap.has(`${ni}-${nj}`)) return anchorMap.get(`${ni}-${nj}`)!;
-    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { ...a, d: -a.d, along: a.along == null ? null : -a.along }; }
+    // Stored the other way round: flip the deltas AND swap the two stroke picks so
+    // `strokeI` always names the stroke on unit `ni`.
+    if (anchorMap.has(`${nj}-${ni}`)) { const a = anchorMap.get(`${nj}-${ni}`)!; return { ...a, d: -a.d, along: a.along == null ? null : -a.along, strokeI: a.strokeJ, strokeJ: a.strokeI }; }
     return null;
   };
   // printed sheet number -> units carrying it (both strips of a page share one)
@@ -1175,7 +1200,11 @@ export function stitchSheets(
   // `_verify` carries the per-pair metadata the post-solve seam classifier needs
   // (perp axis, along-vote decisiveness, whether the along came from a precise
   // crossing consensus). Stripped before the result is returned.
-  interface VerifyMeta { perp?: "x" | "y"; votes?: number; second?: number; alongPrecise: boolean; }
+  // `strokeI`/`strokeJ` carry the seam's OWN matchline stroke pick (page-point cross
+  // coord on the perp axis, in each unit's own space) from whichever channel located
+  // it — the reciprocal/one-sided ANCHOR or the cross-referenced matchline STROKE
+  // prior. verifySeams checks the facing band against THIS line (failure J).
+  interface VerifyMeta { perp?: "x" | "y"; votes?: number; second?: number; alongPrecise: boolean; strokeI?: number; strokeJ?: number; }
   const pairs: (PairReport & { _final?: { dx: number; dy: number }; _wx?: number; _wy?: number; _keep?: boolean; _split?: boolean; _verify?: VerifyMeta })[] = [];
   for (const uk of pairKeys) {
     const [ni, nj] = uk.split("-").map(Number);
@@ -1379,11 +1408,14 @@ export function stitchSheets(
     // re-checks the physical strokes and reads this to rate the along axis.
     let vPerp: "x" | "y" | undefined;
     let vVotes: number | undefined, vSecond: number | undefined;
+    let vStrokeI: number | undefined, vStrokeJ: number | undefined;
     if (channel && channel.startsWith("anchor")) {
       vPerp = anchor?.perp ?? "x";
+      if (anchor?.precise) { vStrokeI = anchor.strokeI; vStrokeJ = anchor.strokeJ; }
       if (anchorSeg) { vVotes = anchorSeg.votes; vSecond = anchorSeg.secondVotes; }
     } else if (channel === "matchline-stroke" || (channel === "matchline+segment" && stroke)) {
       vPerp = stroke!.perp;
+      vStrokeI = stroke!.strokeI; vStrokeJ = stroke!.strokeJ;
       if (seg) { vVotes = seg.votes; vSecond = seg.secondVotes; }
     } else if ((channel === "matchline+segment" || channel === "matchline-label-only") && prior) {
       vPerp = prior.edge === "top" || prior.edge === "bottom" ? "y" : "x";
@@ -1396,7 +1428,7 @@ export function stitchSheets(
       i: ni, j: nj, channel, conf,
       dxFt: final ? +final.dx.toFixed(2) : null, dyFt: final ? +final.dy.toFixed(2) : null,
       weight: +w.toFixed(2), residFt: null, _final: final ?? undefined, _wx: wx, _wy: wy, _keep: keep,
-      _verify: { perp: vPerp, votes: vVotes, second: vSecond, alongPrecise: channel === "anchor+cross" },
+      _verify: { perp: vPerp, votes: vVotes, second: vSecond, alongPrecise: channel === "anchor+cross", strokeI: vStrokeI, strokeJ: vStrokeJ },
       // A matchline anchor's PERP axis (stroke, sub-foot) and ALONG axis (segVote /
       // crossing, alias-prone) are INDEPENDENT measurements. Emit them as SEPARATE
       // single-axis constraints so IRLS-Huber judges each axis on its own residual —
@@ -1606,16 +1638,41 @@ export function stitchSheets(
     pos = solveGlobal(keys, rootKey, refinedConstraints).pos;
   }
 
-  // worst residual over the PLACED component's token pairs only (a floating,
-  // out-of-component pair would otherwise report a huge spurious residual).
-  const refCons = pairs.filter((r) => r._final && /token/.test(String(r.channel)) && mainSet.has(r.i) && mainSet.has(r.j))
-    .map((r) => ({ i: r.i, j: r.j, dx: r._final!.dx, dy: r._final!.dy }));
+  // ── WORST SEAM RESIDUAL ────────────────────────────────────────────────────
+  // Was: token-channel pairs only — so a matchline/anchor-only set (every real
+  // civil set) reported 0.00 ft no matter how badly it was placed, and the commit
+  // toast's "worst seam 0.00 ft" was not a quality signal at all (failure J,
+  // part 2). Now every PLACED constraint is measured, on the axis it actually
+  // claims to know:
+  //   • a stroke/anchor seam claims its PERPENDICULAR (cross-seam) axis to sub-foot
+  //     — that axis is what decides whether the shared matchline draws once or
+  //     twice, and it is exactly what the diag's SEAM QUALITY gate checks;
+  //   • a token/segment/seam pair claims both axes, so both are measured.
+  // The ALONG-matchline axis of a stroke seam is deliberately EXCLUDED: it is a
+  // soft, down-weighted vote the global graph is designed to overrule (a
+  // grid-overruled crossing pin is documented as SAFE), so counting it would
+  // report the solver's intended behaviour as seam error. Along-axis uncertainty
+  // is surfaced per seam instead, via seamReport's `alongDecisive` + `residFt`.
   let worst = 0;
-  for (const c of refCons) { const rr = residual(c, pos); if (rr > worst) worst = rr; }
+  const seamResid = new Map<string, { residFt: number; perpResidFt?: number }>();
   for (const r of pairs) {
-    if (r._final) r.residFt = +residual({ i: r.i, j: r.j, dx: r._final.dx, dy: r._final.dy }, pos).toFixed(3);
-    delete r._final; delete r._wx; delete r._wy;
+    if (!r._final) { continue; }
+    const c = { i: r.i, j: r.j, dx: r._final.dx, dy: r._final.dy };
+    const useX = (r._wx ?? r.weight) > 0, useY = (r._wy ?? r.weight) > 0;
+    // Honest per-seam residual: only over the axes this constraint actually drives
+    // (a single-axis constraint's unused axis carries a placeholder 0, which the
+    // 2-D `residual` would report as a hundreds-of-feet phantom error).
+    const full = residualAxis(c, pos, useX, useY);
+    const perp = r._verify?.perp;
+    const perpResid = perp ? residualAxis(c, pos, perp === "x", perp === "y") : undefined;
+    r.residFt = +full.toFixed(3);
+    seamResid.set(`${r.i}-${r.j}`, { residFt: +full.toFixed(3), perpResidFt: perpResid != null ? +perpResid.toFixed(3) : undefined });
+    if (r.weight > 0 && mainSet.has(r.i) && mainSet.has(r.j)) {
+      const claim = perp && !/token/.test(String(r.channel)) ? perpResid! : full;
+      if (claim > worst) worst = claim;
+    }
   }
+  for (const r of pairs) { delete r._final; delete r._wx; delete r._wy; }
 
   // ── POST-SOLVE SEAM VERIFICATION (the cannot-align honesty gate) ─────────────
   // For every placed pair, decide whether the seam is PHYSICALLY verified. The key
@@ -1634,7 +1691,7 @@ export function stitchSheets(
     const si = byNo.get(r.i)!, sj = byNo.get(r.j)!;
     const pi = pos.get(r.i), pj = pos.get(r.j);
     if (!pi || !pj) continue;
-    const meta = r._verify ?? { alongPrecise: false };
+    const meta: VerifyMeta = r._verify ?? { alongPrecise: false };
     const perp = meta.perp;
     const channel = r.channel;
     const key = r.i < r.j ? `${r.i}-${r.j}` : `${r.j}-${r.i}`;
@@ -1654,18 +1711,64 @@ export function stitchSheets(
     let perpDeltaFt: number | undefined;
     let strokesFound = false;
     let perpMag = 0;
+    // Which line the check is measured against: "own" = the seam's OWN located
+    // matchline (anchor / stroke prior), "band" = a re-pick from the facing band.
+    let strokeSource: "own" | "band" | undefined;
     if (perp) {
       const di = perp === "x" ? pj.x - pi.x : pj.y - pi.y;
       perpMag = Math.abs(di);
       if (!siblings) {
         const axis: "h" | "v" = perp === "x" ? "v" : "h";
-        const sI = facingStroke(si.raw.geometry, si.view, axis, di >= 0 ? "hi" : "lo");
-        const sJ = facingStroke(sj.raw.geometry, sj.view, axis, di >= 0 ? "lo" : "hi");
-        if (sI != null && sJ != null) {
-          strokesFound = true;
-          const cI = (perp === "x" ? pi.x : pi.y) + FT(sI, si.scale);
-          const cJ = (perp === "x" ? pj.x : pj.y) + FT(sJ, sj.scale);
-          perpDeltaFt = Math.abs(cI - cJ);
+        const baseI = perp === "x" ? pi.x : pi.y, baseJ = perp === "x" ? pj.x : pj.y;
+        // Every matchline-strength line in each sheet's outer band FACING the
+        // neighbour, in CANVAS feet at the solved positions. `facingStroke`'s single
+        // strongest pick is just the head of these lists.
+        const bandFt = (s: DriverSheet, base: number, side: "lo" | "hi") => {
+          const [x0, y0, x1, y1] = s.view;
+          const dim = axis === "v" ? x1 - x0 : y1 - y0;
+          const c0 = axis === "v" ? x0 : y0;
+          const lo = side === "hi" ? c0 + 0.65 * dim : c0;
+          const hi = side === "hi" ? c0 + dim : c0 + 0.35 * dim;
+          return bandStrokeCandidates(s.raw.geometry, axis, lo, hi, s.view, 0.12, 0.98)
+            .map((c) => base + FT(c.cross, s.scale));
+        };
+        const candI = bandFt(si, baseI, di >= 0 ? "hi" : "lo");
+        const candJ = bandFt(sj, baseJ, di >= 0 ? "lo" : "hi");
+        // THE HONESTY GATE (failure J). The seam's OWN matchline — the line the
+        // anchor/stroke prior located NEXT TO ITS LABEL — is the reference. On a
+        // dense civil sheet the *strongest* line in the outer band is a parking row
+        // or the drawing border, not the matchline, so re-picking it (the old
+        // behaviour) made a sub-foot-correct seam look 4–192 ft wrong and drove the
+        // whole set to `unverified`. We now ask the physical question instead: at
+        // the solved positions, does EACH sheet draw a matchline-strength line on
+        // the shared seam line? A seam is only contradicted when NEITHER side has
+        // any candidate near it.
+        const nearest = (lines: number[], at: number) =>
+          lines.reduce((m, l) => Math.min(m, Math.abs(l - at)), Infinity);
+        if (meta.strokeI != null && meta.strokeJ != null) {
+          const ownI = baseI + FT(meta.strokeI, si.scale);
+          const ownJ = baseJ + FT(meta.strokeJ, sj.scale);
+          strokesFound = true; strokeSource = "own";
+          // (a) the two located strokes at the solved positions — this is the seam's
+          //     own claim, and a solve dragged off it is a genuine red flag; and
+          // (b) corroboration from the other sheet's facing band around that line.
+          const ownGap = Math.abs(ownI - ownJ);
+          perpDeltaFt = ownGap;
+          // A stroke pair that coincides is verified outright; when it does NOT, the
+          // facing bands get the last word — if either side still shows a candidate
+          // within tolerance of the other's line, the seam is not contradicted.
+          if (ownGap > coincideTol) {
+            const rescue = Math.min(nearest(candI, ownJ), nearest(candJ, ownI));
+            if (rescue <= coincideTol) perpDeltaFt = rescue;
+          }
+        } else if (candI.length && candJ.length) {
+          // No located matchline on this seam (segment/seam channels): fall back to
+          // the band candidates, but compare ALL of them rather than only the
+          // strongest — the old single-pick compare is the failure-J bug.
+          strokesFound = true; strokeSource = "band";
+          let best = Infinity;
+          for (const a of candI) { const d = nearest(candJ, a); if (d < best) best = d; }
+          perpDeltaFt = best;
         }
       }
     }
@@ -1691,23 +1794,39 @@ export function stitchSheets(
     }
 
     // Classify — suspect wins (conservative): a red flag beats any positive signal.
+    // "Suspect" means we hold POSITIVE evidence the seam is wrong, not merely that
+    // some axis is unproven — an unproven axis is `plausible`. That distinction is
+    // the whole point of the gate: `suspect` blocks the set, `plausible` does not.
+    const strokeVerified = strokesFound && perpDeltaFt! <= coincideTol;
     let status: SeamStatus;
     let reason: string | undefined;
     if (strokesFound && perpDeltaFt! > coincideTol) {
-      status = "suspect"; reason = `matchline strokes disagree by ${perpDeltaFt!.toFixed(1)} ft at solved positions`;
-    } else if (marginRatio != null && marginRatio < 1.3) {
+      status = "suspect";
+      reason = strokeSource === "own"
+        ? `the seam's own matchline strokes sit ${perpDeltaFt!.toFixed(1)} ft apart at the solved positions`
+        : `no matchline in either facing band lines up (nearest pair ${perpDeltaFt!.toFixed(1)} ft apart)`;
+    } else if (marginRatio != null && marginRatio < 1.3 && !strokeVerified) {
+      // An alias-ambiguous ALONG vote is only a red flag when nothing else pins the
+      // seam. When the cross-seam axis is confirmed by coincident matchline strokes
+      // the sheets demonstrably abut on the right line; only the slide ALONG that
+      // line is unproven — that is `plausible` (and `alongDecisive: false` says so),
+      // not `suspect`. Flagging it suspect is what drove the reference set to
+      // `unverified` on seams whose strokes agree to 0.00 ft.
       status = "suspect"; reason = `along vote margin ${marginRatio.toFixed(2)} < 1.3 (alias-ambiguous)`;
     } else if (floorAdjacent) {
       status = "suspect"; reason = "perp offset at the abutment floor (gross-overlap alias)";
     } else if (/token/.test(channel) && r.residFt != null && r.residFt <= 2) {
       status = "verified";
-    } else if (strokesFound && perpDeltaFt! <= coincideTol && alongDecisive) {
+    } else if (strokeVerified && alongDecisive) {
       status = "verified";
     } else {
       status = "plausible";
-      reason = strokesFound ? "along axis not decisively resolved" : "matchline strokes not both found";
+      reason = !strokesFound ? "matchline strokes not both found"
+        : alongDecisive ? "cross-seam axis confirmed; along axis not independently checked"
+        : "cross-seam axis confirmed; along axis not decisively resolved";
     }
 
+    const rr = seamResid.get(`${r.i}-${r.j}`);
     seamReport.push({
       i: r.i, j: r.j,
       pageIndexes: [si.pageIndex ?? si.no, sj.pageIndex ?? sj.no],
@@ -1715,6 +1834,8 @@ export function stitchSheets(
       detail: {
         channel, perpAxis: perp,
         perpDeltaFt: perpDeltaFt != null ? +perpDeltaFt.toFixed(2) : undefined,
+        strokeSource,
+        residFt: rr?.residFt, perpResidFt: rr?.perpResidFt,
         marginRatio: marginRatio != null ? +marginRatio.toFixed(2) : undefined,
         alongDecisive, reason,
       },

@@ -149,7 +149,12 @@ interface PageRec { pageIndex: number; extract: PageExtract; printedNo: number; 
  *  posFt_i (dx when perp "x", dy when perp "y"). `precise` marks anchors whose
  *  `dFt` was replaced by the physical-matchline-STROKE delta (sub-foot), not the
  *  ±17 ft label-position delta. */
-interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp: "x" | "y"; dFt: number; precise?: boolean; along?: number; alongPrecise?: boolean; loDelta?: number; hiDelta?: number; crI?: Crossing[]; crJ?: Crossing[]; }
+interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp: "x" | "y"; dFt: number; precise?: boolean; along?: number; alongPrecise?: boolean; loDelta?: number; hiDelta?: number; crI?: Crossing[]; crJ?: Crossing[];
+  /** The two matchline STROKE picks this anchor was registered from, as perp-axis
+   *  cross-coordinates in each unit's own (frame-local) page points. Carried so the
+   *  post-solve honesty gate verifies the facing bands against the seam's OWN
+   *  matchline rather than re-picking each band's strongest line (failure J). */
+  strokeI?: number; strokeJ?: number; }
 
 export async function autoStitch(
   mupdf: any,
@@ -294,7 +299,7 @@ export async function autoStitch(
     const seamRegister = (
       pi: PageRec, crossI: number, alongI: number,
       pj: PageRec, crossJ: number, alongJ: number, perp: "x" | "y",
-    ): { perpDelta: number | null; along: number | null; loDelta: number | null; hiDelta: number | null; crI: Crossing[]; crJ: Crossing[] } => {
+    ): { perpDelta: number | null; along: number | null; loDelta: number | null; hiDelta: number | null; crI: Crossing[]; crJ: Crossing[]; strokeI: number | null; strokeJ: number | null } => {
       const axis = perp === "x" ? "v" : "h";
       // Rebase each endpoint to its strip's frame-local coordinates (no-op for whole
       // pages / a top strip): stroke deltas and crossing stations then key to the same
@@ -303,7 +308,7 @@ export async function autoStitch(
       const extI = { lo: 0, hi: 0 }, extJ = { lo: 0, hi: 0 };
       const si = findEdgeStroke(fi.geometry, axis, fi.cross, fi.view, 100, 0.3, extI);
       const sj = findEdgeStroke(fj.geometry, axis, fj.cross, fj.view, 100, 0.3, extJ);
-      if (si == null || sj == null) return { perpDelta: null, along: null, loDelta: null, hiDelta: null, crI: [], crJ: [] };
+      if (si == null || sj == null) return { perpDelta: null, along: null, loDelta: null, hiDelta: null, crI: [], crJ: [], strokeI: null, strokeJ: null };
       const scaleI = scaleOf(pi.pageIndex), scaleJ = scaleOf(pj.pageIndex);
       const perpDelta = FT(si, scaleI) - FT(sj, scaleJ);
       // Along-axis seam-crossing consensus, windowed around the label along-delta so
@@ -322,7 +327,7 @@ export async function autoStitch(
         perpDelta, along: cons ? cons.along : null,
         loDelta: FT(extI.lo, scaleI) - FT(extJ.lo, scaleJ),
         hiDelta: FT(extI.hi, scaleI) - FT(extJ.hi, scaleJ),
-        crI: ci, crJ: cj,
+        crI: ci, crJ: cj, strokeI: si, strokeJ: sj,
       };
     };
 
@@ -373,6 +378,7 @@ export async function autoStitch(
         pageJ: jPage.pageIndex, yJ: refJ.at.y,
         perp: r.perp, dFt: r.dFt, precise: true, along: undefined, alongPrecise: false,
         loDelta: r.loDelta, hiDelta: r.hiDelta, crI: r.crI, crJ: r.crJ,
+        strokeI: r.siCross, strokeJ: r.sjCross,
       };
     };
 
@@ -421,7 +427,7 @@ export async function autoStitch(
                   const reg = seamRegister(iPage, cx, cy, jPage, refJ.at.x, refJ.at.y, "x");
                   return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x",
                     dFt: reg.perpDelta ?? FT(cx, scaleOf(iPage.pageIndex)) - FT(refJ.at.x, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
-                    along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
+                    along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined };
                 }
               }
             }
@@ -444,7 +450,7 @@ export async function autoStitch(
                 const reg = seamRegister(iPage, cy, cx, jPage, refJ.at.y, refJ.at.x, "y");
                 return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
                   dFt: reg.perpDelta ?? FT(cy, scaleOf(iPage.pageIndex)) - FT(refJ.at.y, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
-                  along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ };
+                  along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined };
               }
             }
           }
@@ -481,12 +487,12 @@ export async function autoStitch(
             const reg = seamRegister(iPage, ri.at.x, ri.at.y, jPage, r.at.x, r.at.y, "x");
             rawAnchors.push({ pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "x",
               dFt: reg.perpDelta ?? FT(ri.at.x, scaleOf(iPage.pageIndex)) - FT(r.at.x, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
-              along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ });
+              along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined });
           } else {
             const reg = seamRegister(iPage, ri.at.y, ri.at.x, jPage, r.at.y, r.at.x, "y");
             rawAnchors.push({ pageI: iPage.pageIndex, yI: ri.at.y, pageJ: jPage.pageIndex, yJ: r.at.y, perp: "y",
               dFt: reg.perpDelta ?? FT(ri.at.y, scaleOf(iPage.pageIndex)) - FT(r.at.y, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
-              along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ });
+              along: reg.along ?? undefined, alongPrecise: reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined });
           }
         }
       }
@@ -561,6 +567,7 @@ export async function autoStitch(
         precise: a.precise, along: a.along, alongPrecise: a.alongPrecise,
         strokeLoDelta: a.loDelta, strokeHiDelta: a.hiDelta,
         crossI: a.crI, crossJ: a.crJ,
+        strokeI: a.strokeI, strokeJ: a.strokeJ,
       };
       return a.perp === "y"
         ? { i: ki, j: kj, dy: a.dFt, perp: "y", ...common }
