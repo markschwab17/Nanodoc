@@ -17,41 +17,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
-import { useStitchStore } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
-import { getTileAABB } from "@/features/stitch/stitchGeometry";
-import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
 import { attachOcrRpc, recognize } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
-import { parseScaleInput, resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
+import { layoutPlacements, type TilePlacement } from "@/features/stitch/autostitch/layout";
+import { parseScaleInput, isUniform, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
+import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain } from "./commitPages";
 
 const THUMB_SCALE = 0.3;
-const TILE_RENDER_SCALE = 1.5;
-const MARGIN = 20;
-const GAP = 10;
-const TILES_PER_ROW = 3;
-
-/** Yield to the event loop so the tab stays responsive during long PDF work. */
-function yieldToMain(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function imageDataToDataUrl(imageData: ImageData): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-  ctx.putImageData(imageData, 0, 0);
-  return canvas.toDataURL("image/png");
-}
 
 type SourceTab = "device" | "cto";
 
@@ -72,9 +50,6 @@ export function AddPdfModal({
   sessionSourcePdf?: { pdfBytes: Uint8Array; fileName: string } | null;
 }) {
   const fileSystem = useFileSystem();
-  const addTiles = useStitchStore((s) => s.addTiles);
-  const setReferenceScaleFeetPerInch = useStitchStore((s) => s.setReferenceScaleFeetPerInch);
-  const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
   const [sourceTab, setSourceTab] = useState<SourceTab>("device");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -507,86 +482,18 @@ export function AddPdfModal({
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
-      const renderer = rendererRef.current;
-      type TileData = {
-        sourcePdfBytes: Uint8Array;
-        sourcePageIndex: number;
-        sourceFileName?: string;
-        width: number;
-        height: number;
-        imageDataUrl?: string;
-        scaleFeetPerInch?: number;
-      };
-      const newTiles: Array<TileData & { x: number; y: number }> = [];
-      // ONE reference scale for the whole commit: the typed set scale wins; else a
-      // canvas that already has sheets keeps its own reference (so a second blank-box
-      // batch matches feet with what's already there); else the selection decides
-      // (first selected page's own resolved scale — see `referenceBaseline`). Every
-      // tile in this batch sizes against this same feet-per-inch baseline.
-      const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
-      const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
-      const refScale = referenceBaseline({ typed: uniformScale, existing: existingRef, hasTiles, selection: selected, pageScales });
-      // Start below any existing content so a second add doesn't stack
-      // perfectly on top of the first batch.
-      const existingTiles = useStitchStore.getState().tiles;
-      let rowY = MARGIN;
-      for (const t of existingTiles) {
-        const aabb = getTileAABB(t);
-        rowY = Math.max(rowY, aabb.y + aabb.height + GAP);
-      }
-      const rowBuffer: Array<{ tile: TileData; w: number; h: number }> = [];
-
-      const flushRow = () => {
-        if (rowBuffer.length === 0) return;
-        let x = MARGIN;
-        const maxH = Math.max(...rowBuffer.map((b) => b.h));
-        for (const { tile, w } of rowBuffer) {
-          newTiles.push({ ...tile, x, y: rowY });
-          x += w + GAP;
-        }
-        rowY += maxH + GAP;
-        rowBuffer.length = 0;
-      };
-
-      for (let idx = 0; idx < selected.length; idx++) {
-        const pageIndex = selected[idx];
-        await yieldToMain();
-        const page = mupdfDoc.loadPage(pageIndex);
-        const bounds = page.getBounds();
-        page.destroy?.();
-        const widthPt = bounds[2] - bounds[0];
-        const heightPt = bounds[3] - bounds[1];
-        // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt), scaled up
-        // when this page's own scale is coarser than the batch's reference scale
-        // (mixed-scale sets size and align by feet).
-        const pageScale = resolvePageScale(pageIndex, pageScales, uniformScale);
-        const { width: tileW, height: tileH } = tileSizeAtReference(widthPt, heightPt, pageScale, refScale);
-        const rendered = await renderer.renderPage(mupdfDoc, pageIndex, {
-          scale: TILE_RENDER_SCALE,
-        });
-        const imageData = rendered.imageData as ImageData;
-        if (imageData && imageData.data && removeWhiteBackground)
-          makeWhiteTransparentInPlace(imageData);
-        const dataUrl = imageData && imageData.data ? imageDataToDataUrl(imageData) : undefined;
-        const tileData: TileData = {
-          sourcePdfBytes: pdfBytes,
-          sourcePageIndex: pageIndex,
-          sourceFileName: pdfFileName || undefined,
-          width: tileW,
-          height: tileH,
-          imageDataUrl: dataUrl,
-          scaleFeetPerInch: pageScale,
-        };
-        rowBuffer.push({ tile: tileData, w: tileW, h: tileH });
-        if (rowBuffer.length === TILES_PER_ROW) flushRow();
-        setAddingProgress({ done: idx + 1, total: selected.length });
-      }
-      flushRow();
-      // Only write the store when the user typed a scale or the store is unset —
-      // otherwise a blank box on a canvas that already has a reference scale would
-      // silently overwrite a deliberately set canvas scale with a guessed one.
-      if (uniformScale != null || existingRef == null) setReferenceScaleFeetPerInch(refScale);
-      addTiles(newTiles);
+      await commitPlainAdd({
+        mupdf,
+        doc: mupdfDoc,
+        pdfBytes,
+        fileName: pdfFileName || undefined,
+        selected,
+        pageScales,
+        uniformScale,
+        removeWhiteBackground,
+        renderer: rendererRef.current,
+        onProgress: (done, total) => setAddingProgress({ done, total }),
+      });
       onClose();
     } catch (e) {
       console.error(e);
@@ -594,7 +501,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, setReferenceScaleFeetPerInch, abortProbe, pageScales, uniformScale]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, abortProbe, pageScales, uniformScale]);
 
   const handleAddAndAutoAlign = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
@@ -605,96 +512,43 @@ export function AddPdfModal({
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
-      const renderer = rendererRef.current;
-
-      // 1. Render rasters for the selected pages (same as the plain add).
-      const rasters = new Map<number, string>();
-      for (let i = 0; i < selected.length; i++) {
-        const pageIndex = selected[i];
-        await new Promise<void>((r) => setTimeout(r, 0));
-        const rendered = await renderer.renderPage(mupdfDoc, pageIndex, { scale: TILE_RENDER_SCALE });
-        const imageData = rendered.imageData as ImageData;
-        if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
-        if (imageData?.data) rasters.set(pageIndex, imageDataToDataUrl(imageData));
-        setAddingProgress({ done: i + 1, total: selected.length });
-      }
-
-      // 2. Placements: prefer the cached probe (skip the second stitch); else
-      //    fall back to running the aligner live (probe absent/errored/running).
+      // Prefer the cached probe (skips the second stitch); else the helper falls back
+      // to running the aligner live (probe absent/errored/running).
       // The probe always ran with a uniform (null) scale, so its cached poses are
       // only valid when this selection turns out uniform too — a mixed selection
       // always takes the live path, which is per-page-scale aware.
-      const isUniformSelection = isUniform(selected, pageScales, uniformScale);
-      let placements: TilePlacement[];
-      let rootFtPerIn: number;
-      let worstResidFt: number;
-      if (probe && probeState === "done" && isUniformSelection) {
+      let cached: { placements: TilePlacement[]; rootFtPerIn: number; worstResidFt: number } | null = null;
+      if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
         const sel = new Set(selected);
         // Re-run the (cheap) layout over just the selected sheets so the committed
         // tiles normalize to THIS selection's top-left (MARGIN), not the whole
         // document's. The probe laid out all pages, so filtering alone would leave a
         // partial selection offset off-canvas; the expensive stitch stays cached (poses).
         const subset = probe.poses.filter((p) => sel.has(p.pageIndex));
-        placements = layoutPlacements(subset, probe.rootFtPerIn);
-        rootFtPerIn = probe.rootFtPerIn;
-        worstResidFt = probe.worstResidFt;
-      } else {
-        const result = await autoStitch(mupdf, mupdfDoc, selected, {
-          userScale: uniformScale,
-          pageScales,
-          onProgress: (done, total) => setAddingProgress({ done, total }),
-          ocr: recognize,
-        });
-        placements = result.placements;
-        rootFtPerIn = result.rootFtPerIn;
-        worstResidFt = result.worstResidFt;
-      }
-
-      // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
-      //    masked to its own frame) and commit as one undo step.
-      const newTiles = placements.map((p) => {
-        const page = mupdfDoc.loadPage(p.pageIndex);
-        const bounds = page.getBounds();
-        page.destroy?.();
-        const pw = bounds[2] - bounds[0], ph = bounds[3] - bounds[1];
-        return {
-          sourcePdfBytes: pdfBytes,
-          sourcePageIndex: p.pageIndex,
-          sourceFileName: pdfFileName || undefined,
-          x: p.x, y: p.y,
-          width: p.width, height: p.height,
-          imageDataUrl: rasters.get(p.pageIndex),
-          hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
-          scaleFeetPerInch: resolvePageScale(p.pageIndex, pageScales, uniformScale),
+        cached = {
+          placements: layoutPlacements(subset, probe.rootFtPerIn),
+          rootFtPerIn: probe.rootFtPerIn,
+          worstResidFt: probe.worstResidFt,
         };
+      }
+      const result = await commitAutoAlign({
+        mupdf,
+        doc: mupdfDoc,
+        pdfBytes,
+        fileName: pdfFileName || undefined,
+        selected,
+        pageScales,
+        uniformScale,
+        removeWhiteBackground,
+        renderer: rendererRef.current,
+        onProgress: (done, total) => setAddingProgress({ done, total }),
+        ocr: recognize,
+        cached,
       });
-      // Read the pre-commit baseline BEFORE addTiles below so "does the canvas already
-      // have sheets" reflects what was there before this batch, not this batch itself.
-      const existingRef = useStitchStore.getState().referenceScaleFeetPerInch;
-      const hasTiles = useStitchStore.getState().tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
-      addTiles(newTiles);
-      // Explicit set scale wins outright; else a canvas that already has sheets keeps
-      // its own reference scale (same baseline rule as plain add — see
-      // `referenceBaseline`); else a uniform selection roots on its one resolved scale
-      // (matches the pre-mixed-scale behavior exactly), and a mixed selection roots on
-      // the live engine's rootFtPerIn (already per-page-scale aware — see autoStitch's
-      // units[0].scale).
-      const refScale = referenceScaleFor(selected, pageScales, uniformScale);
-      const finalRef = uniformScale ?? (hasTiles && existingRef != null && existingRef > 0 ? existingRef : (isUniformSelection ? refScale : rootFtPerIn));
-      if (uniformScale != null || existingRef == null) setReferenceScaleFeetPerInch(finalRef);
-
-      // 4. Leave unaligned tiles selected so the user can place them manually.
-      const added = useStitchStore.getState().tiles.slice(-newTiles.length);
-      const alignedSet = new Set(placements.filter((p) => p.aligned).map((p) => p.pageIndex));
-      const unalignedIds = added.filter((t) => !alignedSet.has(t.sourcePageIndex)).map((t) => t.id);
-      if (unalignedIds.length) setSelectedTileIds(unalignedIds);
-
-      // 5. Report.
-      const alignedCount = selected.length - unalignedIds.length;
-      const msg = unalignedIds.length > 0
-        ? `Aligned ${alignedCount} of ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft. ${unalignedIds.length} placed below for manual alignment.`
-        : `Aligned ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft.`;
-      useNotificationStore.getState().showNotification(msg, unalignedIds.length > 0 ? "info" : "success");
+      if (result.message)
+        useNotificationStore
+          .getState()
+          .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
       onClose();
     } catch (e) {
       console.error(e);
@@ -702,7 +556,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState, pageScales, uniformScale]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScales, uniformScale]);
 
   const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
