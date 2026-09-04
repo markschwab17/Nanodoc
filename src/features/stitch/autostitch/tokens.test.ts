@@ -137,3 +137,37 @@ describe("split matchline callouts (CAD emits two runs)", () => {
     expect(refs.every((r) => r.matchline)).toBe(true);
   });
 });
+
+describe("fuzzy OCR spellings of the callout vocabulary", () => {
+  const view: [number, number, number, number] = [0, 0, 2592, 1728];
+  const at = (text: string, x: number, y: number): Label =>
+    ({ text, x, y, endX: x + 200, endY: y + 12, angle: 0, h: 12, font: "ocr" });
+
+  // Every string below is verbatim tesseract output from the Belcourt set.
+  it("'MATCH LINE SEE SHEEET 6' (doubled E) parses as a matchline ref to 6", () => {
+    const r = parseSheetRefs([at("MATCH LINE SEE SHEEET 6 |", 50, 800)], view)[0];
+    expect(r.sheet).toBe(6);
+    expect(r.matchline).toBe(true);
+  });
+
+  it("'SE. SHEET 7' inside a run of grading text parses as a ref to 7", () => {
+    const r = parseSheetRefs([at("GFF 293. SE. SHEET 7 95", 50, 800)], view)[0];
+    expect(r.sheet).toBe(7);
+  });
+
+  it("'MA TCH LINE' (split MATCH) is still a matchline", () => {
+    const r = parseSheetRefs([at("MA TCH LINE", 1200, 20)], view)[0];
+    expect(r.matchline).toBe(true);
+  });
+
+  it("'MATCH LIME' (N read as M) is still a matchline", () => {
+    const r = parseSheetRefs([at("MATCH LIME SEE SHEET 8", 1200, 20)], view)[0];
+    expect(r.matchline).toBe(true);
+    expect(r.sheet).toBe(8);
+  });
+
+  it("does not fire on ordinary drawing text containing 'SE'", () => {
+    expect(parseSheetRefs([at("REUSE SHEET FLOW PER PLAN", 50, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("PHASE SHEETING DETAIL", 50, 800)], view)).toHaveLength(0);
+  });
+});

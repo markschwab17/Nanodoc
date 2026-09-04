@@ -111,8 +111,35 @@ export function parseBearings(labels: Label[]): { az: number; ft: number | null;
 /** Sheet cross-references at page edges + matchline callouts. */
 export interface SheetRef { text: string; at: Pt; angle: number; sheet: number | null; sheetCode: string | null; matchline: boolean; station: string | null; edge: string; edgeDist: number; strip: "above" | "below" | null; stripSide: "left" | "right" | null; }
 
-const MATCHLINE_RE = /MATCH\s*LINE/i;
-const SEE_SHEET_RE = /SEE\s+SHEET/i;
+/**
+ * FUZZY callout vocabulary. These phrases arrive from tesseract as often as from
+ * the PDF's own text, and the OCR spellings are systematic, not random: a doubled
+ * or halved E ("SEE SHEEET 6", "SE. SHEET 7"), a stray period, an N read as M
+ * ("MATCH LIME"), a space inside MATCH ("MA TCH LINE"). Every one of those was a
+ * dropped reference on the Belcourt set. The tolerances stay narrow enough that
+ * ordinary drawing text cannot match: the leading \b keeps "USE SHEET" out, and
+ * MATCH/LINE must still appear in order.
+ */
+export const SEE_SHEET_SRC = String.raw`\bSE{1,3}\.?\s+SHE{1,3}T\b`;
+export const REF_NUMBER_SRC = SEE_SHEET_SRC + String.raw`\s+(?:NO\.?\s*)?(\d+)\b`;
+export const REF_CODE_SRC = SEE_SHEET_SRC + String.raw`\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)`;
+const MATCHLINE_RE = /\bMA\s?T\s?C\s?H\s*LI[NM]E/i;
+const SEE_SHEET_RE = new RegExp(SEE_SHEET_SRC, "i");
+const REF_NUMBER_RE = new RegExp(REF_NUMBER_SRC, "i");
+const REF_CODE_RE = new RegExp(REF_CODE_SRC, "i");
+const MATCHLINE_STATION_RE = /\bMA\s?T\s?C\s?H\s*LI[NM]E\s*([\d+.]+)?/i;
+
+/** The sheet NUMBER a "SEE SHEET n" callout names, tolerant of OCR spellings. */
+export function refSheetNumber(text: string): number | null {
+  const m = text.match(REF_NUMBER_RE);
+  return m ? Number(m[1]) : null;
+}
+/** The discipline CODE a "SEE SHEET C-302" callout names (null when it names a number). */
+export function refSheetCode(text: string): string | null {
+  if (REF_NUMBER_RE.test(text)) return null;
+  const m = text.match(REF_CODE_RE);
+  return m ? m[1].replace(/\s+/g, "") : null;
+}
 const labelHeight = (l: Label): number => (l.h != null && l.h > 0 ? l.h : Math.abs((l.endY ?? 0) - (l.y ?? 0)) || 1);
 const angleGap = (a: number, b: number): number => {
   const d = Math.abs((a ?? 0) - (b ?? 0)) % 360;
@@ -216,9 +243,9 @@ export function parseSheetRefs(labels: Label[], view: [number, number, number, n
   const out: SheetRef[] = [];
   for (const l of mergeMatchlineRefLabels(labels)) {
     // numeric ("SEE SHEET 12") or alphanumeric discipline code ("SEE SHEET C5.4")
-    const mSheet = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)\b/i);
-    const mCode = l.text.match(/SEE\s+SHEET\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)/i);
-    const mMatch = l.text.match(/MATCH\s*LINE\s*([\d+.]+)?/i);
+    const mSheet = l.text.match(REF_NUMBER_RE);
+    const mCode = l.text.match(REF_CODE_RE);
+    const mMatch = l.text.match(MATCHLINE_STATION_RE);
     const mStrip = l.text.match(/SEE[\s_]+(ABOVE|BELOW)(?:[\s_]+(LEFT|RIGHT))?/i);
     if (!mSheet && !mCode && !mMatch && !mStrip) continue;
     const c = center(l);

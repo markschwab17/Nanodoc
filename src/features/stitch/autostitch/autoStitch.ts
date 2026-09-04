@@ -8,7 +8,7 @@ import { sliceExtract, stripFrames, type Frame } from "./frameDetect";
 import { layoutPlacements, type TilePlacement, type PlacedSheetPose } from "./layout";
 import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber } from "./ocrBands";
 import { renderBand } from "./bandRender";
-import { parseSheetRefs, type SheetRef } from "./tokens";
+import { parseSheetRefs, refSheetNumber, refSheetCode, type SheetRef } from "./tokens";
 import { extractPageLabel } from "./pageLabels";
 import type { OcrWord, RawImage } from "./ocrService";
 import { DEFAULT_SCALE_FT_PER_IN as DEFAULT_SCALE } from "../pageScales";
@@ -310,16 +310,15 @@ export async function autoStitch(
       (r.sheet != null && r.sheet === p.printedNo) ||
       (r.sheetCode != null && codeOf.get(p.pageIndex) != null && normCode(r.sheetCode) === codeOf.get(p.pageIndex));
     const OPP: Record<string, string> = { left: "right", right: "left", top: "bottom", bottom: "top" };
-    const RE = /SEE\s+SHEET\s+(?:NO\.?\s*)?(\d+)/i;
-    const RE_CODE = /SEE\s+SHEET\s+(?:NO\.?\s*)?([A-Z]{1,3}[-\s]?\d{1,3}(?:\.\d{1,3})?)/i;
-    /** Does an OCR-recovered interior label reference page `p`? Number first (the
-     *  original, unchanged rule), then the discipline code. */
+    /** Does an OCR-recovered interior label reference page `p`? Number first, then
+     *  the discipline code. Both readings tolerate the OCR spellings of the callout
+     *  vocabulary ("SEE SHEEET 6", "SE. SHEET 7") — see tokens.ts. */
     const ocrRefNames = (text: string, p: PageRec): boolean => {
-      const m = text.match(RE);
-      if (m && Number(m[1]) === p.printedNo) return true;
-      const c = text.match(RE_CODE);
+      const no = refSheetNumber(text);
+      if (no != null && no === p.printedNo) return true;
+      const c = refSheetCode(text);
       const own = codeOf.get(p.pageIndex);
-      return !!(c && own && normCode(c[1]) === own);
+      return !!(c && own && normCode(c) === own);
     };
 
     /**
