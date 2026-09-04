@@ -108,6 +108,9 @@ export function useEarnedAutoAlign(
   const setRef = useRef<CanvasProbeSet | null>(null);
   const ctxRef = useRef<EarnedAutoAlignContext>({});
   const probeRef = useRef<ProbeResult | null>(null);
+  /** `performance.now()` when the current probe request was sent — for the
+   *  settle-time log below. */
+  const checkStartRef = useRef(0);
   /** Set on unmount so a reply that lands after teardown writes no state. RESET on
    *  every mount — see the effect below. */
   const goneRef = useRef(false);
@@ -135,7 +138,14 @@ export function useEarnedAutoAlign(
       // The probe is done with tesseract either way; 160-240 MB is worth handing back
       // (`ensureScheduler` rebuilds it lazily if another check follows).
       void shutdownOcr();
-      if ("aborted" in msg) { setStatus("idle"); return; }
+      // One line per settled check: how long it took and how many OCR round-trips
+      // it cost. Cheap enough to leave in always — it is the only visibility into
+      // probe cost outside the offline harness (scripts/stitch-eval.mjs).
+      const logSettle = (settled: string, ocrCalls: number) => {
+        const ms = Math.round(performance.now() - checkStartRef.current);
+        console.info("[probe] %s: %d ms, %d OCR calls", settled, ms, ocrCalls);
+      };
+      if ("aborted" in msg) { setStatus("idle"); logSettle("aborted", 0); return; }
       if ("error" in msg) {
         // A failed check is not a failed feature: the sheets are already on the canvas
         // in a grid, and the honest thing is to say the seams were not verified rather
@@ -145,6 +155,7 @@ export function useEarnedAutoAlign(
         setReason("unverified");
         setDetail(undefined);
         setStatus("unavailable");
+        logSettle("error", 0);
         return;
       }
       probeRef.current = msg;
@@ -157,6 +168,7 @@ export function useEarnedAutoAlign(
         setDetail(gate.detail);
         setStatus("unavailable");
       }
+      logSettle(gate.offered ? "offer" : "unavailable", msg.ocrCalls ?? 0);
     };
     workerRef.current = w;
     return w;
@@ -249,6 +261,7 @@ export function useEarnedAutoAlign(
         pageScales: set.pageScales.size ? [...set.pageScales] : undefined,
         pageCodes: ctxRef.current.pageCodes?.size ? [...ctxRef.current.pageCodes] : undefined,
       };
+      checkStartRef.current = performance.now();
       ensureWorker().postMessage(req);
     },
     [ensureWorker, stop],

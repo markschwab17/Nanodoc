@@ -26,7 +26,12 @@ let abortDocId = 0;
 let ocrSeq = 0;
 const ocrPending = new Map<number, (words: OcrWord[]) => void>();
 const OCR_TIMEOUT_MS = 30_000;
+// Counts every RPC autoStitch makes through its `ocr` callback for the CURRENT
+// probe — reset at the top of `handle()` so a persistent worker's later probes
+// don't accumulate a prior run's count.
+let ocrCallCount = 0;
 function ocrViaMain(image: RawImage): Promise<OcrWord[]> {
+  ocrCallCount++;
   return new Promise((resolve) => {
     const id = ++ocrSeq;
     const timer = setTimeout(() => { ocrPending.delete(id); resolve([]); }, OCR_TIMEOUT_MS);
@@ -45,6 +50,7 @@ let queue: Promise<void> = Promise.resolve();
 async function handle(req: ProbeRequest) {
   const { docId, pdfBytes, pageIndices, userScale, pageScales, pageCodes } = req;
   if (docId !== latestDocId) return; // superseded before we started — skip
+  ocrCallCount = 0;
   try {
     await ensureMupdf();
     const doc = mupdf.Document.openDocument(pdfBytes, "application/pdf");
@@ -61,7 +67,7 @@ async function handle(req: ProbeRequest) {
     } finally {
       doc.destroy?.();
     }
-    const msg: ProbeMessage = toProbeResult(res, docId);
+    const msg: ProbeMessage = toProbeResult(res, docId, ocrCallCount);
     self.postMessage(msg);
   } catch (err) {
     // An abort is not a failure — report it as skipped so the modal shows no toast.

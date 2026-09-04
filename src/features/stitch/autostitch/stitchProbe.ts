@@ -46,6 +46,10 @@ export interface ProbeResult {
   worstAlongUncertaintyFt?: number;
   /** Where that figure came from — `"bound"` means nothing measured it. */
   worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
+  /** How many OCR round-trips (worker → main thread) this probe made. Counted in
+   *  the worker where `autoStitch` calls its `ocr` callback (`ocrViaMain`); logged
+   *  by `useEarnedAutoAlign` alongside probe wall-clock time. */
+  ocrCalls?: number;
 }
 
 export type ProbeMessage =
@@ -55,7 +59,7 @@ export type ProbeMessage =
    *  error — the modal treats it as a skipped check, no toast. */
   | { docId: number; aborted: true };
 
-export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult {
+export function toProbeResult(res: AutoStitchResult, docId: number, ocrCalls?: number): ProbeResult {
   return {
     docId,
     placements: res.placements,
@@ -70,5 +74,6 @@ export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult
     alongAnchored: res.alongAnchored,
     worstAlongUncertaintyFt: res.worstAlongUncertaintyFt,
     worstAlongUncertaintySource: res.worstAlongUncertaintySource,
+    ocrCalls,
   };
 }

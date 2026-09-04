@@ -15,7 +15,9 @@
  * that touches `src/features/stitch/autostitch/`.
  *
  * OCR is cached by image-content hash in scratch-diag/ocr-cache.json — the same
- * cache stitch-diag uses, so the two share every result.
+ * cache stitch-diag uses, so the two share every result. Set
+ * STITCH_EVAL_NO_OCR_CACHE=1 to bypass that cache (read AND write) for a cold,
+ * cache-free timing run — every image is re-OCR'd and the cache file is untouched.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -29,6 +31,7 @@ const argOf = (flag, dflt) => { const i = argv.indexOf(flag); return i >= 0 && a
 const MANIFEST = argOf("--manifest", path.join(REPO, "scripts/fixtures/stitch-eval-sets.json"));
 const ONLY = argOf("--set", null);
 const AS_JSON = argv.includes("--json");
+const round2 = (n) => Math.round(n * 100) / 100;
 
 const expandHome = (p) => (p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p);
 function parseRanges(s) {
@@ -69,10 +72,15 @@ function encodePNG(width, height, rgba) {
 }
 
 // ── OCR (tesseract.js) with the shared disk cache ────────────────────────────
+// STITCH_EVAL_NO_OCR_CACHE=1 bypasses the cache entirely (read AND write) — every
+// image is re-OCR'd fresh and scratch-diag/ocr-cache.json is left untouched. Used
+// to take a cache-free timing baseline without clobbering the shared cache file
+// that stitch-diag also reads.
+const NO_OCR_CACHE = process.env.STITCH_EVAL_NO_OCR_CACHE === "1";
 const CACHE_DIR = path.join(REPO, "scratch-diag");
 const CACHE_FILE = path.join(CACHE_DIR, "ocr-cache.json");
 fs.mkdirSync(CACHE_DIR, { recursive: true });
-const cache = fs.existsSync(CACHE_FILE) ? JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")) : {};
+const cache = NO_OCR_CACHE ? {} : (fs.existsSync(CACHE_FILE) ? JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")) : {});
 let cacheDirty = false, ocrCalls = 0, ocrHits = 0;
 function hashImage(image) {
   const h = crypto.createHash("sha1");
@@ -90,14 +98,13 @@ async function ensureWorker() {
 }
 async function ocr(image) {
   const key = hashImage(image);
-  if (cache[key]) { ocrHits++; return cache[key]; }
+  if (!NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
   ocrCalls++;
   const w = await ensureWorker();
   const { data } = await w.recognize(encodePNG(image.width, image.height, image.data));
   const words = [];
   for (const wd of data.words ?? []) { if (wd.text?.trim()) words.push({ text: wd.text.trim(), confidence: wd.confidence, bbox: { ...wd.bbox } }); }
-  cache[key] = words; cacheDirty = true;
-  if (ocrCalls % 20 === 0) flushCache();
+  if (!NO_OCR_CACHE) { cache[key] = words; cacheDirty = true; if (ocrCalls % 20 === 0) flushCache(); }
   return words;
 }
 const flushCache = () => { if (cacheDirty) { fs.writeFileSync(CACHE_FILE, JSON.stringify(cache)); cacheDirty = false; } };
@@ -217,6 +224,16 @@ for (const set of sets) {
   row.seams = (res.seamReport ?? []).length;
   row.skippedSheets = (res.skipped ?? []).length;
   row.refPages = res.refPageIndices.length;
+  // Rounded 2dp placements, in placement order — a stable, small snapshot a later
+  // run can diff against without re-deriving it from `res.poses`.
+  row.placements = res.placements.map((p) => ({
+    pageIndex: p.pageIndex,
+    x: round2(p.x),
+    y: round2(p.y),
+    width: round2(p.width),
+    height: round2(p.height),
+    aligned: p.aligned,
+  }));
   // ALONG-anchored pages, and the placed pages that are NOT (they are connected but
   // free to slide along their seams, so the commit demotes them to unaligned).
   const placedPages = [...new Set(res.poses.filter((p) => p.posFt).map((p) => p.pageIndex))].sort((a, b) => a - b);
