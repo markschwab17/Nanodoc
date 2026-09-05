@@ -995,22 +995,43 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let aborting = false;
-    // Page 0's top band answers nothing (so it WOULD be retried) but its right band
-    // parks on the gate, holding the page's reads open. Meanwhile the abort is armed,
-    // and page 1's top-of-iteration checkpoint trips the run's OCR signal.
+    // The shape this test has to hit is narrow, so it is worth spelling out. Page 0's
+    // whole burst is issued SYNCHRONOUSLY, and each read's first act is `checkAbort`
+    // — so the abort must not be armed until every one of those 7 calls has been
+    // made, or one of them throws, the first-pass `Promise.all` rejects, and the
+    // retry decision is never reached at all (which would make this test vacuous).
+    //
+    // So: every page-0 read succeeds. Its top and bottom bands answer NOTHING (both
+    // would be retried), its LEFT band parks on a gate so the page's `Promise.all`
+    // cannot settle, and the abort is armed one microtask after issuing — early
+    // enough for page 1's top-of-iteration checkpoint (which waits on a macrotask
+    // `yieldToMain`) to trip the run's OCR signal, late enough to throw nothing.
     const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
       const m = at(img);
-      if (m.page === 0 && edgeOf(m) === "top" && isWhole(m)) { aborting = true; o?.onNoResult?.(); return []; }
-      if (m.page === 0 && m.x0 > 2000 && m.h > 900) await gate; // the right band
+      if (m.page === 0 && edgeOf(m) && isWhole(m)) {
+        await Promise.resolve();
+        aborting = true;      // …after the burst was issued, before page 1's check
+        o?.onNoResult?.();
+        return [];
+      }
+      if (m.page === 0 && Math.abs(m.x0) < 0.5 && m.h > 900) await gate;  // left band
       return [];
     });
     const run = autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, shouldAbort: () => aborting });
     await expect(run).rejects.toBeInstanceOf(AutoStitchAborted);
+    // Page 0's reads were all ISSUED and none of them threw: the retry decision is
+    // genuinely reached below, it is the abort that declines it.
+    expect(ocr).toHaveBeenCalledTimes(7);
+    const rendersBefore = (renderBand as any).mock.calls.length;
+
     release();
     // Let the parked page's reads settle and its retry decision be taken.
     await new Promise((r) => setTimeout(r, 20));
     const clips = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[]);
     expect(clips.some((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1)).toBe(false);
+    // Nothing at all was rastered after the abort — not one sub-clip, not one page.
+    expect((renderBand as any).mock.calls.length).toBe(rendersBefore);
+    expect(fakeDoc.loadPage).toHaveBeenCalledTimes(1); // the retry never re-opened it
   });
 });
 
@@ -1082,7 +1103,9 @@ describe("rotation tally when a side band had to be retried", () => {
       return a === undefined ? [] : [{ text: "ZZZ", confidence: a, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
     });
     await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, ocrConcurrency: 3 });
-    return stripReads;
+    const subRenders = (renderBand as any).mock.calls
+      .filter((c: any[]) => Math.abs((c[2][3] - c[2][1]) - SUB_LEN) < 1).length;
+    return { stripReads, subRenders };
   };
 
   it("a band that needed the retry votes with its RETRIED mass, summed over the sub-clips", async () => {
@@ -1092,7 +1115,8 @@ describe("rotation tally when a side band had to be retried", () => {
     // opposed evidence, which clears the floor and the 2x margin.
     const locked = await run((sub, rot) =>
       sub < 0 ? null : (rot === 270 && sub === 0) ? 90 : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(locked).toBe(5);
+    expect(locked.subRenders).toBe(2 /* side bands */ * 4 /* sub-clips */);
+    expect(locked.stripReads).toBe(5);
   });
 
   it("…but not if a sub-clip of the retry was itself a non-answer", async () => {
@@ -1104,6 +1128,19 @@ describe("rotation tally when a side band had to be retried", () => {
         : (rot === 90 && sub === 1) ? null
         : (rot === 270 && sub === 0) ? 90
         : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(unlocked).toBe(10);
+    expect(unlocked.subRenders).toBe(8); // it WAS retried…
+    expect(unlocked.stripReads).toBe(10); // …but the retry does not get to vote
+  });
+
+  it("a band with ONE surviving rotation is not retried at all — a whole read beats a cut one", async () => {
+    // 270 read the band fine; only 90 was lost. The band therefore already HAS a
+    // whole-raster reading, and cutting it could only make that reading worse (a
+    // callout across a cut is truncated, or misread into a different valid-looking
+    // target). So nothing is re-rastered…
+    const survived = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : null) : undefined));
+    expect(survived.subRenders).toBe(0);
+    // …and the band still does not vote: one rotation is a non-answer, so counting
+    // the survivor would be counting it unopposed.
+    expect(survived.stripReads).toBe(10);
   });
 });

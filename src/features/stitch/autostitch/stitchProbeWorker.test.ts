@@ -12,6 +12,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const stitch = vi.hoisted(() => ({
   /** Every `shouldAbort` the worker has handed to autoStitch, newest last. */
   shouldAborts: [] as (() => boolean)[],
+  /** Every `ocr` callback (the RPC shim) it has handed to autoStitch, newest last. */
+  ocrs: [] as ((image: any, opts?: any) => Promise<any>)[],
   /** Resolves the pending autoStitch call, so a probe can be held open. */
   release: null as null | (() => void),
 }));
@@ -22,6 +24,7 @@ vi.mock("./autoStitch", async (importOriginal) => {
     ...actual,
     autoStitch: vi.fn((_m: any, _d: any, _p: any, opts: any) => {
       stitch.shouldAborts.push(opts.shouldAbort);
+      stitch.ocrs.push(opts.ocr);
       return new Promise((resolve) => {
         stitch.release = () => resolve({
           placements: [], rootFtPerIn: 20, alignedCount: 0, unplacedCount: 0,
@@ -45,6 +48,7 @@ async function loadWorker() {
   vi.resetModules();
   sent.length = 0;
   stitch.shouldAborts.length = 0;
+  stitch.ocrs.length = 0;
   stitch.release = null;
   (self as any).postMessage = (msg: any) => { sent.push(msg); };
   await import("./stitchProbe.worker");
@@ -94,5 +98,70 @@ describe("stitchProbe.worker cooperative abort", () => {
     expect(stitch.shouldAborts.at(-1)!()).toBe(false);
     post({ kind: "abort", docId: 0 });
     expect(stitch.shouldAborts.at(-1)!()).toBe(true);
+  });
+});
+
+describe("stitchProbe.worker OCR RPC — non-answers", () => {
+  const IMG = () => ({ width: 1, height: 1, data: new Uint8ClampedArray(4) });
+
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { vi.useRealTimers(); delete (self as any).onmessage; });
+
+  /** Start a probe and hand back the `ocr` shim autoStitch was given. */
+  const withOcr = async () => {
+    await loadWorker();
+    post(request(1));
+    await settle();
+    return stitch.ocrs.at(-1)!;
+  };
+
+  it("relays the main thread's noResult flag to the caller's onNoResult", async () => {
+    // The whole point of the flag: `[]` alone cannot say whether the crop held no
+    // text or the read was lost, and only the second earns a band a second pass.
+    const ocr = await withOcr();
+    let flagged = false;
+    const p = ocr(IMG(), { onNoResult: () => { flagged = true; } });
+    const req = sent.find((m) => m.kind === "ocr-req");
+    expect(req).toBeTruthy();
+    post({ kind: "ocr-res", ocrId: req.ocrId, words: [], noResult: true });
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(true);
+  });
+
+  it("a reply with words, or without the flag, is an ANSWER", async () => {
+    const ocr = await withOcr();
+    let flagged = false;
+    const p = ocr(IMG(), { onNoResult: () => { flagged = true; } });
+    const req = sent.find((m) => m.kind === "ocr-req");
+    post({ kind: "ocr-res", ocrId: req.ocrId, words: [], noResult: false });
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(false);
+  });
+
+  it("the 25s RPC backstop is a non-answer too, because it cannot tell one from the other", async () => {
+    // The backstop is measured from the moment the request is POSTED; the pool's own
+    // 20s budget is measured from DISPATCH. A read queued behind two others on a
+    // 2-3 worker pool dispatches seconds late, so its non-answer can land AFTER this
+    // fires — and calling that an empty crop hides a lost band.
+    const ocr = await withOcr();
+    // Faked only now: `withOcr` waits on a real timer to reach autoStitch, and the
+    // backstop's timer is armed by the `ocr` call below.
+    vi.useFakeTimers();
+    let flagged = false;
+    const p = ocr(IMG(), { onNoResult: () => { flagged = true; } });
+    await vi.advanceTimersByTimeAsync(25_000);
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(true);
+  });
+
+  it("an ABORT is not a non-answer — the caller stopped it on purpose", async () => {
+    const ocr = await withOcr();
+    const ac = new AbortController();
+    let flagged = false;
+    const p = ocr(IMG(), { signal: ac.signal, onNoResult: () => { flagged = true; } });
+    ac.abort();
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(false);
+    expect(sent.some((m) => m.kind === "ocr-abort")).toBe(true);
   });
 });

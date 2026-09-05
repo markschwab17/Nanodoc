@@ -41,10 +41,15 @@ let abortUpTo = -1;
 // and each one settles only its own call.
 let ocrSeq = 0;
 const ocrPending = new Map<number, (words: OcrWord[], noResult: boolean) => void>();
-// Per-RPC backstop. Deliberately LONGER than the main-thread pool's own 20s
-// per-job budget (ocrService's OCR_JOB_TIMEOUT_MS) so the pool's answer — [], after
-// it has retired the one tesseract worker that hung — always arrives first; this
-// fires only if the reply itself goes missing.
+// Per-RPC backstop. Longer than the main-thread pool's own 20s per-job budget
+// (ocrService's OCR_JOB_TIMEOUT_MS), but the two are NOT measured from the same
+// instant and this one does not reliably come second: the pool's clock starts when a
+// worker DISPATCHES the job, this one when the request is POSTED. A page issues 7-13
+// reads at once onto a pool of 2-3 workers, so a read queued behind two others can
+// dispatch 5s or more after it was posted — and its 20s non-answer then lands at
+// t=25s+, after this fired. So reaching the backstop means one of two things, a lost
+// reply or a job whose budget expired while it waited, and it cannot tell them
+// apart; both are reported as NON-ANSWERS (see `finish`).
 const OCR_TIMEOUT_MS = 25_000;
 // Counts every RPC autoStitch makes through its `ocr` callback for the CURRENT
 // probe — reset at the top of `handle()` so a persistent worker's later probes
@@ -73,10 +78,12 @@ function ocrViaMain(
       if (noResult) opts?.onNoResult?.();
       resolve(words);
     };
-    // Deliberately NOT reported as a non-answer. The pool's own 20 s answer always
-    // beats this 25 s backstop, so reaching it means the REPLY went missing — a
-    // broken RPC, which four more RPCs would not fix.
-    const timer = setTimeout(() => finish([]), OCR_TIMEOUT_MS);
+    // Reported as a NON-ANSWER, because that is what it is either way: a queued job
+    // whose budget expired late, or a reply that went missing. Neither is "this crop
+    // holds no text", and calling it that hides a lost band behind an empty answer.
+    // The cost of being wrong is bounded — a retry is one extra pass over one band,
+    // it is itself subject to the same backstop, and it never recurses.
+    const timer = setTimeout(() => finish([], true), OCR_TIMEOUT_MS);
     // Forwarding the abort is what actually stops the work. An aborted read is
     // usually still QUEUED in the main thread's pool, and a queued job has no
     // deadline of its own — resolving [] here alone would leave the pool grinding

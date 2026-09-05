@@ -376,8 +376,10 @@ interface PageOcrRead { recovered: Label[]; ocrNo: number | null; sideTextRot?: 
  *  band (both rotations are OCR'd and the better one wins); `words[k]` is the read
  *  at `rots[k]`. `w`/`h` are the PRE-rotation raster dims wordsToLabels needs.
  *  `noResult[k]` is set when that read came back a NON-ANSWER (the pool's job budget
- *  expired) rather than a crop with no text in it — the two are the same `[]`, and
- *  only the first is worth re-reading as sub-clips. */
+ *  expired, or the transport lost the reply) rather than a crop with no text in it —
+ *  the two are the same `[]`. Only a band where EVERY rotation is flagged is worth
+ *  re-reading as sub-clips: one surviving rotation means the band already has a
+ *  whole-raster reading, which always beats a cut one. */
 interface BandRead {
   band: BandSpec; scale: number; w: number; h: number;
   rots: (0 | 90 | 270)[]; words: Promise<OcrWord[]>[]; noResult: boolean[];
@@ -450,13 +452,14 @@ function lockSideTextRot(mass: Record<90 | 270, number>): 90 | 270 | undefined {
  * stability guarantees), sheet-number band last. `Promise.all` preserves order, so
  * running the pool flat out cannot change which read wins.
  *
- * A BAND WHOSE READ CAME BACK A NON-ANSWER is read a second time, as overlapping
- * sub-clips (`retryBandAsSubClips`). That is the only thing sub-clips are ever used
- * for: every band that answers at all is read exactly as it always was, one whole
+ * A BAND EVERY ROTATION OF WHICH CAME BACK A NON-ANSWER is read a second time, as
+ * overlapping sub-clips (`retryBandAsSubClips`). That is the only thing sub-clips are
+ * ever used for: every band that answers at all — including a side band where just
+ * one of the two rotations answered — is read exactly as it always was, one whole
  * raster at 200 dpi. Cutting bands up front was measured on the four eval sets and
- * cost three of them — a callout that straddles a cut is truncated or misread into a
- * different valid-looking target — so the cut is reserved for a band that has
- * already produced nothing, where any read at all is an improvement on none.
+ * cost three of them: a callout that straddles a cut is truncated or misread into a
+ * different valid-looking target. So the cut is reserved for a band that produced
+ * nothing whichever way it was turned, where a degraded read beats none.
  * `reopenPage` is what makes the second pass possible at all: by the time a read
  * settles the caller has destroyed the page, so the retry loads its own.
  */
@@ -465,7 +468,7 @@ function readPageOcr(
   page: any,
   view: [number, number, number, number],
   drawingFrame: [number, number, number, number] | null,
-  ocr: (image: RawImage, onNoResult?: () => void) => Promise<OcrWord[]>,
+  ocr: (image: RawImage, opts?: { onNoResult?: () => void }) => Promise<OcrWord[]>,
   signal?: AbortSignal,
   reopenPage?: () => any,
 ): Promise<PageOcrRead> {
@@ -474,7 +477,7 @@ function readPageOcr(
   // loop, and the reads issued before it would then be rejected with nobody
   // listening. The real awaits below still see every rejection.
   const issue = (image: RawImage, onNoResult?: () => void): Promise<OcrWord[]> => {
-    const p = ocr(image, onNoResult);
+    const p = ocr(image, { onNoResult });
     p.catch(() => { /* surfaced below */ });
     return p;
   };
@@ -516,10 +519,14 @@ function readPageOcr(
    * still bounds everything a page has outstanding.
    */
   const retryBandAsSubClips = async (r: BandRead, subs: BandSpec[]): Promise<RetryPart[]> => {
-    const pending: { band: BandSpec; scale: number; w: number; h: number; words: Promise<OcrWord[]>[]; noResult: boolean[] }[] = [];
+    const pending: (Omit<RetryPart, "words"> & { words: Promise<OcrWord[]>[] })[] = [];
     const page2 = reopenPage!();
     try {
       for (const sub of subs) {
+        // Defence in depth, not a live path: this loop is synchronous end to end, so
+        // nothing can abort part-way through it, and the caller has already checked
+        // the signal. It is kept because it is the honest guard to write here and
+        // because `whole` below refuses to vote on the truncation it would produce.
         if (signal?.aborted) break;
         const { image, scale } = renderBand(mupdf, page2, sub.clip);
         const w = image.width, h = image.height;
@@ -536,7 +543,7 @@ function readPageOcr(
       page2.destroy?.();
     }
     const got = await Promise.all(pending.map((p) => Promise.all(p.words)));
-    return pending.map((p, j) => ({ band: p.band, scale: p.scale, w: p.w, h: p.h, words: got[j], noResult: p.noResult }));
+    return pending.map((p, j) => ({ ...p, words: got[j] }));
   };
 
   return (async () => {
@@ -554,16 +561,28 @@ function readPageOcr(
       // whole-band evidence, and then the labels come from the sub-clips instead.
       let words: OcrWord[][] = perBand[i];
       let parts: RetryPart[] | null = null;
-      // THE RETRY. Only a NON-ANSWER earns one — an empty read is an answer. A band
-      // already short enough to be one job has nothing to retry WITH (`splitBand`
-      // hands back the band itself), and an aborted run must raster nothing more.
-      const subs = r.noResult.some(Boolean) && reopenPage && !signal?.aborted
-        ? splitBand(r.band) : [r.band];
+      // THE RETRY, and it is deliberately hard to earn.
+      //
+      // Only a NON-ANSWER earns one — an empty read is an answer, and a band that
+      // answered is read exactly as it always was. Beyond that, EVERY rotation of the
+      // band must have been lost: a side band is read twice, and if one of those
+      // rotations came back with words then the band HAS a whole-raster reading. A
+      // whole read always beats a cut one (the cut truncates callouts and can misread
+      // a fragment into a different valid-looking target — measured, see
+      // task-6-report.md), so with one survivor there is nothing to gain and real
+      // quality to lose. Only when the band produced nothing at all, whichever way it
+      // was turned, is a degraded read better than none.
+      //
+      // The two other bars: a band short enough to be one job has nothing to retry
+      // WITH (`splitBand` hands back the band itself), and an aborted run must raster
+      // nothing more.
+      const allLost = r.rots.every((_, k) => r.noResult[k]);
+      const subs = allLost && reopenPage && !signal?.aborted ? splitBand(r.band) : [r.band];
       if (subs.length > 1) {
         parts = await retryBandAsSubClips(r, subs);
-        // Both rotations are re-read even when only one timed out: the pick compares
-        // their scores, and a whole-band read and a cut one are not comparable
-        // evidence. So the retry replaces the band's evidence wholesale.
+        // Every rotation is re-read, because every rotation was lost — and the pick
+        // below compares their scores, which only means anything between reads of the
+        // same shape. So the retry replaces the band's evidence wholesale.
         words = r.rots.map((_, k) => parts!.flatMap((p) => p.words[k] ?? []));
       }
       // wordsToLabels wants each raster's OWN clip and PRE-rotation dims (it inverts
@@ -589,11 +608,15 @@ function readPageOcr(
       //  - no retry: it votes only if NEITHER rotation was a non-answer (and the
       //    older "exactly one came back empty" guard still applies on top — an empty
       //    read is an answer, but an unopposed one is still not a decision);
-      //  - retried: it votes only if BOTH rotations were re-read cleanly, i.e. no
-      //    sub-clip of either was itself a non-answer.
+      //  - retried: it votes only if the retry actually covered the WHOLE band —
+      //    every sub-clip rastered (half a band's mass is not the band's mass) and no
+      //    sub-clip of any rotation itself a non-answer. The length test pairs with
+      //    the abort break in `retryBandAsSubClips`: neither is reachable today, and
+      //    together they mean a truncated retry could never quietly vote as a whole
+      //    one if it ever became so.
       const whole = parts
-        ? r.rots.every((_, k) => parts!.every((p) => !p.noResult[k]))
-        : !r.noResult.some(Boolean);
+        ? parts.length === subs.length && r.rots.every((_, k) => parts!.every((p) => !p.noResult[k]))
+        : !r.rots.some((_, k) => r.noResult[k]);
       const blank = cands.reduce((n, c) => n + (words[c.k].length === 0 ? 1 : 0), 0);
       if (whole && blank !== 1) for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += c.score;
       // Unchanged pick: highest score wins, and a tie keeps the first of [90, 270]
@@ -666,13 +689,15 @@ async function runAutoStitch(
   let ocrStarted = false;
   const rawOcr = opts.ocr;
   const ocr = rawOcr
-    ? async (image: RawImage, onNoResult?: () => void): Promise<OcrWord[]> => {
+    ? async (image: RawImage, o?: { onNoResult?: () => void }): Promise<OcrWord[]> => {
         checkAbort();
         if (!ocrStarted) { ocrStarted = true; opts.onOcrStart?.(); }
         // `onNoResult` is passed straight through: the transport is the only thing
         // that can tell an expired job budget from a crop with no text in it, and
-        // `readPageOcr` is the only thing that needs to know.
-        return rawOcr(image, { signal: ocrAbort?.signal, onNoResult });
+        // `readPageOcr` is the only thing that needs to know. The run's abort is
+        // added here, which is why the two opts shapes are the same but not the same
+        // object.
+        return rawOcr(image, { signal: ocrAbort?.signal, onNoResult: o?.onNoResult });
       }
     : undefined;
   // How wide the reciprocal strip scan (pass 2) batches its reads. Sized off the
