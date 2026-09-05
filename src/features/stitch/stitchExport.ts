@@ -16,6 +16,7 @@ import { useStitchStore, tileRasterUrl } from "@/shared/stores/stitchStore";
 import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
 import { tileRenderScale } from "./rasterEncode";
+import { disjointRects } from "./cleanup/clipRegions";
 
 /** Stored tile rasters are rendered at this scale (see AddPdfModal). */
 /** What scale the STORED tile raster was rendered at, for this page's size —
@@ -252,10 +253,13 @@ export function tileHoleRectsInPdf(
 ): { x: number; y: number; w: number; h: number }[] {
   // A relocated region's SOURCE is clipped out too (its content is drawn at the
   // destination by tileRelocationsInPdf).
-  const regions = [
+  // The PDF clip below is even-odd, exactly like the canvas `clip-path`, so
+  // overlapping holes would fill each other back in — make the set disjoint
+  // first (see disjointRects).
+  const regions = disjointRects([
     ...(tile.hiddenRegions ?? []),
     ...(tile.relocatedRegions ?? []).map((r) => r.rect),
-  ];
+  ]);
   if (!regions.length || (tile.rotation ?? 0) !== 0) return [];
   return regions.map((r) => {
     // fraction (0..1) → tile-local px

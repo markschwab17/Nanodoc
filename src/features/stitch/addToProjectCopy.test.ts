@@ -11,6 +11,7 @@ import {
   autoAlignUnavailableTitle,
   TRIM_STEP_TITLE,
   TRIM_NO_BOXES_NOTE,
+  TRIM_COACH_BODY,
   type TileForPlan,
 } from "./addToProjectCopy";
 
@@ -332,5 +333,18 @@ describe("Trim title blocks step copy", () => {
     expect(TRIM_NO_BOXES_NOTE).toBe(
       "No title blocks found — use the eraser tool to hide areas by hand",
     );
+  });
+});
+
+describe("step 3 coach-mark copy", () => {
+  it("leads with what the boxes mean, then the handle, then Auto-detect", () => {
+    expect(TRIM_COACH_BODY).toBe(
+      "Boxes cover what will be hidden. Drag the handle above a box to move that content instead, then Apply. Auto-detect finds title blocks and margins for you."
+    );
+    // The old body sent the user to the eraser tool and said "toggle any off",
+    // neither of which is how a box is edited any more.
+    expect(TRIM_COACH_BODY).not.toMatch(/eraser|toggle/i);
+    // Trim is a two-part tool; the coach mark has to name the AI half.
+    expect(TRIM_COACH_BODY).toContain("Auto-detect");
   });
 });

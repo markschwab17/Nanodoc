@@ -14,6 +14,7 @@
  */
 
 import { Button } from "@/components/ui/button";
+import { TRIM_COACH_BODY } from "./addToProjectCopy";
 
 export interface TrimCoachMarkProps {
   onDismiss: () => void;
@@ -27,10 +28,7 @@ export function TrimCoachMark({ onDismiss }: TrimCoachMarkProps) {
       className="absolute top-4 left-1/2 z-30 flex max-w-[380px] -translate-x-1/2 flex-col gap-2 rounded-[10px] border border-border bg-popover px-4 py-3 text-popover-foreground shadow-lg"
     >
       <b className="text-[13px] font-semibold">Trim title blocks</b>
-      <span className="text-xs leading-relaxed text-muted-foreground">
-        Boxes cover what will be hidden on the site sheet. Toggle any off, draw more
-        with the eraser tool, then Apply.
-      </span>
+      <span className="text-xs leading-relaxed text-muted-foreground">{TRIM_COACH_BODY}</span>
       <div className="flex justify-end">
         <Button size="sm" className="h-7" onClick={onDismiss}>
           Got it

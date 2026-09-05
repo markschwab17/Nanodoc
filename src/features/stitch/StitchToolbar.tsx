@@ -29,6 +29,7 @@ import {
   Expand,
   Save,
   Shrink,
+  Scissors,
   Sparkles,
   Stamp,
   Trash2,
@@ -81,8 +82,12 @@ export interface StitchToolbarProps {
   onPanModeChange: (active: boolean) => void;
   onSelectToolActivate: () => void;
   onClearSession?: () => void;
-  /** Clean-Composite: detect + review title-block/match-margin hide-regions. */
-  onCleanup?: () => void;
+  /** Trim: open the hide-region review WITHOUT running detection — draw by hand. */
+  onTrimOpen?: () => void;
+  /** Auto-detect: run title-block / match-margin detection into the open review.
+   *  Kept a SEPARATE button from Trim — Mark: "it is a 2-part tool, either AI or
+   *  manual", and one sparkle on the only button said the whole tool was AI. */
+  onAutoDetect?: () => void;
   /** True while the clean-up review overlay is active. */
   cleanupActive?: boolean;
   /** True while a clean-up detection pass is in flight (before review opens). */
@@ -177,7 +182,8 @@ export function StitchToolbar({
   onPanModeChange,
   onSelectToolActivate,
   onClearSession,
-  onCleanup,
+  onTrimOpen,
+  onAutoDetect,
   cleanupActive,
   cleanupBusy,
   highlightDeleteContent,
@@ -545,17 +551,33 @@ export function StitchToolbar({
           <Ruler className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
         </div>
-        {onCleanup && (
-          <IconButtonWithTooltip
-            variant={cleanupActive ? "secondary" : "outline"}
-            disabled={!hasTiles || cleanupBusy || cleanupActive}
-            title="Clean up: auto-detect title blocks and match-line margins to hide so the sheets read as one continuous drawing. Review the boxes, toggle any off, or draw your own, then Apply."
-            label={cleanupActive ? "Reviewing…" : "Clean up"}
-            tooltipDescription="Auto-detect title blocks & match-line margins to hide, so the sheets read as one continuous drawing. Review, toggle, or draw your own boxes, then Apply."
-            onClick={onCleanup}
-          >
-            <Sparkles className="h-3.5 w-3.5 shrink-0" />
-          </IconButtonWithTooltip>
+        {(onTrimOpen || onAutoDetect) && (
+          <div className="flex items-center gap-1" role="group" aria-label="Trim">
+            {onTrimOpen && (
+              <IconButtonWithTooltip
+                variant={cleanupActive ? "secondary" : "outline"}
+                disabled={!hasTiles || cleanupBusy || cleanupActive}
+                title="Trim: hide title blocks and margins by drawing boxes, then Apply"
+                label={cleanupActive ? "Reviewing…" : "Trim"}
+                tooltipDescription="Draw boxes over the parts of each sheet to hide — title blocks, match-line margins — so the set reads as one continuous drawing. Then Apply."
+                onClick={onTrimOpen}
+              >
+                <Scissors className="h-3.5 w-3.5 shrink-0" />
+              </IconButtonWithTooltip>
+            )}
+            {onAutoDetect && (
+              <IconButtonWithTooltip
+                variant="outline"
+                disabled={!hasTiles || cleanupBusy}
+                title="Auto-detect title blocks and matchline margins"
+                label="Auto-detect"
+                tooltipDescription="Let the detector propose the boxes. They are added to the review — anything you drew by hand stays."
+                onClick={onAutoDetect}
+              >
+                <Sparkles className="h-3.5 w-3.5 shrink-0" />
+              </IconButtonWithTooltip>
+            )}
+          </div>
         )}
         <IconButtonWithTooltip variant="outline" title="Crop output to the bounding box of all tiles" label="Crop to content" onClick={onCropCanvas}>
           <Crop className="h-3.5 w-3.5 shrink-0" />

@@ -247,6 +247,15 @@ const ROLE_NOUN: Record<string, string> = {
  *  inert and gave no clue. */
 export const TRIM_STEP_TITLE = "Find title blocks and matchline margins to hide, then review the boxes";
 
+/** Coach-mark body for step 3, shown the first time a session enters the Trim
+ *  review from the step. Names the ONE thing the boxes mean and the ONE gesture
+ *  that does the other thing (move the content, not the box) — Mark found the
+ *  old overloaded drag unreadable, so the copy leads with the handle. The last
+ *  sentence names Auto-detect, since Trim is a two-part tool and the step just
+ *  ran the AI half on the user's behalf. */
+export const TRIM_COACH_BODY =
+  "Boxes cover what will be hidden. Drag the handle above a box to move that content instead, then Apply. Auto-detect finds title blocks and margins for you.";
+
 /** Shown in the strip for 6s when a Clean-up run from the step finds nothing to
  *  hide — the eraser (Delete content) is the manual fallback, named so the user
  *  is not left staring at an empty review with no next move. */

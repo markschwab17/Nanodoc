@@ -42,6 +42,7 @@ import { buildStitchManifest } from "@/features/stitch/stitchManifest";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
 import { detectCleanupForTiles } from "@/features/stitch/cleanup/cleanupRun";
 import type { TileProposalUI } from "@/features/stitch/cleanup/CleanupReview";
+import { mergeDetected, seedProposals, trimReviewableTiles } from "@/features/stitch/cleanup/trimProposals";
 import { hitTestTileAtPoint, canvasToTileLocal, contentBounds, fitZoomFor } from "@/features/stitch/stitchGeometry";
 import { MAX_ZOOM, RULER_SIZE } from "@/features/stitch/stitchConstants";
 import type { CanvasRect } from "@/features/stitch/imageUtils";
@@ -56,7 +57,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { AlertTriangle, FilePlus, Loader2, X } from "lucide-react";
+import { AlertTriangle, FilePlus, Loader2, Sparkles, X } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
 import { useTourStore } from "@/shared/stores/tourStore";
 
@@ -492,11 +493,6 @@ export default function StitchView() {
   const { loadPDF } = usePDF();
   const { showNotification } = useNotificationStore();
 
-  // While Align to neighbour is up the moving sheet is the selection, so Delete would
-  // delete the sheet being aligned and Ctrl+A would select all of them out from under
-  // the mode. Nudges stay — they are the mode's own fine adjustment.
-  useStitchKeyboard({ selectionEditsDisabled: alignNeighbour.active });
-
   const [showAddPdf, setShowAddPdf] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [saveDialogIntent, setSaveDialogIntent] = useState<"download" | "open">("download");
@@ -512,6 +508,13 @@ export default function StitchView() {
   const [cleanupReviewMode, setCleanupReviewMode] = useState(false);
   const [cleanupProposals, setCleanupProposals] = useState<TileProposalUI[]>([]);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+
+  // While Align to neighbour is up the moving sheet is the selection, so Delete would
+  // delete the sheet being aligned and Ctrl+A would select all of them out from under
+  // the mode. Nudges stay — they are the mode's own fine adjustment.
+  // While clean-up review is open, Delete/Backspace belongs to the selected
+  // BOX (CleanupReview owns that key) — not to the canvas selection.
+  useStitchKeyboard({ selectionEditsDisabled: alignNeighbour.active || cleanupReviewMode });
 
   // --- Step 3 "Trim title blocks" (takeoff step strip only) ---
   // Coach mark: shown the first time cleanup is entered FROM THE STEP, once per
@@ -712,26 +715,26 @@ export default function StitchView() {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [handleSelectToolActivate]);
 
-  // --- Clean-Composite (hide title blocks / match margins) ---
-  // Returns the freshly-DETECTED region count (0 means nothing was found — the
-  // caller decides what to do about that), or null when the run never got that
-  // far (toggled off, nothing reviewable, or it threw).
-  const handleCleanup = useCallback(async (): Promise<number | null> => {
-    // Toolbar button toggles: a second click while reviewing cancels.
-    if (cleanupReviewMode) {
-      exitCleanupReview();
-      return null;
-    }
-    // Only sheets with a PDF source get analyzed — skip scale stamps, rotated
-    // tiles (v1), and promoted note tiles (no source, would fail to capture).
-    const reviewable = useStitchStore
-      .getState()
-      .tiles.filter((t) => !t.isScaleStamp && !(t.rotation ?? 0) && t.sourcePdfBytes.length > 0);
-    if (reviewable.length === 0) {
-      showNotification("Add at least one page to the canvas first.", "info");
-      return null;
-    }
-    // Clean-up is its own mode — turn the other tools off.
+  // --- Trim (hide title blocks / match margins) ---
+  // Two parts, deliberately separate — Mark: "it is a 2-part tool, either AI or
+  // manual", and one sparkle button implied the whole thing was AI. Trim opens
+  // the review; Auto-detect is a second button that folds the detector's
+  // findings into whatever is already there.
+
+  /** Auto-detect found nothing: say so in the strip for a few seconds and ring
+   *  the manual eraser, rather than leaving an empty review with no next move. */
+  const showNoBoxesNote = useCallback(() => {
+    setTrimNote(TRIM_NO_BOXES_NOTE);
+    setHighlightEraser(true);
+    if (trimNoteTimeoutRef.current) clearTimeout(trimNoteTimeoutRef.current);
+    trimNoteTimeoutRef.current = setTimeout(() => {
+      setTrimNote(null);
+      setHighlightEraser(false);
+    }, 6000);
+  }, []);
+
+  /** Put the other tools away — Trim owns the canvas while it is up. */
+  const enterTrimMode = useCallback(() => {
     setContentDeleteMode(false);
     setDeleteElementMode(false);
     setPanMode(false);
@@ -739,82 +742,84 @@ export default function StitchView() {
     scaleAlign.setScaleAlignMode(false);
     alignNeighbourExit();
     setSelectedTileIds([]);
+  }, [pointAlign, scaleAlign, alignNeighbourExit, setSelectedTileIds]);
+
+  /** Open the review with no detection at all: the boxes already on the sheets,
+   *  and a canvas you can draw more on. Returns false if there is nothing to
+   *  trim. A second click while reviewing cancels (the toolbar disables it, but
+   *  the step and the keyboard can still get here). */
+  const handleTrimOpen = useCallback((): boolean => {
+    if (cleanupReviewMode) {
+      exitCleanupReview();
+      return false;
+    }
+    const reviewable = trimReviewableTiles(useStitchStore.getState().tiles);
+    if (reviewable.length === 0) {
+      showNotification("Add at least one page to the canvas first.", "info");
+      return false;
+    }
+    enterTrimMode();
+    setCleanupProposals(seedProposals(reviewable));
+    setCleanupReviewMode(true);
+    return true;
+  }, [cleanupReviewMode, exitCleanupReview, showNotification, enterTrimMode]);
+
+  // Returns the freshly-DETECTED region count (0 means the detector found
+  // nothing — the caller decides what to say about that), or null when the run
+  // never got that far (nothing reviewable, or it threw).
+  const handleAutoDetect = useCallback(async (): Promise<number | null> => {
+    const reviewable = trimReviewableTiles(useStitchStore.getState().tiles);
+    if (reviewable.length === 0) {
+      showNotification("Add at least one page to the canvas first.", "info");
+      return null;
+    }
+    // Auto-detect can be pressed from the toolbar with no review open, in which
+    // case it opens one — seeded first, so the sheets' existing boxes are not
+    // lost when the detections are merged in.
+    const wasOpen = cleanupReviewMode;
+    if (!wasOpen) enterTrimMode();
     setCleanupBusy(true);
     showNotification("Analyzing sheets for title blocks and match margins…", "info");
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
-      const proposals = await detectCleanupForTiles(mupdf, reviewable);
-      // Fresh detections default to enabled — the user confirms by Applying,
-      // toggling off any false positives. Merge in each tile's already-hidden
-      // regions so a re-run never drops prior work (a manual box, or regions
-      // applied from an earlier Clean-up pass), but skip any existing rect
-      // that a fresh detection already covers so re-running doesn't duplicate
-      // an already-applied region.
-      const currentTiles = useStitchStore.getState().tiles;
-      const ui: TileProposalUI[] = proposals.map((p) => {
-        const fresh = p.regions.map((r) => ({ ...r, enabled: true }));
-        const tile = currentTiles.find((t) => t.id === p.tileId);
-        const existing = (tile?.hiddenRegions ?? [])
-          .filter((rect) => !fresh.some((f) => rectsEqual([f.rect], [rect])))
-          .map((rect) => ({
-            rect: { ...rect },
-            kind: "manual" as const,
-            confidence: "high" as const,
-            enabled: true,
-          }));
-        // Carry forward already-relocated regions so a re-run + Apply doesn't wipe them.
-        const relocated = (tile?.relocatedRegions ?? []).map((r) => ({
-          rect: { ...r.rect },
-          kind: "manual" as const,
-          confidence: "high" as const,
-          enabled: true,
-          move: { dx: r.dx, dy: r.dy },
-        }));
-        return { tileId: p.tileId, regions: [...fresh, ...existing, ...relocated] };
-      });
-      const freshTotal = proposals.reduce((s, p) => s + p.regions.length, 0);
-      setCleanupProposals(ui);
+      const detected = await detectCleanupForTiles(mupdf, reviewable);
+      setCleanupProposals((prev) =>
+        mergeDetected(wasOpen ? prev : seedProposals(reviewable), detected)
+      );
       setCleanupReviewMode(true);
+      const freshTotal = detected.reduce((s, p) => s + p.regions.length, 0);
+      if (freshTotal === 0) showNoBoxesNote();
       showNotification(
         freshTotal > 0
-          ? `Found ${freshTotal} region${freshTotal === 1 ? "" : "s"} to clean up. Toggle any off, draw a box to add, then Apply.`
-          : "No title blocks or match margins detected. Draw a box to hide a region manually, then Apply.",
+          ? `Auto-detect added ${freshTotal} box${freshTotal === 1 ? "" : "es"}. Set any to Keep, draw more by hand, then Apply.`
+          : "No title blocks or match margins detected. Draw a box to hide an area, then Apply.",
         "info"
       );
       return freshTotal;
     } catch (e) {
       console.error(e);
-      showNotification("Clean up couldn't analyze the sheets.", "error");
+      showNotification("Auto-detect couldn't analyze the sheets.", "error");
       return null;
     } finally {
       setCleanupBusy(false);
     }
-  }, [cleanupReviewMode, exitCleanupReview, showNotification, pointAlign, scaleAlign, alignNeighbourExit, setSelectedTileIds]);
+  }, [cleanupReviewMode, showNotification, enterTrimMode, showNoBoxesNote]);
 
-  // Step 3's own entry point: same detection run, plus the coach mark (first
-  // entry from the step, this session) and the "no boxes found" fallback that
-  // names the eraser tool.
+  // Step 3's own entry point. The two toolbar buttons are deliberately separate,
+  // but the STEP stays one click: it opens Trim and runs Auto-detect for you,
+  // plus the coach mark (first entry from the step, this session).
   const handleTrimStepClick = useCallback(() => {
-    // A click while already reviewing is a NO-OP — handleCleanup's own toggle
+    // A click while already reviewing is a NO-OP — handleTrimOpen's own toggle
     // would otherwise read it as "cancel review", which is not what clicking a
     // step pill that reads "reviewing" should do. Bail before touching
     // trimStepEnteredRef so a no-op click can't leave it armed for some later,
     // unrelated toolbar-opened review to wrongly claim as "from the step".
     if (cleanupReviewMode) return;
     trimStepEnteredRef.current = true;
-    void handleCleanup().then((freshTotal) => {
-      if (freshTotal !== 0) return;
-      // Nothing detected: point at the manual eraser for a few seconds rather
-      // than leaving an empty review with no next move.
-      setTrimNote(TRIM_NO_BOXES_NOTE);
-      setHighlightEraser(true);
-      if (trimNoteTimeoutRef.current) clearTimeout(trimNoteTimeoutRef.current);
-      trimNoteTimeoutRef.current = setTimeout(() => {
-        setTrimNote(null);
-        setHighlightEraser(false);
-      }, 6000);
-    });
-  }, [cleanupReviewMode, handleCleanup]);
+    if (!handleTrimOpen()) return;
+    // handleAutoDetect raises the "no title blocks found" note itself.
+    void handleAutoDetect();
+  }, [cleanupReviewMode, handleTrimOpen, handleAutoDetect]);
 
   // The coach mark fires once the review overlay actually opens as a result of
   // that step click — not on every re-open, and not for a toolbar-triggered run.
@@ -968,7 +973,7 @@ export default function StitchView() {
     const parts: string[] = [];
     if (hiddenTotal) parts.push(`hid ${hiddenTotal}`);
     if (movedTotal) parts.push(`relocated ${movedTotal} as movable ${movedTotal === 1 ? "object" : "objects"}`);
-    showNotification(parts.length ? `Clean up: ${parts.join(" · ")}.` : "No changes applied.", "success");
+    showNotification(parts.length ? `Trim: ${parts.join(" · ")}.` : "No changes applied.", "success");
   }, [cleanupProposals, showNotification]);
 
   // Escape cancels clean-up review.
@@ -1286,7 +1291,8 @@ export default function StitchView() {
         onPanModeChange={handlePanModeChange}
         onSelectToolActivate={handleSelectToolActivate}
         onClearSession={handleClearSession}
-        onCleanup={handleCleanup}
+        onTrimOpen={handleTrimOpen}
+        onAutoDetect={() => { void handleAutoDetect(); }}
         cleanupActive={cleanupReviewMode}
         cleanupBusy={cleanupBusy}
         highlightDeleteContent={highlightEraser}
@@ -1402,9 +1408,22 @@ export default function StitchView() {
         {cleanupReviewMode && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2.5 shadow-lg">
             <span className="text-sm font-medium text-popover-foreground">
-              Clean up: {cleanupHideCount} to hide{cleanupMoveCount ? ` · ${cleanupMoveCount} to relocate` : ""}
+              Trim: {cleanupHideCount} hidden{cleanupMoveCount ? ` · ${cleanupMoveCount} moved` : ""}
             </span>
-            <span className="hidden sm:inline text-xs text-muted-foreground">Drag a box to relocate · click hide/keep · handles resize · ✕ delete · drag empty to add</span>
+            <span className="hidden sm:inline text-xs text-muted-foreground">Draw a box to hide an area.</span>
+            {/* Auto-detect is repeated here so it can be run once the review is
+                already open — the toolbar is the other half of the same pair. */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5"
+              disabled={cleanupBusy}
+              title="Auto-detect title blocks and matchline margins"
+              onClick={() => { void handleAutoDetect(); }}
+            >
+              <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              Auto-detect
+            </Button>
             <Button variant="ghost" size="sm" className="h-7" onClick={exitCleanupReview}>
               Cancel
             </Button>
