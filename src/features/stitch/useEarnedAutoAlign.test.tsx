@@ -386,7 +386,10 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     expect(posted.filter((p) => p.kind === "abort" && p.docId === docId)).toHaveLength(1);
     expect(hook.status).toBe("unavailable");
     expect(hook.reason).toBe("too_slow");
-    expect(info).toHaveBeenCalledWith("[probe] %s: %d ms, %d OCR calls", "unavailable", expect.any(Number), 0);
+    // "?" not 0: the budget expired with no reply, so nobody ever told us the count —
+    // and printing 0 claimed a check that had been grinding through OCR for a minute
+    // had made no OCR calls at all.
+    expect(info).toHaveBeenCalledWith("[probe] %s: %d ms, %s OCR calls", "unavailable", expect.any(Number), "?");
     info.mockRestore();
 
     // A reply that lands after the budget already gave up must not resurrect it.
@@ -416,6 +419,16 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     shutdownOcr.mockClear();
     act(() => hook.reset());
     expect(shutdownOcr).toHaveBeenCalled();
+  });
+
+  it("logs the count the worker reported, including on an aborted reply", () => {
+    seedCanvas([0, 1]);
+    mount();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    act(() => hook.check());
+    act(() => workers[0].reply({ docId: posted.at(-1)!.docId, aborted: true, ocrCalls: 42 }));
+    expect(info).toHaveBeenCalledWith("[probe] %s: %d ms, %s OCR calls", "aborted", expect.any(Number), "42");
+    info.mockRestore();
   });
 
   it("does not fire the budget once the worker settles first", () => {

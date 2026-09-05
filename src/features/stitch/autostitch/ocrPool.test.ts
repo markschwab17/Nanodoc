@@ -326,13 +326,38 @@ describe("createOcrPool — failures and teardown", () => {
     expect(created.map((w) => w.terminated)).toEqual([1, 1]);
     await expect(c).resolves.toBe(OCR_NO_RESULT); // queued job released, never ran
 
-    // In-flight jobs settle however their (now dead) worker settles.
+    // In-flight jobs are settled by terminate() itself, not left to their now-dead
+    // worker. Whatever that worker says afterwards is ignored — the pool is gone.
+    await expect(a).resolves.toBe(OCR_NO_RESULT);
+    await expect(b).resolves.toBe(OCR_NO_RESULT);
     created[0].open.resolve("A");
     created[1].open.reject(new Error("terminated"));
-    await expect(a).resolves.toBe("A");
-    await expect(b).rejects.toThrow("terminated");
+    await flush();
 
     await expect(p.run("d")).resolves.toBe(OCR_NO_RESULT);
     expect(createCalls).toBe(2); // nothing new was built
+  });
+
+  it("terminate() disarms the dispatch timers — no phantom timeout after teardown", async () => {
+    vi.useFakeTimers();
+    try {
+      const onTimeout = vi.fn();
+      const p = createOcrPool<string, unknown>({ size: 2, createWorker, timeoutMs: () => 100, onTimeout });
+      const a = p.run("a");
+      const b = p.run("b");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(created.length).toBe(2);
+
+      await p.terminate();
+      // Both in-flight jobs are settled by the teardown, not by their timers…
+      await expect(a).resolves.toBe(OCR_NO_RESULT);
+      await expect(b).resolves.toBe(OCR_NO_RESULT);
+      // …and the timers themselves are gone. Left armed, they logged "recognize job
+      // timed out" a full budget after the modal had closed and the pool had been
+      // thrown away — a warning about work nobody was doing any more.
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(onTimeout).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
   });
 });

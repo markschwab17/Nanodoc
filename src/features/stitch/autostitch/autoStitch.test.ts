@@ -699,8 +699,11 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
   const run = async (opts: {
     edgeRot: 90 | 270 | null; hitStrips: number[]; ocrConcurrency: number;
     /** Confidence the winning edge-band rotation reads at (two side bands, so its
-     *  rotMass is 2x(conf-50)); and, optionally, what the LOSING rotation reads. */
-    edgeConf?: number; edgeOtherConf?: number;
+     *  rotMass is 2x(conf-50)), and what the LOSING rotation reads — `null` means it
+     *  answered with NO WORDS AT ALL, which is what a timed-out pool job looks like
+     *  from here. The default 51 is a real but worthless read: below wordsToLabels'
+     *  own 60-confidence cutoff, so it makes no labels, worth 1 per band. */
+    edgeConf?: number; edgeOtherConf?: number | null;
     /** Strips whose OCR rejects, and strips whose OCR answers late — the two
      *  together let a test make completion order disagree with index order. */
     throwStrips?: number[]; slowStrips?: number[];
@@ -728,9 +731,9 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
         // labels cannot hand page 0 the reciprocal edge ref and skip the very scan
         // under test; only where the CONFIDENCE lands matters here.
         if (opts.edgeRot == null) return [];
-        return rotOf(img) === opts.edgeRot
-          ? words("ZZZ", opts.edgeConf ?? 90)
-          : (opts.edgeOtherConf != null ? words("ZZZ", opts.edgeOtherConf) : []);
+        if (rotOf(img) === opts.edgeRot) return words("ZZZ", opts.edgeConf ?? 90);
+        const other = opts.edgeOtherConf === undefined ? 51 : opts.edgeOtherConf;
+        return other == null ? [] : words("ZZZ", other);
       }
       stripReads++;
       (rotsByStrip.get(tag) ?? rotsByStrip.set(tag, []).get(tag)!).push(rotOf(img));
@@ -819,12 +822,13 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
 
   it("locks the rotation only on real evidence: a floor and a margin over the loser", async () => {
     // The default fixture reads one word at confidence 90 on each of the two side
-    // bands: rotMass 80 vs 0, which clears both tests and locks.
+    // bands, and a worthless 51 the other way: rotMass 80 vs 2, which clears both
+    // tests and locks.
     const locked = await run({ edgeRot: 270, hitStrips: [], ocrConcurrency: 3 });
     expect(locked.stripReads).toBe(5);
 
     // FLOOR. A single misread fragment at confidence 55 is worth 5 per band, 10 for
-    // the page — a 10-vs-0 landslide made entirely of noise. It must not lock.
+    // the page — a 10-vs-2 landslide made entirely of noise. It must not lock.
     const noise = await run({ edgeRot: 270, hitStrips: [], edgeConf: 55, ocrConcurrency: 3 });
     expect(noise.stripReads).toBe(10);
 
@@ -837,5 +841,19 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     // …and a clear 2x margin over a loser that DID read something still locks.
     const clear = await run({ edgeRot: 270, hitStrips: [], edgeConf: 95, edgeOtherConf: 60, ocrConcurrency: 3 });
     expect(clear.stripReads).toBe(5);
+  });
+
+  it("a band where ONE rotation came back empty is left out of the tally", async () => {
+    // A side band's two rotations are two separate pool jobs. One can time out
+    // while the other returns, and `recognize` collapses OCR_NO_RESULT and a
+    // wordless read into the same `[]` — so a 20 s hiccup on one crop used to hand
+    // the survivor an unopposed landslide and lock the page to whichever rotation
+    // happened not to hang.
+    const answered = await run({ edgeRot: 270, hitStrips: [], edgeConf: 90, edgeOtherConf: 51, ocrConcurrency: 3 });
+    expect(answered.stripReads).toBe(5);   // 80 vs 2 — a real, opposed win: locks
+
+    // Identical winning read; the other rotation returned nothing at all.
+    const halfDead = await run({ edgeRot: 270, hitStrips: [], edgeConf: 90, edgeOtherConf: null, ocrConcurrency: 3 });
+    expect(halfDead.stripReads).toBe(10);  // no tally, no lock, both rotations scanned
   });
 });

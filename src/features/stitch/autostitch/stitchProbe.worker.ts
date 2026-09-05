@@ -114,8 +114,8 @@ async function handle(req: ProbeRequest) {
   } catch (err) {
     // An abort is not a failure — report it as skipped so the modal shows no toast.
     const msg: ProbeMessage = err instanceof AutoStitchAborted
-      ? { docId, aborted: true }
-      : { docId, error: String(err) };
+      ? { docId, aborted: true, ocrCalls: ocrCallCount }
+      : { docId, error: String(err), ocrCalls: ocrCallCount };
     self.postMessage(msg);
   }
 }

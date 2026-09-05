@@ -202,7 +202,7 @@ export function AddPdfModal({
       }
       if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
       // Nothing running and nothing queued means tesseract's 160-240 MB has no
-      // more work: hand it back. `ensureScheduler` rebuilds it lazily if a
+      // more work: hand it back. `ensurePool` rebuilds it lazily if a
       // later probe needs it.
       const ocrIdle = () => probeTimerRef.current == null && !probeInFlightRef.current;
       if (msg.docId !== probeDocIdRef.current) {

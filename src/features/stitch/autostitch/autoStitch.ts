@@ -495,7 +495,16 @@ function readPageOcr(
         // Score ONCE per candidate: the tally below and the pick both want it, and
         // `sort` would otherwise re-run it O(n log n) times over the same words.
         const cands = r.rots.map((rot, k) => ({ rot, words: got[k], score: rotScore(got[k]) }));
-        for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += c.score;
+        // A band's two rotations are two SEPARATE pool jobs, and one can time out
+        // while the other returns — `recognize` collapses OCR_NO_RESULT and a
+        // genuinely wordless read into the same `[]`, so the tally cannot tell them
+        // apart. Counting the survivor UNOPPOSED is how a single 20 s hiccup on one
+        // crop flips a page's rotation lock. When exactly one side came back empty,
+        // this band contributes nothing to the tally. (Both empty is already a
+        // no-op; and the per-band PICK is untouched either way — it has to choose
+        // something, and the non-empty read is still the better of the two.)
+        const blank = cands.reduce((n, c) => n + (c.words.length === 0 ? 1 : 0), 0);
+        if (blank !== 1) for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += c.score;
         // Unchanged pick: highest score wins, and a tie keeps the first of [90, 270]
         // because `Array#sort` is stable.
         const best = cands.sort((a, b) => b.score - a.score)[0];

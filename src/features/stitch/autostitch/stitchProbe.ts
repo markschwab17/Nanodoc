@@ -54,10 +54,13 @@ export interface ProbeResult {
 
 export type ProbeMessage =
   | ProbeResult
-  | { docId: number; error: string }
+  /** `ocrCalls` is carried on the failure paths too: a probe that errored or was
+   *  aborted still SPENT those round-trips, and reporting 0 for them made the
+   *  settle log quietly understate what a giving-up check had cost. */
+  | { docId: number; error: string; ocrCalls?: number }
   /** The probe was aborted mid-run (the user clicked plain "Add pages"). Not an
    *  error — the modal treats it as a skipped check, no toast. */
-  | { docId: number; aborted: true };
+  | { docId: number; aborted: true; ocrCalls?: number };
 
 export function toProbeResult(res: AutoStitchResult, docId: number, ocrCalls?: number): ProbeResult {
   return {

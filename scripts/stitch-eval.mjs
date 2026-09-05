@@ -251,8 +251,12 @@ for (const set of sets) {
   const t0 = Date.now();
   const before = ocrCalls;
   // `ocrConcurrency` tells autoStitch how wide the transport behind `ocr` really is,
-  // so its reciprocal strip scan batches to THIS pool rather than to the browser
-  // default (which, with no `navigator` in Node, would come out at 2 against 3 workers).
+  // so its reciprocal strip scan batches to THIS pool rather than guessing. The
+  // browser default derives from `navigator.hardwareConcurrency`, which Node only
+  // exposes from v21 (this harness runs on v20, where it is undefined and the
+  // derivation floors at 2) — and even on a newer Node it would describe the
+  // machine, not the three workers built below. Passing the real size is the only
+  // way the two agree.
   const res = await autoStitch(mupdf, doc, parseRanges(set.pages ?? "0-9"), { userScale: set.scale ?? 20, ocr, ocrConcurrency: OCR_POOL_SIZE });
   flushCache();
   row.seconds = (Date.now() - t0) / 1000;

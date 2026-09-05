@@ -6,7 +6,7 @@
  * dependable in the webviews this app packages for — macOS WKWebView and Linux
  * WebKitGTK (see src-tauri/tauri.conf.json `targets: "all"`). A nested-worker
  * failure there is silent, so OCR-based alignment would quietly never work. The
- * tesseract scheduler therefore lives on the main thread in ocrService.ts.
+ * tesseract POOL therefore lives on the main thread in ocrService.ts.
  *
  * This worker's ONLY job is the CPU raster→image conversion that would
  * otherwise starve the modal's page-render loop: it receives
@@ -14,7 +14,7 @@
  * draws it onto an OffscreenCanvas and `convertToBlob()`s it (both supported in
  * plain workers across modern Chrome/WebKit), then replies `{ocrId, blob}`
  * (Blobs are cheap to postMessage). The main thread hands that Blob straight to
- * `scheduler.addJob("recognize", blob)`, so the only main-thread cost is the
+ * the pool's `run(blob)`, so the only main-thread cost is the
  * postMessage — the heavy canvas/putImageData/convertToBlob stays off main.
  *
  * If OffscreenCanvas/convertToBlob is unavailable (an ancient webview), the

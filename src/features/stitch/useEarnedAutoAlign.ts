@@ -147,9 +147,12 @@ export function useEarnedAutoAlign(
    *  cost. Cheap enough to leave in always — it is the only visibility into probe cost
    *  outside the offline harness (scripts/stitch-eval.mjs). Shared by a normal worker
    *  reply and by the budget expiring, since both are ways a check "settles". */
-  const logSettle = useCallback((settled: string, ocrCalls: number) => {
+  const logSettle = useCallback((settled: string, ocrCalls: number | null) => {
     const ms = Math.round(performance.now() - checkStartRef.current);
-    console.info("[probe] %s: %d ms, %d OCR calls", settled, ms, ocrCalls);
+    // `null` means genuinely unknown — the budget expired with no reply, so nobody
+    // ever told us the count. Printing 0 there claimed a check that had been
+    // grinding through OCR for a minute had made no OCR calls at all.
+    console.info("[probe] %s: %d ms, %s OCR calls", settled, ms, ocrCalls == null ? "?" : String(ocrCalls));
   }, []);
 
   // Callbacks live in refs so `check`/`run` stay stable and a caller need not
@@ -161,8 +164,8 @@ export function useEarnedAutoAlign(
 
   /**
    * One worker, created on first use and terminated on unmount. `attachOcrRpc` bridges
-   * the worker's OCR requests to the shared tesseract scheduler (which runs its own
-   * workers — the main thread only routes the messages).
+   * the worker's OCR requests to the shared tesseract POOL (`ocrService`, which owns
+   * its own workers — the main thread only routes the messages).
    */
   const ensureWorker = useCallback((): Worker => {
     if (workerRef.current) return workerRef.current;
@@ -175,9 +178,9 @@ export function useEarnedAutoAlign(
       // The worker answered — the budget that was watching this same check is moot.
       clearBudget();
       // The probe is done with tesseract either way; 160-240 MB is worth handing back
-      // (`ensureScheduler` rebuilds it lazily if another check follows).
+      // (`ensurePool` rebuilds it lazily if another check follows).
       void shutdownOcr();
-      if ("aborted" in msg) { setStatus("idle"); logSettle("aborted", 0); return; }
+      if ("aborted" in msg) { setStatus("idle"); logSettle("aborted", msg.ocrCalls ?? null); return; }
       if ("error" in msg) {
         // A failed check is not a failed feature: the sheets are already on the canvas
         // in a grid, and the honest thing is to say the seams were not verified rather
@@ -187,7 +190,7 @@ export function useEarnedAutoAlign(
         setReason("unverified");
         setDetail(undefined);
         setStatus("unavailable");
-        logSettle("error", 0);
+        logSettle("error", msg.ocrCalls ?? null);
         return;
       }
       probeRef.current = msg;
@@ -200,7 +203,7 @@ export function useEarnedAutoAlign(
         setDetail(gate.detail);
         setStatus("unavailable");
       }
-      logSettle(gate.offered ? "offer" : "unavailable", msg.ocrCalls ?? 0);
+      logSettle(gate.offered ? "offer" : "unavailable", msg.ocrCalls ?? null);
     };
     workerRef.current = w;
     return w;
@@ -313,7 +316,7 @@ export function useEarnedAutoAlign(
         // superseded check, so this should be unreachable, but a reply landing in
         // the same tick as the timeout is not worth a race with `goneRef`.
         if (goneRef.current || requestedDocId !== docIdRef.current) return;
-        logSettle("unavailable", 0);
+        logSettle("unavailable", null);
         // The SAME abort a superseded check (or a plain "Add pages" re-check) would
         // send — the worker does not need a different message to know to give up.
         stop();

@@ -111,6 +111,8 @@ export function createOcrPool<Input, Result>(
   const live = new Set<W>();      // created and not yet retired (idle or busy)
   const idle: W[] = [];
   const queue: Job<Input, Result>[] = [];
+  // One entry per DISPATCHED job whose timeout is still armed — see `dispatch`.
+  const armed = new Set<() => void>();
   let pending = 0;                // workers reserved in `grow()` but not created yet
   let busy = 0;
   let creating = false;
@@ -200,6 +202,7 @@ export function createOcrPool<Input, Result>(
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
+      armed.delete(disarm);
       try { onTimeout?.(); } catch { /* logging must never break the timeout path */ }
       settle(job, OCR_NO_RESULT);
       busy--;
@@ -210,6 +213,20 @@ export function createOcrPool<Input, Result>(
       warm = false;
       pump();           // …and a replacement is created lazily if work remains
     }, timeoutMs());
+    // `terminate()`'s handle on this dispatch. It has to do BOTH halves: clearing
+    // the timer alone would strand the job forever (with the worker terminated,
+    // the timer was the only thing left that would ever settle it), and settling
+    // alone would leave the timer armed to log a phantom "job timed out" a full
+    // budget after the modal closed.
+    const disarm = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      armed.delete(disarm);
+      settle(job, OCR_NO_RESULT);
+      busy--;
+    };
+    armed.add(disarm);
     // Deliberately NOT clearing the timer when the job is merely ABORTED: the
     // worker is still chewing on the crop, and the timer is the only thing that
     // will ever reclaim it if that crop is the one that hangs.
@@ -220,6 +237,7 @@ export function createOcrPool<Input, Result>(
           if (done) return;
           done = true;
           clearTimeout(timer);
+          armed.delete(disarm);
           settle(job, result); // no-op if the job was aborted mid-flight
           release(worker);
         },
@@ -227,6 +245,7 @@ export function createOcrPool<Input, Result>(
           if (done) return;
           done = true;
           clearTimeout(timer);
+          armed.delete(disarm);
           fail(job, err);
           release(worker);
         },
@@ -264,9 +283,14 @@ export function createOcrPool<Input, Result>(
       live.clear();
       idle.length = 0;
       for (const job of queue.splice(0)) settle(job, OCR_NO_RESULT);
-      // In-flight jobs are left to their fate: terminating their worker makes
-      // recognize() reject (→ the caller's error path) and, if it never settles
-      // at all, the dispatch timer still fires and resolves them OCR_NO_RESULT.
+      // In-flight jobs are settled HERE rather than left to the dispatch timers.
+      // Leaving those armed meant the pool logged "recognize job timed out" and
+      // called `onTimeout` up to a full budget (20 s) after the modal had closed
+      // and the pool had been thrown away — a warning about work nobody was doing
+      // any more. `disarm` clears the timer and settles the job it was guarding,
+      // so nothing is stranded by the timer going away.
+      for (const disarm of [...armed]) disarm();
+      armed.clear();
       await Promise.all(workers.map(async (w) => {
         try { await w.terminate(); } catch { /* already dead */ }
       }));
