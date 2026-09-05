@@ -107,14 +107,6 @@ export const TOOLBAR_H_PX = 24;
 export const TOOLBAR_EST_W_PX = 150;
 /** Resize handle box, in SCREEN px. */
 export const HANDLE_PX = 11;
-/**
- * Padding (SCREEN px) around the box AND its controls that still counts as
- * "hovering this box". Mark: "when you move your mouse to the hover interactions
- * they disappear and you cannot interact with them" — the controls float clear
- * of the box, so without a padded bridge the pointer leaves the box mid-transit
- * and unmounts the very thing it was reaching for.
- */
-export const HOVER_PAD_PX = 12;
 /** Grace period before hover chrome is hidden, so a slip off the edge is survivable. */
 export const HOVER_LINGER_MS = 300;
 /**
@@ -151,11 +143,16 @@ export interface CleanupBoxChrome {
   /** Resize handle side length. */
   handle: number;
   /**
-   * The area that counts as "still on this box": the union of the box and the
-   * controls row, padded. Rendered as an invisible bridge so the pointer can
-   * cross the gap to the controls without the box firing `pointerleave`.
+   * The CORRIDOR between the box's edge and the controls row — the only strip of
+   * canvas the pointer crosses that belongs to neither. Rendered as an invisible
+   * child of the box so a pointer resting there is still "on" the box.
+   *
+   * Deliberately no wider than the controls and no taller than the gap: an
+   * earlier version padded the whole union by 12 px, which made a hovered box
+   * swallow every press in a halo around it and you could not start a new box
+   * beside one.
    */
-  hoverRegion: BoxRect;
+  bridge: BoxRect;
 }
 
 /**
@@ -184,26 +181,14 @@ export function cleanupBoxChrome(
   const grip = { left: gripLeft, top: rowTop + (rowH - gripSide) / 2, width: gripSide, height: gripSide };
   const toolbar = { left: gripLeft + gripSide + gap, top: rowTop, height: rowH, width: toolbarWidthPx / z };
 
-  const pad = HOVER_PAD_PX / z;
-  const x0 = Math.min(0, grip.left, toolbar.left) - pad;
-  const y0 = Math.min(0, rowTop) - pad;
-  const x1 = Math.max(boxW, toolbar.left + toolbar.width) + pad;
-  const y1 = Math.max(boxH, rowTop + rowH) + pad;
-
-  return {
-    grip,
-    toolbar,
-    handle: HANDLE_PX / z,
-    hoverRegion: { left: x0, top: y0, width: x1 - x0, height: y1 - y0 },
+  // Above: from the row's underside down to the box's top edge. Below: mirrored.
+  const bridgeTop = placement === "above" ? rowTop + rowH : boxH;
+  const bridge = {
+    left: grip.left,
+    top: bridgeTop,
+    width: toolbar.left + toolbar.width - grip.left,
+    height: gap,
   };
-}
 
-/** Is a point (offset from the box's top-left, canvas units) inside `region`? */
-export function pointInHoverRegion(x: number, y: number, region: BoxRect): boolean {
-  return (
-    x >= region.left &&
-    x <= region.left + region.width &&
-    y >= region.top &&
-    y <= region.top + region.height
-  );
+  return { grip, toolbar, handle: HANDLE_PX / z, bridge };
 }

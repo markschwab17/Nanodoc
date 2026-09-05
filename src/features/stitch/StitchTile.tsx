@@ -7,7 +7,7 @@
  * to the full tiles array (which changes on every drag frame).
  */
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
@@ -373,6 +373,30 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     [tile.id, tile.locked]
   );
 
+  // hiddenRegions are stored as fractions (0..1) of the tile — scale to px for
+  // the clip helper, which also has to make the hole set disjoint (the clip is
+  // even-odd). Memoised: the polygon string only changes when the regions or the
+  // tile's size/rotation do, and it was being rebuilt on every drag frame.
+  // Rotated tiles are NOT clipped (v1): the export drops holes on rotated tiles
+  // too, so preview and export stay consistent.
+  // Above the early return below — a hook must never sit behind a conditional.
+  const isRotated = (tile.rotation ?? 0) !== 0;
+  const hiddenClip = useMemo(() => {
+    if (isRotated) return null;
+    // Hide hiddenRegions AND every relocated region's SOURCE (its content is
+    // redrawn at the offset further down).
+    const holesPx = [
+      ...(tile.hiddenRegions ?? []),
+      ...(tile.relocatedRegions ?? []).map((r) => r.rect),
+    ].map((r) => ({
+      x: r.x * tile.width,
+      y: r.y * tile.height,
+      w: r.w * tile.width,
+      h: r.h * tile.height,
+    }));
+    return cssClipPathWithHoles(tile.width, tile.height, holesPx);
+  }, [isRotated, tile.hiddenRegions, tile.relocatedRegions, tile.width, tile.height]);
+
   // An image-less tile with no explanation is nothing to draw. One that FAILED
   // to encode is drawn as a visible error card: the user has to be able to see
   // and remove it, which an invisible-but-selectable tile made impossible.
@@ -385,23 +409,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // so the canvas must show the same thing (scale stamps included).
   const displayWidth = tile.width;
   const displayHeight = tile.height;
-  // hiddenRegions are stored as fractions (0..1) of the tile — scale to px for
-  // the clip helper. Rotated tiles are NOT clipped (v1): the export drops holes
-  // on rotated tiles too, so preview and export stay consistent.
-  const isRotated = (tile.rotation ?? 0) !== 0;
   const relocated = isRotated ? [] : tile.relocatedRegions ?? [];
-  // Hide hiddenRegions AND every relocated region's SOURCE (its content is
-  // redrawn at the offset below).
-  const holesPx = [
-    ...(tile.hiddenRegions ?? []),
-    ...relocated.map((r) => r.rect),
-  ].map((r) => ({
-    x: r.x * tile.width,
-    y: r.y * tile.height,
-    w: r.w * tile.width,
-    h: r.h * tile.height,
-  }));
-  const hiddenClip = isRotated ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
 
   // Selection chrome: FIXED colours, SCREEN-pixel widths (see canvasOverlayStyle — the
   // sheets are white paper in both themes, and the layer this lives in is zoom-scaled).

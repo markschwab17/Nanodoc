@@ -44,9 +44,11 @@ const proposal = (over: Partial<TileProposalUI["regions"][number]> = {}): TilePr
   },
 ];
 
-/** jsdom has no PointerEvent; MouseEvent + a pointerId is enough for React. */
-function pointer(type: string, x: number, y: number): Event {
-  const e = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 });
+/** jsdom has no PointerEvent; MouseEvent + a pointerId is enough for React.
+ *  `relatedTarget` matters for pointerover/out: React derives enter/leave from
+ *  the pair, and only fires leave up to the common ancestor of from → to. */
+function pointer(type: string, x: number, y: number, relatedTarget?: EventTarget | null): Event {
+  const e = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0, relatedTarget });
   Object.defineProperty(e, "pointerId", { value: 1 });
   return e;
 }
@@ -63,6 +65,7 @@ describe("CleanupReview — one meaning per gesture", () => {
   };
 
   beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     useStitchStore.getState().reset();
     useStitchStore.setState({ zoomLevel: 1, canvasWidth: 2000, canvasHeight: 2000 });
     container = document.createElement("div");
@@ -82,6 +85,7 @@ describe("CleanupReview — one meaning per gesture", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
   });
 
   const render = (proposals: TileProposalUI[]) =>
@@ -152,12 +156,68 @@ describe("CleanupReview — one meaning per gesture", () => {
     hover(boxEl());
     const bridge = container.querySelector("[data-cleanup-bridge]") as HTMLElement;
     expect(bridge).toBeTruthy();
-    // Box is 100x75 canvas px at (200,150) tile-local; the bridge is offset from
-    // the box's top-left and must reach ABOVE it, past the controls row.
-    expect(parseFloat(bridge.style.top)).toBeLessThan(0);
-    expect(parseFloat(bridge.style.left)).toBeLessThanOrEqual(0);
-    expect(parseFloat(bridge.style.height)).toBeGreaterThan(75);
-    expect(parseFloat(bridge.style.width)).toBeGreaterThan(100);
+    // Box is 100x75 canvas px at (200,150) tile-local. The bridge spans ONLY the
+    // gap between the box's top edge and the controls row above it.
+    // jsdom reports every rect at 0,0, so `toolbarPlacement` puts the row BELOW.
+    // Either way the bridge is a thin strip flush against one box edge.
+    expect(parseFloat(bridge.style.top)).toBeCloseTo(75, 6); // the box's bottom edge
+    const height = parseFloat(bridge.style.height);
+    expect(height).toBeGreaterThan(0);
+    expect(height).toBeLessThan(20);                          // the gap, not a halo
+    expect(parseFloat(bridge.style.left)).toBeGreaterThan(0); // inside the box's span
+  });
+
+  it("does NOT arm the hide timer when the pointer returns from the bridge to the box", () => {
+    // `pointerleave` fires on a child when the pointer moves to its PARENT. A
+    // bridge that listened for leave would start the 300 ms countdown on the way
+    // BACK from the controls, and the controls would vanish under the cursor —
+    // Mark's original complaint, one step later.
+    render(proposal());
+    hover(boxEl());
+    const bridge = container.querySelector("[data-cleanup-bridge]") as HTMLElement;
+    const box = boxEl();
+    // The return trip: out of the bridge, INTO its parent box. React fires leave
+    // only up to the common ancestor, so the bridge alone sees it.
+    act(() => {
+      bridge.dispatchEvent(pointer("pointerout", 250, 200, box));
+      box.dispatchEvent(pointer("pointerover", 250, 200, bridge));
+    });
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(gripEl()).toBeTruthy();        // still there, with the pointer on the box
+    expect(button(CANCEL_TITLE)).toBeTruthy();
+  });
+
+  it("does not swallow a drag started on the paper beside a hovered box", () => {
+    // The bridge used to be the box + controls + a 12 px halo, and it stops every
+    // pointerdown (otherwise a press on it would start a box drag from a point
+    // that is not on the box). A halo therefore made the paper AROUND a hovered
+    // box undrawable. jsdom does no hit-testing, so this is asserted where the
+    // truth actually lives — the bridge's rect must not cover any paper outside
+    // the box, on any side.
+    render(proposal());
+    hover(boxEl());
+    const bridge = container.querySelector("[data-cleanup-bridge]") as HTMLElement;
+    const r = {
+      left: parseFloat(bridge.style.left),
+      top: parseFloat(bridge.style.top),
+      width: parseFloat(bridge.style.width),
+      height: parseFloat(bridge.style.height),
+    };
+    const covers = (x: number, y: number) =>
+      x >= r.left && x <= r.left + r.width && y >= r.top && y <= r.top + r.height;
+    // Box-local coords: the box is (0,0)-(100,75). Just outside each edge:
+    expect(covers(-4, 40)).toBe(false);   // left of the box
+    expect(covers(104, 40)).toBe(false);  // right of it
+    expect(covers(50, -4)).toBe(false);   // above it
+    expect(covers(-4, -4)).toBe(false);   // the corner the halo used to eat
+    // Still a drag surface everywhere the box is not: the draw surface gets it.
+    const surface = container.querySelector(".cursor-crosshair") as HTMLElement;
+    act(() => {
+      surface.dispatchEvent(pointer("pointerdown", 195, 160));
+      surface.dispatchEvent(pointer("pointermove", 120, 100));
+      surface.dispatchEvent(pointer("pointerup", 120, 100));
+    });
+    expect(handlers.onManualBox).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the controls after the pointer leaves, once the box is SELECTED", () => {

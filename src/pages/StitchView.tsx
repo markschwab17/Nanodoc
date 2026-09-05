@@ -745,14 +745,13 @@ export default function StitchView() {
   }, [pointAlign, scaleAlign, alignNeighbourExit, setSelectedTileIds]);
 
   /** Open the review with no detection at all: the boxes already on the sheets,
-   *  and a canvas you can draw more on. Returns false if there is nothing to
-   *  trim. A second click while reviewing cancels (the toolbar disables it, but
-   *  the step and the keyboard can still get here). */
+   *  and a canvas you can draw more on. Returns whether the review is open —
+   *  false only when there is nothing to trim. Callers guard the already-open
+   *  case (the toolbar disables Trim, the step pill no-ops), so re-opening is a
+   *  no-op here rather than a cancel: silently discarding a review's boxes is
+   *  not something a button that says "Trim" should ever do. */
   const handleTrimOpen = useCallback((): boolean => {
-    if (cleanupReviewMode) {
-      exitCleanupReview();
-      return false;
-    }
+    if (cleanupReviewMode) return true;
     const reviewable = trimReviewableTiles(useStitchStore.getState().tiles);
     if (reviewable.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
@@ -762,7 +761,7 @@ export default function StitchView() {
     setCleanupProposals(seedProposals(reviewable));
     setCleanupReviewMode(true);
     return true;
-  }, [cleanupReviewMode, exitCleanupReview, showNotification, enterTrimMode]);
+  }, [cleanupReviewMode, showNotification, enterTrimMode]);
 
   // Returns the freshly-DETECTED region count (0 means the detector found
   // nothing — the caller decides what to say about that), or null when the run
@@ -775,14 +774,16 @@ export default function StitchView() {
     }
     // Auto-detect can be pressed from the toolbar with no review open, in which
     // case it opens one — seeded first, so the sheets' existing boxes are not
-    // lost when the detections are merged in.
+    // lost when the detections are merged in. The other tools are only put away
+    // once the detector has actually come back: a run that throws should leave
+    // the user's pan/selection exactly as it found them.
     const wasOpen = cleanupReviewMode;
-    if (!wasOpen) enterTrimMode();
     setCleanupBusy(true);
     showNotification("Analyzing sheets for title blocks and match margins…", "info");
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       const detected = await detectCleanupForTiles(mupdf, reviewable);
+      if (!wasOpen) enterTrimMode();
       setCleanupProposals((prev) =>
         mergeDetected(wasOpen ? prev : seedProposals(reviewable), detected)
       );

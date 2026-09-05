@@ -5,12 +5,10 @@ import {
   cleanupBoxLabel,
   cleanupBoxState,
   toolbarPlacement,
-  pointInHoverRegion,
   GRIP_INK,
   GRIP_PX,
   HANDLE_PX,
   HOVER_LINGER_MS,
-  HOVER_PAD_PX,
   TOOLBAR_FLIP_MARGIN_PX,
 } from "./cleanupBoxModel";
 
@@ -112,69 +110,61 @@ describe("cleanupBoxChrome", () => {
   });
 });
 
-describe("the hover region — controls must stay reachable", () => {
+describe("the bridge — the corridor between the box and its controls", () => {
   // Mark: "when you move your mouse to the hover interactions they disappear and
-  // you cannot interact with them." The region the pointer may occupy without
-  // "leaving" the box is the union of the box, the controls row, and padding.
+  // you cannot interact with them." The only canvas the pointer crosses that
+  // belongs to neither the box nor the controls is the gap between them, so that
+  // gap — and nothing more — is bridged. A padded halo around the whole thing
+  // would make a hovered box swallow presses meant for the empty paper beside it.
   const TOOLBAR_W = 150;
   const chrome = (placement: "above" | "below" = "above") =>
     cleanupBoxChrome(200, 100, 1, placement, TOOLBAR_W);
-  const inside = (x: number, y: number, placement: "above" | "below" = "above") =>
-    pointInHoverRegion(x, y, chrome(placement).hoverRegion);
 
   it("gives the pointer a grace period rather than hiding on the first leave", () => {
     expect(HOVER_LINGER_MS).toBeGreaterThanOrEqual(300);
   });
 
-  it("covers the box itself", () => {
-    expect(inside(100, 50)).toBe(true);
-    expect(inside(0, 0)).toBe(true);
-    expect(inside(200, 100)).toBe(true);
-  });
-
-  it("covers the GAP between the box's top edge and the controls row", () => {
+  it("exactly spans the gap between the box's top edge and the controls row", () => {
     const c = chrome();
-    const gapY = (c.toolbar.top + c.toolbar.height + 0) / 2; // somewhere in the gap
-    expect(gapY).toBeLessThan(0); // the gap really is above the box
-    expect(inside(100, gapY)).toBe(true);
+    expect(c.bridge.top).toBeCloseTo(c.toolbar.top + c.toolbar.height, 6); // row's underside
+    expect(c.bridge.top + c.bridge.height).toBeCloseTo(0, 6);              // box's top edge
+    expect(c.bridge.height).toBeGreaterThan(0);
   });
 
-  it("covers the move handle and the whole toolbar", () => {
-    const c = chrome();
-    expect(inside(c.grip.left + c.grip.width / 2, c.grip.top + c.grip.height / 2)).toBe(true);
-    expect(inside(c.toolbar.left + c.toolbar.width - 1, c.toolbar.top + 1)).toBe(true);
-  });
-
-  it("pads by 12 screen px around the union, and stops shortly after", () => {
-    const c = chrome();
-    expect(HOVER_PAD_PX).toBe(12);
-    expect(inside(-HOVER_PAD_PX + 0.5, 50)).toBe(true);   // just inside the left pad
-    expect(inside(-HOVER_PAD_PX - 1, 50)).toBe(false);    // beyond it
-    expect(inside(100, 100 + HOVER_PAD_PX - 0.5)).toBe(true);
-    expect(inside(100, 100 + HOVER_PAD_PX + 1)).toBe(false);
-    const topEdge = c.toolbar.top - HOVER_PAD_PX;
-    expect(inside(100, topEdge + 0.5)).toBe(true);
-    expect(inside(100, topEdge - 1)).toBe(false);
-  });
-
-  it("follows the row when the toolbar flips below the box", () => {
+  it("mirrors below the box when the row flips", () => {
     const c = chrome("below");
-    expect(c.toolbar.top).toBeGreaterThan(100);
-    expect(inside(100, c.toolbar.top + 1, "below")).toBe(true);
-    expect(inside(100, -HOVER_PAD_PX + 0.5, "below")).toBe(true); // pad above the box only
-    expect(inside(100, -HOVER_PAD_PX - 1, "below")).toBe(false);  // no row up there any more
+    expect(c.bridge.top).toBeCloseTo(100, 6);                              // box's bottom edge
+    expect(c.bridge.top + c.bridge.height).toBeCloseTo(c.toolbar.top, 6);  // row's top
   });
 
-  it("widens with the measured toolbar so a long row is still covered", () => {
-    const narrow = cleanupBoxChrome(200, 100, 1, "above", 40).hoverRegion;
-    const wide = cleanupBoxChrome(200, 100, 1, "above", 400).hoverRegion;
+  it("is no wider than the controls — it never overhangs the box's sides", () => {
+    const c = chrome();
+    expect(c.bridge.left).toBe(c.grip.left);
+    expect(c.bridge.left + c.bridge.width).toBeCloseTo(c.toolbar.left + c.toolbar.width, 6);
+    expect(c.bridge.left).toBeGreaterThan(0);   // starts inside the box's span, not left of it
+  });
+
+  it("never extends past the box's own edges into the empty paper around it", () => {
+    // The regression this shape exists to prevent: a press beside a hovered box
+    // must still reach the draw surface.
+    for (const placement of ["above", "below"] as const) {
+      const c = chrome(placement);
+      const top = Math.min(c.bridge.top, c.bridge.top + c.bridge.height);
+      const bottom = Math.max(c.bridge.top, c.bridge.top + c.bridge.height);
+      expect(top).toBeGreaterThanOrEqual(placement === "above" ? -100 : 100);
+      expect(bottom).toBeLessThanOrEqual(placement === "above" ? 0 : 200);
+    }
+  });
+
+  it("widens with the measured toolbar so the whole row is reachable", () => {
+    const narrow = cleanupBoxChrome(200, 100, 1, "above", 40).bridge;
+    const wide = cleanupBoxChrome(200, 100, 1, "above", 400).bridge;
     expect(wide.width).toBeGreaterThan(narrow.width);
-    expect(pointInHoverRegion(380, -10, wide)).toBe(true);
-    expect(pointInHoverRegion(380, -10, narrow)).toBe(false);
   });
 
-  it("scales the padding in screen px too", () => {
-    const far = cleanupBoxChrome(200, 100, 0.5, "above", TOOLBAR_W).hoverRegion;
-    expect(far.left).toBeCloseTo(Math.min(0, cleanupBoxChrome(200, 100, 0.5, "above", TOOLBAR_W).grip.left) - HOVER_PAD_PX / 0.5, 6);
+  it("scales in screen px like the rest of the chrome", () => {
+    const one = chrome().bridge;
+    const half = cleanupBoxChrome(200, 100, 0.5, "above", TOOLBAR_W).bridge;
+    expect(half.height).toBeCloseTo(one.height * 2, 6);
   });
 });

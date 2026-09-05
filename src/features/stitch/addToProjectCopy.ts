@@ -256,10 +256,11 @@ export const TRIM_STEP_TITLE = "Find title blocks and matchline margins to hide,
 export const TRIM_COACH_BODY =
   "Boxes cover what will be hidden. Drag the handle above a box to move that content instead, then Apply. Auto-detect finds title blocks and margins for you.";
 
-/** Shown in the strip for 6s when a Clean-up run from the step finds nothing to
- *  hide — the eraser (Delete content) is the manual fallback, named so the user
- *  is not left staring at an empty review with no next move. */
-export const TRIM_NO_BOXES_NOTE = "No title blocks found — use the eraser tool to hide areas by hand";
+/** Shown in the strip for 6s when Auto-detect finds nothing to hide. Names the
+ *  manual half of the tool — you draw the box yourself — so the user is not left
+ *  staring at an empty review with no next move. (The eraser button still rings
+ *  alongside it as the other way to clear an area.) */
+export const TRIM_NO_BOXES_NOTE = "No title blocks found — draw a box to hide an area by hand";
 
 export function autoAlignExplanation(outcome: AutoAlignOutcome | null | undefined): string | null {
   if (!outcome) return null;

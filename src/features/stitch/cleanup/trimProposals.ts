@@ -88,7 +88,7 @@ export function mergeDetected(
     const entry = byTile.get(d.tileId) ?? { tileId: d.tileId, regions: [] as CleanupRegionUI[] };
     for (const r of d.regions) {
       if (entry.regions.some((e) => sameRect(e.rect, r.rect))) continue;
-      entry.regions.push({ ...r, enabled: true });
+      entry.regions.push({ ...r, rect: { ...r.rect }, enabled: true });
     }
     if (entry.regions.length) byTile.set(d.tileId, entry);
   }

@@ -148,6 +148,48 @@ describe("tileHoleRectsInPdf", () => {
     const holes = tileHoleRectsInPdf(tile, 0, 0, 200);
     expect(holes).toEqual([{ x: 40, y: 145, w: 20, h: 10 }]); // same as the hidden-region case
   });
+
+  // The export clips with `clipEvenOdd`, so an area covered by an EVEN number of
+  // holes is painted back in. Overlapping holes have to be made disjoint before
+  // they reach the clip, or they cancel — the same fault that made a
+  // double-added hide box mask nothing on the canvas.
+  test("two IDENTICAL hidden regions collapse to one hole (they used to cancel)", () => {
+    const r = { x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0,
+      hiddenRegions: [r, { ...r }] } as any;
+    expect(tileHoleRectsInPdf(tile, 0, 0, 200)).toEqual([{ x: 40, y: 145, w: 20, h: 10 }]);
+  });
+
+  test("frameMask's four overlapping bands become a disjoint set that still covers the corners", () => {
+    // frameMask emits full-width top/bottom bands AND full-height side bands,
+    // which overlap at all four page corners — under even-odd those corners were
+    // painted back in and the page margins leaked into the export.
+    const tile = { x: 0, y: 0, width: 100, height: 100, rotation: 0, hiddenRegions: [
+      { x: 0, y: 0, w: 1, h: 0.1 },    // top
+      { x: 0, y: 0.9, w: 1, h: 0.1 },  // bottom
+      { x: 0, y: 0, w: 0.1, h: 1 },    // left
+      { x: 0.9, y: 0, w: 0.1, h: 1 },  // right
+    ] } as any;
+    const holes = tileHoleRectsInPdf(tile, 0, 0, 100);
+
+    // No two holes overlap…
+    for (let i = 0; i < holes.length; i++)
+      for (let j = i + 1; j < holes.length; j++) {
+        const a = holes[i], b = holes[j];
+        const ov = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
+                   Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        expect(ov).toBe(0);
+      }
+    // …and their total area is the union: 10000 − the 80×80 interior = 3600.
+    expect(holes.reduce((s, h) => s + h.w * h.h, 0)).toBeCloseTo(3600, 6);
+
+    // Every corner is still inside some hole (this is what regressed), and the
+    // frame's interior is still outside every hole.
+    const covered = (x: number, y: number) =>
+      holes.some((h) => x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h);
+    for (const [x, y] of [[5, 5], [95, 5], [5, 95], [95, 95]]) expect(covered(x, y)).toBe(true);
+    expect(covered(50, 50)).toBe(false);
+  });
 });
 
 describe("tileRelocationsInPdf", () => {

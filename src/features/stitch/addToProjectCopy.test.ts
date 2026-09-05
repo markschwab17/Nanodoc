@@ -329,10 +329,13 @@ describe("Trim title blocks step copy", () => {
     );
   });
 
-  it("the no-boxes note names the eraser as the manual fallback", () => {
+  it("the no-boxes note points at the manual half of Trim — drawing a box", () => {
     expect(TRIM_NO_BOXES_NOTE).toBe(
-      "No title blocks found — use the eraser tool to hide areas by hand",
+      "No title blocks found — draw a box to hide an area by hand",
     );
+    // It used to send the user to the eraser. Trim IS the manual tool now, and
+    // the review it just opened is where the box gets drawn.
+    expect(TRIM_NO_BOXES_NOTE).not.toMatch(/eraser/i);
   });
 });
 

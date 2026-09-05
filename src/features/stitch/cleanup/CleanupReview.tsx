@@ -218,6 +218,10 @@ function RegionBox({
   const move = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
+    // The handles and the grip are DOM children of the box and carry this same
+    // handler, so without this the box's own onPointerMove would run it a second
+    // time for every move during a resize or a content drag.
+    e.stopPropagation();
     const c = clientToCanvas(e.clientX, e.clientY);
     if (!c) return;
     const dx = c.x - d.sx, dy = c.y - d.sy;
@@ -345,28 +349,32 @@ function RegionBox({
 
       {show && (
         <>
-          {/* Invisible hover bridge: the union of the box and its controls plus 12
-              screen px. It is a DOM CHILD of the box, and pointerenter/leave treat
-              descendants as "inside", so crossing the gap up to the handle never
-              reads as leaving the box. Mounted only while hovering or dragging —
-              a merely SELECTED box keeps its controls anyway, and a permanent
-              bridge would block drawing a new box in the strip above it. */}
+          {/* Invisible bridge across the gap between the box and its controls —
+              a DOM CHILD of the box, so pointerenter/leave (which treat
+              descendants as "inside") never see the transit as leaving.
+              Mounted only while hovering or dragging: a merely SELECTED box keeps
+              its controls anyway, and a permanent bridge would block drawing a
+              new box in the strip above this one.
+
+              It carries NO onPointerLeave. `pointerleave` fires on a child when
+              the pointer moves to its PARENT, so a bridge that armed the linger
+              on leave would start the hide countdown on the return trip from the
+              controls back onto the box — Mark's original complaint, one step
+              later. The box's own onPointerLeave already covers this subtree. */}
           {(hover || active) && (
             <div
               data-cleanup-bridge
               aria-hidden
               onPointerEnter={enter}
-              onPointerLeave={leave}
-              // The bridge is a DOM child of the box, so a press on it would
-              // otherwise bubble into beginBox and start a box drag from a point
-              // that is not on the box. It is a hover target and nothing else.
+              // A press here would otherwise bubble into beginBox and start a box
+              // drag from a point that is not on the box. Hover target only.
               onPointerDown={stop}
               style={{
                 position: "absolute",
-                left: chrome.hoverRegion.left,
-                top: chrome.hoverRegion.top,
-                width: chrome.hoverRegion.width,
-                height: chrome.hoverRegion.height,
+                left: chrome.bridge.left,
+                top: chrome.bridge.top,
+                width: chrome.bridge.width,
+                height: chrome.bridge.height,
                 zIndex: -1, // behind the box body and the controls
                 background: "transparent",
               }}
