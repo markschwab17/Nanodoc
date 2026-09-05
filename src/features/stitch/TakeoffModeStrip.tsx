@@ -116,7 +116,7 @@ function AutoAlignOffer({ status, sheets, reason, detail, onRun, onRecheck }: Ta
     );
   }
   if (status === "unavailable" && reason) {
-    return (
+    const note = (
       <span
         className="flex flex-col items-end leading-tight text-xs text-muted-foreground"
         title={autoAlignUnavailableTitle(reason, detail)}
@@ -124,6 +124,18 @@ function AutoAlignOffer({ status, sheets, reason, detail, onRun, onRecheck }: Ta
       >
         <span>{autoAlignUnavailableNote(reason)}</span>
         {detail && <span className="text-[11px] opacity-80">{detail}</span>}
+      </span>
+    );
+    if (reason !== "too_slow") return note;
+    // The budget gave up on the probe, not a verdict about the sheets — trying again
+    // is likely to just work, so this is the one unavailable reason that keeps the
+    // Re-check action (unbudgeted: see useEarnedAutoAlign's `recheck`).
+    return (
+      <span className="flex items-center gap-2" aria-live="polite">
+        {note}
+        <Button size="sm" variant="outline" className="h-7 shrink-0" onClick={onRecheck}>
+          Re-check
+        </Button>
       </span>
     );
   }

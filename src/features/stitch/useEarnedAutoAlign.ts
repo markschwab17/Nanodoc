@@ -27,6 +27,13 @@
  * (the solver does not run twice), which is also what routes the commit through T0's
  * demotion — a sheet the seam report cannot stand behind is placed below rather than
  * claimed. The grid tiles are swapped for the aligned ones in ONE undo step.
+ *
+ * `check()` also carries a soft time budget (`PROBE_BUDGET_MS`): if the worker has not
+ * settled 60s after the request went out, the hook sends the probe the same abort it
+ * would send on a superseded check, and reports `unavailable`/`too_slow` — "it never
+ * grinds" is a promise about wall-clock time, not just about the UI staying responsive
+ * while the probe runs. `recheck()` — the user asking again on purpose — is deliberately
+ * UN-budgeted, so a Re-check after the budget fires gets a real, unhurried answer.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -39,6 +46,10 @@ import { commitAutoAlign, type CommitResult } from "./commitPages";
 import { AutoStitchAborted } from "./autostitch/autoStitch";
 import type { AutoAlignUnavailableReason } from "./addToProjectCopy";
 import { canvasProbeSet, hasMixedSources, movedSinceCheck, type CanvasProbeSet } from "./earnedAutoAlignSet";
+
+/** How long a probe gets before the hook stops waiting and says so instead. A manual
+ *  Re-check (the user asking again on purpose) skips this — see `recheck` below. */
+const PROBE_BUDGET_MS = 60_000;
 
 /** Session knowledge the canvas cannot supply. Remembered between checks. */
 export interface EarnedAutoAlignContext {
@@ -111,9 +122,29 @@ export function useEarnedAutoAlign(
   /** `performance.now()` when the current probe request was sent — for the
    *  settle-time log below. */
   const checkStartRef = useRef(0);
+  /** The pending soft-budget timeout for the check in flight, if any. Cleared on
+   *  settle, on unmount, and by every `stop()` (a superseded check or a reset) so it
+   *  never fires for a check that is no longer the current one. */
+  const budgetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Set on unmount so a reply that lands after teardown writes no state. RESET on
    *  every mount — see the effect below. */
   const goneRef = useRef(false);
+
+  const clearBudget = useCallback(() => {
+    if (budgetTimerRef.current !== null) {
+      clearTimeout(budgetTimerRef.current);
+      budgetTimerRef.current = null;
+    }
+  }, []);
+
+  /** One line per settled check: how long it took and how many OCR round-trips it
+   *  cost. Cheap enough to leave in always — it is the only visibility into probe cost
+   *  outside the offline harness (scripts/stitch-eval.mjs). Shared by a normal worker
+   *  reply and by the budget expiring, since both are ways a check "settles". */
+  const logSettle = useCallback((settled: string, ocrCalls: number) => {
+    const ms = Math.round(performance.now() - checkStartRef.current);
+    console.info("[probe] %s: %d ms, %d OCR calls", settled, ms, ocrCalls);
+  }, []);
 
   // Callbacks live in refs so `check`/`run` stay stable and a caller need not
   // memoise its handlers to avoid re-probing.
@@ -135,16 +166,11 @@ export function useEarnedAutoAlign(
       const msg = ev.data;
       if ((msg as { kind?: string })?.kind) return; // ocr-req / ocrPhase frames
       if (goneRef.current || msg.docId !== docIdRef.current) return; // stale
+      // The worker answered — the budget that was watching this same check is moot.
+      clearBudget();
       // The probe is done with tesseract either way; 160-240 MB is worth handing back
       // (`ensureScheduler` rebuilds it lazily if another check follows).
       void shutdownOcr();
-      // One line per settled check: how long it took and how many OCR round-trips
-      // it cost. Cheap enough to leave in always — it is the only visibility into
-      // probe cost outside the offline harness (scripts/stitch-eval.mjs).
-      const logSettle = (settled: string, ocrCalls: number) => {
-        const ms = Math.round(performance.now() - checkStartRef.current);
-        console.info("[probe] %s: %d ms, %d OCR calls", settled, ms, ocrCalls);
-      };
       if ("aborted" in msg) { setStatus("idle"); logSettle("aborted", 0); return; }
       if ("error" in msg) {
         // A failed check is not a failed feature: the sheets are already on the canvas
@@ -182,6 +208,7 @@ export function useEarnedAutoAlign(
     goneRef.current = false;
     return () => {
       goneRef.current = true;
+      clearBudget();
       workerRef.current?.terminate();
       workerRef.current = null;
       void shutdownOcr();
@@ -206,11 +233,14 @@ export function useEarnedAutoAlign(
     return useStitchStore.subscribe(recover);
   }, [status]);
 
-  /** Stop whatever is running and make any reply still in flight stale. */
+  /** Stop whatever is running and make any reply still in flight stale. Also retires
+   *  the budget watching that same check — it belongs to the check `stop` just ended,
+   *  not to whatever runs next. */
   const stop = useCallback(() => {
+    clearBudget();
     workerRef.current?.postMessage({ kind: "abort", docId: docIdRef.current });
     docIdRef.current++;
-  }, []);
+  }, [clearBudget]);
 
   const reset = useCallback(() => {
     stop();
@@ -223,7 +253,10 @@ export function useEarnedAutoAlign(
   }, [stop]);
 
   const check = useCallback(
-    (ctx?: EarnedAutoAlignContext) => {
+    // `budgeted` is internal-only — `recheck` below calls this with `false` so the
+    // user's own "try again" is never the thing the budget cuts off. Not part of the
+    // public `EarnedAutoAlign["check"]` signature; TS allows the wider function here.
+    (ctx?: EarnedAutoAlignContext, budgeted = true) => {
       if (ctx) ctxRef.current = { ...ctxRef.current, ...ctx };
       stop();
       probeRef.current = null;
@@ -262,12 +295,31 @@ export function useEarnedAutoAlign(
         pageCodes: ctxRef.current.pageCodes?.size ? [...ctxRef.current.pageCodes] : undefined,
       };
       checkStartRef.current = performance.now();
+      const requestedDocId = req.docId;
       ensureWorker().postMessage(req);
+      if (budgeted) {
+        budgetTimerRef.current = setTimeout(() => {
+          budgetTimerRef.current = null;
+          // Belt-and-braces: `stop()`/`reset()` already clear this timer on every
+          // superseded check, so this should be unreachable, but a reply landing in
+          // the same tick as the timeout is not worth a race with `goneRef`.
+          if (goneRef.current || requestedDocId !== docIdRef.current) return;
+          logSettle("unavailable", 0);
+          // The SAME abort a superseded check (or a plain "Add pages" re-check) would
+          // send — the worker does not need a different message to know to give up.
+          stop();
+          setReason("too_slow");
+          setDetail(undefined);
+          setStatus("unavailable");
+        }, PROBE_BUDGET_MS);
+      }
     },
-    [ensureWorker, stop],
+    [ensureWorker, stop, logSettle],
   );
 
-  const recheck = useCallback(() => check(), [check]);
+  // The user asking again on purpose gets a real, unhurried answer — the budget exists
+  // to stop an UNATTENDED probe from grinding, not to hurry a deliberate retry.
+  const recheck = useCallback(() => check(undefined, false), [check]);
 
   const run = useCallback(async () => {
     const set = setRef.current;

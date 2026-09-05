@@ -371,3 +371,89 @@ describe("useEarnedAutoAlign", () => {
     root = createRoot(container);
   });
 });
+
+describe("useEarnedAutoAlign — probe time budget", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("gives up after the budget: aborts once, reports unavailable/too_slow, logs it", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    const docId = posted.at(-1)!.docId;
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(posted.filter((p) => p.kind === "abort" && p.docId === docId)).toHaveLength(1);
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
+    expect(info).toHaveBeenCalledWith("[probe] %s: %d ms, %d OCR calls", "unavailable", expect.any(Number), 0);
+    info.mockRestore();
+
+    // A reply that lands after the budget already gave up must not resurrect it.
+    act(() => workers[0].reply(goodProbe(docId, [0, 1])));
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
+  });
+
+  it("does not fire the budget once the worker settles first", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+    const abortsBefore = posted.filter((p) => p.kind === "abort").length;
+    act(() => vi.advanceTimersByTime(60_000));
+    // No extra abort was sent, and the settled offer was left alone.
+    expect(posted.filter((p) => p.kind === "abort")).toHaveLength(abortsBefore);
+    expect(hook.status).toBe("offer");
+  });
+
+  it("Re-check after the budget fires runs a fresh, un-budgeted check", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
+
+    act(() => hook.recheck());
+    expect(hook.status).toBe("checking");
+    const abortsAfterRecheck = posted.filter((p) => p.kind === "abort").length;
+    // Waiting out a full budget's worth of time does not touch the un-budgeted check.
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(hook.status).toBe("checking");
+    expect(posted.filter((p) => p.kind === "abort")).toHaveLength(abortsAfterRecheck);
+
+    // It still settles normally, on its own schedule.
+    act(() => workers.at(-1)!.reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+  });
+
+  it("a superseded check (new docId) clears the old budget — no stray abort or state write", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    const first = posted.at(-1)!.docId;
+    act(() => hook.check()); // supersedes before the first budget could fire
+    const second = posted.at(-1)!.docId;
+    expect(second).not.toBe(first);
+    const abortsSoFar = posted.filter((p) => p.kind === "abort").length; // the supersede's own abort
+    act(() => vi.advanceTimersByTime(60_000));
+    // The first check's budget never fires a SECOND abort for it.
+    expect(posted.filter((p) => p.kind === "abort" && p.docId === first)).toHaveLength(1);
+    expect(posted.filter((p) => p.kind === "abort")).toHaveLength(abortsSoFar + 1); // only the second check's own budget
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
+  });
+
+  it("clears the timer on unmount — the pending budget is actually cancelled", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    act(() => root.unmount());
+    // Not just guarded by goneRef — the timeout itself is gone.
+    expect(vi.getTimerCount()).toBe(0);
+    root = createRoot(container);
+  });
+});

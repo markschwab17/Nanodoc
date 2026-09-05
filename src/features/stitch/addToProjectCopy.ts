@@ -152,7 +152,8 @@ export type AutoAlignUnavailableReason =
   | "no_refs"
   | "no_matchline"
   | "unverified"
-  | "mixed_sources";
+  | "mixed_sources"
+  | "too_slow";
 
 export const AUTO_ALIGN_UNAVAILABLE_REASONS: Record<AutoAlignUnavailableReason, string> = {
   no_refs: "no sheet numbers or matchline callouts were found",
@@ -162,6 +163,10 @@ export const AUTO_ALIGN_UNAVAILABLE_REASONS: Record<AutoAlignUnavailableReason, 
   // built from two PDFs is never probed. Saying so beats the silence that was there
   // before, which read as "the feature is broken".
   mixed_sources: "these sheets come from two different PDFs",
+  // Not a verdict about the drawings either: the hook's own soft time budget gave up
+  // waiting on the probe. Unlike the other reasons, trying again is likely to just
+  // work — the strip keeps the Re-check action for exactly this one, un-budgeted.
+  too_slow: "the check took too long",
 };
 
 /** The primary action's label. `n` is the number of sheets the run would CLAIM —
