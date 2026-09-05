@@ -364,6 +364,66 @@ describe("ocrService.attachOcrRpc (forwarding)", () => {
     conv.emit({ ocrId: conv.posted[0].ocrId, error: "boom" });
     await flush();
     const relay = probe.posted.find((p) => p.kind === "ocr-res");
-    expect(relay).toEqual({ kind: "ocr-res", ocrId: 42, words: [] });
+    // A conversion failure is a broken pipe, not an expired job budget: `noResult`
+    // is false, so the aligner does not re-read the band as sub-clips for it.
+    expect(relay).toEqual({ kind: "ocr-res", ocrId: 42, words: [], noResult: false });
+  });
+
+  it("tells the probe when a read was a NON-ANSWER, so the band can be re-read", async () => {
+    vi.useFakeTimers();
+    const { attachOcrRpc, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(100);
+    h.recognize = () => new Promise(() => { /* hangs past the budget */ });
+    const probe = new FakeWorker("probe");
+    attachOcrRpc(probe as unknown as Worker);
+    probe.emit({ kind: "ocr-req", ocrId: 7, image: IMG() });
+    const conv = FakeWorker.instances.find((w) => w !== probe)!;
+    conv.emit({ ocrId: conv.posted[0].ocrId, blob: fakeBlob("x") });
+    await vi.advanceTimersByTimeAsync(200);
+    const relay = probe.posted.find((p) => p.kind === "ocr-res");
+    // Same `[]` a wordless crop produces — the flag is the only thing that tells
+    // them apart, and it is what `readPageOcr` retries on.
+    expect(relay).toEqual({ kind: "ocr-res", ocrId: 7, words: [], noResult: true });
+  });
+});
+
+describe("ocrService.recognize — onNoResult", () => {
+  it("fires on an expired job budget and not on a crop that simply has no text", async () => {
+    vi.useFakeTimers();
+    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(100);
+    h.recognize = () => new Promise(() => { /* hangs */ });
+    let hung = false;
+    const pHang = recognize(IMG(), { onNoResult: () => { hung = true; } });
+    convReply(0, "hang");
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(pHang).resolves.toEqual([]);
+    expect(hung).toBe(true);
+
+    // A worker that answers with no words is an ANSWER: same [], no flag.
+    h.recognize = async () => ({ data: { words: [] } });
+    let empty = false;
+    const pEmpty = recognize(IMG(), { onNoResult: () => { empty = true; } });
+    await vi.advanceTimersByTimeAsync(0);
+    convReply(1, "empty");
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(pEmpty).resolves.toEqual([]);
+    expect(empty).toBe(false);
+  });
+
+  it("does NOT fire when the caller aborted — that is the caller's own doing", async () => {
+    const { recognize } = await import("./ocrService");
+    h.recognize = () => new Promise(() => { /* both workers stay busy */ });
+    const ac = new AbortController();
+    const pA = recognize(IMG());
+    const pB = recognize(IMG());
+    let flagged = false;
+    const pC = recognize(IMG(), { signal: ac.signal, onNoResult: () => { flagged = true; } });
+    convReply(0, "a"); convReply(1, "b"); convReply(2, "c");
+    await flush();
+    ac.abort();
+    await expect(pC).resolves.toEqual([]);
+    expect(flagged).toBe(false);
+    void pA; void pB;
   });
 });

@@ -857,3 +857,253 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     expect(halfDead.stripReads).toBe(10);  // no tally, no lock, both rotations scanned
   });
 });
+
+/**
+ * The retry: a band whose read came back a NON-ANSWER (the pool's job budget
+ * expired) is read a second time as overlapping sub-clips. Every band that answers
+ * at all — including one that answers with no words — is read exactly as before.
+ *
+ * The view is 2592 x 1000 pt so the TOP and BOTTOM bands are over budget
+ * (7200 px wide → 4 sub-clips of 918 pt stepping 558 pt) and the side bands are not
+ * (2778 px). Horizontal bands also keep `wordsToLabels` honest and readable: at
+ * rot 0 a word at local x maps to page `clipX0 + x`.
+ */
+describe("a timed-out edge band is retried as overlapping sub-clips", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1000];
+  const SUB_X = [0, 558, 1116, 1674];  // sub-clip origins along a top/bottom band
+  const SUB_LEN = 918;
+  const lab = (text: string, cx: number, cy: number, w = 60, h = 14) =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  /** Where a rendered clip came from, recovered from the raster the OCR stub is given. */
+  interface Meta { page: number; x0: number; y0: number; w: number; h: number }
+
+  const setup = async () => {
+    const { capturePage } = await import("./captureDevice");
+    const { renderBand } = await import("./bandRender");
+    const meta = new Map<number, Meta>();
+    let seq = 0;
+    // Both pixels carry the clip id in GREEN, which survives rotateRaw; RED-first
+    // after rotation means 90, BLUE-first 270, and a 2-wide image was never rotated.
+    (renderBand as any).mockImplementation((_m: any, pg: any, clip: number[]) => {
+      const id = ++seq;
+      meta.set(id, { page: pg.idx, x0: clip[0], y0: clip[1], w: clip[2] - clip[0], h: clip[3] - clip[1] });
+      return { image: { width: 2, height: 1, data: new Uint8ClampedArray([255, id, 0, 255, 0, id, 255, 255]) }, scale: 1 };
+    });
+    (capturePage as any).mockImplementation((_m: any, pg: any) => ({
+      view: VIEW, words: [], geometry: [], shxLabels: [],
+      labels: [lab(pg.idx === 0 ? "C-301" : "C-302", 2300, 940, 50, 16)], // title-block code only
+    }));
+    const fakeDoc = { loadPage: vi.fn((i: number) => ({ idx: i, destroy: vi.fn() })) };
+    const at = (img: any) => meta.get(img.data[1])!;
+    /** Which horizontal band a clip belongs to: they are the only over-budget ones. */
+    const edgeOf = (m: Meta): "top" | "bottom" | null =>
+      (m.w > 2000 || Math.abs(m.w - SUB_LEN) < 1) ? (m.y0 === 0 ? "top" : "bottom") : null;
+    /** True for the WHOLE band read (2592 pt wide), false for one of its sub-clips. */
+    const isWhole = (m: Meta) => m.w > 2000;
+    /** The sub-clip's index along its band, or -1 if this is not a sub-clip. */
+    const subIndex = (m: Meta) =>
+      (edgeOf(m) && !isWhole(m) ? SUB_X.findIndex((x) => Math.abs(x - m.x0) < 0.5) : -1);
+    return { renderBand, fakeDoc, at, edgeOf, isWhole, subIndex, meta };
+  };
+
+  const word = (text: string, x0: number, confidence = 90) =>
+    ({ text, confidence, bbox: { x0, y0: 0, x1: x0 + 60, y1: 12 } });
+
+  it("re-reads a band that answered nothing, and the sub-clips' labels reach the page's recovered set", async () => {
+    const { renderBand, fakeDoc, at, edgeOf, isWhole, subIndex } = await setup();
+    // Page 0's BOTTOM edge and page 1's TOP edge face each other. Both horizontal
+    // bands answer nothing on both pages; the side bands and the sheet-number cell
+    // answer with no words, which is an ANSWER and must not be retried.
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+      const m = at(img);
+      if (edgeOf(m) && isWhole(m)) { o?.onNoResult?.(); return []; }
+      const facing = m.page === 0 ? "bottom" : "top";
+      if (subIndex(m) === 2 && edgeOf(m) === facing) {
+        return [word(m.page === 0 ? "MATCH LINE SEE SHEET C-302" : "MATCH LINE SEE SHEET C-301", 600)];
+      }
+      return [];
+    });
+    let debug: any = null;
+    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
+
+    // The retry loaded its own page handle — the caller's was destroyed when the
+    // reads were merely ISSUED. Two pages, each opened once to extract and once
+    // per retried band (top and bottom both answer nothing → 2 retries each).
+    expect(fakeDoc.loadPage.mock.calls.length).toBeGreaterThan(2);
+    // Sub-clips were rastered, in order along the band, and only for the top/bottom
+    // bands: the side bands are inside the budget and were never cut.
+    const subs = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[])
+      .filter((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1);
+    expect(subs.length).toBe(2 /* pages */ * 2 /* horizontal bands */ * 4 /* sub-clips */);
+    expect(subs.slice(0, 4).map((c: number[]) => c[0])).toEqual(SUB_X);
+
+    // …and the recovered label landed at the SUB-CLIP's own origin plus the word's
+    // offset in it (1116 + 600), not at the band's.
+    const recovered = debug.inputs[0].extract.labels.filter((l: any) => l.font === "ocr");
+    expect(recovered.map((l: any) => l.text)).toContain("MATCH LINE SEE SHEET C-302");
+    expect(recovered.find((l: any) => l.text === "MATCH LINE SEE SHEET C-302").x).toBeCloseTo(1716, 6);
+    // …on the BOTTOM band, which is where page 0's callout was returned.
+    expect(recovered.find((l: any) => l.text === "MATCH LINE SEE SHEET C-302").y).toBeCloseTo(850, 6);
+    // The two pages now reference each other by code, entirely out of the retry.
+    expect(debug.anchors).toHaveLength(1);
+    expect(debug.anchors[0].perp).toBe("y"); // a top/bottom ref pins y
+  });
+
+  it("collapses a callout the overlap made two sub-clips read", async () => {
+    const { fakeDoc, at, edgeOf, isWhole, subIndex } = await setup();
+    // Sub-clips 2 and 3 overlap on pages 1674..2034. The same callout is returned by
+    // both, at each one's own local offset, so both map to page x 1716.
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+      const m = at(img);
+      if (edgeOf(m) && isWhole(m)) { o?.onNoResult?.(); return []; }
+      if (edgeOf(m) !== "top") return [];
+      const j = subIndex(m);
+      if (j === 2) return [word("MATCH LINE SEE SHEET C-302", 600)];
+      if (j === 3) return [word("MATCH LINE SEE SHEET C-302", 42)];
+      return [];
+    });
+    let debug: any = null;
+    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
+    const hits = debug.inputs[0].extract.labels.filter((l: any) => l.text === "MATCH LINE SEE SHEET C-302");
+    expect(hits).toHaveLength(1);
+    expect(hits[0].x).toBeCloseTo(1716, 6);
+  });
+
+  it("does NOT retry a band that answered — an empty read is an answer", async () => {
+    const { renderBand, fakeDoc } = await setup();
+    // Same bands, same (empty) result, but nothing reports a non-answer.
+    const ocr = vi.fn(async () => []);
+    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20 });
+    const clips = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[]);
+    expect(clips.some((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1)).toBe(false);
+    // 4 edge bands + the sheet-number cell, per page. Nothing more.
+    expect(clips).toHaveLength(2 * 5);
+    // 7 reads per page: top, bottom, left x2 rotations, right x2, sheet number.
+    expect(ocr).toHaveBeenCalledTimes(2 * 7);
+  });
+
+  it("an abort landing while the reads are in flight cancels the retry", async () => {
+    const { renderBand, fakeDoc, at, edgeOf, isWhole } = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let aborting = false;
+    // Page 0's top band answers nothing (so it WOULD be retried) but its right band
+    // parks on the gate, holding the page's reads open. Meanwhile the abort is armed,
+    // and page 1's top-of-iteration checkpoint trips the run's OCR signal.
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+      const m = at(img);
+      if (m.page === 0 && edgeOf(m) === "top" && isWhole(m)) { aborting = true; o?.onNoResult?.(); return []; }
+      if (m.page === 0 && m.x0 > 2000 && m.h > 900) await gate; // the right band
+      return [];
+    });
+    const run = autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, shouldAbort: () => aborting });
+    await expect(run).rejects.toBeInstanceOf(AutoStitchAborted);
+    release();
+    // Let the parked page's reads settle and its retry decision be taken.
+    await new Promise((r) => setTimeout(r, 20));
+    const clips = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[]);
+    expect(clips.some((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1)).toBe(false);
+  });
+});
+
+/**
+ * The rotation tally across a retry. A side band's rotation is a property of the
+ * BAND, and the tally is what locks the reciprocal strip scan to one rotation — so a
+ * band whose evidence is not whole must not vote. `stripReads` is what a lock looks
+ * like from outside: 5 strips at one rotation, or 10 at both.
+ *
+ * View 1000 x 2592 pt: the SIDE bands are over budget (7200 px tall → 4 sub-clips of
+ * 918 pt stepping 558) and the horizontal ones are not.
+ */
+describe("rotation tally when a side band had to be retried", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 1000, 2592];
+  const SUB_Y = [0, 558, 1116, 1674];
+  const SUB_LEN = 918;
+  const STRIP_STARTS = [450, 570, 690, 810, 930];
+  const DENSE = Array.from({ length: 5000 }, (_, i) => makeGeom([[400 + (i % 7), 300], [401 + (i % 7), 301]], false, i));
+  const lab = (text: string, cx: number, cy: number, w = 120, h = 10) =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  /**
+   * `answer(sub, rot)` speaks for the side bands of page 0: `sub` is -1 for the
+   * WHOLE-band read and 0-3 for a sub-clip. `null` means a non-answer (the read
+   * reports `onNoResult` and resolves []), a number is that word's confidence, and
+   * `undefined` is a genuine empty read.
+   */
+  const run = async (answer: (sub: number, rot: 90 | 270) => number | null | undefined) => {
+    const { capturePage } = await import("./captureDevice");
+    const { renderBand } = await import("./bandRender");
+    const pages = [
+      { view: VIEW, words: [], geometry: DENSE, shxLabels: [], labels: [] },
+      { view: VIEW, words: [], geometry: [], shxLabels: [], labels: [lab("MATCH LINE SEE SHEET 1", 90, 1300)] },
+    ];
+    const meta = new Map<number, { x0: number; h: number }>();
+    const metaSub = new Map<number, number>();
+    let seq = 0;
+    (renderBand as any).mockImplementation((_m: any, _p: any, clip: number[]) => {
+      const id = ++seq;
+      meta.set(id, { x0: clip[0], h: clip[3] - clip[1] });
+      const y0 = clip[1];
+      // Green carries the id (survives rotateRaw); red-first after rotation = 90.
+      const sub = Math.abs((clip[3] - clip[1]) - SUB_LEN) < 1 ? SUB_Y.findIndex((y) => Math.abs(y - y0) < 0.5) : -1;
+      metaSub.set(id, sub);
+      return { image: { width: 2, height: 1, data: new Uint8ClampedArray([255, id, 0, 255, 0, id, 255, 255]) }, scale: 1 };
+    });
+    let n = 0;
+    (capturePage as any).mockImplementation(() => pages[n++]);
+
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    let stripReads = 0;
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+      const m = meta.get(img.data[1])!;
+      const rot: 0 | 90 | 270 = img.width === 2 ? 0 : (img.data[0] === 255 ? 90 : 270);
+      if (STRIP_STARTS.some((x) => Math.abs(x - m.x0) < 0.5)) { stripReads++; return []; }
+      const side = (Math.abs(m.x0) < 0.5 || Math.abs(m.x0 - 880) < 0.5) && (m.h > 2000 || Math.abs(m.h - SUB_LEN) < 1);
+      if (!side || rot === 0) return [];
+      const a = answer(metaSub.get(img.data[1])!, rot);
+      if (a === null) { o?.onNoResult?.(); return []; }
+      // "ZZZ" can never parse as a sheet ref, so these reads cannot hand page 0 the
+      // reciprocal edge ref and skip the very scan under test.
+      return a === undefined ? [] : [{ text: "ZZZ", confidence: a, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
+    });
+    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, ocrConcurrency: 3 });
+    return stripReads;
+  };
+
+  it("a band that needed the retry votes with its RETRIED mass, summed over the sub-clips", async () => {
+    // Both rotations of the whole band are non-answers, so the band is re-read. In
+    // the retry 270 reads a confident word on sub-clip 0 and 90 a worthless 51 on
+    // sub-clip 3: 40 vs 1 per band, 80 vs 2 over the page's two side bands — real,
+    // opposed evidence, which clears the floor and the 2x margin.
+    const locked = await run((sub, rot) =>
+      sub < 0 ? null : (rot === 270 && sub === 0) ? 90 : (rot === 90 && sub === 3) ? 51 : undefined);
+    expect(locked).toBe(5);
+  });
+
+  it("…but not if a sub-clip of the retry was itself a non-answer", async () => {
+    // Identical to above except one of 90's sub-clips also blew its budget. The
+    // band's evidence is no longer whole in both directions, so it does not vote —
+    // exactly the guard that stops one 20 s hiccup locking a page's rotation.
+    const unlocked = await run((sub, rot) =>
+      sub < 0 ? null
+        : (rot === 90 && sub === 1) ? null
+        : (rot === 270 && sub === 0) ? 90
+        : (rot === 90 && sub === 3) ? 51 : undefined);
+    expect(unlocked).toBe(10);
+  });
+});

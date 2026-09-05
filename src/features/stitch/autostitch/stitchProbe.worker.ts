@@ -40,7 +40,7 @@ let abortUpTo = -1;
 // exactly why the pending map is keyed by ocrId — replies may land in any order,
 // and each one settles only its own call.
 let ocrSeq = 0;
-const ocrPending = new Map<number, (words: OcrWord[]) => void>();
+const ocrPending = new Map<number, (words: OcrWord[], noResult: boolean) => void>();
 // Per-RPC backstop. Deliberately LONGER than the main-thread pool's own 20s
 // per-job budget (ocrService's OCR_JOB_TIMEOUT_MS) so the pool's answer — [], after
 // it has retired the one tesseract worker that hung — always arrives first; this
@@ -50,7 +50,10 @@ const OCR_TIMEOUT_MS = 25_000;
 // probe — reset at the top of `handle()` so a persistent worker's later probes
 // don't accumulate a prior run's count.
 let ocrCallCount = 0;
-function ocrViaMain(image: RawImage, opts?: { signal?: AbortSignal }): Promise<OcrWord[]> {
+function ocrViaMain(
+  image: RawImage,
+  opts?: { signal?: AbortSignal; onNoResult?: () => void },
+): Promise<OcrWord[]> {
   return new Promise((resolve) => {
     const signal = opts?.signal;
     // Counted below the guard: a read that is never issued is not a round-trip,
@@ -59,14 +62,20 @@ function ocrViaMain(image: RawImage, opts?: { signal?: AbortSignal }): Promise<O
     ocrCallCount++;
     const id = ++ocrSeq;
     let settled = false;
-    const finish = (words: OcrWord[]) => {
+    const finish = (words: OcrWord[], noResult = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       ocrPending.delete(id);
       signal?.removeEventListener("abort", onAbort);
+      // Forwarded before resolving so the caller's flag is set by the time its
+      // `await` continues — `autoStitch` reads it right after the read settles.
+      if (noResult) opts?.onNoResult?.();
       resolve(words);
     };
+    // Deliberately NOT reported as a non-answer. The pool's own 20 s answer always
+    // beats this 25 s backstop, so reaching it means the REPLY went missing — a
+    // broken RPC, which four more RPCs would not fix.
     const timer = setTimeout(() => finish([]), OCR_TIMEOUT_MS);
     // Forwarding the abort is what actually stops the work. An aborted read is
     // usually still QUEUED in the main thread's pool, and a queued job has no
@@ -124,7 +133,7 @@ self.onmessage = (e: MessageEvent<any>) => {
   if (e.data && e.data.kind === "ocr-res") {
     const cb = ocrPending.get(e.data.ocrId);
     ocrPending.delete(e.data.ocrId);
-    cb?.(e.data.words as OcrWord[]);
+    cb?.(e.data.words as OcrWord[], e.data.noResult === true);
     return;
   }
   if (e.data && e.data.kind === "abort") {

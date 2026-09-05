@@ -132,14 +132,18 @@ function ensurePool() {
   built.catch(() => { if (poolPromise === built) poolPromise = null; });
   return built;
 }
-async function ocr(image) {
+async function ocr(image, opts) {
   const key = hashImage(image);
   if (!NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
   ocrCalls++;
   const p = await ensurePool();
   const res = await p.run(encodePNG(image.width, image.height, image.data));
-  // A timed-out job is a non-answer, not an empty sheet — never cache it.
-  if (res === NO_RESULT) return [];
+  // A timed-out job is a non-answer, not an empty sheet — never cache it, and tell
+  // the caller so it can re-read that band as sub-clips (`onNoResult`). This machine
+  // has never actually produced one: the harness's tesseract finishes a 7200 px band
+  // well inside the 20 s budget where the browser build does not, which is why the
+  // corpus cannot exercise the retry and must come out bit-identical.
+  if (res === NO_RESULT) { opts?.onNoResult?.(); return []; }
   const words = [];
   for (const wd of res.data.words ?? []) { if (wd.text?.trim()) words.push({ text: wd.text.trim(), confidence: wd.confidence, bbox: { ...wd.bbox } }); }
   if (!NO_OCR_CACHE) { cache[key] = words; cacheDirty = true; if (ocrCalls % 20 === 0) flushCache(); }

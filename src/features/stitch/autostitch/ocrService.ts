@@ -189,8 +189,20 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
  *
  * `signal`: aborting drops a still-queued job outright (it never runs) and
  * makes an in-flight one's result be ignored; either way the call resolves [].
+ *
+ * `onNoResult`: fired when the pool answered OCR_NO_RESULT and the caller did NOT
+ * abort — i.e. this read is a NON-ANSWER (the job blew its 20 s budget, or the pool
+ * was torn down under it), not a crop that genuinely holds no text. The return type
+ * stays `OcrWord[]` and stays `[]`, so every existing caller is unaffected; the hook
+ * exists because `autoStitch` needs to tell the two apart to decide whether a band
+ * is worth re-reading as sub-clips, and `[]` cannot carry that. A conversion or
+ * transport THROW is deliberately not reported here — it is a broken pipe, not a
+ * band that was too big, and re-rastering it four times would not help.
  */
-export async function recognize(image: RawImage, opts?: { signal?: AbortSignal }): Promise<OcrWord[]> {
+export async function recognize(
+  image: RawImage,
+  opts?: { signal?: AbortSignal; onNoResult?: () => void },
+): Promise<OcrWord[]> {
   try {
     // Kick the first worker's boot off BEFORE converting, so the wasm+traineddata
     // load overlaps the raster→Blob round-trip instead of following it.
@@ -203,7 +215,13 @@ export async function recognize(image: RawImage, opts?: { signal?: AbortSignal }
     if (opts?.signal?.aborted) return [];
 
     const result = await jobs.run(blob, { signal: opts?.signal });
-    if (result === OCR_NO_RESULT) return []; // timed out, aborted, or torn down
+    if (result === OCR_NO_RESULT) {
+      // Timed out, aborted, or torn down. An ABORT is the caller's own doing and
+      // must not look like a failed read (it would have the aligner retry work it
+      // has just given up on), so only the other two are reported.
+      if (!opts?.signal?.aborted) opts?.onNoResult?.();
+      return [];
+    }
 
     const { data } = result as { data: { words?: any[] } };
     const words: OcrWord[] = [];
@@ -267,6 +285,10 @@ export async function shutdownOcr(): Promise<void> {
  * ignored on arrival: the probe issues a whole page of band reads at once, so an
  * abandoned run leaves dozens of jobs sitting in the pool's queue — and a queued
  * job has no deadline of its own. Aborting drops the queued ones outright.
+ *
+ * The reply carries `noResult` when `recognize` reported a NON-ANSWER (see its
+ * `onNoResult`). It rides along on the existing message rather than as a second
+ * one so the reply stays a single settle per ocrId.
  */
 export function attachOcrRpc(probeWorker: Worker): void {
   const outstanding = new Map<number, AbortController>();
@@ -282,14 +304,18 @@ export function attachOcrRpc(probeWorker: Worker): void {
     const ctrl = new AbortController();
     outstanding.set(d.ocrId, ctrl);
     let words: OcrWord[];
+    let noResult = false;
     try {
-      words = await recognize(d.image as RawImage, { signal: ctrl.signal });
+      words = await recognize(d.image as RawImage, {
+        signal: ctrl.signal,
+        onNoResult: () => { noResult = true; },
+      });
     } finally {
       outstanding.delete(d.ocrId);
     }
     // The probe has already resolved this id with [] and stopped listening for it;
     // a late reply would only be dropped there, so don't send one.
     if (ctrl.signal.aborted) return;
-    probeWorker.postMessage({ kind: "ocr-res", ocrId: d.ocrId, words });
+    probeWorker.postMessage({ kind: "ocr-res", ocrId: d.ocrId, words, noResult });
   });
 }
