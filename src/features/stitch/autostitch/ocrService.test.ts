@@ -72,7 +72,7 @@ const IMG = (): RawImage => ({ width: 2, height: 2, data: new Uint8ClampedArray(
 const fakeBlob = (tag: string) => ({ __tag: tag }) as unknown as Blob;
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const WORD = (text: string) => ({ text, confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } });
-/** Pool size is clamp(hardwareConcurrency - 1, 2, 4), so cores ⇒ workers. */
+/** Pool size is clamp(hardwareConcurrency - 1, 2, 3), so cores ⇒ workers. */
 const setCores = (n: number) =>
   Object.defineProperty(globalThis.navigator, "hardwareConcurrency", { value: n, configurable: true });
 /** Answer the conversion worker's Nth (0-based) request with a tagged blob. */
@@ -155,7 +155,7 @@ describe("ocrService.recognize — pool concurrency", () => {
     await expect(pB).resolves.toEqual([WORD("b")]);
   });
 
-  it("sizes the pool from hardwareConcurrency, clamped to [2, 4]", async () => {
+  it("sizes the pool from hardwareConcurrency, clamped to [2, 3]", async () => {
     setCores(16);
     const { recognize } = await import("./ocrService");
     h.recognize = () => new Promise(() => { /* hold every worker */ });
@@ -164,7 +164,7 @@ describe("ocrService.recognize — pool concurrency", () => {
     for (let i = 0; i < 6; i++) convReply(i, `j${i}`);
     await flush();
 
-    expect(h.workers.length).toBe(4); // clamped, not 15
+    expect(h.workers.length).toBe(3); // clamped, not 15
     void jobs;
   });
 });

@@ -395,6 +395,29 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     expect(hook.reason).toBe("too_slow");
   });
 
+  it("the budget expiring hands tesseract's workers back", () => {
+    // Nothing else will: `stop()` bumps the docId, so the worker's eventual
+    // {aborted:true} is dropped by the staleness guard BEFORE it reaches the reply
+    // handler's shutdownOcr(), and 160-240 MB stayed held until unmount.
+    seedCanvas([0, 1]);
+    mount();
+    shutdownOcr.mockClear();
+    act(() => hook.check());
+    expect(shutdownOcr).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(hook.reason).toBe("too_slow");
+    expect(shutdownOcr).toHaveBeenCalled();
+  });
+
+  it("reset() hands them back too, for the same reason", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    shutdownOcr.mockClear();
+    act(() => hook.reset());
+    expect(shutdownOcr).toHaveBeenCalled();
+  });
+
   it("does not fire the budget once the worker settles first", () => {
     seedCanvas([0, 1]);
     mount();
@@ -408,7 +431,7 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     expect(hook.status).toBe("offer");
   });
 
-  it("Re-check after the budget fires runs a fresh, un-budgeted check", () => {
+  it("Re-check after the budget fires runs a fresh check on a 3x leash", () => {
     seedCanvas([0, 1]);
     mount();
     act(() => hook.check());
@@ -419,7 +442,7 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     act(() => hook.recheck());
     expect(hook.status).toBe("checking");
     const abortsAfterRecheck = posted.filter((p) => p.kind === "abort").length;
-    // Waiting out a full budget's worth of time does not touch the un-budgeted check.
+    // Waiting out a NORMAL budget's worth of time does not touch the Re-check.
     act(() => vi.advanceTimersByTime(60_000));
     expect(hook.status).toBe("checking");
     expect(posted.filter((p) => p.kind === "abort")).toHaveLength(abortsAfterRecheck);
@@ -427,6 +450,17 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     // It still settles normally, on its own schedule.
     act(() => workers.at(-1)!.reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
     expect(hook.status).toBe("offer");
+  });
+
+  it("…but the Re-check is bounded too: it gives up at 3x, not never", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.recheck());
+    act(() => vi.advanceTimersByTime(120_000));
+    expect(hook.status).toBe("checking");   // still inside the longer leash
+    act(() => vi.advanceTimersByTime(60_001));
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
   });
 
   it("a superseded check (new docId) clears the old budget — no stray abort or state write", () => {

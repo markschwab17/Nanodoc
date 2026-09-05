@@ -17,10 +17,22 @@ async function ensureMupdf() {
   if (!mupdf) mupdf = (await import("mupdf")).default;
 }
 
-// Cooperative-abort target. A plain "Add pages" click posts {kind:"abort", docId};
-// the running autoStitch for that docId then throws AutoStitchAborted at its next
-// checkpoint. Only the CURRENT probe's docId is tracked (probes are serialized).
-let abortDocId = 0;
+// Cooperative-abort WATERMARK. A plain "Add pages" click, a superseded check or an
+// expired time budget posts {kind:"abort", docId}; the running autoStitch for that
+// docId then throws AutoStitchAborted at its next checkpoint.
+//
+// A high-water mark, not "the last docId anyone asked to stop". Probes are
+// serialized but their aborts are not: the budget for probe N fires and aborts N,
+// the user immediately hits Re-check, and the hook's stop() aborts N+1 — which,
+// with a single scalar, CLOBBERED the request to stop N. Probe N's
+// `abortDocId === docId` test went false again, so it ran to completion with the
+// Re-check queued behind it: exactly the grind the budget exists to prevent.
+// `>=` on a watermark cannot be un-set.
+//
+// Starting at -1 also matters. `abortDocId = 0` matched AddPdfModal's very first
+// probe, which posts docId 0 (it only increments on supersede), so that probe saw
+// shouldAbort() true at its first checkpoint and gave up before doing any work.
+let abortUpTo = -1;
 
 // ── OCR over RPC to the main thread (tesseract cannot nest here portably) ──
 // SEVERAL requests are outstanding at once: autoStitch issues a whole page's band
@@ -91,7 +103,7 @@ async function handle(req: ProbeRequest) {
         pageScales: pageScales ? new Map(pageScales) : undefined,
         pageCodes: pageCodes ? new Map(pageCodes) : undefined,
         ocr: ocrViaMain,
-        shouldAbort: () => abortDocId === docId,
+        shouldAbort: () => abortUpTo >= docId,
         onOcrStart: () => self.postMessage({ kind: "ocrPhase", docId }),
       });
     } finally {
@@ -116,8 +128,9 @@ self.onmessage = (e: MessageEvent<any>) => {
     return;
   }
   if (e.data && e.data.kind === "abort") {
-    // Stop the running (or queued) probe for this docId at its next checkpoint.
-    abortDocId = e.data.docId;
+    // Stop the running (or queued) probe for this docId — and every earlier one —
+    // at its next checkpoint. Never lowers: see `abortUpTo`.
+    abortUpTo = Math.max(abortUpTo, e.data.docId);
     return;
   }
   latestDocId = (e.data as ProbeRequest).docId;

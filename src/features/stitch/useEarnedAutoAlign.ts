@@ -32,8 +32,10 @@
  * settled 60s after the request went out, the hook sends the probe the same abort it
  * would send on a superseded check, and reports `unavailable`/`too_slow` — "it never
  * grinds" is a promise about wall-clock time, not just about the UI staying responsive
- * while the probe runs. `recheck()` — the user asking again on purpose — is deliberately
- * UN-budgeted, so a Re-check after the budget fires gets a real, unhurried answer.
+ * while the probe runs. `recheck()` — the user asking again on purpose — gets a much
+ * longer leash (`RECHECK_BUDGET_MS`), so a Re-check after the budget fires has room for
+ * a real answer, but it is still bounded: un-budgeted, a Re-check on a set the aligner
+ * cannot finish spun forever.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -47,9 +49,13 @@ import { AutoStitchAborted } from "./autostitch/autoStitch";
 import type { AutoAlignUnavailableReason } from "./addToProjectCopy";
 import { canvasProbeSet, hasMixedSources, movedSinceCheck, type CanvasProbeSet } from "./earnedAutoAlignSet";
 
-/** How long a probe gets before the hook stops waiting and says so instead. A manual
- *  Re-check (the user asking again on purpose) skips this — see `recheck` below. */
+/** How long a probe gets before the hook stops waiting and says so instead. */
 const PROBE_BUDGET_MS = 60_000;
+/** A manual Re-check gets a far longer leash — the user asked again on purpose, and
+ *  the budget exists to stop an UNATTENDED probe from grinding, not to hurry a
+ *  deliberate retry. But it is still a leash: unbounded meant a Re-check on a set the
+ *  aligner cannot finish spun forever with no way out but closing the modal. */
+const RECHECK_BUDGET_MS = 3 * PROBE_BUDGET_MS;
 
 /** Session knowledge the canvas cannot supply. Remembered between checks. */
 export interface EarnedAutoAlignContext {
@@ -244,6 +250,10 @@ export function useEarnedAutoAlign(
 
   const reset = useCallback(() => {
     stop();
+    // Same hole as the budget path: `stop()` bumps `docIdRef`, so the abandoned
+    // probe's own reply is discarded as stale before it can release OCR. Nothing
+    // else is running (this hook probes one at a time), so this is unconditional.
+    void shutdownOcr();
     setRef.current = null;
     probeRef.current = null;
     setSheets(0);
@@ -253,10 +263,10 @@ export function useEarnedAutoAlign(
   }, [stop]);
 
   const check = useCallback(
-    // `budgeted` is internal-only — `recheck` below calls this with `false` so the
-    // user's own "try again" is never the thing the budget cuts off. Not part of the
-    // public `EarnedAutoAlign["check"]` signature; TS allows the wider function here.
-    (ctx?: EarnedAutoAlignContext, budgeted = true) => {
+    // `budgetMs` is internal-only — `recheck` below passes the longer leash. Not part
+    // of the public `EarnedAutoAlign["check"]` signature; TS allows the wider
+    // function here.
+    (ctx?: EarnedAutoAlignContext, budgetMs: number = PROBE_BUDGET_MS) => {
       if (ctx) ctxRef.current = { ...ctxRef.current, ...ctx };
       stop();
       probeRef.current = null;
@@ -297,29 +307,36 @@ export function useEarnedAutoAlign(
       checkStartRef.current = performance.now();
       const requestedDocId = req.docId;
       ensureWorker().postMessage(req);
-      if (budgeted) {
-        budgetTimerRef.current = setTimeout(() => {
-          budgetTimerRef.current = null;
-          // Belt-and-braces: `stop()`/`reset()` already clear this timer on every
-          // superseded check, so this should be unreachable, but a reply landing in
-          // the same tick as the timeout is not worth a race with `goneRef`.
-          if (goneRef.current || requestedDocId !== docIdRef.current) return;
-          logSettle("unavailable", 0);
-          // The SAME abort a superseded check (or a plain "Add pages" re-check) would
-          // send — the worker does not need a different message to know to give up.
-          stop();
-          setReason("too_slow");
-          setDetail(undefined);
-          setStatus("unavailable");
-        }, PROBE_BUDGET_MS);
-      }
+      budgetTimerRef.current = setTimeout(() => {
+        budgetTimerRef.current = null;
+        // Belt-and-braces: `stop()`/`reset()` already clear this timer on every
+        // superseded check, so this should be unreachable, but a reply landing in
+        // the same tick as the timeout is not worth a race with `goneRef`.
+        if (goneRef.current || requestedDocId !== docIdRef.current) return;
+        logSettle("unavailable", 0);
+        // The SAME abort a superseded check (or a plain "Add pages" re-check) would
+        // send — the worker does not need a different message to know to give up.
+        stop();
+        // …and hand tesseract's workers back, which nothing else will now do. The
+        // reply handler's `shutdownOcr()` is guarded by the docId staleness check,
+        // and `stop()` has just bumped `docIdRef` — so the worker's eventual
+        // `{aborted:true}` is dropped BEFORE it can reach that release, and 160-240
+        // MB stayed held until the component unmounted. No `ocrIdle()` guard is
+        // needed here (AddPdfModal has one because it debounces and can have a
+        // replacement already queued): this hook runs one probe at a time and
+        // `stop()` has just abandoned it.
+        void shutdownOcr();
+        setReason("too_slow");
+        setDetail(undefined);
+        setStatus("unavailable");
+      }, budgetMs);
     },
     [ensureWorker, stop, logSettle],
   );
 
-  // The user asking again on purpose gets a real, unhurried answer — the budget exists
-  // to stop an UNATTENDED probe from grinding, not to hurry a deliberate retry.
-  const recheck = useCallback(() => check(undefined, false), [check]);
+  // The user asking again on purpose gets a much longer answer window, but not an
+  // infinite one — see RECHECK_BUDGET_MS.
+  const recheck = useCallback(() => check(undefined, RECHECK_BUDGET_MS), [check]);
 
   const run = useCallback(async () => {
     const set = setRef.current;
