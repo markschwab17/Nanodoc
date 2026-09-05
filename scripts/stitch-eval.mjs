@@ -250,7 +250,10 @@ for (const set of sets) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), "application/pdf");
   const t0 = Date.now();
   const before = ocrCalls;
-  const res = await autoStitch(mupdf, doc, parseRanges(set.pages ?? "0-9"), { userScale: set.scale ?? 20, ocr });
+  // `ocrConcurrency` tells autoStitch how wide the transport behind `ocr` really is,
+  // so its reciprocal strip scan batches to THIS pool rather than to the browser
+  // default (which, with no `navigator` in Node, would come out at 2 against 3 workers).
+  const res = await autoStitch(mupdf, doc, parseRanges(set.pages ?? "0-9"), { userScale: set.scale ?? 20, ocr, ocrConcurrency: OCR_POOL_SIZE });
   flushCache();
   row.seconds = (Date.now() - t0) / 1000;
   row.ocrCalls = ocrCalls - before;

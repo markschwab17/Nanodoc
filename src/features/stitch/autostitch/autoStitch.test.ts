@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resolvePrintedNos, autoStitch, AutoStitchAborted, resolveSheetCodes } from "./autoStitch";
+import { makeGeom } from "./types";
 
 // autoStitch's per-page capture and band raster are mupdf-bound; mock them so the
 // abort-checkpoint behaviour is testable without wasm. Pages carry NO edge refs,
@@ -633,5 +634,148 @@ describe("resolveSheetCodes — a supplied code has to be corroborated", () => {
   it("leaves distinct codes alone", () => {
     const out = resolveSheetCodes([page(0, { titleCode: "C-1" }), page(1, { titleCode: "C-2" })], warn);
     expect([...out.codes.values()].sort()).toEqual(["C1", "C2"]);
+  });
+});
+
+describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
+  // Page i is band-scanned for the reciprocal "SEE SHEET <j>" label that the
+  // referencing sheet's one-sided edge ref implies. Two things are under test: the
+  // scan runs at the ONE rotation page i's edge bands already proved its vertical
+  // text reads at (both only when that is unknown), and strips go out
+  // `ocrConcurrency` at a time with the LOWEST-index hit winning — which is the
+  // answer the old strip-at-a-time loop gave.
+  const VIEW: [number, number, number, number] = [0, 0, 1000, 800];
+  const lab = (text: string, cx: number, cy: number, w = 120, h = 10) =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
+
+  // Page i needs real vector density: the reciprocal pass prunes pages below
+  // PLAN_GEOMETRY_MIN (5000), because the anchor confirms via a segment vote.
+  const DENSE = Array.from({ length: 5000 }, (_, i) => makeGeom([[400 + (i % 7), 300], [401 + (i % 7), 301]], false, i));
+
+  // Strip origins for a LEFT-edge ref on a 1000-wide view: [0.45W, 0.98W) stepped by
+  // 120 → 450, 570, 690, 810, 930.
+  const STRIP_STARTS = [450, 570, 690, 810, 930];
+
+  /**
+   * Every band raster the mock hands out is 2x1: a RED pixel then a BLUE one, both
+   * carrying the band's tag in the green channel. `rotateRaw` puts RED first for 90
+   * and BLUE first for 270, so the OCR stub reads BOTH the rotation and which band
+   * it is looking at off the image it is actually given — never from call order,
+   * which concurrency makes meaningless.
+   */
+  const raster = (tag: number) => ({
+    image: { width: 2, height: 1, data: new Uint8ClampedArray([255, tag, 0, 255, 0, tag, 255, 255]) },
+    scale: 1,
+  });
+  const rotOf = (img: any): 0 | 90 | 270 => (img.width === 2 ? 0 : img.data[0] === 255 ? 90 : 270);
+  const tagOf = (img: any): number => img.data[1];
+  const EDGE_BAND = 200; // any tag that is not a strip index
+
+  // One high-confidence word. wordsToLabels keeps >= 60 and merges runs into phrases.
+  const words = (text: string) => [{ text, confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  /**
+   * Two pages. Page 1 carries a LEFT-edge "MATCH LINE SEE SHEET 1" in its text
+   * channels (so it is ref-bearing and takes the no-OCR path); page 0 carries no
+   * edge ref at all (so its edge bands ARE read, which is what can teach the scan a
+   * rotation) and is the page the reciprocal scan then walks.
+   *
+   * `edgeRot` is the rotation the OCR stub gives its confidence mass to on page 0's
+   * side bands: 90/270 makes the scan's rotation KNOWN, null leaves both scoring
+   * zero — a dead tie, which is the "learned nothing" case.
+   *
+   * `hitStrips` names, by strip index in scan order, the strips whose OCR answers
+   * with the reciprocal label.
+   */
+  const run = async (opts: { edgeRot: 90 | 270 | null; hitStrips: number[]; ocrConcurrency: number }) => {
+    const { capturePage } = await import("./captureDevice");
+    const { renderBand } = await import("./bandRender");
+    const pages = [
+      { view: VIEW, words: [], geometry: DENSE, shxLabels: [], labels: [] },
+      { view: VIEW, words: [], geometry: [], shxLabels: [], labels: [lab("MATCH LINE SEE SHEET 1", 90, 400)] },
+    ];
+    let n = 0;
+    (capturePage as any).mockImplementation(() => pages[n++]);
+    (renderBand as any).mockImplementation((_m: any, _p: any, clip: number[]) => {
+      const strip = STRIP_STARTS.findIndex((x) => Math.abs(x - clip[0]) < 0.5);
+      return raster(strip >= 0 ? strip : EDGE_BAND);
+    });
+
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    const rotsByStrip = new Map<number, (0 | 90 | 270)[]>();
+    let stripReads = 0;
+    const ocr = vi.fn(async (img: any) => {
+      const tag = tagOf(img);
+      if (tag === EDGE_BAND) {
+        // Page 0's edge bands. "ZZZ" can never parse as a sheet ref, so the recovered
+        // labels cannot hand page 0 the reciprocal edge ref and skip the very scan
+        // under test; only where the CONFIDENCE lands matters here.
+        return opts.edgeRot != null && rotOf(img) === opts.edgeRot ? words("ZZZ") : [];
+      }
+      stripReads++;
+      (rotsByStrip.get(tag) ?? rotsByStrip.set(tag, []).get(tag)!).push(rotOf(img));
+      return opts.hitStrips.includes(tag) ? words("MATCH LINE SEE SHEET 2") : [];
+    });
+
+    let debug: any = null;
+    await autoStitch({} as any, fakeDoc as any, [0, 1], {
+      ocr, userScale: 20, ocrConcurrency: opts.ocrConcurrency, onDebug: (d) => { debug = d; },
+    });
+    return { debug, rotsByStrip, stripReads };
+  };
+
+  it("scans ONLY the rotation the edge bands proved, and both when they proved nothing", async () => {
+    // Same pages, same strips, same (empty) answer — the only difference is whether
+    // page 0's edge bands came out with a rotation.
+    const known = await run({ edgeRot: 270, hitStrips: [], ocrConcurrency: 3 });
+    const unknown = await run({ edgeRot: null, hitStrips: [], ocrConcurrency: 3 });
+
+    expect([...known.rotsByStrip.keys()].sort()).toEqual([0, 1, 2, 3, 4]);
+    expect([...known.rotsByStrip.values()]).toEqual([[270], [270], [270], [270], [270]]);
+    expect(known.stripReads).toBe(5);    // 5 strips, one read each
+    expect(unknown.stripReads).toBe(10); // 5 strips, both rotations
+    // Rotation order WITHIN a strip is preserved when both are scanned: 90 first,
+    // 270 only once 90 has found nothing.
+    expect([...unknown.rotsByStrip.values()]).toEqual([[90, 270], [90, 270], [90, 270], [90, 270], [90, 270]]);
+    // …and neither run finds an anchor, so halving the reads changed no answer.
+    expect(known.debug.anchors).toHaveLength(0);
+    expect(unknown.debug.anchors).toHaveLength(0);
+  });
+
+  it("takes the LOWEST-index hit when two strips in the same chunk both match", async () => {
+    // Chunk 0 is strips 0-2. Strips 1 and 2 both answer; the sequential scan would
+    // have returned strip 1 and stopped, so the chunked scan must return strip 1 too.
+    const only1 = await run({ edgeRot: 270, hitStrips: [1], ocrConcurrency: 3 });
+    const only2 = await run({ edgeRot: 270, hitStrips: [2], ocrConcurrency: 3 });
+    const both = await run({ edgeRot: 270, hitStrips: [1, 2], ocrConcurrency: 3 });
+
+    // dx carries the matching label's x, so it says WHICH strip won.
+    expect(only1.debug.anchors).toHaveLength(1);
+    expect(only2.debug.anchors).toHaveLength(1);
+    expect(only1.debug.anchors[0].dx).not.toBe(only2.debug.anchors[0].dx);
+    expect(both.debug.anchors).toHaveLength(1);
+    expect(both.debug.anchors[0].dx).toBe(only1.debug.anchors[0].dx);
+  });
+
+  it("issues strips in chunks of ocrConcurrency and stops issuing once one has hit", async () => {
+    // A hit on strip 0 still costs the whole chunk it travelled in — that overshoot
+    // is the trade — but nothing beyond it.
+    const wide = await run({ edgeRot: 270, hitStrips: [0], ocrConcurrency: 3 });
+    expect(wide.stripReads).toBe(3);
+    const narrow = await run({ edgeRot: 270, hitStrips: [0], ocrConcurrency: 1 });
+    expect(narrow.stripReads).toBe(1);
+    // Same anchor either way: the width of the batch cannot change the answer.
+    expect(wide.debug.anchors[0].dx).toBe(narrow.debug.anchors[0].dx);
+    // A hit in the SECOND chunk leaves the third unissued: 5 strips in chunks of 2 →
+    // strips 0-1, 2-3, 4; a hit on strip 2 stops the scan after four reads.
+    const second = await run({ edgeRot: 270, hitStrips: [2], ocrConcurrency: 2 });
+    expect(second.stripReads).toBe(4);
   });
 });

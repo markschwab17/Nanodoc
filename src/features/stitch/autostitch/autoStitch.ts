@@ -11,6 +11,9 @@ import { renderBand } from "./bandRender";
 import { parseSheetRefs, parseScaleNotes, refSheetNumber, refSheetCode, normCode, type SheetRef } from "./tokens";
 import { extractPageLabel, classifySheetRole, type SheetRole, type PageLabelResult } from "./pageLabels";
 import type { OcrWord, RawImage } from "./ocrService";
+// ocrPool.ts only — never ocrService.ts: this module also runs inside the probe
+// worker and under vite-node, and the service pulls in Vite `?url` worker assets.
+import { defaultOcrPoolSize } from "./ocrPool";
 import { DEFAULT_SCALE_FT_PER_IN as DEFAULT_SCALE } from "../pageScales";
 
 /** Drawing-density floor (geometry vector count). Used ONLY to prune the
@@ -43,6 +46,12 @@ export interface AutoStitchOptions {
    *  reads are issued in a burst, so most are still QUEUED when an abort lands and a
    *  queued pool job has no deadline of its own. */
   ocr?: (image: RawImage, opts?: { signal?: AbortSignal }) => Promise<OcrWord[]>;
+  /** How many OCR reads the transport behind `ocr` can genuinely run at once — the
+   *  width the reciprocal strip scan batches at. Defaults to `defaultOcrPoolSize()`,
+   *  which is what `ocrService` sizes its pool by; a caller that builds its own pool
+   *  at a fixed size (the Node eval harness: 3) passes that size here so the batch
+   *  matches the pool actually doing the work. */
+  ocrConcurrency?: number;
   /** Cooperative abort. Consulted at the top of each per-page iteration, before
    *  every OCR band call, and per pair in the anchor-search pass. When it returns
    *  true, autoStitch throws AutoStitchAborted at the next checkpoint so a plain
@@ -331,6 +340,13 @@ interface PageRec {
   /** The page's title-block read, done ONCE (it walks every label on the page and
    *  the reciprocal-anchor pass wants the same answer the role classification used). */
   pageLabel: PageLabelResult;
+  /** Which way this sheet's VERTICAL text reads, as decided by the edge-band pass:
+   *  the rotation (90 or 270) that carried the OCR confidence mass across the page's
+   *  left/right bands. Undefined when the page took the no-OCR path, had no side
+   *  bands, or the two rotations tied — i.e. whenever the pass did not actually
+   *  learn anything. The reciprocal strip scan reads it as "scan this rotation
+   *  only", and falls back to both when it is undefined. */
+  sideTextRot?: 90 | 270;
 }
 
 /** Reciprocal-label anchor before unit-key resolution: endpoints keyed by
@@ -347,8 +363,9 @@ interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp
    *  matchline rather than re-picking each band's strongest line (failure J). */
   strokeI?: number; strokeJ?: number; }
 
-/** One page's edge-band OCR recovery: synthetic labels, and the title-cell number. */
-interface PageOcrRead { recovered: Label[]; ocrNo: number | null }
+/** One page's edge-band OCR recovery: synthetic labels, the title-cell number, and
+ *  the rotation its side bands read best at (see `PageRec.sideTextRot`). */
+interface PageOcrRead { recovered: Label[]; ocrNo: number | null; sideTextRot?: 90 | 270 }
 
 /** One band's reads. `rots` is [0] for a horizontal band and [90, 270] for a side
  *  band (both rotations are OCR'd and the better one wins); `words[k]` is the read
@@ -419,6 +436,11 @@ function readPageOcr(
   return (async () => {
     const perBand = await Promise.all(reads.map((r) => Promise.all(r.words)));
     const recovered: Label[] = [];
+    // Confidence mass per rotation, summed over the page's SIDE bands. Per band the
+    // winner is picked exactly as before (this is only an extra tally); across the
+    // page it answers "which way does this sheet's vertical text read?", which the
+    // reciprocal strip scan then trusts instead of trying both.
+    const rotMass: Record<90 | 270, number> = { 90: 0, 270: 0 };
     for (let i = 0; i < reads.length; i++) {
       const r = reads[i];
       const got = perBand[i];
@@ -427,11 +449,16 @@ function readPageOcr(
         recovered.push(...wordsToLabels(got[0], r.band, r.scale, r.w, r.h, r.rots[0]));
       } else {
         const cands = r.rots.map((rot, k) => ({ rot, words: got[k] }));
+        for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += rotScore(c.words);
         const best = cands.sort((a, b) => rotScore(b.words) - rotScore(a.words))[0];
         recovered.push(...wordsToLabels(best.words, r.band, r.scale, r.w, r.h, best.rot));
       }
     }
-    return { recovered, ocrNo: parseSheetNumber(await sheetNo) };
+    // Only a STRICT winner counts as knowledge. Equal masses — including the very
+    // common "both read nothing" (0 vs 0) — leave it undefined so the strip scan
+    // keeps trying both rotations rather than guessing.
+    const sideTextRot = rotMass[90] > rotMass[270] ? 90 : rotMass[270] > rotMass[90] ? 270 : undefined;
+    return { recovered, ocrNo: parseSheetNumber(await sheetNo), sideTextRot };
   })();
 }
 
@@ -501,6 +528,12 @@ async function runAutoStitch(
         return rawOcr(image, ocrAbort ? { signal: ocrAbort.signal } : undefined);
       }
     : undefined;
+  // How wide the reciprocal strip scan (pass 2) batches its reads. Sized off the
+  // concurrency of the transport behind `ocr` — the browser pool's own derivation
+  // by default, the harness's fixed 3 when it says so — because a chunk exists to
+  // fill that pool exactly once: narrower leaves workers idle, wider only queues
+  // strips whose answers a hit in the same chunk will discard.
+  const OCR_CHUNK = Math.max(1, Math.floor(opts.ocrConcurrency ?? defaultOcrPoolSize()));
 
   // ── PASS 1: per-page capture + edge-band OCR recovery ───────────────────────
   // Collect each page's extract + printed number FIRST (page released after
@@ -605,9 +638,11 @@ async function runAutoStitch(
     const { pageIndex, drawingFrame } = p;
     let extract = p.extract;
     let ocrNo: number | null = null;
+    let sideTextRot: 90 | 270 | undefined;
     if (p.ocrRead) {
       const read = await p.ocrRead;
       ocrNo = read.ocrNo;
+      sideTextRot = read.sideTextRot;
       if (read.recovered.length) extract = { ...extract, labels: [...extract.labels, ...read.recovered] };
     }
 
@@ -635,7 +670,7 @@ async function runAutoStitch(
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
       title: p.title, statedFtPerIn: p.statedFtPerIn, role: "tile", ctoCode,
-      sheetCode: null, sheetCodeDropped: false, pageLabel: p.pageLabel,
+      sheetCode: null, sheetCodeDropped: false, pageLabel: p.pageLabel, sideTextRot,
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
@@ -864,13 +899,53 @@ async function runAutoStitch(
     };
 
     /**
+     * Run `probe` over `starts` (strip origins, in scan order) in chunks of
+     * `OCR_CHUNK` and return the FIRST hit — first meaning LOWEST strip index, which
+     * is exactly what the old strip-at-a-time loop returned.
+     *
+     * Why it is still the same answer: chunks are consumed in order, and within a
+     * chunk `find` takes the lowest index, so the winner is the globally lowest
+     * index that hits. Chunks are only ISSUED until one hits, so the scan still
+     * stops early — it just overshoots by at most `OCR_CHUNK - 1` strips instead of
+     * stopping dead. That overshoot is the whole trade: those strips would otherwise
+     * have been OCR'd one at a time behind an idle pool.
+     *
+     * `probe` rasters synchronously before its first await (mupdf is not re-entrant,
+     * and a chunk's strips must be rendered in index order on the way in), so a
+     * chunk holds at most `OCR_CHUNK` strip rasters, each released when its probe
+     * returns.
+     */
+    const scanStrips = async (
+      starts: number[],
+      probe: (start: number) => Promise<RawAnchor | null>,
+    ): Promise<RawAnchor | null> => {
+      for (let s = 0; s < starts.length; s += OCR_CHUNK) {
+        const inFlight = starts.slice(s, s + OCR_CHUNK).map((start) => {
+          const p = probe(start);
+          // Marked handled at birth: `Promise.all` reports only the FIRST rejection,
+          // and a second failing strip in the same chunk would otherwise surface as
+          // an unhandled rejection.
+          p.catch(() => { /* surfaced by the await below */ });
+          return p;
+        });
+        const hit = (await Promise.all(inFlight)).find((r): r is RawAnchor => r != null);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    /**
      * Band-search page i's interior for the reciprocal "SEE SHEET <expected>"
      * label. A left/right ref on j drives a VERTICAL interior band scan on i (side
-     * opposite the ref edge; text is vertical → OCR at rot 90/270) and anchors dx.
+     * opposite the ref edge; text is vertical → OCR at rot 90/270, or at the ONE
+     * rotation page i's edge bands already proved it reads at) and anchors dx.
      * A top/bottom ref drives a HORIZONTAL interior band scan (opposite half's
      * y-range; text is horizontal → no rotation) and anchors dy. Same world-line
      * reasoning either way: the two facing labels lie on the shared matchline, so
      * the offset on the perpendicular axis is d = FT(pos_i) - FT(pos_j).
+     *
+     * Strips go through `scanStrips` above: `OCR_CHUNK` at a time, lowest-index hit
+     * wins, no further chunk issued once one has.
      */
     const searchReciprocal = async (iPage: PageRec, jPage: PageRec, refJ: SheetRef): Promise<RawAnchor | null> => {
       const [x0, y0, x1, y1] = iPage.extract.view;
@@ -894,12 +969,25 @@ async function runAutoStitch(
           // interior for a strip ref (either side may carry the reciprocal label).
           const [rx0, rx1] = jIsStrip ? [x0 + 0.02 * W, x0 + 0.98 * W]
             : refJ.edge === "left" ? [x0 + 0.45 * W, x0 + 0.98 * W] : [x0 + 0.02 * W, x0 + 0.55 * W];
-          for (let bx0 = rx0; bx0 < rx1; bx0 += 120) {
+          // The text on these strips is the SAME vertical matchline text the edge-band
+          // pass already read on this sheet, so when that pass came out with a rotation
+          // (the one its left/right bands carried the confidence mass at) scan only
+          // that one and halve the reads. Both rotations whenever it did not — the page
+          // took the no-OCR path, had no side bands, or the two tied.
+          const rots: readonly (90 | 270)[] = iPage.sideTextRot ? [iPage.sideTextRot] : [90, 270];
+          const starts: number[] = [];
+          for (let bx0 = rx0; bx0 < rx1; bx0 += 120) starts.push(bx0);
+          const hit = await scanStrips(starts, async (bx0) => {
             const bx1 = Math.min(bx0 + 160, rx1);
             const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
+            // Synchronous, and before this probe's first await: see `scanStrips`.
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-            for (const rot of [90, 270] as const) {
-              const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
+            const w = image.width, h = image.height;
+            // Rotations stay strictly ordered and strictly sequential WITHIN a strip:
+            // 90 first, 270 only if 90 found nothing — the old loop's order, and the
+            // reason a strip costs one OCR call rather than two when 90 hits.
+            for (const rot of rots) {
+              const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, w, h, rot);
               for (const lab of labels) {
                 if (ocrRefNames(lab.text, jPage)) {
                   const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
@@ -911,14 +999,20 @@ async function runAutoStitch(
                 }
               }
             }
-          }
+            return null;
+          });
+          if (hit) return hit;
         } else {
           // Top/bottom ref: horizontal matchline, horizontal text (no rotation). Ref on
           // j's top edge → i's matching label near i's south interior; bottom → north.
           // A strip ref scans i's FULL interior (either side may carry the label).
           const [ry0, ry1] = jIsStrip ? [y0 + 0.02 * H, y0 + 0.98 * H]
             : refJ.edge === "top" ? [y0 + 0.45 * H, y0 + 0.98 * H] : [y0 + 0.02 * H, y0 + 0.55 * H];
-          for (let by0 = ry0; by0 < ry1; by0 += 120) {
+          const starts: number[] = [];
+          for (let by0 = ry0; by0 < ry1; by0 += 120) starts.push(by0);
+          // Horizontal text — one read per strip, so no rotation rule applies here;
+          // the chunking is the only change.
+          const hit = await scanStrips(starts, async (by0) => {
             const by1 = Math.min(by0 + 160, ry1);
             const clip: [number, number, number, number] = [x0, by0, x1, by1];
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
@@ -932,7 +1026,9 @@ async function runAutoStitch(
                   along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined };
               }
             }
-          }
+            return null;
+          });
+          if (hit) return hit;
         }
       } finally {
         page.destroy?.();

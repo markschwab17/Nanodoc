@@ -31,7 +31,7 @@
 // (If a path 404s after a tesseract.js upgrade, check `ls node_modules/tesseract.js/dist`.)
 import workerUrl from "tesseract.js/dist/worker.min.js?url";
 import coreUrl from "tesseract.js-core/tesseract-core-simd.wasm.js?url";
-import { createOcrPool, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
+import { createOcrPool, defaultOcrPoolSize, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
 
 export interface RawImage { width: number; height: number; data: Uint8ClampedArray }
 export interface OcrWord {
@@ -64,18 +64,6 @@ export function __setOcrJobTimeoutMsForTest(ms: number): void {
 // overlap instead of queueing behind one another.
 let pool: OcrPool<Blob, any> | null = null;
 
-/**
- * One worker per core, minus one left for the main thread, clamped to [2, 4].
- * Two is the floor — with a single worker there is nothing to overlap, which is
- * the whole point. Four is the ceiling: each worker holds the tesseract SIMD
- * wasm heap plus the `eng` traineddata (80-120 MB apiece), so a 16-core machine
- * spinning up 15 of them would spend more on memory and boot than it saves.
- */
-function poolSize(): number {
-  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 0;
-  return Math.min(4, Math.max(2, cores - 1));
-}
-
 /** Boot one configured tesseract worker (the pool's per-worker init). */
 async function createTesseractWorker(): Promise<{ recognize(input: Blob): Promise<any>; terminate(): unknown }> {
   const { createWorker, PSM } = await import("tesseract.js");
@@ -99,7 +87,7 @@ async function createTesseractWorker(): Promise<{ recognize(input: Blob): Promis
 function ensurePool(): OcrPool<Blob, any> {
   if (!pool) {
     pool = createOcrPool<Blob, any>({
-      size: poolSize(),
+      size: defaultOcrPoolSize(),
       createWorker: createTesseractWorker,
       // Read per dispatch so __setOcrJobTimeoutMsForTest applies to jobs the
       // already-built pool dispatches later.

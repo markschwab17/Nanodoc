@@ -135,7 +135,9 @@ for (const scale of SCALES) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), "application/pdf");
   let debug = null;
   const t0 = Date.now();
-  const res = await autoStitch(mupdf, doc, PAGES, { userScale: scale, ocr, onDebug: (d) => { debug = d; } });
+  // One tesseract worker here (not a pool), so the OCR channel is strictly serial:
+  // batching the strip scan any wider would only queue reads a hit will discard.
+  const res = await autoStitch(mupdf, doc, PAGES, { userScale: scale, ocr, ocrConcurrency: 1, onDebug: (d) => { debug = d; } });
   flushCache();
   console.log(`\n========== SCALE ${scale}  (${((Date.now() - t0) / 1000).toFixed(1)}s, ocr ${ocrCalls} calls / ${ocrHits} hits) ==========`);
   reportRun(scale, res, debug);

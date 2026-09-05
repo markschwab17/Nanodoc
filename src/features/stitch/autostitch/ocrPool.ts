@@ -21,6 +21,27 @@
  * up in parallel just made the first job wait on all of them at once.
  */
 
+/**
+ * How many OCR jobs this environment can genuinely run at once — the pool's
+ * `size`, and therefore the width every CALLER should batch its reads at.
+ *
+ * One worker per core, minus one left for the main thread, clamped to [2, 4].
+ * Two is the floor — with a single worker there is nothing to overlap, which is
+ * the whole point. Four is the ceiling: each worker holds the tesseract SIMD
+ * wasm heap plus the `eng` traineddata (80-120 MB apiece), so a 16-core machine
+ * spinning up 15 of them would spend more on memory and boot than it saves.
+ *
+ * Lives HERE, not in `ocrService.ts`, so `autoStitch` can size its OCR batches
+ * off the same derivation without importing the browser service (which pulls in
+ * Vite `?url` worker assets and cannot load in the probe worker or in Node).
+ * Callers that build their own pool at an explicit size — the Node eval harness,
+ * three workers — pass that size down instead (`AutoStitchOptions.ocrConcurrency`).
+ */
+export function defaultOcrPoolSize(): number {
+  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 0;
+  return Math.min(4, Math.max(2, cores - 1));
+}
+
 /** Anything that can OCR one input and be shut down — a tesseract worker fits structurally. */
 export interface OcrPoolWorker<Input, Result> {
   recognize(input: Input): Promise<Result>;
