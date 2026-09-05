@@ -108,7 +108,11 @@ let poolPromise = null, NO_RESULT = null;
  */
 function ensurePool() {
   if (poolPromise) return poolPromise;
-  poolPromise = (async () => {
+  // A FAILED build must not be memoised: caching a rejected promise would make
+  // every later call rethrow the first boot error forever. Clear the memo so the
+  // next caller retries (the pool itself has the same retry rule), while the
+  // callers already holding this promise still see the real error.
+  const built = (async () => {
     const { createOcrPool, OCR_NO_RESULT } = await import("../src/features/stitch/autostitch/ocrPool.ts");
     const { createWorker, PSM } = await import("tesseract.js");
     NO_RESULT = OCR_NO_RESULT;
@@ -124,7 +128,9 @@ function ensurePool() {
       onTimeout: () => console.warn("[stitch-eval] OCR job timed out — retiring that worker"),
     });
   })();
-  return poolPromise;
+  poolPromise = built;
+  built.catch(() => { if (poolPromise === built) poolPromise = null; });
+  return built;
 }
 async function ocr(image) {
   const key = hashImage(image);
@@ -320,7 +326,10 @@ for (const set of sets) {
   rows.push(row);
 }
 flushCache();
-if (poolPromise) await (await poolPromise).terminate();
+// Teardown must not resurrect a boot failure as the script's exit status: the run
+// itself already reported whatever that failure did to the results.
+const builtPool = poolPromise ? await poolPromise.catch(() => null) : null;
+if (builtPool) await builtPool.terminate();
 
 if (AS_JSON) {
   console.log(JSON.stringify({ manifest: MANIFEST, rows }, null, 2));

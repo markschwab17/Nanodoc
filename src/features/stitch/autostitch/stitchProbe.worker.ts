@@ -39,10 +39,12 @@ const OCR_TIMEOUT_MS = 25_000;
 // don't accumulate a prior run's count.
 let ocrCallCount = 0;
 function ocrViaMain(image: RawImage, opts?: { signal?: AbortSignal }): Promise<OcrWord[]> {
-  ocrCallCount++;
   return new Promise((resolve) => {
     const signal = opts?.signal;
+    // Counted below the guard: a read that is never issued is not a round-trip,
+    // and reporting it would inflate the probe's ocrCalls on every abort.
     if (signal?.aborted) { resolve([]); return; }
+    ocrCallCount++;
     const id = ++ocrSeq;
     let settled = false;
     const finish = (words: OcrWord[]) => {

@@ -87,13 +87,18 @@ function hashImage(image) {
 let workerPromise = null;
 function ensureWorker() {
   if (workerPromise) return workerPromise;
-  workerPromise = (async () => {
+  // A FAILED boot must not be memoised — a cached rejected promise would rethrow
+  // the first error for the rest of the run. Clear the memo so the next call
+  // retries; callers already holding this promise still see the real error.
+  const built = (async () => {
     const { createWorker, PSM } = await import("tesseract.js");
     const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
     await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
     return w;
   })();
-  return workerPromise;
+  workerPromise = built;
+  built.catch(() => { if (workerPromise === built) workerPromise = null; });
+  return built;
 }
 
 async function ocr(image) {
@@ -142,7 +147,9 @@ for (const scale of SCALES) {
 }
 
 flushCache();
-if (workerPromise) await (await workerPromise).terminate();
+// Never let a boot failure resurface as the script's exit status at teardown.
+const builtWorker = workerPromise ? await workerPromise.catch(() => null) : null;
+if (builtWorker) await builtWorker.terminate();
 
 // topology comparison
 if (SCALES.length >= 2) compareTopology(runs);

@@ -106,8 +106,17 @@ describe("autoStitch concurrent OCR", () => {
     });
 
     const run = autoStitch({} as any, fakeDoc as any, [0, 1, 2, 3], { ocr });
-    // Long enough for extraction to run as far ahead as it is allowed to.
-    await new Promise((r) => setTimeout(r, 30));
+    // Wait for the pipeline to fill on the CONDITION, not on the clock: a fixed
+    // sleep is a race on a loaded machine (too short) and dead time otherwise.
+    // Extraction cannot get past two pages while the gate is shut, so once two
+    // pages' reads are issued the pipeline is at its ceiling by construction.
+    const deadline = Date.now() + 5000;
+    while (ocr.mock.calls.length < 2 * READS_PER_PAGE && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    expect(ocr).toHaveBeenCalledTimes(2 * READS_PER_PAGE);
+    // Give a third page every chance to slip through before asserting it did not.
+    await new Promise((r) => setTimeout(r, 20));
 
     // Two pages' worth in flight, seven reads each: the whole page goes at once
     // (sequentially this was 1), and page 2 was extracted without waiting for
@@ -120,6 +129,48 @@ describe("autoStitch concurrent OCR", () => {
     await run;
     expect(ocr).toHaveBeenCalledTimes(4 * READS_PER_PAGE);
     expect(capturePage).toHaveBeenCalledTimes(4);
+  });
+
+  it("an abort while the backpressure gate is shut rasters nothing more", async () => {
+    const { capturePage } = await import("./captureDevice");
+    const { renderBand } = await import("./bandRender");
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const ocr = vi.fn(async () => { await gate; return []; });
+    let aborting = false;
+
+    const run = autoStitch({} as any, fakeDoc as any, [0, 1, 2, 3], {
+      ocr,
+      shouldAbort: () => aborting,
+    });
+    const deadline = Date.now() + 5000;
+    while (ocr.mock.calls.length < 2 * READS_PER_PAGE && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    // Page 3 is parked inside the gate, PAST its own top-of-loop checkpoint.
+    expect(capturePage).toHaveBeenCalledTimes(2);
+    const rendersAtGate = (renderBand as any).mock.calls.length;
+
+    aborting = true;
+    release();
+    await expect(run).rejects.toBeInstanceOf(AutoStitchAborted);
+
+    // Without a checkpoint after the gate, waking up here would have captured the
+    // page and rastered its whole band set — tens of MB of pixmaps — before the
+    // next iteration's checkpoint got a chance to fire.
+    expect(capturePage).toHaveBeenCalledTimes(2);
+    expect((renderBand as any).mock.calls.length).toBe(rendersAtGate);
+  });
+
+  it("aborts the OCR signal when the run ends, even on the success path", async () => {
+    const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
+    const signals: (AbortSignal | undefined)[] = [];
+    const ocr = vi.fn(async (_img: any, o?: { signal?: AbortSignal }) => { signals.push(o?.signal); return []; });
+    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr });
+    // The run returned normally, so nothing tripped checkAbort — the wrapper's
+    // `finally` is the only thing that can drop reads still queued behind it.
+    expect(signals[0]?.aborted).toBe(true);
   });
 });
 

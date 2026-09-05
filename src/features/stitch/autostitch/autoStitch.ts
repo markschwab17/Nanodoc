@@ -384,27 +384,37 @@ function readPageOcr(
   view: [number, number, number, number],
   drawingFrame: [number, number, number, number] | null,
   ocr: (image: RawImage) => Promise<OcrWord[]>,
+  signal?: AbortSignal,
 ): Promise<PageOcrRead> {
+  // Issue one read. The `.catch` goes on HERE, at the moment the promise exists,
+  // not in a sweep afterwards: `renderBand` can throw part-way through the band
+  // loop, and the reads issued before it would then be rejected with nobody
+  // listening. The real awaits below still see every rejection.
+  const issue = (image: RawImage): Promise<OcrWord[]> => {
+    const p = ocr(image);
+    p.catch(() => { /* surfaced below */ });
+    return p;
+  };
   const reads: BandRead[] = [];
   for (const band of pageEdgeBands(view, drawingFrame)) {
+    // An abort mid-page must not raster the bands still to come: each is a pixmap
+    // of tens of MB, and nothing downstream will ever read them.
+    if (signal?.aborted) break;
     const { image, scale } = renderBand(mupdf, page, band.clip);
     const w = image.width, h = image.height;
     if (band.edge === "left" || band.edge === "right") {
-      // The rotated copies go straight into `ocr` and are never bound to a local:
+      // The rotated copies go straight into `issue` and are never bound to a local:
       // the side band's own raster is dead the moment both rotations exist.
-      reads.push({ band, scale, w, h, rots: [90, 270], words: [ocr(rotateRaw(image, 90)), ocr(rotateRaw(image, 270))] });
+      reads.push({ band, scale, w, h, rots: [90, 270], words: [issue(rotateRaw(image, 90)), issue(rotateRaw(image, 270))] });
     } else {
-      reads.push({ band, scale, w, h, rots: [0], words: [ocr(image)] });
+      reads.push({ band, scale, w, h, rots: [0], words: [issue(image)] });
     }
   }
   // Issued with the bands, consumed after them. resolvePrintedNos sanity-checks
   // the range (a misread like "2"→"22" would misroute byPrinted resolution).
-  const sheetNo = ocr(renderBand(mupdf, page, sheetNoBand(view).clip).image);
-  // Nothing above is awaited yet, so mark every read handled: if one rejects while
-  // the caller is waiting on a sibling, the rejection must not surface as an
-  // unhandled promise. The real awaits below still see it.
-  for (const r of reads) for (const p of r.words) p.catch(() => { /* surfaced below */ });
-  sheetNo.catch(() => { /* surfaced below */ });
+  const sheetNo = signal?.aborted
+    ? Promise.resolve<OcrWord[]>([])
+    : issue(renderBand(mupdf, page, sheetNoBand(view).clip).image);
 
   return (async () => {
     const perBand = await Promise.all(reads.map((r) => Promise.all(r.words)));
@@ -425,11 +435,37 @@ function readPageOcr(
   })();
 }
 
+/**
+ * Run the aligner, and guarantee that no OCR read outlives the run.
+ *
+ * The controller is owned HERE rather than inside the run so that the `finally`
+ * is unconditional. `checkAbort()` trips it on a cooperative abort, but that is
+ * only one of the ways a run ends: a `renderBand`/mupdf throw, a solver error, or
+ * simply returning normally with the tail of the last page's burst still queued
+ * all used to leave up to two pages of reads grinding through the pool for a
+ * result nobody will read. Aborting a signal whose jobs have all settled is a
+ * no-op, so the success path pays nothing for it.
+ */
 export async function autoStitch(
   mupdf: any,
   doc: any,
   pageIndices: number[],
   opts: AutoStitchOptions = {}
+): Promise<AutoStitchResult> {
+  const ocrAbort = typeof AbortController === "function" ? new AbortController() : null;
+  try {
+    return await runAutoStitch(mupdf, doc, pageIndices, opts, ocrAbort);
+  } finally {
+    ocrAbort?.abort();
+  }
+}
+
+async function runAutoStitch(
+  mupdf: any,
+  doc: any,
+  pageIndices: number[],
+  opts: AutoStitchOptions,
+  ocrAbort: AbortController | null,
 ): Promise<AutoStitchResult> {
   const total = pageIndices.length;
   const units: Unit[] = [];
@@ -444,12 +480,11 @@ export async function autoStitch(
   // Cooperative-abort checkpoint. Throwing a distinguishable error lets the
   // worker report `{aborted:true}` (not an error) when a plain add supersedes the probe.
   //
-  // The controller carries the SAME abort down into the OCR transport. It matters
-  // now that reads are issued in a burst: most of a page's bands are still sitting
-  // in the pool's QUEUE when an abort lands, and a queued job has no deadline of
-  // its own — unsignalled, every one of them would be OCR'd in full for a run that
-  // has already given up.
-  const ocrAbort = typeof AbortController === "function" ? new AbortController() : null;
+  // `ocrAbort` (owned by the wrapper above) carries the SAME abort down into the
+  // OCR transport. It matters now that reads are issued in a burst: most of a
+  // page's bands are still sitting in the pool's QUEUE when an abort lands, and a
+  // queued job has no deadline of its own — unsignalled, every one of them would
+  // be OCR'd in full for a run that has already given up.
   const checkAbort = () => {
     if (!opts.shouldAbort?.()) return;
     ocrAbort?.abort();
@@ -501,6 +536,11 @@ export async function autoStitch(
     while (inFlight.length >= OCR_PAGES_IN_FLIGHT) await inFlight.shift();
     const pageIndex = pageIndices[i];
     await yieldToMain();
+    // Re-checked after BOTH awaits above: an abort landing while this iteration
+    // waited for the backpressure gate (which can be a whole page of OCR long)
+    // would otherwise still capture the page and raster its 5-9 band pixmaps —
+    // ~110 MB on a large sheet — before the next iteration's checkpoint fired.
+    checkAbort();
     const page = doc.loadPage(pageIndex);
     let extract: PageExtract;
     let ocrRead: Promise<PageOcrRead> | null = null;
@@ -535,7 +575,7 @@ export async function autoStitch(
       if (ocr && !hasEdgeRefs(extract, drawingFrame)) {
         // Rasters every band NOW (the page dies in the `finally` below) and issues
         // every read at once; the answers are consumed in the resolve step.
-        ocrRead = readPageOcr(mupdf, page, extract.view, drawingFrame, ocr);
+        ocrRead = readPageOcr(mupdf, page, extract.view, drawingFrame, ocr, ocrAbort?.signal);
       }
     } finally {
       page.destroy?.();

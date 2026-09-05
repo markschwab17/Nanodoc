@@ -209,6 +209,10 @@ export async function recognize(image: RawImage, opts?: { signal?: AbortSignal }
     const jobs = ensurePool();
     jobs.prewarm();
     const blob = await imageToBlob(image);
+    // Conversion is not free (a PNG encode per band), and the probe now issues a
+    // whole page of them at once — so re-check before queueing rather than letting
+    // the pool drop an already-converted job.
+    if (opts?.signal?.aborted) return [];
 
     const result = await jobs.run(blob, { signal: opts?.signal });
     if (result === OCR_NO_RESULT) return []; // timed out, aborted, or torn down
@@ -295,6 +299,9 @@ export function attachOcrRpc(probeWorker: Worker): void {
     } finally {
       outstanding.delete(d.ocrId);
     }
+    // The probe has already resolved this id with [] and stopped listening for it;
+    // a late reply would only be dropped there, so don't send one.
+    if (ctrl.signal.aborted) return;
     probeWorker.postMessage({ kind: "ocr-res", ocrId: d.ocrId, words });
   });
 }
