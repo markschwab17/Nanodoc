@@ -671,8 +671,10 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
   const tagOf = (img: any): number => img.data[1];
   const EDGE_BAND = 200; // any tag that is not a strip index
 
-  // One high-confidence word. wordsToLabels keeps >= 60 and merges runs into phrases.
-  const words = (text: string) => [{ text, confidence: 90, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
+  // One word. wordsToLabels keeps >= 60 and merges runs into phrases; `rotScore`
+  // counts confidence mass above 50, so one word at 90 is worth 40 to its rotation.
+  const words = (text: string, confidence = 90) => [{ text, confidence, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
+  const tick = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -694,7 +696,15 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
    * `hitStrips` names, by strip index in scan order, the strips whose OCR answers
    * with the reciprocal label.
    */
-  const run = async (opts: { edgeRot: 90 | 270 | null; hitStrips: number[]; ocrConcurrency: number }) => {
+  const run = async (opts: {
+    edgeRot: 90 | 270 | null; hitStrips: number[]; ocrConcurrency: number;
+    /** Confidence the winning edge-band rotation reads at (two side bands, so its
+     *  rotMass is 2x(conf-50)); and, optionally, what the LOSING rotation reads. */
+    edgeConf?: number; edgeOtherConf?: number;
+    /** Strips whose OCR rejects, and strips whose OCR answers late — the two
+     *  together let a test make completion order disagree with index order. */
+    throwStrips?: number[]; slowStrips?: number[];
+  }) => {
     const { capturePage } = await import("./captureDevice");
     const { renderBand } = await import("./bandRender");
     const pages = [
@@ -717,10 +727,15 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
         // Page 0's edge bands. "ZZZ" can never parse as a sheet ref, so the recovered
         // labels cannot hand page 0 the reciprocal edge ref and skip the very scan
         // under test; only where the CONFIDENCE lands matters here.
-        return opts.edgeRot != null && rotOf(img) === opts.edgeRot ? words("ZZZ") : [];
+        if (opts.edgeRot == null) return [];
+        return rotOf(img) === opts.edgeRot
+          ? words("ZZZ", opts.edgeConf ?? 90)
+          : (opts.edgeOtherConf != null ? words("ZZZ", opts.edgeOtherConf) : []);
       }
       stripReads++;
       (rotsByStrip.get(tag) ?? rotsByStrip.set(tag, []).get(tag)!).push(rotOf(img));
+      if (opts.slowStrips?.includes(tag)) await tick(20);
+      if (opts.throwStrips?.includes(tag)) throw new Error(`strip ${tag} exploded`);
       return opts.hitStrips.includes(tag) ? words("MATCH LINE SEE SHEET 2") : [];
     });
 
@@ -777,5 +792,50 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     // strips 0-1, 2-3, 4; a hit on strip 2 stops the scan after four reads.
     const second = await run({ edgeRot: 270, hitStrips: [2], ocrConcurrency: 2 });
     expect(second.stripReads).toBe(4);
+  });
+
+  it("a throwing strip cannot sink a LOWER-index hit in the same chunk", async () => {
+    // The sequential loop rendered strip 1 only once strip 0 had missed, so a throw
+    // on strip 1 could not even exist once strip 0 had hit. Running them together
+    // must not change that: `Promise.all` would have rejected the whole chunk and,
+    // since nothing catches `searchReciprocal`, killed the run.
+    const ok = await run({ edgeRot: 270, hitStrips: [0], throwStrips: [1], ocrConcurrency: 3 });
+    expect(ok.debug.anchors).toHaveLength(1);
+    const clean = await run({ edgeRot: 270, hitStrips: [0], ocrConcurrency: 3 });
+    expect(ok.debug.anchors[0].dx).toBe(clean.debug.anchors[0].dx);
+  });
+
+  it("rethrows a strip that failed BEFORE any hit, and the LOWEST-index one at that", async () => {
+    // Strip 0 throws and strip 1 would have hit: the sequential loop never reached
+    // strip 1, so the run still dies here.
+    await expect(run({ edgeRot: 270, hitStrips: [1], throwStrips: [0], ocrConcurrency: 3 }))
+      .rejects.toThrow("strip 0 exploded");
+    // Both throw, and strip 0 is made the SLOW one so completion order and index
+    // order disagree. The old loop's error was always the lowest-index one;
+    // `Promise.all` would have surfaced strip 1's, which rejected first in time.
+    await expect(run({ edgeRot: 270, hitStrips: [], throwStrips: [0, 1], slowStrips: [0], ocrConcurrency: 3 }))
+      .rejects.toThrow("strip 0 exploded");
+  });
+
+  it("locks the rotation only on real evidence: a floor and a margin over the loser", async () => {
+    // The default fixture reads one word at confidence 90 on each of the two side
+    // bands: rotMass 80 vs 0, which clears both tests and locks.
+    const locked = await run({ edgeRot: 270, hitStrips: [], ocrConcurrency: 3 });
+    expect(locked.stripReads).toBe(5);
+
+    // FLOOR. A single misread fragment at confidence 55 is worth 5 per band, 10 for
+    // the page — a 10-vs-0 landslide made entirely of noise. It must not lock.
+    const noise = await run({ edgeRot: 270, hitStrips: [], edgeConf: 55, ocrConcurrency: 3 });
+    expect(noise.stripReads).toBe(10);
+
+    // MARGIN. Plenty of mass, but the other rotation read almost as much — which is
+    // what a dense sheet rasterised sideways actually does. 80 vs 70 is not a
+    // decision, so both rotations are still scanned.
+    const even = await run({ edgeRot: 270, hitStrips: [], edgeConf: 90, edgeOtherConf: 85, ocrConcurrency: 3 });
+    expect(even.stripReads).toBe(10);
+
+    // …and a clear 2x margin over a loser that DID read something still locks.
+    const clear = await run({ edgeRot: 270, hitStrips: [], edgeConf: 95, edgeOtherConf: 60, ocrConcurrency: 3 });
+    expect(clear.stripReads).toBe(5);
   });
 });

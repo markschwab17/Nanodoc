@@ -342,10 +342,11 @@ interface PageRec {
   pageLabel: PageLabelResult;
   /** Which way this sheet's VERTICAL text reads, as decided by the edge-band pass:
    *  the rotation (90 or 270) that carried the OCR confidence mass across the page's
-   *  left/right bands. Undefined when the page took the no-OCR path, had no side
-   *  bands, or the two rotations tied — i.e. whenever the pass did not actually
-   *  learn anything. The reciprocal strip scan reads it as "scan this rotation
-   *  only", and falls back to both when it is undefined. */
+   *  left/right bands, and only when that mass clears `lockSideTextRot`'s floor and
+   *  margin. Undefined whenever the pass did not actually learn anything — the page
+   *  took the no-OCR path, had no side bands, read nothing, read only noise, or read
+   *  both directions about equally. The reciprocal strip scan reads it as "scan this
+   *  rotation only", and falls back to both when it is undefined. */
   sideTextRot?: 90 | 270;
 }
 
@@ -377,6 +378,49 @@ interface BandRead {
 
 /** Confidence mass above the 50-point floor — the side-band rotation tie-break. */
 const rotScore = (ws: OcrWord[]) => ws.reduce((s, w) => s + Math.max(0, w.confidence - 50), 0);
+
+/**
+ * Minimum `rotScore` mass the winning rotation must carry before a page's side
+ * bands are allowed to LOCK the reciprocal strip scan to it, and the factor by
+ * which it must beat the loser.
+ *
+ * Locking is not the same decision as the per-band pick. The per-band pick has to
+ * choose SOMETHING, and picking the wrong way there costs one band's labels;
+ * locking narrows a whole later scan, and picking the wrong way there can make it
+ * return a different strip (see `searchReciprocal`). So it needs real evidence,
+ * not merely more evidence than nothing.
+ *
+ * The FLOOR is calibrated off the scale `rotScore` produces. It is confidence mass
+ * above 50, and `wordsToLabels` discards every word below confidence 60 — so a word
+ * that could ever BECOME a label is worth at least 10, and 60 is six such words. A
+ * lone misread fragment at confidence 55 is worth 5 and cannot clear it; neither can
+ * one lucky 60.
+ *
+ * The MARGIN is what actually decides on real sheets, and the measurements say why.
+ * Across the four eval sets both rotations score in the 800-9500 range on EVERY
+ * page: a dense civil sheet rasterised sideways yields confident garbage whichever
+ * way you turn it, so "one rotation scored higher" is nearly always true and nearly
+ * always meaningless. Requiring 2x separates the pages whose side bands genuinely
+ * hold upright text (ratios 2.35-3.01) from the pages where the two reads are the
+ * same noise twice (1.02-1.96, with nothing at all in between). Only 3 of 22 PG_SITE pages and 3 of 4 Belcourt pages clear
+ * it; the two PG_SITE pages that previously locked to 270 scored 1.32x and 1.14x and
+ * now correctly lock to nothing.
+ *
+ * The floor is therefore never the binding test on these sets (the smallest winning
+ * mass observed is ~836). It exists for the degenerate case the margin cannot judge:
+ * a page that read almost nothing at all, where 5-vs-0 is a 5x ratio and still noise.
+ */
+const SIDE_ROT_LOCK_MIN_MASS = 60;
+const SIDE_ROT_LOCK_MARGIN = 2;
+
+/** The page-level rotation lock, or undefined for "the bands proved nothing". */
+function lockSideTextRot(mass: Record<90 | 270, number>): 90 | 270 | undefined {
+  const [win, lose]: [90 | 270, 90 | 270] = mass[270] > mass[90] ? [270, 90] : [90, 270];
+  const hi = mass[win], lo = mass[lose];
+  if (hi < SIDE_ROT_LOCK_MIN_MASS) return undefined;      // noise, or nothing read at all
+  if (hi <= lo * SIDE_ROT_LOCK_MARGIN) return undefined;  // both directions read: not a decision
+  return win;
+}
 
 /**
  * Render every OCR band of ONE page and issue ALL of its reads at once.
@@ -448,17 +492,17 @@ function readPageOcr(
       if (r.rots.length === 1) {
         recovered.push(...wordsToLabels(got[0], r.band, r.scale, r.w, r.h, r.rots[0]));
       } else {
-        const cands = r.rots.map((rot, k) => ({ rot, words: got[k] }));
-        for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += rotScore(c.words);
-        const best = cands.sort((a, b) => rotScore(b.words) - rotScore(a.words))[0];
+        // Score ONCE per candidate: the tally below and the pick both want it, and
+        // `sort` would otherwise re-run it O(n log n) times over the same words.
+        const cands = r.rots.map((rot, k) => ({ rot, words: got[k], score: rotScore(got[k]) }));
+        for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += c.score;
+        // Unchanged pick: highest score wins, and a tie keeps the first of [90, 270]
+        // because `Array#sort` is stable.
+        const best = cands.sort((a, b) => b.score - a.score)[0];
         recovered.push(...wordsToLabels(best.words, r.band, r.scale, r.w, r.h, best.rot));
       }
     }
-    // Only a STRICT winner counts as knowledge. Equal masses — including the very
-    // common "both read nothing" (0 vs 0) — leave it undefined so the strip scan
-    // keeps trying both rotations rather than guessing.
-    const sideTextRot = rotMass[90] > rotMass[270] ? 90 : rotMass[270] > rotMass[90] ? 270 : undefined;
-    return { recovered, ocrNo: parseSheetNumber(await sheetNo), sideTextRot };
+    return { recovered, ocrNo: parseSheetNumber(await sheetNo), sideTextRot: lockSideTextRot(rotMass) };
   })();
 }
 
@@ -903,12 +947,21 @@ async function runAutoStitch(
      * `OCR_CHUNK` and return the FIRST hit — first meaning LOWEST strip index, which
      * is exactly what the old strip-at-a-time loop returned.
      *
-     * Why it is still the same answer: chunks are consumed in order, and within a
-     * chunk `find` takes the lowest index, so the winner is the globally lowest
-     * index that hits. Chunks are only ISSUED until one hits, so the scan still
-     * stops early — it just overshoots by at most `OCR_CHUNK - 1` strips instead of
+     * Why it is still the same answer: chunks are consumed in order, and a chunk's
+     * results are walked in INDEX order, so the winner is the globally lowest index
+     * that hits. Chunks are only ISSUED until one hits, so the scan still stops
+     * early — it just overshoots by at most `OCR_CHUNK - 1` strips instead of
      * stopping dead. That overshoot is the whole trade: those strips would otherwise
      * have been OCR'd one at a time behind an idle pool.
+     *
+     * `allSettled`, not `all`, and the walk is by index for the same two reasons.
+     * The old loop rendered strip k+1 only once strip k had missed, so (a) a throw
+     * on a LATER strip could not exist at all once an earlier one had hit — with
+     * `all`, one such throw sank the whole chunk and, since nothing catches
+     * `searchReciprocal`, the whole run; and (b) any error it did raise was always
+     * the lowest-index one, where `all` surfaces whichever rejected FIRST in time.
+     * So: return the first fulfilled non-null result, and rethrow a rejection only
+     * when it is reached before any hit.
      *
      * `probe` rasters synchronously before its first await (mupdf is not re-entrant,
      * and a chunk's strips must be rendered in index order on the way in), so a
@@ -920,16 +973,13 @@ async function runAutoStitch(
       probe: (start: number) => Promise<RawAnchor | null>,
     ): Promise<RawAnchor | null> => {
       for (let s = 0; s < starts.length; s += OCR_CHUNK) {
-        const inFlight = starts.slice(s, s + OCR_CHUNK).map((start) => {
-          const p = probe(start);
-          // Marked handled at birth: `Promise.all` reports only the FIRST rejection,
-          // and a second failing strip in the same chunk would otherwise surface as
-          // an unhandled rejection.
-          p.catch(() => { /* surfaced by the await below */ });
-          return p;
-        });
-        const hit = (await Promise.all(inFlight)).find((r): r is RawAnchor => r != null);
-        if (hit) return hit;
+        // `allSettled` attaches its handlers synchronously to every promise in the
+        // array, so no rejection here can ever go unobserved.
+        const settled = await Promise.allSettled(starts.slice(s, s + OCR_CHUNK).map((start) => probe(start)));
+        for (const r of settled) {
+          if (r.status === "rejected") throw r.reason;
+          if (r.value != null) return r.value;
+        }
       }
       return null;
     };
@@ -970,10 +1020,17 @@ async function runAutoStitch(
           const [rx0, rx1] = jIsStrip ? [x0 + 0.02 * W, x0 + 0.98 * W]
             : refJ.edge === "left" ? [x0 + 0.45 * W, x0 + 0.98 * W] : [x0 + 0.02 * W, x0 + 0.55 * W];
           // The text on these strips is the SAME vertical matchline text the edge-band
-          // pass already read on this sheet, so when that pass came out with a rotation
-          // (the one its left/right bands carried the confidence mass at) scan only
-          // that one and halve the reads. Both rotations whenever it did not — the page
-          // took the no-OCR path, had no side bands, or the two tied.
+          // pass already read on this sheet, so when that pass LOCKED a rotation (see
+          // `lockSideTextRot`) scan only that one and halve the reads. Both rotations
+          // whenever it did not — the page took the no-OCR path, had no side bands, or
+          // the evidence was too thin or too even to decide.
+          //
+          // This is the one narrowing in the scan that can change an ANSWER, and not
+          // only by missing a label: if strip k matches solely at 90, a later strip m
+          // matches solely at 270, and the lock says 270, the scan now returns m where
+          // it used to return k — a different anchor, not a lost one. It is gated on
+          // the lock needing real mass and a clear margin for exactly that reason, and
+          // verified against the four eval sets' placements.
           const rots: readonly (90 | 270)[] = iPage.sideTextRot ? [iPage.sideTextRot] : [90, 270];
           const starts: number[] = [];
           for (let bx0 = rx0; bx0 < rx1; bx0 += 120) starts.push(bx0);
@@ -982,12 +1039,11 @@ async function runAutoStitch(
             const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
             // Synchronous, and before this probe's first await: see `scanStrips`.
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-            const w = image.width, h = image.height;
             // Rotations stay strictly ordered and strictly sequential WITHIN a strip:
             // 90 first, 270 only if 90 found nothing — the old loop's order, and the
             // reason a strip costs one OCR call rather than two when 90 hits.
             for (const rot of rots) {
-              const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, w, h, rot);
+              const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
               for (const lab of labels) {
                 if (ocrRefNames(lab.text, jPage)) {
                   const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
