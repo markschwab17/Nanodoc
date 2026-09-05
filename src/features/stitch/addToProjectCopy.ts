@@ -242,6 +242,16 @@ const ROLE_NOUN: Record<string, string> = {
   details: "a details sheet",
 };
 
+// ── Step 3, "Trim title blocks" (takeoff step strip) ─────────────────────────
+/** Step 3's button `title`: what clicking it does, since the step used to be
+ *  inert and gave no clue. */
+export const TRIM_STEP_TITLE = "Find title blocks and matchline margins to hide, then review the boxes";
+
+/** Shown in the strip for 6s when a Clean-up run from the step finds nothing to
+ *  hide — the eraser (Delete content) is the manual fallback, named so the user
+ *  is not left staring at an empty review with no next move. */
+export const TRIM_NO_BOXES_NOTE = "No title blocks found — use the eraser tool to hide areas by hand";
+
 export function autoAlignExplanation(outcome: AutoAlignOutcome | null | undefined): string | null {
   if (!outcome) return null;
   const parts: string[] = [];

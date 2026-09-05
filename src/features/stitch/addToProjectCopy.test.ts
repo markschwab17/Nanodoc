@@ -9,6 +9,8 @@ import {
   autoAlignButtonLabel,
   autoAlignUnavailableNote,
   autoAlignUnavailableTitle,
+  TRIM_STEP_TITLE,
+  TRIM_NO_BOXES_NOTE,
   type TileForPlan,
 } from "./addToProjectCopy";
 
@@ -315,6 +317,20 @@ describe("the earned Auto-align copy", () => {
   it("the tooltip is just the note when there is nothing more to say", () => {
     expect(autoAlignUnavailableTitle("no_matchline")).toBe(
       "Auto-align isn't available for these sheets — they don't share a matchline.",
+    );
+  });
+});
+
+describe("Trim title blocks step copy", () => {
+  it("the button title says what clicking it does", () => {
+    expect(TRIM_STEP_TITLE).toBe(
+      "Find title blocks and matchline margins to hide, then review the boxes",
+    );
+  });
+
+  it("the no-boxes note names the eraser as the manual fallback", () => {
+    expect(TRIM_NO_BOXES_NOTE).toBe(
+      "No title blocks found — use the eraser tool to hide areas by hand",
     );
   });
 });

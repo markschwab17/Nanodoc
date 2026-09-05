@@ -18,8 +18,51 @@ import {
   autoAlignButtonLabel,
   autoAlignUnavailableNote,
   autoAlignUnavailableTitle,
+  TRIM_STEP_TITLE,
   type AutoAlignUnavailableReason,
 } from "./addToProjectCopy";
+
+/** Step 3's phase: `"now"` while the Clean-up review is open, `"done"` once any
+ *  sheet has a hidden region, `"todo"` otherwise (the default, optional state). */
+export type TrimStepPhase = "todo" | "now" | "done";
+
+export interface TrimStepUiState {
+  state: TrimStepPhase;
+  suffix: string;
+  disabled: boolean;
+}
+
+/** The inputs step 3's UI is derived from — no store reads here, so every row of
+ *  the constraints table is a plain function call to test. */
+export interface TrimStepInputs {
+  /** Sheets on the canvas (scale stamps excluded) — nothing to clean up without one. */
+  tileCount: number;
+  /** `sum(tiles[].hiddenRegions.length)` — regions already hidden, across all sheets. */
+  hiddenCount: number;
+  /** The Clean-up review overlay is open. */
+  cleanupActive: boolean;
+  /** A detection pass is in flight (before the review overlay opens). */
+  cleanupBusy: boolean;
+}
+
+/**
+ * Step 3's derived state. Reviewing wins over a stale "N hidden" from a prior
+ * Apply (the review's own proposals are what is about to change), otherwise a
+ * sheet with any hidden region reads as done; a click while reviewing is left to
+ * `onCleanup` itself, which already toggles cancel — so `disabled` only guards
+ * the two cases with truly nothing to click into.
+ */
+export function trimStepState({
+  tileCount,
+  hiddenCount,
+  cleanupActive,
+  cleanupBusy,
+}: TrimStepInputs): TrimStepUiState {
+  const disabled = tileCount === 0 || cleanupBusy;
+  if (cleanupActive) return { state: "now", suffix: " · reviewing", disabled };
+  if (hiddenCount > 0) return { state: "done", suffix: ` · ${hiddenCount} hidden`, disabled };
+  return { state: "todo", suffix: " · optional", disabled };
+}
 
 /**
  * The earned Auto-align offer. The sheets are already on the canvas in a grid; this is
@@ -51,29 +94,44 @@ export interface TakeoffModeStripProps {
   canAdd: boolean;
   onAddToProject: () => void;
   autoAlign?: TakeoffModeAutoAlign;
+  /** Step 3's raw inputs — derived into UI state with `trimStepState`. Omitted
+   *  entirely, step 3 renders as the old inert "optional" pill (no `onTrim` to
+   *  call, nothing to derive from). */
+  trimState?: TrimStepInputs;
+  /** Runs the same Clean-up review the toolbar's own button starts. */
+  onTrim?: () => void;
+  /** Set for 6s after a Clean-up run from this step finds nothing to hide — the
+   *  strip's one-line fallback naming the eraser tool. */
+  trimNote?: string | null;
 }
 
-/** One step pill. `state` drives the marker and whether it reads as current. */
+/** One step pill. `state` drives the marker and whether it reads as current.
+ *  Steps 1–2 pass none of `onClick`/`disabled`/`title` and render exactly as
+ *  before (a `<div>`); step 3 passes `onClick` and becomes a real `<button>`. */
 function Step({
   state,
   marker,
   label,
   suffix,
+  onClick,
+  disabled,
+  title,
 }: {
   state: "done" | "now" | "todo";
   marker: React.ReactNode;
   label: string;
   suffix?: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  title?: string;
 }) {
-  return (
-    <div
-      className={`flex items-center gap-2 px-3.5 h-full border-b-2 text-xs font-medium ${
-        state === "now"
-          ? "text-foreground border-primary"
-          : "text-muted-foreground border-transparent"
-      }`}
-      aria-current={state === "now" ? "step" : undefined}
-    >
+  const className = `flex items-center gap-2 px-3.5 h-full border-b-2 text-xs font-medium ${
+    state === "now"
+      ? "text-foreground border-primary"
+      : "text-muted-foreground border-transparent"
+  }`;
+  const inner = (
+    <>
       <span
         className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border-[1.5px] text-[10px] font-bold ${
           state === "done"
@@ -90,6 +148,28 @@ function Step({
         {label}
         {suffix ? <span className="font-normal text-muted-foreground">{suffix}</span> : null}
       </span>
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={`${className} disabled:cursor-not-allowed disabled:opacity-60`}
+        aria-current={state === "now" ? "step" : undefined}
+        aria-disabled={disabled || undefined}
+        disabled={disabled}
+        title={title}
+        onClick={onClick}
+      >
+        {inner}
+      </button>
+    );
+  }
+
+  return (
+    <div className={className} aria-current={state === "now" ? "step" : undefined}>
+      {inner}
     </div>
   );
 }
@@ -161,6 +241,9 @@ export function TakeoffModeStrip({
   canAdd,
   onAddToProject,
   autoAlign,
+  trimState,
+  onTrim,
+  trimNote,
 }: TakeoffModeStripProps) {
   // While anything is unplaced that is the only number worth showing — the
   // sheet count is reassurance, the unplaced count is a task.
@@ -169,6 +252,10 @@ export function TakeoffModeStrip({
       ? ` · ${unplacedCount} need${unplacedCount === 1 ? "s" : ""} placing`
       : ` · ${sheetCount} sheet${sheetCount === 1 ? "" : "s"}`;
 
+  // No `trimState`/`onTrim` at all: step 3 falls back to the old inert pill
+  // (nothing to derive from, nothing to click into).
+  const trim = trimState ? trimStepState(trimState) : null;
+
   return (
     <nav
       aria-label="Site sheet steps"
@@ -176,7 +263,24 @@ export function TakeoffModeStrip({
     >
       <Step state="done" marker={<Check className="h-2.5 w-2.5 stroke-[3]" />} label="Sheets chosen" />
       <Step state="now" marker="2" label="Arrange" suffix={arrangeSuffix} />
-      <Step state="todo" marker="3" label="Trim title blocks" suffix=" · optional" />
+      {trim && onTrim ? (
+        <Step
+          state={trim.state}
+          marker="3"
+          label="Trim title blocks"
+          suffix={trim.suffix}
+          onClick={onTrim}
+          disabled={trim.disabled}
+          title={TRIM_STEP_TITLE}
+        />
+      ) : (
+        <Step state="todo" marker="3" label="Trim title blocks" suffix=" · optional" />
+      )}
+      {trimNote && (
+        <span className="ml-2 max-w-[280px] truncate text-xs text-muted-foreground" role="status" aria-live="polite">
+          {trimNote}
+        </span>
+      )}
       <span className="flex-1" />
       {autoAlign && (
         <div className="mr-3 flex min-w-0 items-center">

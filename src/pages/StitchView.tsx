@@ -16,10 +16,11 @@ import { StitchContextMenu } from "@/features/stitch/StitchContextMenu";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
 import { commitPlainAdd, type CommitResult } from "@/features/stitch/commitPages";
 import { parseStitchPlan } from "@/features/stitch/stitchPlan";
-import { autoAlignExplanation } from "@/features/stitch/addToProjectCopy";
+import { autoAlignExplanation, TRIM_NO_BOXES_NOTE } from "@/features/stitch/addToProjectCopy";
 import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
 import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
+import { TrimCoachMark } from "@/features/stitch/TrimCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
 import {
@@ -512,6 +513,26 @@ export default function StitchView() {
   const [cleanupProposals, setCleanupProposals] = useState<TileProposalUI[]>([]);
   const [cleanupBusy, setCleanupBusy] = useState(false);
 
+  // --- Step 3 "Trim title blocks" (takeoff step strip only) ---
+  // Coach mark: shown the first time cleanup is entered FROM THE STEP, once per
+  // session (not persisted) — trimStepEnteredRef marks intent at click time,
+  // trimCoachShownRef guards it firing more than once.
+  const trimStepEnteredRef = useRef(false);
+  const trimCoachShownRef = useRef(false);
+  const [showTrimCoach, setShowTrimCoach] = useState(false);
+  // "No title blocks found" fallback: a one-line note in the strip plus a ring
+  // on the toolbar's Delete content (eraser) button, both live for 6s.
+  const [trimNote, setTrimNote] = useState<string | null>(null);
+  const [highlightEraser, setHighlightEraser] = useState(false);
+  const trimNoteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (trimNoteTimeoutRef.current) clearTimeout(trimNoteTimeoutRef.current);
+  }, []);
+  /** Regions already hidden across every sheet — step 3's "done" count. */
+  const hiddenRegionCount = useStitchStore((s) =>
+    s.tiles.reduce((sum, t) => sum + (t.hiddenRegions?.length ?? 0), 0)
+  );
+
   /** Leave clean-up review (no-op re-render when not in review). */
   const exitCleanupReview = useCallback(() => {
     setCleanupReviewMode(false);
@@ -692,11 +713,14 @@ export default function StitchView() {
   }, [handleSelectToolActivate]);
 
   // --- Clean-Composite (hide title blocks / match margins) ---
-  const handleCleanup = useCallback(async () => {
+  // Returns the freshly-DETECTED region count (0 means nothing was found — the
+  // caller decides what to do about that), or null when the run never got that
+  // far (toggled off, nothing reviewable, or it threw).
+  const handleCleanup = useCallback(async (): Promise<number | null> => {
     // Toolbar button toggles: a second click while reviewing cancels.
     if (cleanupReviewMode) {
       exitCleanupReview();
-      return;
+      return null;
     }
     // Only sheets with a PDF source get analyzed — skip scale stamps, rotated
     // tiles (v1), and promoted note tiles (no source, would fail to capture).
@@ -705,7 +729,7 @@ export default function StitchView() {
       .tiles.filter((t) => !t.isScaleStamp && !(t.rotation ?? 0) && t.sourcePdfBytes.length > 0);
     if (reviewable.length === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
-      return;
+      return null;
     }
     // Clean-up is its own mode — turn the other tools off.
     setContentDeleteMode(false);
@@ -757,13 +781,48 @@ export default function StitchView() {
           : "No title blocks or match margins detected. Draw a box to hide a region manually, then Apply.",
         "info"
       );
+      return freshTotal;
     } catch (e) {
       console.error(e);
       showNotification("Clean up couldn't analyze the sheets.", "error");
+      return null;
     } finally {
       setCleanupBusy(false);
     }
   }, [cleanupReviewMode, exitCleanupReview, showNotification, pointAlign, scaleAlign, alignNeighbourExit, setSelectedTileIds]);
+
+  // Step 3's own entry point: same detection run, plus the coach mark (first
+  // entry from the step, this session) and the "no boxes found" fallback that
+  // names the eraser tool.
+  const handleTrimStepClick = useCallback(() => {
+    trimStepEnteredRef.current = true;
+    void handleCleanup().then((freshTotal) => {
+      if (freshTotal !== 0) return;
+      // Nothing detected: point at the manual eraser for a few seconds rather
+      // than leaving an empty review with no next move.
+      setTrimNote(TRIM_NO_BOXES_NOTE);
+      setHighlightEraser(true);
+      if (trimNoteTimeoutRef.current) clearTimeout(trimNoteTimeoutRef.current);
+      trimNoteTimeoutRef.current = setTimeout(() => {
+        setTrimNote(null);
+        setHighlightEraser(false);
+      }, 6000);
+    });
+  }, [handleCleanup]);
+
+  // The coach mark fires once the review overlay actually opens as a result of
+  // that step click — not on every re-open, and not for a toolbar-triggered run.
+  // The "entered from step" flag is consumed on the very next open either way,
+  // so a step click that finds nothing reviewable doesn't misattribute some
+  // later, unrelated toolbar-triggered open.
+  useEffect(() => {
+    if (!cleanupReviewMode || !trimStepEnteredRef.current) return;
+    trimStepEnteredRef.current = false;
+    if (!trimCoachShownRef.current) {
+      trimCoachShownRef.current = true;
+      setShowTrimCoach(true);
+    }
+  }, [cleanupReviewMode]);
 
   const handleToggleCleanupRegion = useCallback((tileId: string, index: number) => {
     setCleanupProposals((prev) =>
@@ -1160,6 +1219,14 @@ export default function StitchView() {
             onRun: () => void earned.run(),
             onRecheck: earned.recheck,
           }}
+          trimState={{
+            tileCount: sheetTileCount,
+            hiddenCount: hiddenRegionCount,
+            cleanupActive: cleanupReviewMode,
+            cleanupBusy,
+          }}
+          onTrim={handleTrimStepClick}
+          trimNote={trimNote}
         />
       )}
       {takeoffMode && addToProjectError && (
@@ -1216,6 +1283,7 @@ export default function StitchView() {
         onCleanup={handleCleanup}
         cleanupActive={cleanupReviewMode}
         cleanupBusy={cleanupBusy}
+        highlightDeleteContent={highlightEraser}
         embed={!!ctoContext?.embed}
         onCancel={handleCancel}
         takeoffMode={takeoffMode}
@@ -1313,6 +1381,9 @@ export default function StitchView() {
               setAlignExplanation(null);
             }}
           />
+        )}
+        {showTrimCoach && cleanupReviewMode && (
+          <TrimCoachMark onDismiss={() => setShowTrimCoach(false)} />
         )}
         {cleanupBusy && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[2px]" aria-live="polite" aria-busy="true">

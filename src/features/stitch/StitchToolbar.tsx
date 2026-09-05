@@ -5,6 +5,7 @@
 import type { ComponentProps } from "react";
 import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
+import { cn } from "@/lib/utils";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   ArrowDownToLine,
@@ -86,6 +87,9 @@ export interface StitchToolbarProps {
   cleanupActive?: boolean;
   /** True while a clean-up detection pass is in flight (before review opens). */
   cleanupBusy?: boolean;
+  /** Rings the Delete content button for a few seconds — the step-3 "no title
+   *  blocks found" fallback pointing at the manual eraser. */
+  highlightDeleteContent?: boolean;
   /** True when hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1, `embed=1`): hides the Back-to-editor link, replacing it with a Cancel button that calls `onCancel`. */
   embed?: boolean;
   /** Called when Cancel is clicked in embed mode. */
@@ -122,12 +126,13 @@ function IconButtonWithTooltip({
   label,
   tooltipDescription,
   children,
+  className,
   ...buttonProps
 }: ComponentProps<typeof Button> & { title: string; label: string; tooltipDescription?: string }) {
   const tooltipText = tooltipDescription ?? label;
   return (
     <div className="relative group inline-flex">
-      <Button size="icon" className="h-7 w-7 shrink-0" title={title} {...buttonProps}>
+      <Button size="icon" className={cn("h-7 w-7 shrink-0", className)} title={title} {...buttonProps}>
         {children}
       </Button>
       <span
@@ -175,6 +180,7 @@ export function StitchToolbar({
   onCleanup,
   cleanupActive,
   cleanupBusy,
+  highlightDeleteContent,
   embed,
   onCancel,
   takeoffMode,
@@ -457,6 +463,11 @@ export function StitchToolbar({
           variant={contentDeleteMode ? "secondary" : "outline"}
           title={deleteContentTip}
           label="Delete content"
+          className={
+            highlightDeleteContent
+              ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
+              : undefined
+          }
           onClick={() => {
             onPanModeChange(false);
             setContentDeleteMode((v) => !v);

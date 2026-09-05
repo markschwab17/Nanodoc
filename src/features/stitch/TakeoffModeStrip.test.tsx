@@ -9,7 +9,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react-dom/test-utils";
-import { TakeoffModeStrip, type TakeoffModeAutoAlign } from "./TakeoffModeStrip";
+import {
+  TakeoffModeStrip,
+  trimStepState,
+  type TakeoffModeAutoAlign,
+  type TrimStepInputs,
+} from "./TakeoffModeStrip";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -131,5 +136,157 @@ describe("TakeoffModeStrip auto-align offer", () => {
     for (const status of ["idle", "checking", "offer", "unavailable", "stale", "aligning"] as const) {
       expect(render(offer({ status, reason: "no_refs" }))).toContain("Add to project");
     }
+  });
+});
+
+const trimInputs = (over: Partial<TrimStepInputs> = {}): TrimStepInputs => ({
+  tileCount: 4,
+  hiddenCount: 0,
+  cleanupActive: false,
+  cleanupBusy: false,
+  ...over,
+});
+
+describe("trimStepState", () => {
+  it("reads as optional and disabled with nothing on the canvas", () => {
+    expect(trimStepState(trimInputs({ tileCount: 0 }))).toEqual({
+      state: "todo",
+      suffix: " · optional",
+      disabled: true,
+    });
+  });
+
+  it("reads as optional and clickable once a sheet is on the canvas", () => {
+    expect(trimStepState(trimInputs())).toEqual({
+      state: "todo",
+      suffix: " · optional",
+      disabled: false,
+    });
+  });
+
+  it("disables while a detection pass is in flight, even with sheets on the canvas", () => {
+    expect(trimStepState(trimInputs({ cleanupBusy: true }))).toEqual({
+      state: "todo",
+      suffix: " · optional",
+      disabled: true,
+    });
+  });
+
+  it("reads as reviewing, and stays clickable, while the review overlay is open", () => {
+    expect(trimStepState(trimInputs({ cleanupActive: true }))).toEqual({
+      state: "now",
+      suffix: " · reviewing",
+      disabled: false,
+    });
+  });
+
+  it("reads as N hidden once Apply has hidden regions and review has closed", () => {
+    expect(trimStepState(trimInputs({ hiddenCount: 3 }))).toEqual({
+      state: "done",
+      suffix: " · 3 hidden",
+      disabled: false,
+    });
+  });
+
+  it("reviewing wins over a stale hidden count from a prior Apply", () => {
+    expect(trimStepState(trimInputs({ hiddenCount: 3, cleanupActive: true }))).toEqual({
+      state: "now",
+      suffix: " · reviewing",
+      disabled: false,
+    });
+  });
+
+  it("still disables a hidden-count row when no sheets remain", () => {
+    expect(trimStepState(trimInputs({ tileCount: 0, hiddenCount: 3 }))).toEqual({
+      state: "done",
+      suffix: " · 3 hidden",
+      disabled: true,
+    });
+  });
+});
+
+function renderStrip(props: {
+  trimState?: TrimStepInputs;
+  onTrim?: () => void;
+  trimNote?: string | null;
+}) {
+  act(() => {
+    root.render(
+      <TakeoffModeStrip
+        sheetCount={4}
+        unplacedCount={0}
+        canAdd
+        onAddToProject={() => {}}
+        {...props}
+      />,
+    );
+  });
+}
+
+function findByText(text: string) {
+  return [...container.querySelectorAll("*")].find((el) => el.textContent === text);
+}
+
+describe("TakeoffModeStrip step 3 (Trim title blocks)", () => {
+  it("falls back to the old inert pill when no trim wiring is passed at all", () => {
+    renderStrip({});
+    expect(container.textContent).toContain("Trim title blocks · optional");
+    const buttons = [...container.querySelectorAll("button")];
+    expect(buttons.some((b) => b.textContent?.includes("Trim title blocks"))).toBe(false);
+  });
+
+  it("renders as a real, enabled button once wired with sheets on the canvas", () => {
+    renderStrip({ trimState: trimInputs(), onTrim: () => {} });
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Trim title blocks"),
+    )!;
+    expect(button).toBeTruthy();
+    expect(button.hasAttribute("disabled")).toBe(false);
+    expect(button.getAttribute("title")).toBe(
+      "Find title blocks and matchline margins to hide, then review the boxes",
+    );
+  });
+
+  it("clicking the step calls onTrim", () => {
+    const onTrim = vi.fn();
+    renderStrip({ trimState: trimInputs(), onTrim });
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Trim title blocks"),
+    )!;
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onTrim).toHaveBeenCalledTimes(1);
+  });
+
+  it("is disabled and aria-disabled with no sheets on the canvas", () => {
+    renderStrip({ trimState: trimInputs({ tileCount: 0 }), onTrim: () => {} });
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Trim title blocks"),
+    )!;
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("reads as reviewing while the overlay is open", () => {
+    renderStrip({ trimState: trimInputs({ cleanupActive: true }), onTrim: () => {} });
+    expect(container.textContent).toContain("Trim title blocks · reviewing");
+  });
+
+  it("reads as N hidden once regions are hidden", () => {
+    renderStrip({ trimState: trimInputs({ hiddenCount: 2 }), onTrim: () => {} });
+    expect(container.textContent).toContain("Trim title blocks · 2 hidden");
+  });
+
+  it("shows the one-line no-boxes-found note naming the eraser", () => {
+    renderStrip({
+      trimState: trimInputs(),
+      onTrim: () => {},
+      trimNote: "No title blocks found — use the eraser tool to hide areas by hand",
+    });
+    expect(findByText("No title blocks found — use the eraser tool to hide areas by hand")).toBeTruthy();
+  });
+
+  it("shows no note at all when there is nothing to say", () => {
+    renderStrip({ trimState: trimInputs(), onTrim: () => {}, trimNote: null });
+    expect(container.textContent).not.toContain("No title blocks found");
   });
 });
