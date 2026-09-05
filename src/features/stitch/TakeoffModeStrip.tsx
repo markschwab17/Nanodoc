@@ -157,6 +157,10 @@ function Step({
         type="button"
         className={`${className} disabled:cursor-not-allowed disabled:opacity-60`}
         aria-current={state === "now" ? "step" : undefined}
+        // While reviewing, the pill stays a real, enabled button — a click is a
+        // no-op (handled by the caller), not a disabled control — but it reads
+        // as "pressed" to reflect that state.
+        aria-pressed={state === "now" ? true : undefined}
         aria-disabled={disabled || undefined}
         disabled={disabled}
         title={title}

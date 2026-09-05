@@ -795,6 +795,12 @@ export default function StitchView() {
   // entry from the step, this session) and the "no boxes found" fallback that
   // names the eraser tool.
   const handleTrimStepClick = useCallback(() => {
+    // A click while already reviewing is a NO-OP — handleCleanup's own toggle
+    // would otherwise read it as "cancel review", which is not what clicking a
+    // step pill that reads "reviewing" should do. Bail before touching
+    // trimStepEnteredRef so a no-op click can't leave it armed for some later,
+    // unrelated toolbar-opened review to wrongly claim as "from the step".
+    if (cleanupReviewMode) return;
     trimStepEnteredRef.current = true;
     void handleCleanup().then((freshTotal) => {
       if (freshTotal !== 0) return;
@@ -808,7 +814,7 @@ export default function StitchView() {
         setHighlightEraser(false);
       }, 6000);
     });
-  }, [handleCleanup]);
+  }, [cleanupReviewMode, handleCleanup]);
 
   // The coach mark fires once the review overlay actually opens as a result of
   // that step click — not on every re-open, and not for a toolbar-triggered run.

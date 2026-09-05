@@ -196,6 +196,23 @@ describe("trimStepState", () => {
     });
   });
 
+  it("reads as reviewing but disabled when a detection pass is ALSO in flight", () => {
+    // A re-run mid-review: still "now"/"reviewing", but busy overrides clickable.
+    expect(trimStepState(trimInputs({ cleanupActive: true, cleanupBusy: true }))).toEqual({
+      state: "now",
+      suffix: " · reviewing",
+      disabled: true,
+    });
+  });
+
+  it("reads as reviewing but disabled with no sheets on the canvas", () => {
+    expect(trimStepState(trimInputs({ cleanupActive: true, tileCount: 0 }))).toEqual({
+      state: "now",
+      suffix: " · reviewing",
+      disabled: true,
+    });
+  });
+
   it("still disables a hidden-count row when no sheets remain", () => {
     expect(trimStepState(trimInputs({ tileCount: 0, hiddenCount: 3 }))).toEqual({
       state: "done",
@@ -269,6 +286,28 @@ describe("TakeoffModeStrip step 3 (Trim title blocks)", () => {
   it("reads as reviewing while the overlay is open", () => {
     renderStrip({ trimState: trimInputs({ cleanupActive: true }), onTrim: () => {} });
     expect(container.textContent).toContain("Trim title blocks · reviewing");
+  });
+
+  it("stays a real, enabled, aria-pressed button while reviewing — a click is left to the caller as a no-op", () => {
+    const onTrim = vi.fn();
+    renderStrip({ trimState: trimInputs({ cleanupActive: true }), onTrim });
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Trim title blocks"),
+    )!;
+    expect(button.hasAttribute("disabled")).toBe(false);
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    // The step itself still fires onClick — the no-op guard lives in the
+    // caller's handler (StitchView's handleTrimStepClick), not here.
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onTrim).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not aria-pressed outside the reviewing state", () => {
+    renderStrip({ trimState: trimInputs(), onTrim: () => {} });
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Trim title blocks"),
+    )!;
+    expect(button.getAttribute("aria-pressed")).toBeNull();
   });
 
   it("reads as N hidden once regions are hidden", () => {
