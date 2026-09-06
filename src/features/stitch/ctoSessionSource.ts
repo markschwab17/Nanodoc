@@ -307,6 +307,15 @@ export function classifyServerProbe(opts: {
     return "none";
   }
   if (!serverProbeRequestMatches(row.request, canvas, pageCodes)) return "none";
+  // NEVER A VERDICT ON UNKNOWN EVIDENCE — enforced here as well as on the droplet.
+  //
+  // The Lambda already stores an evidence-holed run as `status: 'unknown'`, so this
+  // should be unreachable. It is checked anyway because it is the ONE rule the browser
+  // enforces on its own replies (`useEarnedAutoAlign` re-checks, then refuses), and a
+  // rule that lives only in the writer is a rule one droplet deploy can lose. A reply
+  // whose counters say a read never came back is exactly the reply that makes two
+  // probes of the same sheets disagree, whichever machine produced it.
+  if ((row.ocrStats?.unknown ?? 0) > 0) return "none";
   return "use";
 }
 

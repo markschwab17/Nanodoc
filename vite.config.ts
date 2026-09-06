@@ -30,7 +30,11 @@ function engineVersion(command: string): string {
   try {
     const git = (args: string[]) =>
       execFileSync("git", args, { cwd: __dirname, encoding: "utf8" }).trim();
-    const head = git(["rev-parse", "--short", "HEAD"]);
+    // `--short=12`, not a bare `--short`: git's default abbreviation length is chosen
+    // per checkout from the object count, so the editor and the Lambda bundle could
+    // stamp the same commit as 7 and 8 characters and never match. Pinned in BOTH
+    // builds (`scripts/build-probe-bundle.mjs`).
+    const head = git(["rev-parse", "--short=12", "HEAD"]);
     if (!head) return "dev";
     // Untracked files excluded, exactly as the bundle build does it: a scratch file
     // beside the repo is not a change to the engine.

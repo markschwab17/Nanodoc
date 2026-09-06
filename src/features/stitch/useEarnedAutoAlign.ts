@@ -43,8 +43,9 @@
  * `site_sheet_sources.probe`. When the takeoff flow hands one over, `check()` takes it
  * instead of spending the minute — but only when it is provably an answer to the SAME
  * question: the same engine commit (`ENGINE_VERSION`), the same plan (`planHashHex`), the
- * same page set and scales (`serverProbeRequestMatches` against `canvasProbeSet`), and a
- * canvas nobody has touched since the check began. A row still being computed is polled
+ * same page set and scales (`serverProbeRequestMatches` against `canvasProbeSet`), and
+ * evidence with no holes in it (`ocrStats.unknown === 0`, the same bar a worker reply has
+ * to clear). A row still being computed is polled
  * briefly (2 s apart, 20 s in total, with the strip saying exactly what it says for any
  * check in flight); anything else — an older CTO, a different build, a `status` of
  * `unknown`/`timeout`/`error`, a plan since edited — is not a verdict, and the worker runs
@@ -115,10 +116,17 @@ const SERVER_SOURCE = " (server)";
  * Never throws and never distinguishes those cases, deliberately: every one of them
  * means the same thing to the caller ("no verdict from here"), and the caller's answer
  * to that is already the right one — run the browser probe.
+ *
+ * IT HAS ITS OWN DEADLINE. The poll loop's 20 s window is enforced by comparing clocks
+ * BETWEEN reads, so it only advances when a read comes back: one request that hangs
+ * (a captive-portal proxy, a socket that is never reset) parked the hook in "checking"
+ * with no escape and no probe running — the one state this feature must never produce.
+ * One poll interval is the whole budget a poll deserves; the abort lands in the catch
+ * below like any other failure, and the loop moves on to the next tick or gives up.
  */
 async function fetchServerProbe(url: string): Promise<unknown> {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(SERVER_POLL_INTERVAL_MS) });
     if (!res.ok) return null;
     const json = (await res.json()) as { probe?: unknown } | null;
     return json?.probe ?? null;
@@ -526,11 +534,12 @@ export function useEarnedAutoAlign(
         });
 
         if (verdict === "use") {
-          // The same guard `run()` applies, applied earlier: the verdict's placements
-          // are ABSOLUTE, and a canvas the user has dragged since this check started is
-          // not the canvas it describes. Probe it here rather than presenting an offer
-          // that would immediately go stale.
-          if (movedSinceCheck(set, useStitchStore.getState().tiles)) break;
+          // A tile the user dragged while this was resolving does NOT send the check
+          // back to the worker. The verdict is about the PAGES, and a browser probe of
+          // the same set would answer the same thing — while a canvas that has moved is
+          // already handled, once, in `run()`: it withdraws the offer as `"stale"` and
+          // an undo puts it straight back. Re-probing here would spend the minute this
+          // whole path exists to save and land on the identical stale offer.
           const row = probe as ServerProbe;
           const result = row.result as ProbeResult;
           probeRef.current = result;

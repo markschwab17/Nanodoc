@@ -163,6 +163,23 @@ describe("the probe request a canvas implies (cross fixture with CTO)", () => {
 });
 
 describe("planHashHex", () => {
+  /**
+   * THE OTHER CROSS FIXTURE. `scripts/fixtures/plan-hash.json` is CTO's file, copied
+   * byte for byte (`src/lib/site-sheet/__tests__/fixtures/plan-hash.json`), and its
+   * `hash` is asserted by CTO's vitest suite and the droplet's `node --test` too. The
+   * three implementations cannot drift apart without one of the three going red — and
+   * this is the only one of them that runs on `crypto.subtle` rather than node crypto.
+   */
+  test("agrees with CTO and the droplet on the shared fixture", async () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts/fixtures/plan-hash.json"),
+        "utf8",
+      ),
+    ) as { plan: unknown; hash: string };
+    expect(await planHashHex(fixture.plan)).toBe(fixture.hash);
+  });
+
   test("is sha256 of JSON.stringify — the same dull algorithm CTO and the droplet run", async () => {
     const plan = { version: 1, mode: "auto", entries: [{ kind: "takeoff", scaleFeetPerInch: 20 }] };
     const expected = createHash("sha256").update(JSON.stringify(plan), "utf8").digest("hex");
@@ -253,6 +270,13 @@ describe("classifyServerProbe", () => {
     for (const status of ["unknown", "timeout", "error", "weird"]) {
       expect(ask({ ...base, status })).toBe("none");
     }
+  });
+
+  test("refuses a verdict reached on evidence with a hole in it", () => {
+    expect(ask({ ...base, ocrStats: { calls: 9, nonAnswers: 2, retries: 1, unknown: 1, withheldVotes: 0 } }))
+      .toBe("none");
+    expect(ask({ ...base, ocrStats: { calls: 9, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 } }))
+      .toBe("use");
   });
 
   test("refuses another build, another plan, and a result that is not one", () => {

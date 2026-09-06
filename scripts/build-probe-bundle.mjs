@@ -44,7 +44,10 @@ const ENTRY = path.join(REPO, "src/features/stitch/autostitch/probeNode.ts");
 
 // Not fatal — building one to test locally before committing is the normal loop — but it
 // changes the STAMP, not just the log line: see the header.
-const head = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
+// `--short=12`, not a bare `--short`: git picks the default abbreviation length per
+// checkout from the object count, so this bundle and the editor build could stamp the
+// same commit at different lengths and never match. Pinned in BOTH (`vite.config.ts`).
+const head = execFileSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
 const dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: REPO, encoding: "utf8" }).trim() !== "";
 const version = dirty ? `${head}-dirty` : head;
 

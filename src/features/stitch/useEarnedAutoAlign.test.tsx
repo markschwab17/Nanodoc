@@ -889,7 +889,7 @@ describe("useEarnedAutoAlign — the server verdict", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(fetchMock).toHaveBeenLastCalledWith(PROBE_URL);
+    expect(fetchMock).toHaveBeenLastCalledWith(PROBE_URL, { signal: expect.any(AbortSignal) });
     expect(browserProbes()).toHaveLength(0);
 
     await act(async () => { await vi.advanceTimersByTimeAsync(14_000); });
@@ -953,6 +953,97 @@ describe("useEarnedAutoAlign — the server verdict", () => {
 
     await act(async () => { hook.recheck(); });
     expect(hook.status).toBe("checking");
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("gives every poll its own deadline, so one hung read cannot park the check", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    const fetchMock = vi.fn(async (_url: string, _init?: { signal?: AbortSignal }) => ({
+      ok: true,
+      json: async () => ({ probe: pending }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    // The 20 s window is compared BETWEEN reads, so it only advances when one comes
+    // back: without a per-read deadline a socket that never answers leaves the hook in
+    // "checking" forever with no probe running.
+    const init = fetchMock.mock.calls[0][1];
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init!.signal!.aborted).toBe(false);
+  });
+
+  it("a tile dragged while the verdict resolved still becomes the offer — run() owns stale", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    const finished = await storedOk();
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      // The user nudges a sheet while the Lambda is still finishing.
+      const tiles = useStitchStore.getState().tiles;
+      useStitchStore.setState({ tiles: tiles.map((t, i) => (i === 0 ? { ...t, x: t.x + 40 } : t)) });
+      return { ok: true, json: async () => ({ probe: finished }) };
+    }));
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    // Re-probing here would spend the minute this path exists to save and land on the
+    // identical stale offer. The offer stands; taking it is what discovers the drag.
+    expect(hook.status).toBe("offer");
+    expect(browserProbes()).toHaveLength(0);
+    await act(async () => { await hook.run(); });
+    expect(hook.status).toBe("stale");
+    expect(commitAutoAlign).not.toHaveBeenCalled();
+  });
+
+  it("an unmount during the poll writes nothing and starts nothing", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ probe: pending }) })));
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    act(() => root.unmount());
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+    expect(browserProbes()).toHaveLength(0);
+    expect(workers).toHaveLength(0);
+    root = createRoot(container); // so afterEach's unmount is a no-op
+  });
+
+  it("reset() during the poll ends the check — it does not fall through to the worker", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ probe: pending }) })));
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    act(() => hook.reset());
+    expect(hook.status).toBe("idle");
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+    expect(hook.status).toBe("idle");
+    expect(browserProbes()).toHaveLength(0);
+  });
+
+  it("Re-check during the poll supersedes it — one probe, not two", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ probe: pending }) })));
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+    act(() => hook.recheck());
+    expect(browserProbes()).toHaveLength(1);
+
+    // The abandoned poll must not add a second probe when its window runs out.
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(browserProbes()).toHaveLength(1);
   });
 
