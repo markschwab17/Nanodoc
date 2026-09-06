@@ -260,6 +260,86 @@ export function isServerProbePending(probe: ServerProbe, nowMs: number): boolean
 }
 
 /**
+ * Everything the gate can decide WITHOUT the plan hash.
+ *
+ * Split out because the hash is the one asynchronous part of the rule (`crypto.subtle`),
+ * and two callers need the synchronous half on its own: `classifyServerProbe` (which
+ * adds the hash) and `serverProbeMayBeUsable` (which uses it to decide whether a row is
+ * worth waiting one turn for before starting a worker it would immediately abort).
+ */
+function usableApartFromPlan(
+  row: ServerProbe,
+  engineVersion: string,
+  canvas: { pageIndices: readonly number[]; uniformScale: number | null; pageScales: ReadonlyMap<number, number> },
+  pageCodes: ReadonlyMap<number, string> | null | undefined,
+): boolean {
+  // `unknown` (the probe answered on evidence with a hole in it), `timeout`, `error`,
+  // and anything a future droplet invents: not a verdict, and never presented as one.
+  if (row.status !== "ok") return false;
+  if (typeof row.engine !== "string" || row.engine !== engineVersion) return false;
+  if (!isPlainRecord(row.result) || !Array.isArray((row.result as { placements?: unknown }).placements)) {
+    return false;
+  }
+  if (!serverProbeRequestMatches(row.request, canvas, pageCodes)) return false;
+  // NEVER A VERDICT ON UNKNOWN EVIDENCE — enforced here as well as on the droplet.
+  //
+  // The Lambda already stores an evidence-holed run as `status: 'unknown'`, so this
+  // should be unreachable. It is checked anyway because it is the ONE rule the browser
+  // enforces on its own replies (`useEarnedAutoAlign` re-checks, then refuses), and a
+  // rule that lives only in the writer is a rule one droplet deploy can lose. A reply
+  // whose counters say a read never came back is exactly the reply that makes two
+  // probes of the same sheets disagree, whichever machine produced it.
+  if ((row.ocrStats?.unknown ?? 0) > 0) return false;
+  return true;
+}
+
+/**
+ * Could this stored row be usable, once its plan hash is confirmed?
+ *
+ * The editor now starts its browser probe IMMEDIATELY and races the server, because in
+ * production the verdict is minutes away and a check that waits for it is a check that
+ * waits for nothing. The one case that should not pay for a worker is the reopen: a row
+ * that is already a finished verdict for this build and this page set, where the only
+ * thing left to check is the hash. This predicate spots that case synchronously, so the
+ * caller can spend ONE turn on `planHashHex` before deciding — rather than constructing
+ * a worker, posting to it, and aborting it a microtask later.
+ *
+ * Never a substitute for `classifyServerProbe`: a row can pass this and still be for
+ * another plan. It only says "worth confirming".
+ */
+export function serverProbeMayBeUsable(opts: {
+  probe: unknown;
+  engineVersion: string;
+  canvas: { pageIndices: readonly number[]; uniformScale: number | null; pageScales: ReadonlyMap<number, number> };
+  pageCodes?: ReadonlyMap<number, string> | null;
+}): boolean {
+  if (!isPlainRecord(opts.probe)) return false;
+  const row = opts.probe as ServerProbe;
+  if (row.v !== SERVER_PROBE_VERSION) return false;
+  return usableApartFromPlan(row, opts.engineVersion, opts.canvas, opts.pageCodes);
+}
+
+/**
+ * Is there any point polling this row again?
+ *
+ * `false` while the answer could still change: no row at all (the droplet has not
+ * claimed it yet — the editor opens about a second after the combine kicks the job, so
+ * this is the NORMAL first read), or a `pending` claim. `true` once the row holds a
+ * final answer, is a shape this build will never use, or names a different plan — three
+ * ways of saying that every later read returns the same thing.
+ *
+ * An EXPIRED pending is deliberately not exhausted: the droplet's claim predicate lets a
+ * later request rescue a row whose job died, so the answer can still change.
+ */
+export function serverPollIsExhausted(probe: unknown, planHash: string | null): boolean {
+  if (!isPlainRecord(probe)) return false;
+  const row = probe as ServerProbe;
+  if (row.v !== SERVER_PROBE_VERSION) return true;
+  if (typeof row.planHash === "string" && planHash != null && row.planHash !== planHash) return true;
+  return row.status !== "pending";
+}
+
+/**
  * The whole gate, as one pure decision.
  *
  * `planHash` is what the editor computed for the plan it loaded (`planHashHex`); `null`
@@ -298,25 +378,8 @@ export function classifyServerProbe(opts: {
     return isServerProbePending(row, nowMs) ? "wait" : "none";
   }
 
-  // `unknown` (the probe answered on evidence with a hole in it), `timeout`, `error`,
-  // and anything a future droplet invents: not a verdict, and never presented as one.
-  if (row.status !== "ok") return "none";
-  if (typeof row.engine !== "string" || row.engine !== engineVersion) return "none";
   if (typeof planHash !== "string" || row.planHash !== planHash) return "none";
-  if (!isPlainRecord(row.result) || !Array.isArray((row.result as { placements?: unknown }).placements)) {
-    return "none";
-  }
-  if (!serverProbeRequestMatches(row.request, canvas, pageCodes)) return "none";
-  // NEVER A VERDICT ON UNKNOWN EVIDENCE — enforced here as well as on the droplet.
-  //
-  // The Lambda already stores an evidence-holed run as `status: 'unknown'`, so this
-  // should be unreachable. It is checked anyway because it is the ONE rule the browser
-  // enforces on its own replies (`useEarnedAutoAlign` re-checks, then refuses), and a
-  // rule that lives only in the writer is a rule one droplet deploy can lose. A reply
-  // whose counters say a read never came back is exactly the reply that makes two
-  // probes of the same sheets disagree, whichever machine produced it.
-  if ((row.ocrStats?.unknown ?? 0) > 0) return "none";
-  return "use";
+  return usableApartFromPlan(row, engineVersion, canvas, pageCodes) ? "use" : "none";
 }
 
 /**

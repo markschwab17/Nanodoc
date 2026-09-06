@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +9,8 @@ import {
   STITCH_SESSION_LOST,
   classifyServerProbe,
   ctoProbeUrl,
+  serverPollIsExhausted,
+  serverProbeMayBeUsable,
   isStitchSessionLost,
   planHashHex,
   serverProbeRequestMatches,
@@ -301,6 +303,90 @@ describe("classifyServerProbe", () => {
     expect(
       ask({ v: 1, status: "pending", planHash: "other", expiresAt: new Date(1_100_000).toISOString() }),
     ).toBe("none");
+  });
+});
+
+/**
+ * THE COPIES ARE THE CONTRACT.
+ *
+ * `scripts/fixtures/probe-request.json` and `scripts/fixtures/plan-hash.json` are CTO's
+ * files, kept here so nanodoc's suite can run without the CTO checkout. Copies drift:
+ * CTO edits a case, its own suite goes green, and the two repos quietly stop asserting
+ * the same thing — which is precisely the failure these fixtures exist to catch.
+ *
+ * So when the CTO worktree is present beside this one, the bytes are compared. When it
+ * is not (CI, a fresh clone, a machine that only has nanodoc) the check SKIPS with a
+ * message rather than failing: a missing sibling repo is not a broken fixture.
+ */
+describe("the CTO fixture copies are byte-identical", () => {
+  const CTO_FIXTURES =
+    "/Users/markschwab/Documents/CTO-Website-worktrees/site-sheet/src/lib/site-sheet/__tests__/fixtures";
+  const localFixture = (name: string) =>
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts/fixtures", name);
+  const sha256 = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
+
+  for (const name of ["probe-request.json", "plan-hash.json"]) {
+    test(name, () => {
+      const upstream = path.join(CTO_FIXTURES, name);
+      if (!existsSync(upstream)) {
+        console.info(`[fixtures] skipped ${name}: no CTO worktree at ${CTO_FIXTURES}`);
+        return;
+      }
+      expect(sha256(readFileSync(localFixture(name)))).toBe(sha256(readFileSync(upstream)));
+    });
+  }
+});
+
+describe("serverProbeMayBeUsable", () => {
+  const canvas = { pageIndices: [0, 1], uniformScale: 20, pageScales: new Map([[0, 20], [1, 20]]) };
+  const row = {
+    v: 1,
+    engine: "abc1234",
+    status: "ok",
+    planHash: "whatever",
+    request: { pageIndices: [0, 1], userScale: 20, pageScales: [[0, 20], [1, 20]] },
+    result: { placements: [] },
+  };
+  const ask = (probe: unknown) => serverProbeMayBeUsable({ probe, engineVersion: "abc1234", canvas });
+
+  test("spots the reopen — a finished verdict that only needs its hash confirmed", () => {
+    // Deliberately blind to the plan hash: that is the asynchronous half, and the whole
+    // point is to decide whether spending a turn on it beats building a worker.
+    expect(ask(row)).toBe(true);
+    expect(ask({ ...row, planHash: undefined })).toBe(true);
+  });
+
+  test("is false for everything that could never be used whatever the hash says", () => {
+    expect(ask({ ...row, status: "pending" })).toBe(false);
+    expect(ask({ ...row, engine: "other" })).toBe(false);
+    expect(ask({ ...row, request: { ...row.request, pageIndices: [0, 2] } })).toBe(false);
+    expect(ask({ ...row, ocrStats: { calls: 1, nonAnswers: 0, retries: 0, unknown: 1, withheldVotes: 0 } }))
+      .toBe(false);
+    expect(ask(null)).toBe(false);
+  });
+});
+
+describe("serverPollIsExhausted", () => {
+  test("keeps reading while the answer could still change", () => {
+    // The editor opens about a second after the combine kicks the job, so "no row yet"
+    // is the NORMAL first read, not a dead end.
+    expect(serverPollIsExhausted(null, "h")).toBe(false);
+    expect(serverPollIsExhausted({ v: 1, status: "pending", planHash: "h" }, "h")).toBe(false);
+    // An expired claim is a job that fell over; the droplet lets a later request rescue
+    // the row, so the read can still change.
+    expect(serverPollIsExhausted({ v: 1, status: "pending", expiresAt: "1970-01-01T00:00:00Z" }, "h"))
+      .toBe(false);
+  });
+
+  test("stops on a final answer, an unknown shape, or another plan", () => {
+    for (const status of ["ok", "unknown", "timeout", "error"]) {
+      expect(serverPollIsExhausted({ v: 1, status, planHash: "h" }, "h")).toBe(true);
+    }
+    expect(serverPollIsExhausted({ v: 2, status: "pending" }, "h")).toBe(true);
+    expect(serverPollIsExhausted({ v: 1, status: "pending", planHash: "other" }, "h")).toBe(true);
+    // Nothing to compare against: a hash the browser could not compute is not evidence
+    // that the row is for a different plan.
+    expect(serverPollIsExhausted({ v: 1, status: "pending", planHash: "other" }, null)).toBe(false);
   });
 });
 

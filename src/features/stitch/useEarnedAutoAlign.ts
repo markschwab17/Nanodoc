@@ -38,20 +38,33 @@
  * with Re-check still there — rather than a verdict that happens to rest on whichever
  * reads came back this time.
  *
- * THE ANSWER MAY ALREADY EXIST. CTO's droplet probes the combined PDF on the way out of
- * the combine, with a Lambda running THIS repo's engine bundle, and stores the verdict on
- * `site_sheet_sources.probe`. When the takeoff flow hands one over, `check()` takes it
- * instead of spending the minute — but only when it is provably an answer to the SAME
- * question: the same engine commit (`ENGINE_VERSION`), the same plan (`planHashHex`), the
- * same page set and scales (`serverProbeRequestMatches` against `canvasProbeSet`), and
- * evidence with no holes in it (`ocrStats.unknown === 0`, the same bar a worker reply has
- * to clear). A row still being computed is polled
- * briefly (2 s apart, 20 s in total, with the strip saying exactly what it says for any
- * check in flight); anything else — an older CTO, a different build, a `status` of
- * `unknown`/`timeout`/`error`, a plan since edited — is not a verdict, and the worker runs
- * as it always has. Never a gate, only a shortcut: every failure lands on the same probe
- * that would have run anyway. `recheck()` is the user asking THIS browser to look again,
- * so it never consults the row.
+ * THE ANSWER MAY ALREADY EXIST — SO RACE IT. CTO's droplet probes the combined PDF on the
+ * way out of the combine, with a Lambda running THIS repo's engine bundle, and stores the
+ * verdict on `site_sheet_sources.probe`. But it kicks that job and opens the editor about
+ * a second later, and the Lambda takes 40-140 s cold: a check that WAITED for the verdict
+ * would be waiting for something that is never there. So the browser probe starts
+ * immediately, exactly as it did before any of this existed, and the stored row is polled
+ * beside it (every 2 s, for the probe's own budget plus `SERVER_POLL_GRACE_MS`).
+ *
+ * A verdict is used only when it is provably an answer to the SAME question: the same
+ * engine commit (`ENGINE_VERSION`), the same plan (`planHashHex`), the same page set and
+ * scales (`serverProbeRequestMatches` against `canvasProbeSet`), and evidence with no
+ * holes in it (`ocrStats.unknown === 0`, the same bar a worker reply has to clear). One
+ * that qualifies while the browser probe is still checking PRE-EMPTS it — the worker is
+ * aborted through the ordinary `stop()` path and the strip settles on the server's
+ * answer, with ` (server)` on the `[probe]` line. Once the browser probe has settled
+ * honestly, a later verdict is ignored: two answers for one check is a flicker, not a
+ * service. The one exception is `too_slow`, which is the ABSENCE of an answer rather than
+ * one, and may be replaced inside the grace window.
+ *
+ * A row that is ALREADY a finished verdict when the editor opens — a reopen or a reload —
+ * skips the worker entirely: it is one plan hash away from usable, so `check` spends that
+ * turn instead of building a worker it would abort a microtask later.
+ *
+ * Everything else — an older CTO, a different build, a `status` of
+ * `unknown`/`timeout`/`error`, a plan since edited — is simply not a verdict, and the
+ * worker's answer stands. Never a gate, only a race one side cannot lose. `recheck()` is
+ * the user asking THIS browser to look again, so it never consults the row.
  *
  * `check()` also carries a soft time budget (`PROBE_BUDGET_MS`): if the worker has not
  * settled 60s after the request went out, the hook sends the probe the same abort it
@@ -74,7 +87,13 @@ import { AutoStitchAborted, type OcrStats } from "./autostitch/autoStitch";
 import type { AutoAlignUnavailableReason } from "./addToProjectCopy";
 import { canvasProbeSet, hasMixedSources, movedSinceCheck, type CanvasProbeSet } from "./earnedAutoAlignSet";
 import { ENGINE_VERSION } from "./autostitch/engineVersion";
-import { classifyServerProbe, planHashHex, type ServerProbe } from "./ctoSessionSource";
+import {
+  classifyServerProbe,
+  planHashHex,
+  serverPollIsExhausted,
+  serverProbeMayBeUsable,
+  type ServerProbe,
+} from "./ctoSessionSource";
 
 /** How long a probe gets before the hook stops waiting and says so instead. */
 const PROBE_BUDGET_MS = 60_000;
@@ -96,12 +115,19 @@ const RECHECK_BUDGET_MS = 3 * PROBE_BUDGET_MS;
  */
 const BROWSER_OCR_CONCURRENCY = 3;
 
-/** How often a `pending` server verdict is re-read, and for how long in total. Past
- *  the window the editor stops waiting and probes in the browser — a check that sits
- *  on a spinner waiting for somebody else's job is exactly what this feature is
- *  supposed to remove. */
+/** How often the stored verdict is re-read while the browser probe races it. */
 const SERVER_POLL_INTERVAL_MS = 2_000;
-const SERVER_POLL_WINDOW_MS = 20_000;
+
+/**
+ * How long the poll outlives the browser probe's own budget.
+ *
+ * The poll window is `budgetMs + this`, and the tail is what makes the ONE case where a
+ * settled browser answer may still be replaced possible: the budget fires at 60 s with
+ * `too_slow` — "the check took too long" — and a verdict that lands at 70 s is strictly
+ * better news than that. Every other settled outcome is final; two answers for one
+ * check is a flicker, not a service.
+ */
+const SERVER_POLL_GRACE_MS = 20_000;
 
 /** The `[probe]` line for a verdict nobody in this browser computed. Same shape as
  *  every other settle line — the `ms` is how long the EDITOR waited (a hit is instant;
@@ -149,16 +175,19 @@ export interface EarnedAutoAlignContext {
    *
    * Only honoured on the check that SUPPLIES it — a later `check()` (Add PDF added
    * sheets, the user pressed Re-check) is asking about a canvas this verdict was never
-   * about, and runs the browser probe. `null`/absent is the ordinary case: an older
-   * CTO build, a row whose probe never ran, a session that is not a takeoff handoff.
+   * about, and runs the browser probe alone. `null`/absent is the ordinary case: an
+   * older CTO build, a row whose probe never ran, a session that is not a takeoff
+   * handoff — and it is also the NORMAL first read on a fresh combine, because the
+   * droplet may not have claimed the row in the second before this window opened. It
+   * enables the race all the same; `probeUrl` is what the race reads.
    */
   serverProbe?: unknown;
   /** The RAW stitch plan the verdict must hash to — the same object CTO sent, unparsed
    *  and un-reserialised, because the hash is over `JSON.stringify` of exactly it. */
   plan?: unknown;
-  /** `GET /api/nanodoc/probe?token=…`, for re-reading a verdict that was still being
-   *  computed when the editor opened. Absent means a pending row cannot be polled, so
-   *  it is treated as no verdict. */
+  /** `GET /api/nanodoc/probe?token=…` — where the race re-reads the row while the
+   *  browser probe runs. Absent means no polling at all: only the verdict handed over
+   *  at open is ever considered, which is the pre-race behaviour. */
   probeUrl?: string | null;
 }
 
@@ -239,6 +268,26 @@ export function useEarnedAutoAlign(
    *  otherwise re-probe forever, which is precisely the grind the time budget exists
    *  to prevent. */
   const autoRecheckSpentRef = useRef(false);
+  /**
+   * What the BROWSER probe of the current check has done, as the server poll needs to
+   * know it:
+   *
+   *  - `"running"` — still checking, so a usable verdict PRE-EMPTS it (abort, take);
+   *  - `"too_slow"` — the budget fired, the only settled answer a verdict may replace;
+   *  - `"final"` — settled honestly (offer, unavailable, error, aborted) or never
+   *    started; a verdict arriving now is ignored rather than flickering the strip.
+   */
+  const browserOutcomeRef = useRef<"running" | "too_slow" | "final">("final");
+  /**
+   * Which USER-initiated check the server poll belongs to.
+   *
+   * Deliberately not `docIdRef`: the automatic re-check bumps that (it calls `check`,
+   * which calls `stop`), and the poll must survive it — the re-check is the same check
+   * still looking for the same answer, and killing the race there would leave a
+   * `too_slow` outcome with nothing to rescue it. Bumped by a check the user asked for
+   * and by `reset()`, which are the two things that really do end the question.
+   */
+  const pollSessionRef = useRef(0);
   /** How the reply handler asks for that re-check. It cannot call `check` directly —
    *  the handler is built inside `ensureWorker`, which `check` depends on, so closing
    *  over it would be a cycle. Assigned below, once `check` exists. */
@@ -315,12 +364,19 @@ export function useEarnedAutoAlign(
       // first made that probe pay a full pool boot AND briefly hold two pools' worth
       // of memory. The re-check's own settle releases it, exactly like any other.
       const releaseOcr = () => { void shutdownOcr(); };
-      if ("aborted" in msg) { releaseOcr(); setStatus("idle"); logSettle("aborted", null, msg.ocrCalls, rerun); return; }
+      if ("aborted" in msg) {
+        releaseOcr();
+        browserOutcomeRef.current = "final";
+        setStatus("idle");
+        logSettle("aborted", null, msg.ocrCalls, rerun);
+        return;
+      }
       if ("error" in msg) {
         // A failed check is not a failed feature: the sheets are already on the canvas
         // in a grid, and the honest thing is to say the seams were not verified rather
         // than offer a button on a probe that never finished.
         releaseOcr();
+        browserOutcomeRef.current = "final";
         console.warn("[earnedAutoAlign] probe failed:", msg.error);
         probeRef.current = null;
         setReason("unverified");
@@ -351,6 +407,10 @@ export function useEarnedAutoAlign(
         // budget's answer is the true one — and it is the one unavailable reason that
         // keeps the Re-check action (TakeoffModeStrip), which is what the user wants.
         releaseOcr();
+        // "The check took too long" is the one settled answer a late server verdict is
+        // allowed to replace — it is not a finding about the sheets, it is the absence
+        // of one. See SERVER_POLL_GRACE_MS.
+        browserOutcomeRef.current = "too_slow";
         probeRef.current = null;
         setSheets(0);
         setReason("too_slow");
@@ -360,6 +420,7 @@ export function useEarnedAutoAlign(
         return;
       }
       releaseOcr();
+      browserOutcomeRef.current = "final";
       probeRef.current = msg;
       const gate = autoAlignGate(msg, setRef.current?.pageIndices ?? []);
       if (gate.offered) {
@@ -420,6 +481,10 @@ export function useEarnedAutoAlign(
 
   const reset = useCallback(() => {
     stop();
+    // …and the server race with it. `stop()` only bumps `docIdRef`, which the poll
+    // deliberately does not watch (see `pollSessionRef`).
+    pollSessionRef.current++;
+    browserOutcomeRef.current = "final";
     // Same hole as the budget path: `stop()` bumps `docIdRef`, so the abandoned
     // probe's own reply is discarded as stale before it can release OCR. Nothing
     // else is running (this hook probes one at a time), so this is unconditional.
@@ -458,6 +523,7 @@ export function useEarnedAutoAlign(
         ocrConcurrency: BROWSER_OCR_CONCURRENCY,
       };
       checkStartRef.current = performance.now();
+      browserOutcomeRef.current = "running";
       const requestedDocId = req.docId;
       ensureWorker().postMessage(req);
       budgetTimerRef.current = setTimeout(() => {
@@ -480,6 +546,8 @@ export function useEarnedAutoAlign(
         // replacement already queued): this hook runs one probe at a time and
         // `stop()` has just abandoned it.
         void shutdownOcr();
+        // The one settled outcome a late server verdict may still replace.
+        browserOutcomeRef.current = "too_slow";
         setReason("too_slow");
         setDetail(undefined);
         setStatus("unavailable");
@@ -488,42 +556,84 @@ export function useEarnedAutoAlign(
     [ensureWorker, stop, logSettle],
   );
 
+  /** Settle the check on a verdict this browser did not compute. */
+  const applyServerVerdict = useCallback(
+    (row: ServerProbe, set: CanvasProbeSet) => {
+      clearBudget();
+      const result = row.result as ProbeResult;
+      probeRef.current = result;
+      const gate = autoAlignGate(result, set.pageIndices);
+      if (gate.offered) {
+        setSheets(gate.sheets);
+        // Cleared explicitly: this may be REPLACING a `too_slow`, and a stale reason
+        // behind a live offer is one `status` bug away from being shown.
+        setReason(undefined);
+        setDetail(undefined);
+        setStatus("offer");
+      } else {
+        setSheets(0);
+        setReason(gate.reason);
+        setDetail(gate.detail);
+        setStatus("unavailable");
+      }
+      browserOutcomeRef.current = "final";
+      logSettle(
+        gate.offered ? "offer" : "unavailable",
+        (row.ocrStats as OcrStats | null) ?? null,
+        row.ocrStats?.calls,
+        false,
+        SERVER_SOURCE,
+      );
+    },
+    [clearBudget, logSettle],
+  );
+
   /**
-   * The server shortcut, end to end.
+   * Race the stored verdict against the browser probe.
    *
-   * Three outcomes, and only the first of them skips the worker:
+   * THE TIMING IS WHY THIS IS A RACE AND NOT A SHORTCUT. CTO kicks the probe as it
+   * combines the PDF and opens the editor about a second later; the Lambda takes 40-140 s
+   * cold. A check that waited for the verdict before probing would wait for something
+   * that is never there — so the browser probe starts IMMEDIATELY, exactly as it did
+   * before any of this existed, and the poll runs beside it.
    *
-   *  - the stored verdict is for THIS engine build, THIS plan and THIS page set (and
-   *    nothing has moved on the canvas since the check began) → take it, run it through
-   *    the same `autoAlignGate` a worker reply goes through, and settle;
-   *  - a probe is genuinely still running (`pending`, not past its expiry) → re-read
-   *    `GET /api/nanodoc/probe` every 2 s for at most 20 s, with the strip still saying
-   *    "Checking whether these sheets can be auto-aligned…", then give up on it;
-   *  - anything else — no row, an older row, a different build, a plan since edited, a
-   *    different page set, a status of `unknown`/`timeout`/`error` → no verdict.
+   * What the poll may do, and when:
    *
-   * Every path that is not "take it" ends in `startBrowserProbe`, so a server that is
-   * down, slow, wrong or simply absent costs the user nothing but the poll window.
+   *  - while the browser probe is still checking → a usable verdict PRE-EMPTS it: the
+   *    worker is aborted through the ordinary `stop()` path, tesseract is handed back,
+   *    and the strip settles on the server's answer with ` (server)` on the line;
+   *  - once the browser probe has settled honestly → nothing. The answer on screen is a
+   *    real answer and replacing it a minute later is a flicker, not a service;
+   *  - the one exception is `too_slow`, which is the ABSENCE of an answer. A verdict
+   *    inside the grace window replaces it (see `SERVER_POLL_GRACE_MS`).
    *
-   * `docId` is the check this began for: every await is a place the user could have
-   * superseded it (Add PDF, Re-check) or left the page, so the guard is re-tested after
-   * each one and a stale resolution writes nothing.
+   * The one case that still skips the worker entirely is the REOPEN: a row that is
+   * already a finished verdict for this build and this page set
+   * (`serverProbeMayBeUsable`) is one plan hash away from usable, so the caller defers
+   * the browser probe for the single turn that takes rather than building a worker it
+   * would abort a microtask later. If the hash disagrees, the probe starts here instead.
+   *
+   * Liveness is `pollSessionRef`, not `docIdRef`: see the ref's own note.
    */
-  const resolveServerVerdict = useCallback(
+  const raceServerVerdict = useCallback(
     async (
-      docId: number,
+      pollSession: number,
       set: CanvasProbeSet,
       budgetMs: number,
       server: { probe: unknown; plan: unknown; url: string | null; pageCodes: ReadonlyMap<number, string> | null },
+      browserStarted: boolean,
     ) => {
-      const live = () => !goneRef.current && docId === docIdRef.current;
-      checkStartRef.current = performance.now();
+      const live = () => !goneRef.current && pollSession === pollSessionRef.current;
+      // The deferred case has no worker to have stamped the clock yet.
+      if (!browserStarted) checkStartRef.current = performance.now();
+      const deadline = Date.now() + budgetMs + SERVER_POLL_GRACE_MS;
       const hash = await planHashHex(server.plan);
-      let probe = server.probe;
-      const deadline = Date.now() + SERVER_POLL_WINDOW_MS;
+      if (!live()) return;
+
+      let probe: unknown = server.probe;
+      let started = browserStarted;
 
       for (;;) {
-        if (!live()) return;
         const verdict = classifyServerProbe({
           probe,
           engineVersion: ENGINE_VERSION,
@@ -534,44 +644,38 @@ export function useEarnedAutoAlign(
         });
 
         if (verdict === "use") {
-          // A tile the user dragged while this was resolving does NOT send the check
-          // back to the worker. The verdict is about the PAGES, and a browser probe of
-          // the same set would answer the same thing — while a canvas that has moved is
-          // already handled, once, in `run()`: it withdraws the offer as `"stale"` and
-          // an undo puts it straight back. Re-probing here would spend the minute this
-          // whole path exists to save and land on the identical stale offer.
-          const row = probe as ServerProbe;
-          const result = row.result as ProbeResult;
-          probeRef.current = result;
-          const gate = autoAlignGate(result, set.pageIndices);
-          if (gate.offered) {
-            setSheets(gate.sheets);
-            setStatus("offer");
-          } else {
-            setReason(gate.reason);
-            setDetail(gate.detail);
-            setStatus("unavailable");
+          const outcome = started ? browserOutcomeRef.current : "final-none";
+          if (outcome === "final") return; // settled honestly — leave it alone
+          if (outcome === "running") {
+            // The same abort a superseded check sends, and the same hand-back the
+            // budget path does: `stop()` bumps the docId, so the worker's own reply is
+            // discarded as stale before it can reach the handler's `shutdownOcr`.
+            stop();
+            void shutdownOcr();
           }
-          logSettle(
-            gate.offered ? "offer" : "unavailable",
-            (row.ocrStats as OcrStats | null) ?? null,
-            row.ocrStats?.calls,
-            false,
-            SERVER_SOURCE,
-          );
+          applyServerVerdict(probe as ServerProbe, set);
           return;
         }
 
-        if (verdict !== "wait" || !server.url || Date.now() >= deadline) break;
+        // Nothing usable yet, so the browser probe must be running by now.
+        if (!started) {
+          startBrowserProbe(set, budgetMs);
+          started = true;
+        }
+        if (!server.url) return;
+        // A row that will never say anything different, an answer already on screen, or
+        // the end of the window: three ways for the race to be over.
+        if (serverPollIsExhausted(probe, hash)) return;
+        if (browserOutcomeRef.current === "final") return;
+        if (Date.now() >= deadline) return;
+
         await new Promise<void>((resolve) => setTimeout(resolve, SERVER_POLL_INTERVAL_MS));
         if (!live()) return;
         probe = await fetchServerProbe(server.url);
+        if (!live()) return;
       }
-
-      if (!live()) return;
-      startBrowserProbe(set, budgetMs);
     },
-    [logSettle, startBrowserProbe],
+    [applyServerVerdict, startBrowserProbe, stop],
   );
 
   const check = useCallback(
@@ -598,6 +702,13 @@ export function useEarnedAutoAlign(
           : null;
       if (ctx) ctxRef.current = { ...ctxRef.current, ...ctx };
       if (server) server.pageCodes = ctxRef.current.pageCodes ?? null;
+      // A check the user asked for is a new question: it retires any server race still
+      // running for the old one. The automatic re-check (`auto`) deliberately does not,
+      // so the race survives it — see `pollSessionRef`.
+      if (!auto) {
+        pollSessionRef.current++;
+        browserOutcomeRef.current = "final";
+      }
       stop();
       // A check the USER asked for earns a fresh entitlement to one automatic re-check.
       // The automatic re-check must not grant itself another — that is the loop.
@@ -633,19 +744,27 @@ export function useEarnedAutoAlign(
         return;
       }
       setStatus("checking");
-      // THE SHORTCUT. A verdict CTO's droplet already computed for exactly this page
-      // set, this plan and this engine build is the same answer the worker below would
-      // spend a minute of OCR reaching. `resolveServerVerdict` takes it when it fits,
-      // waits briefly when one is still being computed, and otherwise starts the very
-      // browser probe this branch skipped. Only for the check that CARRIED the verdict:
-      // see `EarnedAutoAlignContext.serverProbe`.
+      // THE RACE. The browser probe starts NOW — the server verdict is 40-140 s away in
+      // production and a check that waited for it would wait for nothing — and the poll
+      // runs beside it, allowed to pre-empt a probe still in flight. The single
+      // exception is a row that is ALREADY a finished verdict for this build and this
+      // page set (a reopen): that is one plan hash away from usable, so it earns the one
+      // turn `planHashHex` takes rather than a worker built and aborted a microtask
+      // later. See `raceServerVerdict`.
       if (server) {
-        void resolveServerVerdict(docIdRef.current, set, budgetMs, server);
+        const deferBrowser = serverProbeMayBeUsable({
+          probe: server.probe,
+          engineVersion: ENGINE_VERSION,
+          canvas: set,
+          pageCodes: server.pageCodes,
+        });
+        if (!deferBrowser) startBrowserProbe(set, budgetMs);
+        void raceServerVerdict(pollSessionRef.current, set, budgetMs, server, !deferBrowser);
         return;
       }
       startBrowserProbe(set, budgetMs);
     },
-    [stop, startBrowserProbe, resolveServerVerdict],
+    [stop, startBrowserProbe, raceServerVerdict],
   );
 
   // The user asking again on purpose gets a much longer answer window, but not an
