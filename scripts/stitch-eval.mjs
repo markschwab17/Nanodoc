@@ -317,13 +317,13 @@ function placementDiffs(expected, actual) {
   const out = [];
   for (const [key, want] of Object.entries(expected)) {
     const got = actual[key];
-    if (!got) { out.push(`unit ${key} was not placed at all`); continue; }
+    if (!got) { out.push(`placement ${key} is in the fixture but this run did not place it`); continue; }
     for (const field of ["x", "y", "width", "height"]) {
       const d = Math.abs(got[field] - want[field]);
-      if (d > 0.01 + 1e-9) out.push(`unit ${key} ${field} ${got[field]} != ${want[field]} (${d.toFixed(2)} pt)`);
+      if (d > 0.01 + 1e-9) out.push(`placement ${key} moved — ${field} ${got[field]}, fixture says ${want[field]} (${d.toFixed(2)} pt out)`);
     }
   }
-  for (const key of Object.keys(actual)) if (!expected[key]) out.push(`unit ${key} is placed but the fixture has no such unit`);
+  for (const key of Object.keys(actual)) if (!expected[key]) out.push(`placement ${key} was placed but the fixture has no such unit`);
   return out;
 }
 
@@ -429,7 +429,7 @@ for (const set of sets) {
   if (expectedPlacements) {
     const want = expectedPlacements[set.name];
     if (!want) fail(`no placements fixture entry for this set (${path.basename(ASSERT_PLACEMENTS)})`);
-    else for (const d of placementDiffs(want, placementSnapshot(row.placements))) fail(`placement moved — ${d}`);
+    else for (const d of placementDiffs(want, placementSnapshot(row.placements))) fail(d);
   }
 
   if (set.minAligned != null && row.aligned < set.minAligned) fail(`aligned ${row.aligned} < ${set.minAligned}`);

@@ -38,6 +38,14 @@ const THUMB_SCALE = 0.3;
  *  settled selection feels immediate. */
 const PROBE_DEBOUNCE_MS = 400;
 
+/** How long the modal waits for a probe reply before it stops waiting and says so.
+ *  The SAME soft budget the embed probe has always had (`useEarnedAutoAlign`), and it
+ *  is per REQUEST — so the one automatic re-run gets a fresh 60 s rather than the
+ *  worst case being two unbounded probes back to back. Nothing here abandons the
+ *  pages: the plain add stays enabled the whole time, and Skip check is on screen for
+ *  every second of the wait. */
+const PROBE_BUDGET_MS = 60_000;
+
 type SourceTab = "device" | "cto";
 
 export function AddPdfModal({
@@ -144,12 +152,26 @@ export function AddPdfModal({
   const probeInFlightRef = useRef(false);
   /** The request last posted, kept so the automatic re-run can re-issue exactly it
    *  (same pages, same bytes) under a fresh docId — the reply handler cannot reach
-   *  the effect that built it. */
+   *  the effect that built it. CLEARED on every settle and by `stopProbe`: it holds
+   *  the document's bytes, and this modal stays mounted for the whole life of the
+   *  stitch view, so a request left here after the modal closed pinned a PDF nobody
+   *  was looking at any more. */
   const probeReqRef = useRef<ProbeRequest | null>(null);
+  /** The pending budget for the request in flight (see PROBE_BUDGET_MS). */
+  const probeBudgetRef = useRef<number | null>(null);
   /** Latched once the CURRENT request has spent its one automatic re-run; cleared
    *  only where a new request is posted (below). This is what makes it one re-run
    *  and not a loop on a set whose reads time out every single time. */
   const probeRecheckSpentRef = useRef(false);
+
+  /** Retire the budget watching the request in flight. It belongs to THAT request:
+   *  every settle, every supersede and the re-run all end it. */
+  const clearProbeBudget = useCallback(() => {
+    if (probeBudgetRef.current != null) {
+      window.clearTimeout(probeBudgetRef.current);
+      probeBudgetRef.current = null;
+    }
+  }, []);
 
   /**
    * Stop whatever the probe is doing — the debounced request that has not been
@@ -168,12 +190,47 @@ export function AddPdfModal({
       window.clearTimeout(probeTimerRef.current);
       probeTimerRef.current = null;
     }
+    clearProbeBudget();
     const inFlight = probeInFlightRef.current;
     if (inFlight) probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
     probeInFlightRef.current = false;
+    // Nothing is going to re-issue this one, and it holds the whole PDF.
+    probeReqRef.current = null;
     if (mode === "supersede") probeDocIdRef.current++;
     else if (!inFlight) setProbeState("skipped");
-  }, []);
+  }, [clearProbeBudget]);
+
+  /**
+   * Post a probe request and start its budget. The one place a request is sent, so
+   * the debounced first check and the automatic re-run cannot drift apart: same
+   * bookkeeping, same wall-clock promise, and the re-run's budget is its OWN 60 s.
+   *
+   * On expiry the worker is told to give up (the same abort a superseded check
+   * sends), the docId is bumped so its eventual reply is stale, tesseract's workers
+   * are handed back — nothing else will now do it, since that stale reply is dropped
+   * before it reaches the handler's release — and the modal says the check took too
+   * long instead of sitting on a spinner.
+   */
+  const postProbe = useCallback((req: ProbeRequest) => {
+    clearProbeBudget();
+    probeReqRef.current = req;
+    probeInFlightRef.current = true;
+    probeWorkerRef.current?.postMessage(req);
+    const requested = req.docId;
+    probeBudgetRef.current = window.setTimeout(() => {
+      probeBudgetRef.current = null;
+      // Belt-and-braces: every supersede clears this timer, so a budget for a request
+      // that is no longer the current one should be unreachable.
+      if (requested !== probeDocIdRef.current) return;
+      probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+      probeDocIdRef.current++;
+      probeInFlightRef.current = false;
+      probeReqRef.current = null;
+      void shutdownOcr();
+      setProbe(null);
+      setProbeState("too_slow");
+    }, PROBE_BUDGET_MS);
+  }, [clearProbeBudget]);
 
   /** Skip the check and move on (Skip check button, plain add). */
   const abortProbe = useCallback(() => stopProbe("skip"), [stopProbe]);
@@ -223,6 +280,8 @@ export function AddPdfModal({
         return; // stale — superseded by a newer selection or load
       }
       probeInFlightRef.current = false;
+      // The worker answered — the budget watching this same request is moot.
+      clearProbeBudget();
       // NEVER AN OFFER ON UNKNOWN EVIDENCE — the same rule the embed probe applies
       // (`useEarnedAutoAlign`), because it is the same probe and the same promise.
       // See `modalProbeGate`.
@@ -237,16 +296,14 @@ export function AddPdfModal({
         if (req) {
           console.debug("[stitchProbe] unknown OCR reads — re-checking once", outcome.stats);
           probeDocIdRef.current++;
-          probeInFlightRef.current = true;
-          const rerun: ProbeRequest = { ...req, docId: probeDocIdRef.current };
-          probeReqRef.current = rerun;
-          probeWorkerRef.current?.postMessage(rerun);
+          postProbe({ ...req, docId: probeDocIdRef.current });
           return;
         }
         // No request to re-issue (only reachable if one was never recorded): fall
         // through to the honest answer rather than sit on "checking" forever.
       }
-      // Nothing more will be read on this check.
+      // Nothing more will be read on this check, and nothing will re-issue it.
+      probeReqRef.current = null;
       if (ocrIdle()) void shutdownOcr();
       if (outcome.kind === "skipped") {
         // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
@@ -274,7 +331,12 @@ export function AddPdfModal({
       setProbeState("done");
     };
     probeWorkerRef.current = w;
-    return () => { w.terminate(); probeWorkerRef.current = null; void shutdownOcr(); };
+    return () => {
+      w.terminate();
+      probeWorkerRef.current = null;
+      probeReqRef.current = null;
+      void shutdownOcr();
+    };
   }, []);
 
   /**
@@ -306,20 +368,17 @@ export function AddPdfModal({
     const pages = selectedIndices;
     probeTimerRef.current = window.setTimeout(() => {
       probeTimerRef.current = null;
-      probeInFlightRef.current = true;
       // userScale is null: placements are scale-invariant for a uniform set, so
       // the probe outcome is unaffected and the effect needs no scale dep.
-      const req: ProbeRequest = {
+      // A request the SELECTION asked for earns a fresh entitlement to one automatic
+      // re-run; the re-run itself must not grant itself another (that is the loop).
+      probeRecheckSpentRef.current = false;
+      postProbe({
         docId: probeDocIdRef.current,
         pdfBytes: bytes,
         pageIndices: pages,
         userScale: null,
-      };
-      // A request the SELECTION asked for earns a fresh entitlement to one automatic
-      // re-run; the re-run itself must not grant itself another (that is the loop).
-      probeRecheckSpentRef.current = false;
-      probeReqRef.current = req;
-      probeWorkerRef.current?.postMessage(req);
+      });
     }, PROBE_DEBOUNCE_MS);
     return () => {
       if (probeTimerRef.current != null) {
@@ -327,7 +386,7 @@ export function AddPdfModal({
         probeTimerRef.current = null;
       }
     };
-  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, stopProbe]);
+  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, stopProbe, postProbe]);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {

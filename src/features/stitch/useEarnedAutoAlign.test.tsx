@@ -282,6 +282,11 @@ describe("useEarnedAutoAlign", () => {
     expect(hook.status).toBe("unavailable");
     expect(hook.reason).toBe("mixed_sources");
     expect(posted.filter((p) => !p.kind)).toHaveLength(0);
+    // A check that posts nothing must still hand tesseract back: the reply handler now
+    // KEEPS the pool alive across an automatic re-check, and a canvas that lost a sheet
+    // between the discarded reply and that re-check lands exactly here. No settle is
+    // coming, so this is the only release on the path.
+    expect(shutdownOcr).toHaveBeenCalled();
   });
 
   it("REFUSES to apply the offer when a sheet was EDITED since the check", async () => {
