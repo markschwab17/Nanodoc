@@ -201,14 +201,15 @@ export function autoAlignUnavailableTitle(reason: AutoAlignUnavailableReason, de
  * which on its own reads as "it didn't work" with no clue why. Each reason names a
  * DIFFERENT thing to do about it: nothing to match by (the sheets carry no readable
  * identity — nothing the user can drag will fix that), nothing shared (the sheets
- * simply are not neighbours), or matched but unproven (it may well be right; look at
- * the seams). Pages are named 1-based, ascending, because that is the order the user
- * will scan them in.
+ * simply are not neighbours), matched but unproven (it may well be right; look at the
+ * seams), or never actually read (`too_slow` — try again, it is likely to just work).
+ * Pages are named 1-based, ascending, because that is the order the user will scan
+ * them in.
  *
  * Returns null when there is nothing to explain — a clean run, or a caller that has
  * no outcome to report.
  */
-export type AutoAlignReason = "ok" | "no_refs" | "not_adjacent" | "along_unresolved" | "unverified";
+export type AutoAlignReason = "ok" | "no_refs" | "not_adjacent" | "along_unresolved" | "unverified" | "too_slow";
 
 export interface AutoAlignOutcome {
   reason: AutoAlignReason;
@@ -295,6 +296,13 @@ export function autoAlignExplanation(outcome: AutoAlignOutcome | null | undefine
     }
     case "unverified":
       parts.push("Alignment could not be verified — check the seams before adding.");
+      break;
+    case "too_slow":
+      // Not a verdict about the drawings: the run reached its layout twice without a
+      // read it asked for, so nothing it measured is worth quoting. Same words the
+      // strip's gate uses for the same fact — one probe, two front doors, one
+      // sentence — plus the one thing worth doing about it, which is to try again.
+      parts.push(`${autoAlignUnavailableNote("too_slow")}. The sheets are placed below to align by hand, or try the check again.`);
       break;
     case "ok":
       break;

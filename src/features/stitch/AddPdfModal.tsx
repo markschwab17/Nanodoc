@@ -335,9 +335,15 @@ export function AddPdfModal({
       w.terminate();
       probeWorkerRef.current = null;
       probeReqRef.current = null;
+      // The budget outlives the worker otherwise: it is a bare `setTimeout`, and on
+      // expiry it posts an abort to a terminated worker and calls `setProbeState` on
+      // an unmounted component. Every other end of a request clears it; so does this
+      // one. (`clearProbeBudget` is a `useCallback([])`, so naming it in the deps
+      // keeps this a once-per-lifetime effect.)
+      clearProbeBudget();
       void shutdownOcr();
     };
-  }, []);
+  }, [clearProbeBudget]);
 
   /**
    * The feasibility probe runs over the TICKED PAGES ONLY, debounced.

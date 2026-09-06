@@ -48,7 +48,11 @@
  *   STITCH_EVAL_ASSERT_PLACEMENTS=<path.json>  every set's placements must match the
  *                                              file to 0.01 pt; a difference, a
  *                                              missing set and an unexpected unit are
- *                                              all REGRESSIONS (non-zero exit).
+ *                                              all REGRESSIONS (non-zero exit). So is
+ *                                              a fixture key that never ran — a
+ *                                              machine without the PDFs fails loudly
+ *                                              instead of exiting 0 having asserted
+ *                                              nothing (skipped rows reach no assert).
  *   STITCH_EVAL_WRITE_PLACEMENTS=<path.json>   write them instead — how the fixture is
  *                                              made, and how it is deliberately moved
  *                                              when an engine change is meant to move
@@ -451,6 +455,37 @@ for (const set of sets) {
   if (row.gt?.rootMismatch) fail(`ground-truth scale mismatch — ${row.gt.rootMismatch}`);
   rows.push(row);
 }
+
+/**
+ * Suite-level failures — the ones that belong to the RUN, not to any one row.
+ *
+ * There is exactly one so far, and it is the hole that made `stitch-eval:check`
+ * useless on a machine without the corpus: a set whose PDF is missing is SKIPPED, and
+ * a skipped set never reaches the per-row asserts, so the placements gate had nothing
+ * to say and the script exited 0 having verified nothing at all. "The PDFs aren't
+ * here" and "the placements still match" are different sentences, and the second one
+ * was being printed for the first.
+ *
+ * So: every key in the placements fixture must have a row that actually RAN. A
+ * missing PDF, a `--set` filter, a renamed set — all of them now fail loudly, and the
+ * reason says which it was. (Note the direction: this is about fixture keys with no
+ * run. A set that ran with no fixture key is already a per-row failure above.)
+ */
+const suiteFailures = [];
+if (expectedPlacements) {
+  const ran = new Map(rows.map((r) => [r.name, r]));
+  for (const key of Object.keys(expectedPlacements)) {
+    const row = ran.get(key);
+    if (row && !row.skipped) continue;
+    const why = row?.skipped
+      ? `it was skipped — ${row.skipped}`
+      : ONLY
+        ? `it is not the set --set selected ("${ONLY}")`
+        : `no set of that name is in ${path.basename(MANIFEST)}`;
+    suiteFailures.push(`"${key}" is in ${path.basename(ASSERT_PLACEMENTS)} but nothing checked it: ${why}`);
+  }
+}
+
 flushCache();
 if (writtenPlacements) {
   // MERGE, never replace: `--set X` with the write flag would otherwise wipe every
@@ -470,7 +505,7 @@ const builtPool = poolPromise ? await poolPromise.catch(() => null) : null;
 if (builtPool) await builtPool.terminate();
 
 if (AS_JSON) {
-  console.log(JSON.stringify({ manifest: MANIFEST, rows }, null, 2));
+  console.log(JSON.stringify({ manifest: MANIFEST, rows, suiteFailures }, null, 2));
 } else {
   const pad = (s, n) => String(s).padEnd(n);
   const NAMEW = 32;
@@ -510,8 +545,9 @@ if (AS_JSON) {
   }
   console.log("");
   for (const r of rows) for (const f of r.failures) console.log(`REGRESSION · ${r.name}: ${f}`);
+  for (const f of suiteFailures) console.log(`REGRESSION · suite: ${f}`);
 }
 
-const regressed = rows.some((r) => r.failures.length);
+const regressed = rows.some((r) => r.failures.length) || suiteFailures.length > 0;
 if (!AS_JSON) console.log(regressed ? "\nFAIL — see the regressions above." : "\nOK — every set met its expectations.");
 process.exitCode = regressed ? 1 : 0;

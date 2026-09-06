@@ -1298,7 +1298,12 @@ describe("rotation tally when a side band had to be retried", () => {
     const res = await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, ocrConcurrency: 3 });
     const subRenders = (renderBand as any).mock.calls
       .filter((c: any[]) => Math.abs((c[2][3] - c[2][1]) - SUB_LEN) < 1).length;
-    return { stripReads, subRenders, res };
+    // WHOLE side-band rasters. Two on a clean run (one per side band, issued at both
+    // rotations from the same pixmap); each extra one is a lost rotation being
+    // re-read at full size.
+    const sideRenders = (renderBand as any).mock.calls
+      .filter((c: any[]) => (c[2][3] - c[2][1]) > 2000 && (Math.abs(c[2][0]) < 0.5 || Math.abs(c[2][0] - 880) < 0.5)).length;
+    return { stripReads, subRenders, sideRenders, res };
   };
 
   it("a band that needed the retry votes with its RETRIED mass, summed over the sub-clips", async () => {
@@ -1325,16 +1330,46 @@ describe("rotation tally when a side band had to be retried", () => {
     expect(unlocked.stripReads).toBe(10); // …but the retry does not get to vote
   });
 
-  it("a band with ONE surviving rotation is not retried at all — a whole read beats a cut one", async () => {
+  it("a band with ONE surviving rotation is never CUT — its lost rotation is re-read whole", async () => {
     // 270 read the band fine; only 90 was lost. The band therefore already HAS a
     // whole-raster reading, and cutting it could only make that reading worse (a
     // callout across a cut is truncated, or misread into a different valid-looking
-    // target). So nothing is re-rastered…
+    // target) — and the two rotations' scores are compared against each other, which
+    // only means something between reads of the same shape. So no sub-clip…
     const survived = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : null) : undefined));
     expect(survived.subRenders).toBe(0);
-    // …and the band still does not vote: one rotation is a non-answer, so counting
-    // the survivor would be counting it unopposed.
+    // …but the lost rotation IS re-read, at full size: 2 first-pass side rasters + 1
+    // re-read each. Leaving it alone is what let a single 20 s hiccup move the lock.
+    expect(survived.sideRenders).toBe(4);
+    // Here the re-read is lost again, so the band still does not vote: one rotation is
+    // a non-answer, so counting the survivor would be counting it unopposed.
     expect(survived.stripReads).toBe(10);
+  });
+
+  it("a rotation lost once and answered on the re-read votes exactly as a clean band does", async () => {
+    // THE CASE THE RE-READ EXISTS FOR. 270 answers confidently on both side bands; 90
+    // blows its budget on the first pass of each and answers on the second. The two
+    // bands' evidence is whole again, so the page locks to 270 and the reciprocal scan
+    // reads 5 strips at one rotation — the SAME answer as the run where nothing was
+    // ever lost. Before the re-read, both votes were withheld and the same sheets
+    // scanned 10 strips at both rotations: a different scan, and a verdict free to
+    // differ from run to run on identical input.
+    const clean = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : 51) : undefined));
+    expect(clean.stripReads).toBe(5);
+    expect(clean.res.ocrStats).toMatchObject({ nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 });
+
+    let lost90 = 0;
+    const flaky = await run((sub, rot) => {
+      if (sub >= 0) return undefined;                 // never cut — nothing to answer for
+      if (rot === 270) return 90;
+      return ++lost90 <= 2 ? null : 51;               // one non-answer per side band, then it reads
+    });
+    expect(flaky.stripReads).toBe(clean.stripReads);
+    // `sideRenders` counts the shared `renderBand` mock, so both runs are in it:
+    // the clean run's 2, then the flaky run's 2 first-pass rasters + 2 re-reads.
+    expect(flaky.sideRenders - clean.sideRenders).toBe(4);
+    expect(flaky.subRenders).toBe(0);                 // whole, never cut
+    expect(flaky.res.ocrStats).toMatchObject({ nonAnswers: 2, retries: 2, unknown: 0, withheldVotes: 0 });
   });
 
   it("an unread band is UNKNOWN; a band that reads but cannot vote is a WITHHELD VOTE", async () => {
@@ -1361,11 +1396,13 @@ describe("rotation tally when a side band had to be retried", () => {
         : (rot === 90 && sub === 3) ? 51 : undefined);
     expect(partial.res.ocrStats).toMatchObject({ retries: 2, unknown: 0, withheldVotes: 2 });
 
-    // NEVER RETRIED. One rotation survived, so the band keeps its whole read and is
-    // not cut — a whole read beats a cut one. Nothing is unknown, but the survivor is
-    // unopposed, so the vote is still withheld.
+    // A ROTATION LOST TWICE. One rotation survived, so the band is never cut — but its
+    // lost rotation is re-read whole, and lost again. The survivor is still unopposed,
+    // so the vote is withheld; and because the hole is a READ that never landed, it is
+    // `unknown` too. That is the point of the re-read's second half: the gates key on
+    // `unknown` alone, so a band in this state used to be invisible to them.
     const survivor = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : null) : undefined));
-    expect(survivor.res.ocrStats).toMatchObject({ retries: 0, unknown: 0, withheldVotes: 2 });
+    expect(survivor.res.ocrStats).toMatchObject({ retries: 2, unknown: 2, withheldVotes: 2 });
 
     // NOTHING AT ALL. Every rotation of the whole band lost, and every sub-clip of
     // the retry lost too. This is the band that is genuinely unread — and it is both:

@@ -181,6 +181,20 @@ describe("AddPdfModal — the probe's wall clock", () => {
     expect(body()).toContain(autoAlignUnavailableNote("too_slow"));
   });
 
+  it("unmounting retires the budget too — nothing fires for a modal that is gone", async () => {
+    // The budget is a bare `setTimeout`, and its callback aborts the worker, hands
+    // tesseract back and writes component state. Every other end of a request cleared
+    // it; unmount did not, so a stitch view closed mid-check did all three 60 s later
+    // for a component nobody was looking at. Handing the pool back a SECOND time is
+    // the observable half — the terminated worker swallows the rest in silence.
+    await openWithSelection();
+    expect(requests()).toHaveLength(1);
+    act(() => root.unmount());
+    const afterUnmount = mocks.shutdownOcr.mock.calls.length;
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(mocks.shutdownOcr.mock.calls.length).toBe(afterUnmount);
+  });
+
   it("changing the selection supersedes the check and its budget — no stray abort later", async () => {
     await openWithSelection();
     expect(requests()).toHaveLength(1);

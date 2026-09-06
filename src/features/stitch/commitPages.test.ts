@@ -303,6 +303,96 @@ describe("commitAutoAlign honesty gate", () => {
     expect(res.unalignedIds).toHaveLength(2); // pages 1 and 2, both on the suspect seam
   });
 
+  /**
+   * THE LIVE PATH'S OWN UNKNOWN-READS GATE.
+   *
+   * The probe gates refuse to show a verdict built on reads that never came back —
+   * but the commit's live branch is not the probe. It is reached whenever there is no
+   * cached result to reuse, and that includes the case the modal actually offers: a
+   * MIXED-SCALE selection can never reuse the uniform-scale probe, so a clean offer is
+   * followed by a fresh solve whose reads may not be clean at all. One lost strip read
+   * moves a Belcourt sheet ~39 ft with the verdict, the residual and the anchor list
+   * unchanged, so nothing downstream would ever have noticed.
+   */
+  describe("unknown OCR reads on the live solve", () => {
+    const stats = (unknown: number) => ({ calls: 12, nonAnswers: unknown, retries: unknown, unknown, withheldVotes: 0 });
+    const solved = (over: Record<string, unknown>) => ({
+      placements: [placement(0, true), placement(1, true)],
+      rootFtPerIn: 20, alignedCount: 2, unplacedCount: 0, worstResidFt: 0,
+      method: "geometric", poses: [], refPageIndices: [0, 1], skipped: [], scaleWarnings: [],
+      alignmentVerdict: "verified", seamReport: [seam(0, 1, "verified")], alongAnchored: [0, 1],
+      ...over,
+    });
+
+    it("re-solves ONCE when the first run had a hole in its reads, and shows the clean re-solve", async () => {
+      const { autoStitch } = await import("./autostitch/autoStitch");
+      (autoStitch as any)
+        .mockResolvedValueOnce(solved({ ocrStats: stats(1) }))
+        .mockResolvedValueOnce(solved({ ocrStats: stats(0) }));
+      const res = await run([0, 1]);
+      expect(autoStitch).toHaveBeenCalledTimes(2);
+      // The second run answered everything it asked, so this is an ordinary result:
+      // offered, aligned, nothing demoted.
+      expect(res.reason).toBe("ok");
+      expect(res.unalignedIds).toHaveLength(0);
+    });
+
+    it("unknown twice: every sheet is PLACED and none is claimed", async () => {
+      const { autoStitch } = await import("./autostitch/autoStitch");
+      (autoStitch as any).mockResolvedValue(solved({ ocrStats: stats(2) }));
+      const res = await run([0, 1]);
+      expect(autoStitch).toHaveBeenCalledTimes(2);   // one re-solve, never a loop
+      // Demote, never block: both sheets are on the canvas and both selected for the
+      // user to place. What is withheld is the CLAIM, not the pages.
+      expect(res.added).toBe(2);
+      expect(useStitchStore.getState().tiles).toHaveLength(2);
+      expect(res.unalignedIds).toHaveLength(2);
+      expect(res.reason).toBe("too_slow");
+      // …and the message says why, in the words the strip already uses. Never a seam
+      // figure: "worst seam 0.00 ft" on a solve nobody is standing behind is exactly
+      // the confident-and-wrong this gate exists to stop.
+      expect(res.message).toBe("Added 2 pages for manual alignment — the check took too long.");
+      expect(res.message).not.toContain("seam");
+    });
+
+    it("a clean run is untouched — one solve, and the answer it gave (control)", async () => {
+      const { autoStitch } = await import("./autostitch/autoStitch");
+      (autoStitch as any).mockResolvedValue(solved({ ocrStats: stats(0) }));
+      const res = await run([0, 1]);
+      expect(autoStitch).toHaveBeenCalledTimes(1);
+      expect(res.reason).toBe("ok");
+      expect(res.unalignedIds).toHaveLength(0);
+    });
+
+    it("a solver that reports no tally at all is the OLD behaviour — one solve, shown", async () => {
+      // Absent is "nobody told us", not "zero unknowns": an older engine, or a stub.
+      // Refusing to answer on it would break every caller that predates the counters.
+      const { autoStitch } = await import("./autostitch/autoStitch");
+      (autoStitch as any).mockResolvedValue(solved({}));
+      const res = await run([0, 1]);
+      expect(autoStitch).toHaveBeenCalledTimes(1);
+      expect(res.reason).toBe("ok");
+    });
+
+    it("the cached path never re-solves: it was gated before it was cached", async () => {
+      const { autoStitch } = await import("./autostitch/autoStitch");
+      const res = await commitAutoAlign({
+        mupdf: {}, doc: fakeDoc, pdfBytes: new Uint8Array([1]), fileName: "plan.pdf",
+        selected: [0, 1], pageScales: new Map(), uniformScale: 20,
+        removeWhiteBackground: false, renderer: fakeRenderer,
+        cached: {
+          placements: [placement(0, true), placement(1, true)],
+          rootFtPerIn: 20, worstResidFt: 0, method: "geometric",
+          alignmentVerdict: "verified",
+          seamReport: [{ i: 1, j: 2, pageIndexes: [0, 1], status: "verified", detail: { channel: "anchor+segment" } }] as any,
+          alongAnchored: [0, 1], refPageIndices: [0, 1],
+        },
+      });
+      expect(autoStitch).not.toHaveBeenCalled();
+      expect(res.reason).toBe("ok");
+    });
+  });
+
   it("carries the skipped sheets and the per-seam quality through to the caller", async () => {
     await solverSays({
       placements: [placement(0, true), placement(1, true)],

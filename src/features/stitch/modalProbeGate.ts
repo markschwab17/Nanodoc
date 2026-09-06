@@ -19,7 +19,7 @@
  * `w.onmessage` closure that no test could reach.
  */
 
-import type { ProbeMessage, ProbeResult } from "@/features/stitch/autostitch/stitchProbe";
+import type { ProbeReply, ProbeResult } from "@/features/stitch/autostitch/stitchProbe";
 import type { OcrStats } from "@/features/stitch/autostitch/autoStitch";
 
 export type ModalProbeOutcome =
@@ -37,10 +37,14 @@ export type ModalProbeOutcome =
   | { kind: "done"; probe: ProbeResult };
 
 /**
+ * `ProbeReply`, not `ProbeMessage`: today's worker cannot post a success without a
+ * tally (`ProbeSuccess`), but this function is also the thing that has to be right
+ * about a reply from a build that could — so the read below stays defensive.
+ *
  * @param msg           the worker's terminal reply (already checked for staleness)
  * @param recheckSpent  has THIS probe request already had its one automatic re-run?
  */
-export function modalProbeOutcome(msg: ProbeMessage, recheckSpent: boolean): ModalProbeOutcome {
+export function modalProbeOutcome(msg: ProbeReply, recheckSpent: boolean): ModalProbeOutcome {
   if ("aborted" in msg) return { kind: "skipped" };
   if ("error" in msg) return { kind: "error", error: msg.error };
   // `> 0`, never `!= null`: an absent tally is not zero unknowns, it is no report at

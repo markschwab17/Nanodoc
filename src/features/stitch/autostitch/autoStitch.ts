@@ -81,22 +81,26 @@ export interface AutoStitchOptions {
  * they are counted apart.
  *
  * `retries` counts RE-READ DECISIONS, not reads: one per strip re-read, one per
- * sheet-number cell re-read, one per band handed to the sub-clip retry — which
- * issues several reads of its own, each of them counted in `calls`.
+ * sheet-number cell re-read, one per band handed to the sub-clip retry (which issues
+ * several reads of its own, each counted in `calls`), one per side band whose single
+ * lost rotation is re-read whole.
  *
  * `unknown` counts READS that were still unanswered after their retry: a strip that
  * had to stop the scan rather than let a later strip be accepted, a sheet-number
  * cell that stays unread, an edge band that produced nothing whichever way it was
- * turned and nothing again when it was cut up. `unknown > 0` means the run reached
- * its verdict with a hole in the evidence.
+ * turned and nothing again when it was cut up, a side band whose lost rotation was
+ * lost again. `unknown > 0` means the run reached its verdict with a hole in the
+ * evidence, and it is the ONLY counter the probe gates and the hook's re-check read.
  *
- * `withheldVotes` counts SIDE BANDS whose rotation vote was withheld because a
- * rotation of them was lost. That is a weaker fault than `unknown` — the band still
- * has a reading, and its labels are still used — but it is not nothing: the vote
- * decides `lockSideTextRot`, and the lock decides which rotations the reciprocal
- * strip scan reads, so a withheld vote can move which strip the scan returns. A
- * band that is BOTH fully lost and a side band appears in both counts; they measure
- * different things.
+ * `withheldVotes` counts SIDE BANDS whose rotation vote was withheld AFTER the
+ * re-read — a rotation lost twice, or a sub-clip retry that did not come back whole.
+ * A band repaired by its re-read votes normally and is not counted. This is a weaker
+ * fault than `unknown` — the band still has a reading, and its labels are still used
+ * — but it is not nothing: the vote decides `lockSideTextRot`, the lock decides which
+ * rotations the reciprocal strip scan reads, so a withheld vote can move which strip
+ * the scan returns. A band withheld because its ROTATION was lost twice is counted in
+ * `unknown` as well, so the gates catch it; a band withheld because its sub-clip
+ * retry came back only partly is not — it did read, just not wholly.
  */
 export interface OcrStats { calls: number; nonAnswers: number; retries: number; unknown: number; withheldVotes: number }
 
@@ -437,8 +441,10 @@ interface PageOcrRead { recovered: Label[]; ocrNo: number | null; sideTextRot?: 
  *  `noResult[k]` is set when that read came back a NON-ANSWER (the pool's job budget
  *  expired, or the transport lost the reply) rather than a crop with no text in it —
  *  the two are the same `[]`. Only a band where EVERY rotation is flagged is worth
- *  re-reading as sub-clips: one surviving rotation means the band already has a
- *  whole-raster reading, which always beats a cut one. */
+ *  re-reading as SUB-CLIPS: one surviving rotation means the band already has a
+ *  whole-raster reading, which always beats a cut one — that band's lost rotation is
+ *  re-read whole instead (`rereadLostRotation`), and `noResult[k]` is cleared when
+ *  the second read lands, so a repaired band votes like one that never faltered. */
 interface BandRead {
   band: BandSpec; scale: number; w: number; h: number;
   rots: (0 | 90 | 270)[]; words: Promise<OcrWord[]>[]; noResult: boolean[];
@@ -511,14 +517,17 @@ function lockSideTextRot(mass: Record<90 | 270, number>): 90 | 270 | undefined {
  * stability guarantees), sheet-number band last. `Promise.all` preserves order, so
  * running the pool flat out cannot change which read wins.
  *
- * A BAND EVERY ROTATION OF WHICH CAME BACK A NON-ANSWER is read a second time, as
- * overlapping sub-clips (`retryBandAsSubClips`). That is the only thing sub-clips are
- * ever used for: every band that answers at all — including a side band where just
- * one of the two rotations answered — is read exactly as it always was, one whole
- * raster at 200 dpi. Cutting bands up front was measured on the four eval sets and
- * cost three of them: a callout that straddles a cut is truncated or misread into a
- * different valid-looking target. So the cut is reserved for a band that produced
- * nothing whichever way it was turned, where a degraded read beats none.
+ * A LOST READ IS RE-READ ONCE, and HOW depends on how much of the band was lost:
+ *  - every rotation a non-answer → the band is cut into overlapping sub-clips
+ *    (`retryBandAsSubClips`). That is the only thing sub-clips are ever used for.
+ *    Cutting bands up front was measured on the four eval sets and cost three of
+ *    them: a callout that straddles a cut is truncated or misread into a different
+ *    valid-looking target. So the cut is reserved for a band that produced nothing
+ *    whichever way it was turned, where a degraded read beats none;
+ *  - a SIDE band with one rotation lost and one answered → the lost rotation alone is
+ *    re-read, WHOLE, at 200 dpi (`rereadLostRotation`). The two rotations' scores are
+ *    compared against each other, so they must be reads of the same shape.
+ * Either way, still lost after the one re-read = the band is `unknown`.
  * `reopenPage` is what makes the second pass possible at all: by the time a read
  * settles the caller has destroyed the page, so the retry loads its own.
  */
@@ -647,6 +656,51 @@ function readPageOcr(
     return pending.map((p, j) => ({ ...p, words: got[j] }));
   };
 
+  /**
+   * Re-read ONE rotation of a side band — the one that came back a non-answer while
+   * the other rotation answered.
+   *
+   * This is the last place a lost read could still change the verdict in silence. A
+   * side band is TWO separate pool jobs, and the sub-clip retry above only fires when
+   * both are lost; a band that lost exactly one was left alone and its vote withheld.
+   * That withheld vote is not a harmless omission: it can move `lockSideTextRot` off
+   * a real rotation, the lock decides which rotations the reciprocal strip scan
+   * reads, and a narrower scan can return a different strip — a different anchor, a
+   * different verdict, on the same sheets. The gates key on `unknown`, which this
+   * case never touched. So the lost rotation now gets the same budget every other
+   * decision-feeding read gets: ONE more try, and if that is lost too the band is
+   * `unknown` as well as withheld, which the gates DO see.
+   *
+   * IT RE-RENDERS, for the reason `readStrip` and the sheet-number cell re-render:
+   * both production transports TRANSFER the raster on the way out
+   * (`postMessage(…, [image.data.buffer])`), so by the time a read settles its
+   * `RawImage` is a husk with a detached buffer. Handing that back throws a
+   * DataCloneError up through the page burst, or — on the path that swallows it —
+   * returns `[]` with no non-answer reported at all, which is the bug wearing a
+   * disguise. `reopenPage` is the way back to the pixels; a caller that cannot
+   * re-open (or a run already aborted) gets no second try, and the band is unknown.
+   *
+   * The WHOLE band, at that one rotation, at the same dpi — never sub-clips. The pick
+   * and the rotation tally compare the two rotations' scores, and a score only means
+   * something between reads of the same shape; a cut re-read scored against an uncut
+   * survivor would decide the lock on the cut. (The all-lost case has no such
+   * asymmetry: it replaces BOTH rotations wholesale, which is exactly why sub-clips
+   * are safe there and not here.)
+   *
+   * Returns the words, or null for "still a non-answer".
+   */
+  const rereadLostRotation = async (r: BandRead, k: number): Promise<OcrWord[] | null> => {
+    // Synchronous end to end, so nothing can interleave on the non-re-entrant mupdf
+    // instance, and the handle is closed before the read is awaited.
+    const page2 = reopenPage!();
+    let again: RawImage;
+    try { again = renderBand(mupdf, page2, r.band.clip).image; }
+    finally { page2.destroy?.(); }
+    let lostAgain = false;
+    const words = await issue(rotateRaw(again, r.rots[k] as 90 | 270), () => { lostAgain = true; });
+    return lostAgain ? null : words;
+  };
+
   return (async () => {
     const perBand = await Promise.all(reads.map((r) => Promise.all(r.words)));
     const recovered: Label[] = [];
@@ -662,6 +716,37 @@ function readPageOcr(
       // whole-band evidence, and then the labels come from the sub-clips instead.
       let words: OcrWord[][] = perBand[i];
       let parts: RetryPart[] | null = null;
+      // THE PARTIAL RE-READ: a side band that lost exactly ONE of its two rotations.
+      //
+      // Nothing here fires on a clean run — every branch is behind a non-answer that
+      // actually happened. When one does: the lost rotation is re-read once at full
+      // size (`rereadLostRotation`), and either it answers, `noResult[k]` is cleared
+      // and the band votes exactly as an untroubled band would, or it is lost again
+      // and the band is BOTH withheld (below) and `unknown` — the strong counter, the
+      // one the probe gates and the hook's re-check actually read.
+      //
+      // Counted as unknown even when there is no re-read to make (no `reopenPage`, or
+      // the run is aborting): "we could not find out" is the same fact whether the
+      // budget expired twice or the second attempt was impossible. Same bookkeeping
+      // the sheet-number cell and `readStrip` do on the same decision.
+      const lostRots = r.rots.filter((_, k) => r.noResult[k]).length;
+      if (r.rots.length === 2 && lostRots === 1) {
+        const k = r.noResult.findIndex((v) => v);   // exactly one, given the guards
+        if (!reopenPage || signal?.aborted) {
+          stats.unknown++;
+        } else {
+          stats.retries++;   // one re-read DECISION, as everywhere else
+          const again = await rereadLostRotation(r, k);
+          if (again) {
+            // `perBand[i]` is what `words` aliases; replace the rotation's evidence in
+            // place so the pick, the score and `labelsAt` all see the read that landed.
+            words[k] = again;
+            r.noResult[k] = false;
+          } else {
+            stats.unknown++;
+          }
+        }
+      }
       // THE RETRY, and it is deliberately hard to earn.
       //
       // Only a NON-ANSWER earns one — an empty read is an answer, and a band that
@@ -670,9 +755,11 @@ function readPageOcr(
       // rotations came back with words then the band HAS a whole-raster reading. A
       // whole read always beats a cut one (the cut truncates callouts and can misread
       // a fragment into a different valid-looking target — measured, see
-      // task-6-report.md), so with one survivor there is nothing to gain and real
-      // quality to lose. Only when the band produced nothing at all, whichever way it
-      // was turned, is a degraded read better than none.
+      // task-6-report.md), so CUTTING a band with one survivor has nothing to gain and
+      // real quality to lose. Only when the band produced nothing at all, whichever
+      // way it was turned, is a degraded read better than none. (The one-survivor band
+      // is not left alone either — it is re-read WHOLE at its lost rotation, just
+      // above. Cut vs whole is the distinction here, not retry vs no retry.)
       //
       // The two other bars: a band short enough to be one job has nothing to retry
       // WITH (`splitBand` hands back the band itself), and an aborted run must raster
@@ -709,6 +796,11 @@ function readPageOcr(
       // But it is a WEAKER fault than an unread band: the band still has a reading and
       // its labels are still used. It gets its own counter, on the bands that actually
       // vote (only side bands do — see the `c.rot !== 0` guard below).
+      //
+      // WITHHELD MEANS WITHHELD AFTER THE RE-READ. `noResult[k]` has already been
+      // cleared for a rotation the partial re-read recovered, so a band that faltered
+      // once and then answered votes here exactly as a band that never faltered — and
+      // is not counted. What is left in this counter is a band that stayed broken.
       if (!whole && r.rots.length === 2) stats.withheldVotes++;
       // UNKNOWN is the strong one: this band produced nothing readable at all —
       // every rotation a non-answer, and then either no cut to make (too short, no
@@ -1225,8 +1317,11 @@ async function runAutoStitch(
      *
      * `probe` rasters synchronously before its first await (mupdf is not re-entrant,
      * and a chunk's strips must be rendered in index order on the way in), so a
-     * chunk holds at most `OCR_CHUNK` strip rasters, each released when its probe
-     * returns.
+     * chunk holds `OCR_CHUNK` strip rasters, each released when its probe returns —
+     * plus, at the moment a non-answer is re-read, that strip's SECOND raster
+     * (`readStrip` re-renders; the first is a husk by then, its buffer transferred).
+     * The ceiling is therefore 2 × `OCR_CHUNK` rasters, and only in the pathological
+     * case where every strip of a chunk blew its budget at once.
      *
      * AN UNKNOWN STRIP ENDS THE SCAN. The first-hit argument above rests on every
      * strip before the winner having been READ and missed; a strip whose read was

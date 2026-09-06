@@ -203,6 +203,18 @@ describe("autoAlignExplanation", () => {
     );
   });
 
+  it("too_slow is not a verdict about the drawings — it says the check never read them", () => {
+    // The live commit path's own gate: unknown reads twice over, so nothing the solve
+    // measured is quoted. Same words as the strip's `too_slow`, deliberately — one
+    // promise, two front doors, one sentence — plus the thing worth doing about it.
+    expect(autoAlignExplanation({ reason: "too_slow" })).toBe(
+      "Auto-align isn't available for these sheets — the check took too long. " +
+      "The sheets are placed below to align by hand, or try the check again.",
+    );
+    // No seam talk: that would be a fact this run never established.
+    expect(autoAlignExplanation({ reason: "too_slow" })).not.toContain("seam");
+  });
+
   it("names the sheets that were left out of the tiling, and what they are", () => {
     expect(autoAlignExplanation({ reason: "ok", skipped: [{ pageNumber: 2, role: "notes" }] })).toBe(
       "Page 2 is a notes sheet and was left out of the alignment.",

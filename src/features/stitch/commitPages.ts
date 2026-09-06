@@ -17,10 +17,10 @@ import type { PDFRenderer } from "@/core/pdf/PDFRenderer";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
 import { getTileAABB } from "@/features/stitch/stitchGeometry";
-import { autoStitch, AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
+import { autoStitch, AutoStitchAborted, type OcrStats } from "@/features/stitch/autostitch/autoStitch";
 import { frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
 import type { AlignmentVerdict, SeamStatus, SeamReportEntry } from "@/features/stitch/autostitch/stitchCore";
-import type { AutoAlignReason } from "./addToProjectCopy";
+import { AUTO_ALIGN_UNAVAILABLE_REASONS, type AutoAlignReason } from "./addToProjectCopy";
 import type { recognize } from "./autostitch/ocrService";
 import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, newTileCanvasFactor } from "./pageScales";
 import { tileRenderScale, encodeTileRasterPng, TILE_RENDER_SCALE } from "./rasterEncode";
@@ -369,6 +369,10 @@ export async function commitAutoAlign(
   let alongAnchored: number[] | undefined;
   let worstAlongUncertaintyFt = 0;
   let worstAlongUncertaintySource: "sweep" | "vote" | "bound" | undefined;
+  /** The live run reached its layout without a read it asked for, twice over. Set
+   *  only on the live path — a cached probe has already been through the same gate
+   *  in the modal/hook, which is why it is cached at all. */
+  let unknownEvidence = false;
   if (cached) {
     // The cached path skips the solver entirely, so its own abort checkpoints
     // never run — check here instead.
@@ -386,7 +390,28 @@ export async function commitAutoAlign(
     worstAlongUncertaintySource = cached.worstAlongUncertaintySource;
     refPageIndices = cached.refPageIndices ?? selected;
   } else {
-    const result = await autoStitch(mupdf, doc, selected, {
+    /**
+     * THE LIVE PATH RUNS THE ALIGNER ITSELF, so it owns the same promise the probe
+     * makes — and used to break.
+     *
+     * The probe gates (`useEarnedAutoAlign`, `modalProbeGate`) refuse to present a
+     * verdict built on reads that never came back. But this branch is not the probe:
+     * it is reached whenever there is no cached result to reuse — no probe ran, it
+     * errored, it is still going, or (the live case that matters) the user ticked a
+     * MIXED-SCALE selection, which can never reuse the uniform-scale probe. The modal
+     * then offers "Add & auto-align" off a probe that WAS clean, and the commit
+     * quietly re-solves with reads that may not be. One lost strip read moves a
+     * Belcourt sheet ~39 ft with the verdict, the residual and the anchor list
+     * unchanged, so nothing downstream would ever have noticed.
+     *
+     * Same rule as the probe, therefore: unknown reads → run it once more (a second
+     * expired 20 s job on the same crop is a different roll of the same dice, and one
+     * clean re-run is what the hook already does); still unknown → nothing this run
+     * measured is committed as an alignment. The sheets are still PLACED — they are
+     * just all placed for the user to align by hand, with the existing "the check took
+     * too long" copy saying why. Never a composite built on a read that never landed.
+     */
+    const runSolver = () => autoStitch(mupdf, doc, selected, {
       userScale: uniformScale,
       pageScales,
       pageCodes,
@@ -394,6 +419,17 @@ export async function commitAutoAlign(
       ocr,
       shouldAbort,
     });
+    const holed = (r: { ocrStats?: OcrStats }) => (r.ocrStats?.unknown ?? 0) > 0;
+    let result = await runSolver();
+    if (holed(result)) {
+      // Between the two runs, and only here: a user who cancelled during the first
+      // solve must not pay for a second. `autoStitch` re-checks continuously inside.
+      checkAbort();
+      console.debug("[commitAutoAlign] unknown OCR reads — re-solving once", result.ocrStats);
+      result = await runSolver();
+      unknownEvidence = holed(result);
+      if (unknownEvidence) console.warn("[commitAutoAlign] unknown OCR reads twice — placing for manual alignment", result.ocrStats);
+    }
     placements = result.placements;
     rootFtPerIn = result.rootFtPerIn;
     worstResidFt = result.worstResidFt;
@@ -440,6 +476,11 @@ export async function commitAutoAlign(
     if (!e || e.verified > 0) continue;
     if (e.suspect > 0 || e.seamOnly === e.total) demoted.add(p.pageIndex);
   }
+  // The FOURTH case, and the only one that is not about the geometry: the run reached
+  // this layout twice without a read it asked for. The seam report cannot catch that —
+  // it grades what was measured, and the hole is in what wasn't — so the demotion is
+  // wholesale. Every sheet is placed, none is claimed.
+  if (unknownEvidence) for (const p of placements) demoted.add(p.pageIndex);
 
   // Read the pre-commit baseline BEFORE addTiles below so "does the canvas already
   // have sheets" reflects what was there before this batch, not this batch itself.
@@ -507,7 +548,11 @@ export async function commitAutoAlign(
       )
     : undefined;
   let reason: AutoAlignReason = "ok";
-  if (method === "none") reason = refPageIndices.length < 2 ? "no_refs" : "not_adjacent";
+  // First, because it outranks every judgement made about the geometry: those are all
+  // read off a solve whose evidence had a hole in it, so quoting them would dress an
+  // unknown up as a finding.
+  if (unknownEvidence) reason = "too_slow";
+  else if (method === "none") reason = refPageIndices.length < 2 ? "no_refs" : "not_adjacent";
   else if (alongUnresolvedPages?.length) reason = "along_unresolved";
   else if (verdict === "unverified" || demoted.size > 0) reason = "unverified";
   const alignedCount = selected.length - unalignedIds.length;
@@ -523,7 +568,13 @@ export async function commitAutoAlign(
       ? `worst seam ${worstResidFt.toFixed(2)} ft across, ±${Math.round(worstAlongUncertaintyFt)} ft along`
       : `worst seam ${worstResidFt.toFixed(2)} ft across, along the matchline unresolved`
     : `worst seam ${worstResidFt.toFixed(2)} ft`;
-  const message = unalignedIds.length > 0
+  // A run with a hole in its reads gets no seam figure at all: `worstResidFt` is a real
+  // number computed over the anchors that DID land, and quoting "worst seam 0.00 ft" on
+  // a solve nobody is standing behind is the precise flavour of confident-and-wrong this
+  // change exists to remove. Say what happened instead, in the words the strip uses.
+  const message = unknownEvidence
+    ? `Added ${selected.length} page${selected.length === 1 ? "" : "s"} for manual alignment — ${AUTO_ALIGN_UNAVAILABLE_REASONS.too_slow}.`
+    : unalignedIds.length > 0
     ? `Aligned ${alignedCount} of ${selected.length} pages · ${seamText}. ${unalignedIds.length} placed below for manual alignment.`
     : `Aligned ${selected.length} pages · ${seamText}.`;
   return {

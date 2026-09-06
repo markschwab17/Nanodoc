@@ -14,10 +14,44 @@ npx vite-node scripts/stitch-eval.mjs                    # the whole corpus
 npx vite-node scripts/stitch-eval.mjs --set "PG_SITE 1A" # one set
 npx vite-node scripts/stitch-eval.mjs --json             # machine-readable
 npx vite-node scripts/stitch-eval.mjs --manifest <path>  # a different corpus
+npm run stitch-eval:check                                # the whole corpus + the placements gate
 ```
 
+`npm run stitch-eval:check` is the same harness with `STITCH_EVAL_ASSERT_PLACEMENTS`
+already pointed at the tracked fixture `scripts/fixtures/stitch-eval-placements.json`.
+**That is the command to run before merging an engine change.** The expectations table
+below binds recall, verdict, residual and suspect count — and not one of them moved
+when a lost OCR read slid a Belcourt sheet 39 ft along its matchline. Only the
+placements catch that.
+
 Exit code 0 = every set met its expectations, 1 = something regressed (each failure is
-printed as `REGRESSION · <set>: <what>`), 2 = the manifest named no runnable set.
+printed as `REGRESSION · <set>: <what>`, or `REGRESSION · suite: <what>` for one that
+belongs to the run rather than to any single set), 2 = the manifest named no runnable
+set.
+
+## Environment switches
+
+All optional; all read once at start-up.
+
+| variable | what it does |
+|---|---|
+| `STITCH_EVAL_NO_OCR_CACHE=1` | bypass the shared OCR cache for READ and WRITE — every image is re-OCR'd and the cache file is left untouched. For a cold, honest timing run. |
+| `STITCH_EVAL_FAULT_CALLS=3,7` | make those OCR reads return the pool's NON-ANSWER (`onNoResult` fires, `[]` comes back) without running tesseract — exactly what a timed-out 20 s job looks like. Indices are 0-based, count every read the aligner makes (cache hits included), and **reset per set**. A retry re-reads its clip under a NEW index, so faulting index *N* exercises the retry without faulting the retry too. |
+| `STITCH_EVAL_LOG_OCR_CALLS=1` | print every read's index and pixel size. How you pick the indices above. |
+| `STITCH_EVAL_ASSERT_PLACEMENTS=<path.json>` | every set's placements must match the file to 0.01 pt. A moved unit, a set the fixture does not mention, a unit the fixture does not have, and a fixture key that never ran are all regressions. |
+| `STITCH_EVAL_WRITE_PLACEMENTS=<path.json>` | write the placements instead of asserting them — how the fixture is made, and how it is deliberately moved when an engine change is *meant* to move an answer. Merges: sets outside this run keep whatever the file already said. |
+
+Why fault injection exists at all: this machine's tesseract has never once blown the
+20 s per-job budget, so the corpus cannot reach the aligner's non-answer paths on its
+own — and those paths are exactly the ones that made the BROWSER probe answer
+differently on two runs of the same sheets. The bar is that **every faulted run
+produces the same placements and the same verdict as the un-faulted one**; a difference
+is a real non-determinism, not a harness artefact.
+
+Why a fixture key with no run is a failure: a set whose PDF is missing is skipped, and
+a skipped set never reaches the per-set asserts. Without the suite-level check,
+`stitch-eval:check` on a machine holding none of the corpus exited 0 having verified
+nothing — "the PDFs aren't here" printed as "the placements still match".
 
 ## The corpus
 

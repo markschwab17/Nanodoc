@@ -51,10 +51,12 @@ export interface ProbeResult {
    *  without a read it wanted, so the result must not be presented as a verdict
    *  (`useEarnedAutoAlign` re-checks once, then says the check took too long).
    *
-   *  Optional because a reply can carry no stats at all: the failure paths below
-   *  have no `AutoStitchResult` to take them from, and a stubbed worker in a test
-   *  need not supply them. Absent is read as "nobody told us", NOT as zero — every
-   *  comparison here is `> 0`, which is false for `undefined` and for `NaN`. */
+   *  Optional HERE, required on `ProbeSuccess` below. `ProbeResult` is also the shape
+   *  of results no aligner run produced — `probeNode`'s abandoned-on-budget result,
+   *  an older build's reply, a test stub — and for those, absent means "nobody told
+   *  us", NOT zero: every comparison on it is `> 0`, which is false for `undefined`
+   *  and for `NaN`. What must never happen is a REAL run dropping its tally on the
+   *  way out, and `ProbeSuccess` makes that a compile error instead of a silence. */
   ocrStats?: OcrStats;
   /** How many OCR round-trips this probe made — kept for compatibility with
    *  everything that read it before `ocrStats` existed, and now simply
@@ -64,8 +66,24 @@ export interface ProbeResult {
   ocrCalls?: number;
 }
 
+/**
+ * The worker's SUCCESS reply, and the one shape where the tally is not optional.
+ *
+ * `unknown > 0` is the whole reason the counters travel: it is what makes the hook
+ * re-check and, failing that, refuse to offer an alignment. A success reply that
+ * quietly omitted them would be read as "nobody told us" and shown — which is
+ * exactly the bug this work removes, restored by an accident of typing. So the
+ * requirement lives on the message the worker actually posts: forget the field in
+ * `toProbeResult` and the build fails, rather than a Belcourt verdict flipping run
+ * to run in production. The gates keep their defensive `> 0` read anyway, because
+ * they also see the replies below.
+ */
+export interface ProbeSuccess extends ProbeResult {
+  ocrStats: OcrStats;
+}
+
 export type ProbeMessage =
-  | ProbeResult
+  | ProbeSuccess
   /** `ocrCalls` is carried on the failure paths too: a probe that errored or was
    *  aborted still SPENT those round-trips, and reporting 0 for them made the
    *  settle log quietly understate what a giving-up check had cost. */
@@ -74,11 +92,21 @@ export type ProbeMessage =
    *  error — the modal treats it as a skipped check, no toast. */
   | { docId: number; aborted: true; ocrCalls?: number };
 
-export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult {
-  // Read once, defensively: `AutoStitchResult.ocrStats` is a required field, but this
-  // is the boundary a stubbed/older aligner crosses, and a missing tally must degrade
-  // to "unreported" rather than throw on the way out of a probe that otherwise worked.
-  const stats: OcrStats | undefined = res.ocrStats;
+/**
+ * What a REPLY HANDLER must cope with: everything the current worker posts, plus a
+ * bare `ProbeResult` — an older build whose reply predates the tally, or a stub. The
+ * gates are written against this, which is why their `ocrStats` read stays defensive
+ * even though today's worker cannot omit it.
+ */
+export type ProbeReply = ProbeMessage | ProbeResult;
+
+export function toProbeResult(res: AutoStitchResult, docId: number): ProbeSuccess {
+  // `AutoStitchResult.ocrStats` is required and so is `ProbeSuccess.ocrStats`, so
+  // dropping the tally here no longer compiles. The `?.` on `ocrCalls` is the one
+  // concession to runtime: this is the boundary a stubbed or older aligner crosses
+  // untyped, and a missing tally must degrade rather than throw on the way out of a
+  // probe that otherwise worked.
+  const stats = res.ocrStats;
   return {
     docId,
     placements: res.placements,
