@@ -17,6 +17,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as zlib from "node:zlib";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { AutoStitchAborted, type AutoStitchResult } from "./autoStitch";
@@ -253,6 +254,33 @@ describe("engine identity", () => {
   });
 });
 
+/**
+ * The pixels back out of an `encodePNG` buffer: walk the chunks, inflate every IDAT,
+ * and drop each scanline's filter byte (the encoder always writes filter 0).
+ * Deliberately hand-rolled — a decoder from a library would test the library.
+ */
+function decodePNGPixels(png: Buffer): Uint8Array {
+  const idat: Buffer[] = [];
+  let width = 0, height = 0;
+  let at = 8; // past the signature
+  while (at < png.length) {
+    const len = png.readUInt32BE(at);
+    const type = png.toString("ascii", at + 4, at + 8);
+    const data = png.subarray(at + 8, at + 8 + len);
+    if (type === "IHDR") { width = data.readUInt32BE(0); height = data.readUInt32BE(4); }
+    if (type === "IDAT") idat.push(data);
+    at += 12 + len; // length + type + data + CRC
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * 4;
+  const out = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    expect(raw[y * (stride + 1)]).toBe(0); // filter type 0, every row
+    raw.copy(out, y * stride, y * (stride + 1) + 1, y * (stride + 1) + 1 + stride);
+  }
+  return Uint8Array.from(out);
+}
+
 describe("PNG encoder", () => {
   it("writes IHDR dimensions and an 8-bit RGBA colour type", () => {
     const png = encodePNG(3, 2, new Uint8ClampedArray(3 * 2 * 4));
@@ -266,13 +294,20 @@ describe("PNG encoder", () => {
   });
 
   it("reads only this image's rows out of a shared buffer", () => {
-    // Band rasters arrive as views into a larger allocation; encoding must respect
-    // byteOffset or every crop would be encoded from the top of the arena.
+    // Band rasters arrive as VIEWS into a larger allocation. Encoding must respect
+    // byteOffset or every crop is silently encoded from the top of the arena — which
+    // does not throw, does not change the file's size, and produces a perfectly
+    // well-formed PNG of the wrong pixels. So this reads the pixels back out.
     const arena = new Uint8ClampedArray(4 * 4 * 4);
-    arena.fill(7);
-    const view = arena.subarray(2 * 4 * 4, 2 * 4 * 4 + 2 * 4 * 4);
+    arena.fill(7);                                        // decoy rows either side
+    const view = arena.subarray(2 * 4 * 4, 2 * 4 * 4 + 2 * 4 * 4);   // 4px wide, 2 rows
     view.fill(200);
-    expect(() => encodePNG(2, 4, view)).not.toThrow();
+    // One byte made unique so a row-order mistake shows up too, not just an offset one.
+    view[0] = 11;
+
+    const decoded = decodePNGPixels(encodePNG(4, 2, view));
+    expect(decoded).toEqual(Uint8Array.from(view));
+    expect(decoded).not.toContain(7);
   });
 });
 
@@ -285,6 +320,60 @@ describe("toOcrWords", () => {
 });
 
 // ── the real engine, over real bytes ─────────────────────────────────────────
+// Two tests, and the first is the one that must never be skipped.
+//
+// `openDocument → autoStitch → toProbeResult` is the whole reason this file exists, and
+// for a while its only coverage was a fixture in ~/Downloads that CI and every other
+// machine does not have — so on those machines the Node entry's real path was tested by
+// nothing at all, and the suite said nothing about it. A two-page PDF built in-process
+// with pdf-lib closes that: it is real bytes through real mupdf, it needs no corpus, and
+// it will notice the entry failing to open a document or failing to shape a result.
+//
+// The Belcourt run stays on top of it, skipped when absent, because a synthetic page has
+// no title block, no callouts and no matchline: it can prove the path runs, not that the
+// path runs over the kind of sheet this engine exists for.
+
+/** Two 36x24in sheets with some vector content, so `capturePage` has geometry to find. */
+async function makeTwoPagePdf(): Promise<Uint8Array> {
+  const { PDFDocument, rgb } = await import("pdf-lib");
+  const doc = await PDFDocument.create();
+  for (let i = 0; i < 2; i++) {
+    const page = doc.addPage([2592, 1728]);
+    page.drawRectangle({ x: 40, y: 40, width: 2512, height: 1648, borderWidth: 2, borderColor: rgb(0, 0, 0) });
+    page.drawLine({ start: { x: 1296, y: 40 }, end: { x: 1296, y: 1688 }, thickness: 1, color: rgb(0, 0, 0) });
+    page.drawText(`C${i + 1}.00`, { x: 2200, y: 80, size: 24 });
+  }
+  return doc.save();
+}
+
+describe("runProbe over a synthetic two-page PDF", () => {
+  it("opens real bytes with real mupdf, drives the aligner and shapes a ProbeResult", async () => {
+    const mupdfMod: any = await import("mupdf");
+    const mupdf = mupdfMod.default ?? mupdfMod;
+    const out = await runProbe(
+      { ...baseReq(), pdfBytes: await makeTwoPagePdf(), pageIndices: [0, 1], userScale: 20 },
+      deps(mupdf),
+    );
+
+    // Two unrelated sheets share no ground, so the honest answer is that nothing
+    // aligned. What is asserted is the SHAPE and the status, not the conclusion.
+    expect(["ok", "unknown"]).toContain(out.status);
+    expect(out.result.docId).toBe(4);
+    expect(Array.isArray(out.result.placements)).toBe(true);
+    expect(Array.isArray(out.result.poses)).toBe(true);
+    expect(Array.isArray(out.result.alignedPageIndices)).toBe(true);
+    expect(Array.isArray(out.result.refPageIndices)).toBe(true);
+    expect(typeof out.result.rootFtPerIn).toBe("number");
+    expect(typeof out.result.worstResidFt).toBe("number");
+    expect(["keymap", "geometric", "none"]).toContain(out.result.method);
+    // The tally is real, and `ocrCalls` is the same number by another name.
+    expect(out.ocrStats).not.toBeNull();
+    expect(out.result.ocrCalls).toBe(out.ocrStats?.calls);
+    // And the pool it built is gone — an un-terminated worker hangs a Node process.
+    expect(workersTerminated).toBe(workersMade);
+  }, 120_000);
+});
+
 // The corpus is local by design (see scripts/fixtures/stitch-eval-sets.json), so this
 // SKIPS on a machine that does not have it rather than failing. tesseract is still
 // stubbed: what is under test is that the Node entry can open a document, drive the

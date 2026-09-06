@@ -19,6 +19,14 @@
  * be matched against the editor's own build — a verdict from a different commit is not
  * interchangeable and the editor re-runs the browser probe.
  *
+ * A DIRTY tree stamps `<short>-dirty`, in the define AND in the file, deliberately as one
+ * value rather than as a warning next to a clean-looking hash. The editor's own constant
+ * is stamped from a build of a committed tree, so `-dirty` can never match it: a bundle
+ * built over uncommitted edits produces verdicts the editor will always discard, which is
+ * the only safe reading of "this engine is not the one you are running". Untracked files
+ * are excluded (`--untracked-files=no`) — a scratch file or an SDD note beside the repo is
+ * not a change to the engine.
+ *
  * Run: npm run build:probe-bundle
  */
 import { execFileSync } from "node:child_process";
@@ -34,11 +42,11 @@ const OUT_FILE = path.join(OUT_DIR, "probe-engine.mjs");
 const VERSION_FILE = path.join(OUT_DIR, "ENGINE_VERSION");
 const ENTRY = path.join(REPO, "src/features/stitch/autostitch/probeNode.ts");
 
-// The commit, not the working tree. A dirty tree is reported so a bundle built over
-// uncommitted edits is never mistaken for the commit it names — but it is not fatal,
-// because building one to test locally before committing is the normal loop.
-const version = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
-const dirty = execFileSync("git", ["status", "--porcelain"], { cwd: REPO, encoding: "utf8" }).trim() !== "";
+// Not fatal — building one to test locally before committing is the normal loop — but it
+// changes the STAMP, not just the log line: see the header.
+const head = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
+const dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: REPO, encoding: "utf8" }).trim() !== "";
+const version = dirty ? `${head}-dirty` : head;
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
@@ -57,6 +65,6 @@ await esbuild.build({
 fs.writeFileSync(VERSION_FILE, version + "\n");
 
 const kb = (fs.statSync(OUT_FILE).size / 1024).toFixed(1);
-console.log(`probe engine ${version}${dirty ? " (WORKING TREE DIRTY — this bundle is not that commit)" : ""}`);
+console.log(`probe engine ${version}${dirty ? "  ← WORKING TREE DIRTY: this bundle is not that commit, and no editor build will accept its verdicts" : ""}`);
 console.log(`  ${path.relative(REPO, OUT_FILE)}  ${kb} kB`);
 console.log(`  ${path.relative(REPO, VERSION_FILE)}`);

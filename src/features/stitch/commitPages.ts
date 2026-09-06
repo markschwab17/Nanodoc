@@ -103,11 +103,19 @@ export interface CommitResult {
   unalignedIds: string[];
   message: string | null;
   /** Auto-align only. The honesty verdict from the post-solve seam verification,
-   *  and WHY the run did not place everything (`'ok'` when it did). */
+   *  and WHY the run did not place everything (`'ok'` when it did).
+   *
+   *  READ THESE TOGETHER, ALWAYS. On `reason: 'too_slow'` (unknown OCR reads twice)
+   *  `verdict` and `seams` still carry the numbers off that second, still-holed solve
+   *  — real figures computed over the anchors that DID land, and therefore exactly the
+   *  kind of confident-looking evidence nobody is standing behind. Nothing may quote
+   *  them without checking `reason` first; that is why `message` omits the seam figure
+   *  entirely on this path. */
   verdict?: AlignmentVerdict;
   reason?: AutoAlignReason;
   /** Per-seam quality, for the UI: which pages, how the seam rated, how far it sits
-   *  from what its own measurement said, and whether it pinned the along axis. */
+   *  from what its own measurement said, and whether it pinned the along axis. Carries
+   *  the still-holed second solve's numbers on `reason: 'too_slow'` — see `verdict`. */
   seams?: { pageIndexes: [number, number]; status: SeamStatus; residFt?: number; perpDeltaFt?: number; alongAnchored?: boolean }[];
   /** Page indices pinned along the matchline as well as across it, and how far an
    *  un-anchored one could slide. `worstAlongUncertaintySource` says whether that
@@ -433,6 +441,10 @@ export async function commitAutoAlign(
     placements = result.placements;
     rootFtPerIn = result.rootFtPerIn;
     worstResidFt = result.worstResidFt;
+    // Taken from the LAST solve either way — including the second, still-holed one when
+    // `unknownEvidence` is set. They are not lies, they are just answers to a question
+    // asked of incomplete evidence, so they only mean anything alongside `reason`
+    // ('too_slow'); see CommitResult.verdict.
     verdict = result.alignmentVerdict;
     seamReport = result.seamReport;
     skipped = result.skipped.map((s) => ({ pageIndex: s.pageIndex, role: s.role }));

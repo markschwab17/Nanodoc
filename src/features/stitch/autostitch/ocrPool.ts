@@ -97,8 +97,8 @@ interface Job<Input, Result> {
   resolve: (value: Result | OcrNoResult) => void;
   reject: (err: unknown) => void;
   settled: boolean;
+  /** Kept so the job can take itself off `waiting` when it settles normally. */
   signal?: AbortSignal;
-  onAbort?: () => void;
 }
 
 export function createOcrPool<Input, Result>(
@@ -118,17 +118,56 @@ export function createOcrPool<Input, Result>(
   let creating = false;
   let warm = false;
   let destroyed = false;
+  /** The in-flight `grow()`, if any — see `terminate`. */
+  let growing: Promise<void> | null = null;
+
+  /**
+   * Jobs waiting on each abort signal — ONE "abort" listener per signal, not one per job.
+   *
+   * A run has a single AbortController (autoStitch makes one and hands the same signal to
+   * every read), and a page issues 7-13 reads at once. A listener per job therefore put
+   * 11+ listeners on one EventTarget, which is exactly what Node's default limit warns
+   * about: every real probe printed a `MaxListenersExceededWarning` naming an
+   * `abort` leak that was not one. Muting the limit would have thrown away a genuinely
+   * useful warning; registering once per signal removes the cause instead, and works
+   * unchanged in the browser (no `node:events`).
+   *
+   * A WeakMap so a signal whose run is over is collectable with its job set.
+   */
+  const waiting = new WeakMap<AbortSignal, Set<Job<Input, Result>>>();
+  function watchSignal(job: Job<Input, Result>, signal: AbortSignal): void {
+    let jobs = waiting.get(signal);
+    if (!jobs) {
+      jobs = new Set();
+      waiting.set(signal, jobs);
+      signal.addEventListener("abort", () => {
+        // Detach the whole set first: `settle` calls back into `unwatchSignal`, and
+        // mutating the set we are iterating is the classic way to skip an entry.
+        const all = waiting.get(signal);
+        waiting.delete(signal);
+        for (const j of all ?? []) {
+          const at = queue.indexOf(j);
+          if (at >= 0) queue.splice(at, 1);  // still queued: it never runs
+          settle(j, OCR_NO_RESULT);          // in flight: result ignored on arrival
+        }
+      }, { once: true });
+    }
+    jobs.add(job);
+  }
+  const unwatchSignal = (job: Job<Input, Result>) => {
+    if (job.signal) waiting.get(job.signal)?.delete(job);
+  };
 
   const settle = (job: Job<Input, Result>, value: Result | OcrNoResult) => {
     if (job.settled) return;
     job.settled = true;
-    if (job.signal && job.onAbort) job.signal.removeEventListener("abort", job.onAbort);
+    unwatchSignal(job);
     job.resolve(value);
   };
   const fail = (job: Job<Input, Result>, err: unknown) => {
     if (job.settled) return;
     job.settled = true;
-    if (job.signal && job.onAbort) job.signal.removeEventListener("abort", job.onAbort);
+    unwatchSignal(job);
     job.reject(err);
   };
 
@@ -143,7 +182,12 @@ export function createOcrPool<Input, Result>(
 
   function pump(): void {
     dispatchWaiting();
-    if (!destroyed && !creating && live.size + pending < desired()) void grow();
+    if (!destroyed && !creating && live.size + pending < desired()) {
+      // Held, not just fired and forgotten: `terminate()` has to be able to wait for it.
+      const p = grow();
+      growing = p;
+      void p.finally(() => { if (growing === p) growing = null; });
+    }
   }
 
   async function grow(): Promise<void> {
@@ -169,7 +213,10 @@ export function createOcrPool<Input, Result>(
           return;
         }
         pending--;
-        if (destroyed) { try { worker.terminate(); } catch { /* ignore */ } return; }
+        // AWAITED, so that a `terminate()` waiting on this grow() really does return with
+        // every worker gone: a worker booted into a torn-down pool is otherwise terminated
+        // on a promise nobody holds, and it stays alive long enough to pin the event loop.
+        if (destroyed) { try { await worker.terminate(); } catch { /* ignore */ } return; }
         live.add(worker);
         idle.push(worker);
         dispatchWaiting();
@@ -260,14 +307,7 @@ export function createOcrPool<Input, Result>(
         const job: Job<Input, Result> = {
           input, resolve, reject, settled: false, signal: opts?.signal,
         };
-        if (job.signal) {
-          job.onAbort = () => {
-            const at = queue.indexOf(job);
-            if (at >= 0) queue.splice(at, 1); // still queued: it never runs
-            settle(job, OCR_NO_RESULT);       // in flight: result ignored on arrival
-          };
-          job.signal.addEventListener("abort", job.onAbort, { once: true });
-        }
+        if (job.signal) watchSignal(job, job.signal);
         queue.push(job);
         pump();
       });
@@ -279,9 +319,6 @@ export function createOcrPool<Input, Result>(
     },
     async terminate() {
       destroyed = true;
-      const workers = [...live];
-      live.clear();
-      idle.length = 0;
       for (const job of queue.splice(0)) settle(job, OCR_NO_RESULT);
       // In-flight jobs are settled HERE rather than left to the dispatch timers.
       // Leaving those armed meant the pool logged "recognize job timed out" and
@@ -291,6 +328,16 @@ export function createOcrPool<Input, Result>(
       // so nothing is stranded by the timer going away.
       for (const disarm of [...armed]) disarm();
       armed.clear();
+      // A `grow()` sitting on `await createWorker()` when we got here will resume, see
+      // `destroyed` and terminate the worker it just booted — but only after this method
+      // has already returned, unless we wait for it. Its worker is not in `live`, so the
+      // sweep below cannot catch it, and the caller would be told the pool was down while
+      // a tesseract thread was still coming up behind it. Waited FIRST, so any worker the
+      // cycle managed to publish before it noticed is in `live` by the time we read it.
+      if (growing) { try { await growing; } catch { /* grow never rejects; belt and braces */ } }
+      const workers = [...live];
+      live.clear();
+      idle.length = 0;
       await Promise.all(workers.map(async (w) => {
         try { await w.terminate(); } catch { /* already dead */ }
       }));

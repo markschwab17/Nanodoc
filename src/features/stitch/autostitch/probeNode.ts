@@ -1,15 +1,22 @@
 /**
  * The auto-align probe, as a plain-Node entry point.
  *
- * ONE Node path. Three callers now drive the aligner outside the browser — the
- * regression harness (`scripts/stitch-eval.mjs`), the diag harness, and the AWS
- * Lambda that pre-computes a verdict server-side — and until this file existed the
- * first of them owned the only Node OCR transport in the tree: a tesseract pool, a
- * PNG encoder and a result-shaping step living inside a `.mjs` script. A Lambda
- * built from a COPY of that would answer the same question with different code, and
- * the whole point of the server probe is that its verdict is interchangeable with the
- * browser's. So the transport moved here, the harness imports it, and the Lambda
- * bundles it (`npm run build:probe-bundle` → `dist-probe/probe-engine.mjs`).
+ * ONE Node path. Three callers drive the aligner outside the browser — the regression
+ * harness (`scripts/stitch-eval.mjs`), the diag harness (`scripts/stitch-diag.mjs`) and
+ * the AWS Lambda that pre-computes a verdict server-side — and until this file existed
+ * the first of them owned the only Node OCR transport in the tree: a tesseract pool, a
+ * PNG encoder and a result-shaping step living inside a `.mjs` script. A Lambda built
+ * from a COPY of that would answer the same question with different code, and the whole
+ * point of the server probe is that its verdict is interchangeable with the browser's.
+ * So the transport moved here, `stitch-eval.mjs` imports it, and the Lambda bundles it
+ * (`npm run build:probe-bundle` → `dist-probe/probe-engine.mjs`).
+ *
+ * NOT PORTED: `scripts/stitch-diag.mjs`. It still carries its own copy of the pool and
+ * the PNG encoder. That is deliberate for now — diag is a single-file investigation tool
+ * whose OCR path is routinely hacked on mid-session, and it asserts nothing, so a private
+ * copy costs no correctness. It is the obvious next thing to fold in if that stops being
+ * true; until then, an engine change that has to move BOTH transports must move that one
+ * by hand.
  *
  * What is NOT here: mupdf and tesseract.js. Both are INJECTED (`deps`), for the same
  * reason `autoStitch` takes `mupdf` as an argument — the Lambda image, the harness and
@@ -287,8 +294,13 @@ export async function runProbe(req: ProbeNodeRequest, deps: ProbeNodeDeps): Prom
     return false;
   };
 
-  const doc = deps.mupdf.Document.openDocument(req.pdfBytes, "application/pdf");
+  // Inside the `try`, not before it: a PDF mupdf cannot open is the most likely thing to
+  // throw in this whole function, and thrown out here it would skip the `finally` and
+  // leak the pool — up to three tesseract worker threads, each of which keeps a Node
+  // event loop alive for good.
+  let doc: any = null;
   try {
+    doc = deps.mupdf.Document.openDocument(req.pdfBytes, "application/pdf");
     const res = await autoStitch(deps.mupdf, doc, req.pageIndices, {
       userScale: req.userScale,
       pageScales: req.pageScales ? new Map(req.pageScales) : undefined,
@@ -301,9 +313,20 @@ export async function runProbe(req: ProbeNodeRequest, deps: ProbeNodeDeps): Prom
       onOcrStart: () => log("[probe] reading outlined text"),
     });
     const ocrStats = res.ocrStats ?? null;
+    // The latch outranks the tally. `autoStitch` throws at its next CHECKPOINT, and the
+    // checkpoints all live in the per-page extraction loop — passes 3 and later (the
+    // reciprocal anchor search, the solve, the seam verification) have none. So a budget
+    // that expires late is observed by `shouldAbort` and then the run simply FINISHES,
+    // returning a real result out of a probe that was already over its time. Reporting
+    // that as `ok` would hand the editor a verdict the Lambda had already given up on.
+    //
+    // The corollary, and it is a real limitation: `budgetMs` bounds when the engine STOPS
+    // TAKING NEW WORK, not the wall clock. A probe can overrun it by the length of its
+    // solve tail, which is why the Lambda's own `Timeout` is 300 s against a 240 s budget.
+    //
     // `> 0` on a possibly-absent tally: `undefined > 0` and `NaN > 0` are both false, so
     // an unreported tally reads as "nobody told us", never as "unknown reads happened".
-    const status: ProbeStatus = (ocrStats?.unknown ?? 0) > 0 ? "unknown" : "ok";
+    const status: ProbeStatus = timedOut ? "timeout" : (ocrStats?.unknown ?? 0) > 0 ? "unknown" : "ok";
     return { result: toProbeResult(res, req.docId), ocrStats, ms: Date.now() - t0, status };
   } catch (err) {
     if (timedOut && err instanceof AutoStitchAborted) {
@@ -311,10 +334,12 @@ export async function runProbe(req: ProbeNodeRequest, deps: ProbeNodeDeps): Prom
     }
     throw err;
   } finally {
-    // Both unconditionally: a thrown probe still holds a mupdf document and up to three
-    // tesseract worker threads, and an un-terminated worker keeps a Node event loop alive
-    // forever (the harness learned this the hard way — see its `ensurePool` note).
-    doc.destroy?.();
+    // Both, unconditionally, and the pool LAST — with its own guard around the document.
+    // A `destroy()` that throws (a half-opened document, a mupdf wasm fault) used to take
+    // the pool's teardown down with it, and an un-terminated tesseract worker keeps a Node
+    // event loop alive forever (the harness learned that one the hard way — see its
+    // `ensurePool` note). A Lambda that cannot exit bills until its timeout.
+    try { doc?.destroy?.(); } catch { /* the pool matters more than a tidy document */ }
     await pool.terminate();
   }
 }
