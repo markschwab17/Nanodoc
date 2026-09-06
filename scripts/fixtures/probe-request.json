@@ -1,0 +1,234 @@
+{
+  "note": "plan -> the probe request the editor will derive from the canvas it commits. Read by droplet-pdf-api/test/site-sheet-probe.test.js, src/lib/site-sheet/__tests__/probe-request.test.ts, and nanodoc scripts/fixtures/probe-request.json (canvasProbeSet is asserted against `request`).",
+  "defaultScaleFtPerIn": 20,
+  "cases": [
+    {
+      "name": "uniform — every sheet calibrated at 20 ft/in",
+      "why": "The plain case. Filled scales are the plan scales, all equal, so userScale is 20 and pageScales is still sent.",
+      "plan": {
+        "version": 1,
+        "mode": "auto",
+        "entries": [
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-1",
+            "scaleFeetPerInch": 20,
+            "label": "C5.00 — GRADING PLAN",
+            "pageNumber": 6
+          },
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-2",
+            "scaleFeetPerInch": 20,
+            "label": "C-5.01 GRADING PLAN",
+            "pageNumber": 7
+          },
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-3",
+            "scaleFeetPerInch": 20,
+            "label": "C502 UTILITY PLAN",
+            "pageNumber": 8
+          }
+        ]
+      },
+      "request": {
+        "pageIndices": [
+          0,
+          1,
+          2
+        ],
+        "userScale": 20,
+        "pageScales": [
+          [
+            0,
+            20
+          ],
+          [
+            1,
+            20
+          ],
+          [
+            2,
+            20
+          ]
+        ],
+        "pageCodes": [
+          [
+            0,
+            "C5.00"
+          ],
+          [
+            1,
+            "C5.01"
+          ],
+          [
+            2,
+            "C502"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "blank scale — the commit fills it with DEFAULT_SCALE_FT_PER_IN",
+      "why": "THE case this fixture exists for. The plan leaves page 1 uncalibrated; commitPages stamps 20 on its tile, so canvasProbeSet reads a DENSE map and the set is uniform after all. A request built from the plan alone would have said userScale null and pageScales [[0,20],[2,20]] — and the editor would have thrown the verdict away.",
+      "plan": {
+        "version": 1,
+        "mode": "auto",
+        "entries": [
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-1",
+            "scaleFeetPerInch": 20,
+            "label": "C5.00 GRADING"
+          },
+          {
+            "kind": "document",
+            "documentId": "d-1",
+            "documentPage": 4,
+            "scaleFeetPerInch": null,
+            "label": "GENERAL NOTES"
+          },
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-3",
+            "scaleFeetPerInch": 20,
+            "label": "6 SITE PLAN"
+          }
+        ]
+      },
+      "request": {
+        "pageIndices": [
+          0,
+          1,
+          2
+        ],
+        "userScale": 20,
+        "pageScales": [
+          [
+            0,
+            20
+          ],
+          [
+            1,
+            20
+          ],
+          [
+            2,
+            20
+          ]
+        ],
+        "pageCodes": [
+          [
+            0,
+            "C5.00"
+          ],
+          [
+            2,
+            "6"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "non-uniform — a genuinely mixed-scale set",
+      "why": "40 ft/in on one sheet survives the fill, so the filled scales differ and userScale is null. pageScales is sent either way.",
+      "plan": {
+        "version": 1,
+        "mode": "manual",
+        "entries": [
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-1",
+            "scaleFeetPerInch": 20,
+            "label": "C5.00 GRADING"
+          },
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-2",
+            "scaleFeetPerInch": 40,
+            "label": "C5.01 GRADING"
+          },
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-3",
+            "scaleFeetPerInch": null,
+            "label": "GRADING PLAN C9.99"
+          }
+        ]
+      },
+      "request": {
+        "pageIndices": [
+          0,
+          1,
+          2
+        ],
+        "userScale": null,
+        "pageScales": [
+          [
+            0,
+            20
+          ],
+          [
+            1,
+            40
+          ],
+          [
+            2,
+            20
+          ]
+        ],
+        "pageCodes": [
+          [
+            0,
+            "C5.00"
+          ],
+          [
+            1,
+            "C5.01"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "no scales at all — every page falls back to 20, which is uniform",
+      "why": "An entirely uncalibrated set is uniform on the canvas, not mixed: every tile reads 20.",
+      "plan": {
+        "version": 1,
+        "mode": "auto",
+        "entries": [
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-1",
+            "scaleFeetPerInch": null,
+            "label": "GRADING PLAN"
+          },
+          {
+            "kind": "takeoff",
+            "pageUuid": "u-2",
+            "scaleFeetPerInch": 0,
+            "label": ""
+          }
+        ]
+      },
+      "request": {
+        "pageIndices": [
+          0,
+          1
+        ],
+        "userScale": 20,
+        "pageScales": [
+          [
+            0,
+            20
+          ],
+          [
+            1,
+            20
+          ]
+        ],
+        "pageCodes": []
+      }
+    }
+  ]
+}
