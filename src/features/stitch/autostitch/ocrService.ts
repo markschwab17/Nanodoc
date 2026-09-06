@@ -31,7 +31,10 @@
 // (If a path 404s after a tesseract.js upgrade, check `ls node_modules/tesseract.js/dist`.)
 import workerUrl from "tesseract.js/dist/worker.min.js?url";
 import coreUrl from "tesseract.js-core/tesseract-core-simd.wasm.js?url";
-import { createOcrPool, defaultOcrPoolSize, OCR_JOB_TIMEOUT_MS, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
+import {
+  createOcrPool, defaultOcrPoolSize, OCR_CONVERT_TIMEOUT_MS, OCR_JOB_TIMEOUT_MS, OCR_NO_RESULT,
+  type OcrPool,
+} from "./ocrPool";
 
 export interface RawImage { width: number; height: number; data: Uint8ClampedArray }
 export interface OcrWord {
@@ -40,12 +43,11 @@ export interface OcrWord {
   bbox: { x0: number; y0: number; x1: number; y1: number }; // px in the recognized image
 }
 
-const OCR_TIMEOUT_MS = 30_000;
-
 // Recognition-job timeout (ms) — bounds ONE job from the moment a pool worker
-// picks it up (separate from OCR_TIMEOUT_MS's use for the conversion-worker
-// RPC). Because it starts at dispatch, not at queueing, a job that waited
-// behind three others still gets its full budget; 20s is comfortably above the
+// picks it up (separate from OCR_CONVERT_TIMEOUT_MS, which bounds the
+// conversion-worker RPC in front of it). Because it starts at dispatch, not at
+// queueing, a job that waited behind three others still gets its full budget;
+// 20s is comfortably above the
 // slowest real band-OCR we have measured and well below "the user gave up".
 // The constant itself lives in ocrPool.ts, with the mechanism that enforces it and
 // alongside the doubled budget one RE-READ gets (`RETRY_JOB_TIMEOUT_MS`, passed per
@@ -136,7 +138,7 @@ function convertViaWorker(image: RawImage): Promise<Blob | null> {
     let worker: Worker;
     try { worker = ensureConvWorker(); } catch { resolve(null); return; }
     const id = ++convSeq;
-    const timer = setTimeout(() => { convPending.delete(id); resolve(null); }, OCR_TIMEOUT_MS);
+    const timer = setTimeout(() => { convPending.delete(id); resolve(null); }, OCR_CONVERT_TIMEOUT_MS);
     convPending.set(id, (blob) => { clearTimeout(timer); resolve(blob); });
     worker.postMessage({ ocrId: id, image }, [image.data.buffer]);
   });
@@ -180,7 +182,7 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
  * OCR a raw RGBA raster. Returns [] on any failure (OCR is best-effort).
  *
  * Two independent timeouts guard this call:
- *  - OCR_TIMEOUT_MS bounds the conversion-worker RPC (raster → Blob).
+ *  - OCR_CONVERT_TIMEOUT_MS bounds the conversion-worker RPC (raster → Blob).
  *  - ocrJobTimeoutMs bounds the recognition job itself, from the moment a pool
  *    worker picks it up. Without it a hung tesseract job never settles: the
  *    direct auto-align path would spin forever, and — worse — the hang would
@@ -194,7 +196,7 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
  * `timeoutMs`: this read's own job budget, overriding the pool's. The aligner passes
  * it for the ONE re-read a lost read earns, and only for that — see
  * `RETRY_JOB_TIMEOUT_MS`. It bounds the recognition job only; the conversion-worker
- * RPC keeps its own OCR_TIMEOUT_MS.
+ * RPC keeps its own OCR_CONVERT_TIMEOUT_MS.
  *
  * `onNoResult`: fired when the pool answered OCR_NO_RESULT and the caller did NOT
  * abort — i.e. this read is a NON-ANSWER (the job blew its 20 s budget, or the pool
@@ -239,7 +241,13 @@ export async function recognize(
       // Timed out, aborted, or torn down. An ABORT is the caller's own doing and
       // must not look like a failed read (it would have the aligner retry work it
       // has just given up on), so only the other two are reported.
-      if (!opts?.signal?.aborted) opts?.onNoResult?.();
+      //
+      // GUARDED, because this one is INSIDE the try: a caller hook that throws would
+      // otherwise fall into the catch below and fire `onNoResult` a SECOND time for the
+      // same read — double-counting `nonAnswers` and, worse, a second `retries++` on a
+      // band the aligner has already decided about. The hook is bookkeeping; a broken
+      // one must not rewrite the read's own outcome.
+      if (!opts?.signal?.aborted) { try { opts?.onNoResult?.(); } catch { /* bookkeeping */ } }
       return [];
     }
 
@@ -254,7 +262,15 @@ export async function recognize(
     console.warn("[ocrService] recognize failed:", err);
     // Aborts excepted, exactly as the OCR_NO_RESULT branch above: a run the caller
     // stopped must not look like a read that failed.
-    if (!opts?.signal?.aborted) opts?.onNoResult?.();
+    //
+    // The abort test is re-made HERE and not inherited: the throw may BE the abort
+    // (`imageToBlob` losing its conversion when the run was torn down), and an abort
+    // that arrives mid-flight is exactly the case this branch must stay quiet on.
+    //
+    // Guarded like the branch above so a throwing hook cannot escape `recognize` — this
+    // is the last handler on the path, so an exception here would reject a call whose
+    // whole contract is "best-effort, resolves []".
+    if (!opts?.signal?.aborted) { try { opts?.onNoResult?.(); } catch { /* bookkeeping */ } }
     return [];
   }
 }

@@ -139,11 +139,14 @@ describe("stitchProbe.worker OCR RPC — non-answers", () => {
     expect(flagged).toBe(false);
   });
 
-  it("the 25s RPC backstop is a non-answer too, because it cannot tell one from the other", async () => {
-    // The backstop is measured from the moment the request is POSTED; the pool's own
-    // 20s budget is measured from DISPATCH. A read queued behind two others on a
-    // 2-3 worker pool dispatches seconds late, so its non-answer can land AFTER this
-    // fires — and calling that an empty crop hides a lost band.
+  it("the RPC backstop covers CONVERSION + queue + job, not just the job", async () => {
+    // The backstop is measured from the moment the request is POSTED, and what follows
+    // it is a whole pipeline: the raster→Blob conversion RPC on its OWN 30 s budget,
+    // then an unbounded wait in the pool's QUEUE (a page issues 7-13 reads at once onto
+    // 2-3 workers), and only then the job's 20 s, measured from DISPATCH. At `20 + 5`
+    // this fired on reads that were merely still converting or still queued — 13-14
+    // spurious non-answers a browser run, each one buying a re-read that put more load
+    // on the very pool that was running late. 30 + 20 + 5 = 55 s.
     const ocr = await withOcr();
     // Faked only now: `withOcr` waits on a real timer to reach autoStitch, and the
     // backstop's timer is armed by the `ocr` call below.
@@ -151,15 +154,19 @@ describe("stitchProbe.worker OCR RPC — non-answers", () => {
     let flagged = false;
     const p = ocr(IMG(), { onNoResult: () => { flagged = true; } });
     await vi.advanceTimersByTimeAsync(25_000);
+    expect(flagged).toBe(false);          // where the old backstop fired
+    await vi.advanceTimersByTimeAsync(30_000);
     await expect(p).resolves.toEqual([]);
+    // Still a NON-ANSWER when it does fire: a lost reply and a job whose budget expired
+    // without an answer are indistinguishable from here, and neither is "no text".
     expect(flagged).toBe(true);
   });
 
   it("the RPC backstop SCALES with the budget a re-read asks for", async () => {
-    // A re-read is dispatched on a doubled job budget (40 s). A fixed 25 s backstop
-    // would fire first and turn a job entitled to 40 s into a non-answer — and the
-    // caller has no second re-read to spend, so the band would go `unknown` for a
-    // reason that is purely an artefact of this timer.
+    // A re-read is dispatched on a doubled job budget (40 s). A backstop fixed at the
+    // ordinary read's figure would fire first and turn a job entitled to 40 s into a
+    // non-answer — and the caller has no second re-read to spend, so the band would go
+    // `unknown` for a reason that is purely an artefact of this timer. 30 + 40 + 5.
     const ocr = await withOcr();
     vi.useFakeTimers();
     let flagged = false;
@@ -167,21 +174,41 @@ describe("stitchProbe.worker OCR RPC — non-answers", () => {
     // The budget rides on the request, so the main thread's pool honours the same one.
     const req = sent.filter((m) => m.kind === "ocr-req").at(-1);
     expect(req.timeoutMs).toBe(40_000);
-    await vi.advanceTimersByTimeAsync(25_000);
-    expect(flagged).toBe(false);          // where the old fixed backstop would have fired
-    await vi.advanceTimersByTimeAsync(20_001);   // 40 s budget + the same 5 s of slack
+    await vi.advanceTimersByTimeAsync(55_000);   // where an ordinary read backstops
+    expect(flagged).toBe(false);
+    await vi.advanceTimersByTimeAsync(20_001);   // + the doubled budget's extra 20 s
     await expect(p).resolves.toEqual([]);
     expect(flagged).toBe(true);
   });
 
-  it("an ordinary read still carries no budget, and still backstops at 25 s", async () => {
+  it("an ordinary read still carries no budget, and still backstops at 55 s", async () => {
     const ocr = await withOcr();
     vi.useFakeTimers();
     const p = ocr(IMG());
     const req = sent.filter((m) => m.kind === "ocr-req").at(-1);
     expect(req.timeoutMs).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(25_000);
+    await vi.advanceTimersByTimeAsync(55_000);
     await expect(p).resolves.toEqual([]);
+  });
+
+  it("the backstop CANCELS the read on the main thread before giving up on it", async () => {
+    // Giving up here does not stop the work: the request may still be sitting in the
+    // main thread's pool queue, and a queued job has no deadline of its own — so
+    // without this the run pays for a crop nobody will read, exactly when the pool is
+    // already the bottleneck. Safe to send for a read that is simultaneously being
+    // reported as a non-answer: `attachOcrRpc` drops the reply for an aborted id, and
+    // `recognize` suppresses the duplicate `onNoResult`, so the read settles once.
+    const ocr = await withOcr();
+    vi.useFakeTimers();
+    let flagged = false;
+    const p = ocr(IMG(), { onNoResult: () => { flagged = true; } });
+    const req = sent.filter((m) => m.kind === "ocr-req").at(-1);
+    expect(sent.some((m) => m.kind === "ocr-abort")).toBe(false);
+    await vi.advanceTimersByTimeAsync(55_000);
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(true);
+    // The SAME id the request went out on, so the main thread cancels THIS read.
+    expect(sent.filter((m) => m.kind === "ocr-abort").map((m) => m.ocrId)).toEqual([req.ocrId]);
   });
 
   it("an ABORT is not a non-answer — the caller stopped it on purpose", async () => {

@@ -481,4 +481,49 @@ describe("ocrService.recognize — onNoResult", () => {
     expect(flagged).toBe(false);
     void pA; void pB;
   });
+
+  it("does not fire from the CATCH branch either once the caller has aborted", async () => {
+    // The other half of the same rule, on the other exit. Tearing a run down is exactly
+    // what BREAKS the pipe — `shutdownOcr` fails every outstanding conversion, so an
+    // abandoned probe's reads all land in this catch at once — and reporting them as
+    // non-answers would have the aligner re-read a whole page for a run that has
+    // already given up, on the pool being torn down under it.
+    const { recognize } = await import("./ocrService");
+    const ac = new AbortController();
+    let flagged = false;
+    const p = recognize(IMG(), { signal: ac.signal, onNoResult: () => { flagged = true; } });
+    const conv = FakeWorker.instances[0];
+    ac.abort();
+    conv.emit({ ocrId: conv.posted[0].ocrId, error: "conversion worker gone" });
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(false);
+  });
+
+  it("a THROWING onNoResult cannot report the read twice, or reject it", async () => {
+    // `onNoResult` is bookkeeping; a broken hook must not rewrite the read's own
+    // outcome. Unguarded, a throw from the OCR_NO_RESULT branch fell into the catch
+    // below it and fired the SAME hook a second time — double-counting `nonAnswers`
+    // and buying the band a second `retries++` for one lost read — while a throw from
+    // the catch escaped `recognize` altogether, rejecting a call whose whole contract
+    // is "best-effort, resolves []".
+    vi.useFakeTimers();
+    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(100);
+    h.recognize = () => new Promise(() => { /* hangs past the budget */ });
+    let fired = 0;
+    const pHang = recognize(IMG(), { onNoResult: () => { fired++; throw new Error("hook blew up"); } });
+    convReply(0, "hang");
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(pHang).resolves.toEqual([]);
+    expect(fired).toBe(1);
+
+    // …and the same on the catch branch, which has no handler after it at all.
+    vi.useRealTimers();
+    let firedC = 0;
+    const pConv = recognize(IMG(), { onNoResult: () => { firedC++; throw new Error("hook blew up"); } });
+    const conv = FakeWorker.instances[0];
+    conv.emit({ ocrId: conv.posted.at(-1)!.ocrId, error: "boom" });
+    await expect(pConv).resolves.toEqual([]);
+    expect(firedC).toBe(1);
+  });
 });

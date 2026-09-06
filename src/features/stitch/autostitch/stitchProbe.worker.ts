@@ -9,7 +9,7 @@
  * Mirrors the mupdf-in-worker init pattern of src/core/pdf/tiles/tileRender.worker.ts.
  */
 import { autoStitch, AutoStitchAborted } from "./autoStitch";
-import { OCR_JOB_TIMEOUT_MS } from "./ocrPool";
+import { OCR_CONVERT_TIMEOUT_MS, OCR_JOB_TIMEOUT_MS } from "./ocrPool";
 import { toProbeResult, type ProbeRequest, type ProbeMessage } from "./stitchProbe";
 import type { OcrWord, RawImage } from "./ocrService";
 
@@ -42,23 +42,34 @@ let abortUpTo = -1;
 // and each one settles only its own call.
 let ocrSeq = 0;
 const ocrPending = new Map<number, (words: OcrWord[], noResult: boolean) => void>();
-// Per-RPC backstop. Longer than the main-thread pool's own per-job budget
-// (OCR_JOB_TIMEOUT_MS), but the two are NOT measured from the same instant and this
-// one does not reliably come second: the pool's clock starts when a worker DISPATCHES
-// the job, this one when the request is POSTED. A page issues 7-13 reads at once onto
-// a pool of 2-3 workers, so a read queued behind two others can dispatch 5s or more
-// after it was posted — and its 20s non-answer then lands at t=25s+, after this
-// fired. So reaching the backstop means one of two things, a lost reply or a job
-// whose budget expired while it waited, and it cannot tell them apart; both are
-// reported as NON-ANSWERS (see `finish`).
+// Per-RPC backstop — the last resort for a request the main thread never answers at
+// all (a lost reply, a listener torn down). It is NOT a second copy of the pool's
+// budget, and it must not behave like one.
 //
-// IT SCALES WITH THE JOB'S BUDGET. A re-read is dispatched with a DOUBLED budget
-// (RETRY_JOB_TIMEOUT_MS, named per call by the aligner); a fixed 25 s backstop would
-// then fire at 25 s on a job entitled to 40 s, turning the whole point of the longer
-// budget into a non-answer the caller can no longer retry. So the backstop is always
-// the job's own budget plus the same 5 s of slack it has always carried.
+// IT COVERS THE WHOLE PIPELINE, because it is measured from a different instant than
+// anything downstream. This clock starts when the request is POSTED; what follows is
+// the raster→Blob conversion RPC (its own budget, OCR_CONVERT_TIMEOUT_MS = 30 s), then
+// an unbounded wait in the pool's QUEUE — a page issues 7-13 reads at once onto 2-3
+// workers — and only then the job's own budget, measured from DISPATCH. A backstop of
+// `budget + slack` therefore fires while perfectly healthy reads are still converting
+// or still queued, and every one of those spurious non-answers costs a re-read, which
+// puts MORE load on the pool that was already running late. That cascade is what a
+// browser probe was showing: 13-14 non-answers a run, all "recovered", on four sheets
+// where nothing was actually lost. So the sum is explicit —
+// conversion + job + slack — and each term is the constant that actually governs
+// that stage.
+//
+// IT STILL SCALES WITH THE JOB'S BUDGET. A re-read is dispatched with a DOUBLED budget
+// (RETRY_JOB_TIMEOUT_MS, named per call by the aligner); a backstop fixed at the
+// ordinary read's figure would fire early on a job entitled to 40 s, turning the whole
+// point of the longer budget into a non-answer the caller can no longer retry.
+//
+// Reaching it still means one of two things — a lost reply, or a job whose budget
+// expired without the answer coming back — and it cannot tell them apart, so both are
+// reported as NON-ANSWERS (see `finish`).
 const OCR_BACKSTOP_SLACK_MS = 5_000;
-const backstopFor = (jobBudgetMs?: number) => (jobBudgetMs ?? OCR_JOB_TIMEOUT_MS) + OCR_BACKSTOP_SLACK_MS;
+const backstopFor = (jobBudgetMs?: number) =>
+  OCR_CONVERT_TIMEOUT_MS + (jobBudgetMs ?? OCR_JOB_TIMEOUT_MS) + OCR_BACKSTOP_SLACK_MS;
 // Counts every RPC autoStitch makes through its `ocr` callback for the CURRENT
 // probe — reset at the top of `handle()` so a persistent worker's later probes
 // don't accumulate a prior run's count.
@@ -92,12 +103,25 @@ function ocrViaMain(
       if (noResult) opts?.onNoResult?.();
       resolve(words);
     };
-    // Reported as a NON-ANSWER, because that is what it is either way: a queued job
-    // whose budget expired late, or a reply that went missing. Neither is "this crop
-    // holds no text", and calling it that hides a lost band behind an empty answer.
-    // The cost of being wrong is bounded — a retry is one extra pass over one band,
-    // it is itself subject to the same backstop, and it never recurses.
-    const timer = setTimeout(() => finish([], true), backstopFor(opts?.timeoutMs));
+    // Reported as a NON-ANSWER, because that is what it is either way: a job whose
+    // budget expired without the reply coming back, or a reply that went missing.
+    // Neither is "this crop holds no text", and calling it that hides a lost band
+    // behind an empty answer. The cost of being wrong is bounded — a retry is one
+    // extra pass over one band, it is itself subject to the same backstop, and it
+    // never recurses.
+    //
+    // CANCELLED ON THE MAIN THREAD FIRST. Giving up here does not stop the work: the
+    // request may still be sitting in the pool's queue, and a queued job has no
+    // deadline of its own, so without this the run pays for a crop nobody will read —
+    // and pays for it exactly when the pool is already the bottleneck. `ocr-abort` is
+    // the same message the abort path sends, and it is safe to send for a read that is
+    // about to be reported as a non-answer: `attachOcrRpc` drops the reply for an
+    // aborted id, and `recognize` suppresses the duplicate `onNoResult` an abort would
+    // otherwise raise, so the read settles here once and only once.
+    const timer = setTimeout(() => {
+      (self as any).postMessage({ kind: "ocr-abort", ocrId: id });
+      finish([], true);
+    }, backstopFor(opts?.timeoutMs));
     // Forwarding the abort is what actually stops the work. An aborted read is
     // usually still QUEUED in the main thread's pool, and a queued job has no
     // deadline of its own — resolving [] here alone would leave the pool grinding

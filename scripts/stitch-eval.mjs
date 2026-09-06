@@ -303,8 +303,18 @@ async function ocr(image, opts) {
   if (delay) { delayFaultsFired++; delayFaultedIdx.add(idx); heldInputs.set(png, delay); }
   // `opts.timeoutMs` is the aligner naming a budget for THIS read — the doubled one a
   // re-read gets. Undefined on every ordinary read, which leaves the pool's own.
-  const res = await p.run(png, { timeoutMs: opts?.timeoutMs });
-  heldInputs.delete(png); // no-op once the worker took it; matters if the job never dispatched
+  //
+  // The delete is in a `finally`: `p.run` REJECTS when a pool worker's own recognize
+  // throws, and on that path the entry stayed in `heldInputs` for the rest of the
+  // process — a map keyed by a PNG buffer, so one leak is a whole band raster held
+  // live. Nothing else ever removes it (the key is the buffer identity, and the read
+  // is over).
+  let res;
+  try {
+    res = await p.run(png, { timeoutMs: opts?.timeoutMs });
+  } finally {
+    heldInputs.delete(png); // no-op once the worker took it; matters if the job never dispatched
+  }
   // A timed-out job is a non-answer, not an empty sheet — never cache it, and tell the
   // caller so it re-reads that same clip once (`onNoResult`). This machine has never
   // actually produced one: the harness's tesseract finishes a 7200 px band well inside

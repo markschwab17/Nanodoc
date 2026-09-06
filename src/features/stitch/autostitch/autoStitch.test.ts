@@ -747,7 +747,9 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     let stripReads = 0;
     let aborting = false;
     const attempts = new Map<string, number>();
-    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+    /** The job budget every strip RE-READ was issued with, in issue order. */
+    const retryBudgets: (number | undefined)[] = [];
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void; timeoutMs?: number }) => {
       if (img.data.length === 0) throw new Error("read of a DETACHED raster: the transport already took this buffer");
       const tag = tagOf(img), rot = rotOf(img);
       transferAway(img);
@@ -769,6 +771,7 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
       const key = `${tag}:${rot}`;
       const nth = (attempts.get(key) ?? 0) + 1;
       attempts.set(key, nth);
+      if (nth > 1) retryBudgets.push(o?.timeoutMs);
       if (opts.lostStrips?.includes(tag) || (opts.flakyStrips?.includes(tag) && nth === 1)) {
         if (opts.abortOnLoss) aborting = true;
         o?.onNoResult?.();
@@ -782,7 +785,7 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
       ocr, userScale: 20, ocrConcurrency: opts.ocrConcurrency, onDebug: (d) => { debug = d; },
       shouldAbort: opts.abortOnLoss ? () => aborting : undefined,
     });
-    return { res, debug, rotsByStrip, stripReads, stripRenders };
+    return { res, debug, rotsByStrip, stripReads, stripRenders, retryBudgets };
   };
 
   it("scans ONLY the rotation the edge bands proved, and both when they proved nothing", async () => {
@@ -910,6 +913,11 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     expect(flaky.stripRenders.filter((i) => i === 2)).toHaveLength(2);
     expect(flaky.res.ocrStats.calls).toBe(clean.res.ocrStats.calls + 1);
     expect(flaky.res.ocrStats).toMatchObject({ nonAnswers: 1, retries: 1, unknown: 0, withheldVotes: 0 });
+    // …on the DOUBLED budget, the same one an edge band's re-read gets. A strip that
+    // blew 20 s is no faster the second time, and a second non-answer here does not
+    // merely lose the strip — it makes the whole scan unknown and the probe decline.
+    expect(flaky.retryBudgets).toEqual([40_000]);
+    expect(clean.retryBudgets).toEqual([]);   // nothing is re-read on a clean run
   });
 
   it("within one chunk: a hit BELOW an unknown is still taken, a hit ABOVE it is not", async () => {
@@ -971,13 +979,14 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
 
 /**
  * The retry: a band whose read came back a NON-ANSWER (the pool's job budget
- * expired) is read a second time as overlapping sub-clips. Every band that answers
- * at all — including one that answers with no words — is read exactly as before.
+ * expired) is read a second time — the SAME whole band, re-rendered, on a doubled
+ * budget. Every band that answers at all — including one that answers with no words —
+ * is read exactly as before.
  *
- * The view is 2592 x 1000 pt so the TOP and BOTTOM bands are over budget
- * (7200 px wide → 4 sub-clips of 918 pt stepping 558 pt) and the side bands are not
- * (2778 px). Horizontal bands also keep `wordsToLabels` honest and readable: at
- * rot 0 a word at local x maps to page `clipX0 + x`.
+ * The view is 2592 x 1000 pt so the TOP and BOTTOM bands are the wide ones (7200 px,
+ * the size that used to be cut into overlapping sub-clips on a retry) and the side
+ * bands are not (2778 px). Horizontal bands also keep `wordsToLabels` honest and
+ * readable: at rot 0 a word at local x maps to page `clipX0 + x`.
  */
 describe("a timed-out edge band is re-read WHOLE, never as sub-clips", () => {
   const VIEW: [number, number, number, number] = [0, 0, 2592, 1000];
@@ -1161,8 +1170,8 @@ describe("a timed-out edge band is re-read WHOLE, never as sub-clips", () => {
    * read, and the two send the page to the same page-order fallback, which can
    * misroute every `SEE SHEET n` on the set that resolves byPrinted. So the cell is
    * read a second time, and that read RE-RENDERS it through `reopenPage`, the way
-   * the sub-clip retry does: by then the caller has destroyed its page AND the
-   * transport has taken the first raster's buffer, so there is nothing left to
+   * every re-read in this engine does: by then the caller has destroyed its page AND
+   * the transport has taken the first raster's buffer, so there is nothing left to
    * re-read. The stub below models both halves — it detaches what it is handed, and
    * refuses a husk.
    */
@@ -1177,13 +1186,16 @@ describe("a timed-out edge band is re-read WHOLE, never as sub-clips", () => {
       (renderBand as any).mockClear();   // two runs in one test: count THIS one's renders
       // Counted per PAGE, because the re-read is a different raster by construction.
       const tries = new Map<number, number>();
-      const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+      /** The job budget every cell RE-READ was issued with. */
+      const retryBudgets: (number | undefined)[] = [];
+      const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void; timeoutMs?: number }) => {
         if (img.data.length === 0) throw new Error("read of a DETACHED raster: the transport already took this buffer");
         const m = at(img);
         transferAway(img);
         if (!SHEET_NO_CELL(m)) return [];
         const nth = (tries.get(m.page) ?? 0) + 1;
         tries.set(m.page, nth);
+        if (nth > 1) retryBudgets.push(o?.timeoutMs);
         if (nth <= lose) { o?.onNoResult?.(); return []; }
         // Deliberately NOT page order — 1 and 2 the other way round — so a printedNo
         // that comes out right can only have come from this read.
@@ -1191,7 +1203,7 @@ describe("a timed-out edge band is re-read WHOLE, never as sub-clips", () => {
       });
       let debug: any = null;
       const res = await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
-      return { res, debug, ocr, fakeDoc, cellRenders: cellRenderCount(renderBand) };
+      return { res, debug, ocr, fakeDoc, retryBudgets, cellRenders: cellRenderCount(renderBand) };
     };
 
     const clean = await readCell(0);
@@ -1213,6 +1225,11 @@ describe("a timed-out edge band is re-read WHOLE, never as sub-clips", () => {
     expect(flaky.fakeDoc.loadPage.mock.calls.length).toBe(clean.fakeDoc.loadPage.mock.calls.length + 2);
     expect(flaky.ocr).toHaveBeenCalledTimes(2 * 8);   // 7 reads + the cell's re-read
     expect(flaky.res.ocrStats).toEqual({ calls: 2 * 8, nonAnswers: 2, retries: 2, unknown: 0, withheldVotes: 0 });
+    // …on the DOUBLED budget, like every other re-read in this engine: the cell that
+    // blew 20 s is no faster the second time, and losing it twice sends the page to
+    // the page-order fallback that can misroute a whole byPrinted set.
+    expect(flaky.retryBudgets).toEqual([40_000, 40_000]);   // one per page
+    expect(clean.retryBudgets).toEqual([]);
   });
 
   it("a title-block cell lost twice leaves the number UNKNOWN, not 'this sheet prints none'", async () => {

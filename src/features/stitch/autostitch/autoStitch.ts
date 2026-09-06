@@ -120,9 +120,10 @@ interface OcrReadTag { kind: OcrReadTrace["kind"]; pageIndex: number; rot: 0 | 9
  *
  * `retries` counts RE-READ DECISIONS, one per re-read: one per strip re-read, one per
  * sheet-number cell re-read, one per lost band rotation re-read. Every retry in this
- * engine is a SAME-INPUT re-read — the identical clip, rendered again, read again (an
- * edge band's on a doubled job budget). A retry that read something else — the
- * overlapping sub-clips a fully lost band used to be cut into — is a second opinion,
+ * engine is a SAME-INPUT re-read — the identical clip, rendered again, read again on a
+ * DOUBLED job budget (`RETRY_JOB_TIMEOUT_MS`, all three kinds alike, since the crop
+ * that was too slow once is no faster the second time). A retry that read something
+ * else — the overlapping sub-clips a fully lost band used to be cut into — is a second opinion,
  * not a second attempt, and accepting one as a full answer is how two runs over the
  * same sheets reached different verdicts with nothing marked unknown.
  *
@@ -629,6 +630,13 @@ function readPageOcr(
    * throw, or come back `[]` with no non-answer reported at all — a clean miss, the
    * very failure being fixed. No `reopenPage` (a caller that cannot re-open) means
    * no second read, and the cell is unknown.
+   *
+   * ON THE DOUBLED BUDGET (`RETRY_JOB_TIMEOUT_MS`), like every other re-read in this
+   * engine. A cell that blew its 20 s budget is not read any faster the second time,
+   * so re-reading it on the same clock mostly buys a second non-answer — the budget
+   * is the only thing a same-input re-read is allowed to change. It was left on the
+   * ordinary budget when the doubling landed only because that round scoped itself to
+   * edge bands; there was never a reason for the cell to differ.
    */
   const readSheetNo = async (): Promise<{ words: OcrWord[]; unknown: boolean }> => {
     if (signal?.aborted) return { words: [], unknown: false };
@@ -649,7 +657,7 @@ function readPageOcr(
     finally { page2.destroy?.(); }
     let lostAgain = false;
     const second = await issue(again, () => { lostAgain = true; },
-      undefined, { kind: "sheetNo", pageIndex, rot: 0, retry: true });
+      RETRY_JOB_TIMEOUT_MS, { kind: "sheetNo", pageIndex, rot: 0, retry: true });
     if (!lostAgain) return { words: second, unknown: false };
     stats.unknown++;
     return { words: [], unknown: true };
@@ -688,13 +696,22 @@ function readPageOcr(
     // Synchronous end to end, so nothing can interleave on the non-re-entrant mupdf
     // instance, and the handle is closed before the read is awaited.
     const page2 = reopenPage!();
-    let again: RawImage;
+    let again: RawImage | null = null;
     try { again = renderBand(mupdf, page2, r.band.clip).image; }
     finally { page2.destroy?.(); }
     let lostAgain = false;
     const rot = r.rots[k];
+    // A SIDE band's re-read is TWO rasters for a moment: the freshly rendered one and
+    // the rotated copy `rotateRaw` builds from it. Only the rotated copy is handed to
+    // the transport (which then transfers ITS buffer away), so the source would sit
+    // pinned by this local for the whole 40 s the re-read is entitled to — a band-sized
+    // buffer, alongside two or three tesseract wasm heaps, on the memory ceiling this
+    // pool is sized against. Released before the await; a rot-0 band has no copy to
+    // make, and its single raster is the one in flight.
+    const input = rot === 0 ? again : rotateRaw(again, rot);
+    again = null;
     const words = await issue(
-      rot === 0 ? again : rotateRaw(again, rot),
+      input,
       () => { lostAgain = true; },
       RETRY_JOB_TIMEOUT_MS,
       { kind: "edge", pageIndex, rot, retry: true },
@@ -859,7 +876,7 @@ async function runAutoStitch(
         ocrStats.calls++;
         // Captured before the read so the trace can report it: `tag` never reaches the
         // transport (its opts shape has no such field), and with no `onOcrRead` hook
-        // nothing below runs at all.
+        // nothing observable happens below.
         const { width, height } = image;
         let traced = false;
         // `onNoResult` is wrapped, not passed straight through: the transport is the
@@ -867,25 +884,37 @@ async function runAutoStitch(
         // it, the run wants that counted whether or not this particular caller cares,
         // and the caller's own hook still fires. The run's abort is added here, which
         // is why the two opts shapes are the same but not the same object.
-        const words = await rawOcr(image, {
-          signal: ocrAbort?.signal,
-          onNoResult: () => {
-            ocrStats.nonAnswers++;
-            traced = true;
-            o?.onNoResult?.();
-          },
-          // Undefined on every ordinary read (the transport's own budget applies); set
-          // only by the ONE re-read a lost read earns.
-          timeoutMs: o?.timeoutMs,
-        });
-        if (trace && o?.tag) {
-          trace({
-            index, kind: o.tag.kind, pageIndex: o.tag.pageIndex, rot: o.tag.rot,
-            retry: o.tag.retry === true, width, height, nonAnswer: traced,
-            words: words.map((w) => w.text),
+        let words: OcrWord[] | undefined;
+        // Traced from a `finally`, so a transport that REJECTS still appears in the
+        // dump. A rejection is the one outcome the counters cannot describe — nothing
+        // fired `onNoResult`, so `nonAnswers` never moved, and a read that simply
+        // vanishes from the trace is precisely the shape of the bug this hook was built
+        // to find. It is reported as a non-answer, because that is what it is: the
+        // transport did not answer. (The engine's own accounting is unchanged — a
+        // rejection propagates, and the caller that catches it decides.)
+        try {
+          words = await rawOcr(image, {
+            signal: ocrAbort?.signal,
+            onNoResult: () => {
+              ocrStats.nonAnswers++;
+              traced = true;
+              o?.onNoResult?.();
+            },
+            // Undefined on every ordinary read (the transport's own budget applies); set
+            // only by the ONE re-read a lost read earns.
+            timeoutMs: o?.timeoutMs,
           });
+          return words;
+        } finally {
+          if (trace && o?.tag) {
+            trace({
+              index, kind: o.tag.kind, pageIndex: o.tag.pageIndex, rot: o.tag.rot,
+              retry: o.tag.retry === true, width, height,
+              nonAnswer: traced || words === undefined,
+              words: (words ?? []).map((w) => w.text),
+            });
+          }
         }
-        return words;
       }
     : undefined;
   // How wide the reciprocal strip scan (pass 2) batches its reads. Sized off the
@@ -1337,7 +1366,15 @@ async function runAutoStitch(
      * The re-read is awaited inside the probe, so it goes out before the next CHUNK
      * is issued rather than after the whole scan. One is the whole budget: a second
      * expired job on the same crop is a crop this run is not going to read, and
-     * spending 20 s more to learn that again is what made the probe feel broken.
+     * spending 40 s more to learn that again is what made the probe feel broken.
+     *
+     * ON THE DOUBLED BUDGET (`RETRY_JOB_TIMEOUT_MS`), like every other re-read in this
+     * engine. A strip that blew its 20 s budget is no faster the second time, so
+     * re-reading it on the same clock mostly buys a second non-answer — and a second
+     * non-answer here does not merely lose a strip, it makes the whole scan `unknown`
+     * and the probe decline the verdict. The budget is the only thing a same-input
+     * re-read may change; it was left on the ordinary one when the doubling landed only
+     * because that round scoped itself to edge bands.
      *
      * Returns null for "still a non-answer" — the strip is UNKNOWN, which is not the
      * `[]` a strip with no label in it returns.
@@ -1351,7 +1388,11 @@ async function runAutoStitch(
       if (opts.shouldAbort?.()) return null;
       ocrStats.retries++;
       let lostAgain = false;
-      const second = await ocr!(rerender(), { onNoResult: () => { lostAgain = true; }, tag: { ...tag, retry: true } });
+      const second = await ocr!(rerender(), {
+        onNoResult: () => { lostAgain = true; },
+        timeoutMs: RETRY_JOB_TIMEOUT_MS,
+        tag: { ...tag, retry: true },
+      });
       return lostAgain ? null : second;
     };
 

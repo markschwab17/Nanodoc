@@ -69,6 +69,26 @@ export const OCR_JOB_TIMEOUT_MS = 20_000;
  */
 export const RETRY_JOB_TIMEOUT_MS = OCR_JOB_TIMEOUT_MS * 2;
 
+/**
+ * The budget the raster→Blob CONVERSION step gets, ahead of the pool entirely.
+ *
+ * A different clock from `OCR_JOB_TIMEOUT_MS`, and deliberately so: the pool's budget is
+ * measured from DISPATCH and bounds tesseract, while this one bounds the round-trip to
+ * the conversion worker (`ocrService.convertViaWorker`) that turns a band raster into a
+ * PNG blob — work that happens BEFORE the job is ever queued. One read therefore costs,
+ * worst case, this plus its queue wait plus its job budget.
+ *
+ * It lives HERE, beside the job budget, because it is not only `ocrService`'s business:
+ * the probe worker's RPC backstop has to cover the whole pipeline it is backstopping, and
+ * a backstop that budgets for the job but not for the conversion in front of it fires on
+ * reads that are merely still converting or still queued. That is how a browser probe
+ * came to report 13-14 non-answers a run with nothing actually lost — each one costing a
+ * re-read, and the re-reads adding load to the very pool that was running late.
+ *
+ * Node has no equivalent step: `probeNode.encodePNG` is synchronous and in-process.
+ */
+export const OCR_CONVERT_TIMEOUT_MS = 30_000;
+
 /** Anything that can OCR one input and be shut down — a tesseract worker fits structurally. */
 export interface OcrPoolWorker<Input, Result> {
   recognize(input: Input): Promise<Result>;
