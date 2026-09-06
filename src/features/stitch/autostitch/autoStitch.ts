@@ -66,8 +66,32 @@ export interface AutoStitchOptions {
   onOcrStart?: () => void;
   /** Diagnostic hook: surfaces the raw solver inputs/result (pairs, anchors) for
    *  the Node stitch-diag harness. Never used in production. */
-  onDebug?: (d: { anchors: StitchAnchor[]; result: StitchResult; inputs: SheetInput[] }) => void;
+  onDebug?: (d: { anchors: StitchAnchor[]; result: StitchResult; inputs: SheetInput[]; unknownSheetNoPages: number[] }) => void;
 }
+/**
+ * What the run's OCR channel actually did. `calls` and `nonAnswers` are counted
+ * centrally, in the one `ocr` wrapper every read goes through; `retries` and
+ * `unknown` are counted at the decisions that consume a read.
+ *
+ * `nonAnswers` is NOT "reads that found nothing". It is reads the transport could
+ * not answer at all — the pool's per-job budget expired, or the reply was lost —
+ * and they arrive as the same empty `OcrWord[]` a blank crop does. Collapsing the
+ * two is why the browser probe can answer differently on two runs of the same
+ * sheets (the harness never sees it: its tesseract finishes inside the budget), so
+ * they are counted apart.
+ *
+ * `retries` counts RE-READ DECISIONS, not reads: one per strip re-read, one per
+ * sheet-number cell re-read, one per band handed to the sub-clip retry — which
+ * issues several reads of its own, each of them counted in `calls`.
+ *
+ * `unknown` counts DECISIONS that could not be made because the evidence was still
+ * a non-answer after its retry: a strip scan that had to stop rather than accept a
+ * later strip, a sheet-number cell that stays unread, an edge band whose evidence
+ * is not whole. `unknown > 0` means the run reached its verdict without evidence it
+ * wanted; whether such a verdict may be SHOWN is the caller's decision.
+ */
+export interface OcrStats { calls: number; nonAnswers: number; retries: number; unknown: number }
+
 export interface AutoStitchResult {
   placements: TilePlacement[];
   rootFtPerIn: number;
@@ -102,6 +126,10 @@ export interface AutoStitchResult {
   /** Pages whose own stated scale note disagrees with the scale being used by more
    *  than 25%. Advisory only — the scale in use is never overridden. */
   scaleWarnings: { pageIndex: number; usedFtPerIn: number; statedFtPerIn: number }[];
+  /** What the OCR channel did, and how much of it could not be answered. See
+   *  `OcrStats`: a run with `unknown > 0` reached this result without a read it
+   *  wanted, and the caller must not present it as a settled verdict. */
+  ocrStats: OcrStats;
 }
 
 /** Yield to the event loop so the tab stays responsive between page extractions. */
@@ -352,6 +380,12 @@ interface PageRec {
    *  both directions about equally. The reciprocal strip scan reads it as "scan this
    *  rotation only", and falls back to both when it is undefined. */
   sideTextRot?: 90 | 270;
+  /** The title-block cell was read and the read was a NON-ANSWER, twice — so this
+   *  page's printed number is UNKNOWN, which is not the same as "this sheet prints
+   *  no number". `printedNo` still falls back exactly as it does for a sheet that
+   *  genuinely prints none; the flag is what says the fallback rests on a read that
+   *  never happened. */
+  unknownSheetNo?: boolean;
 }
 
 /** Reciprocal-label anchor before unit-key resolution: endpoints keyed by
@@ -368,9 +402,32 @@ interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp
    *  matchline rather than re-picking each band's strongest line (failure J). */
   strokeI?: number; strokeJ?: number; }
 
+/**
+ * What ONE strip of the reciprocal scan turned out to be.
+ *
+ * `miss` is evidence — this strip was READ and holds no reciprocal label, so the
+ * scan may move on to the next one. `unknown` is the absence of evidence: the read
+ * was still a NON-ANSWER after its one immediate re-read, so nothing at all is
+ * known about this strip and the scan may NOT quietly move on (see `scanStrips`).
+ */
+type StripProbe =
+  | { kind: "hit"; anchor: RawAnchor }
+  | { kind: "miss" }
+  | { kind: "unknown" };
+
+/** What the scan over a page's strips turned out to be. `strip` is the winning
+ *  strip's index in scan order — the lowest index that hit. */
+type StripScan =
+  | { kind: "hit"; strip: number; anchor: RawAnchor }
+  | { kind: "miss" }
+  | { kind: "unknown" };
+
 /** One page's edge-band OCR recovery: synthetic labels, the title-cell number, and
  *  the rotation its side bands read best at (see `PageRec.sideTextRot`). */
-interface PageOcrRead { recovered: Label[]; ocrNo: number | null; sideTextRot?: 90 | 270 }
+interface PageOcrRead { recovered: Label[]; ocrNo: number | null; sideTextRot?: 90 | 270;
+  /** The title-block cell was a non-answer even after its one re-read: `ocrNo` is
+   *  null because nothing was READ, not because nothing was there. */
+  unknownSheetNo: boolean }
 
 /** One band's reads. `rots` is [0] for a horizontal band and [90, 270] for a side
  *  band (both rotations are OCR'd and the better one wins); `words[k]` is the read
@@ -469,6 +526,7 @@ function readPageOcr(
   view: [number, number, number, number],
   drawingFrame: [number, number, number, number] | null,
   ocr: (image: RawImage, opts?: { onNoResult?: () => void }) => Promise<OcrWord[]>,
+  stats: OcrStats,
   signal?: AbortSignal,
   reopenPage?: () => any,
 ): Promise<PageOcrRead> {
@@ -499,11 +557,43 @@ function readPageOcr(
       reads.push({ band, scale, w, h, rots: [0], noResult, words: [issue(image, mark(0))] });
     }
   }
-  // Issued with the bands, consumed after them. resolvePrintedNos sanity-checks
-  // the range (a misread like "2"→"22" would misroute byPrinted resolution).
-  const sheetNo = signal?.aborted
-    ? Promise.resolve<OcrWord[]>([])
-    : issue(renderBand(mupdf, page, sheetNoBand(view).clip).image);
+  /**
+   * The title-block cell, issued with the bands and consumed after them.
+   * resolvePrintedNos sanity-checks the range (a misread like "2"→"22" would
+   * misroute byPrinted resolution).
+   *
+   * A NON-ANSWER here is not "this sheet has no number": it is the pool's budget
+   * expiring on a cell that may well hold one, and "no number" sends the page to
+   * the page-order fallback, which can misroute every `SEE SHEET n` on the set that
+   * resolves byPrinted. So the cell is re-read ONCE — the SAME raster, no second
+   * render and no second page handle — and if that is a non-answer too the number
+   * stays UNKNOWN rather than quietly becoming "none".
+   *
+   * Holding the raster across the first read is the only new retention here, and it
+   * is the smallest band on the page (0.2W x 0.12H): a few MB at 200 dpi, released
+   * the moment the retry decision is taken. The band rasters, which are ten times
+   * that, are still handed straight to the transport and never kept.
+   */
+  const readSheetNo = async (): Promise<{ words: OcrWord[]; unknown: boolean }> => {
+    if (signal?.aborted) return { words: [], unknown: false };
+    const { image } = renderBand(mupdf, page, sheetNoBand(view).clip);
+    let lost = false;
+    const first = await issue(image, () => { lost = true; });
+    if (!lost) return { words: first, unknown: false };
+    // An aborted run re-reads nothing: the answer would arrive for a run that has
+    // already given up, and the cell is unknown either way.
+    if (signal?.aborted) return { words: [], unknown: true };
+    stats.retries++;
+    let lostAgain = false;
+    const second = await issue(image, () => { lostAgain = true; });
+    if (!lostAgain) return { words: second, unknown: false };
+    stats.unknown++;
+    return { words: [], unknown: true };
+  };
+  const sheetNo = readSheetNo();
+  // Same reason the reads carry one: a rejection here must not go unobserved while
+  // the band burst is still being awaited below.
+  sheetNo.catch(() => { /* surfaced below */ });
 
   /**
    * Re-read ONE band as overlapping sub-clips, in order along the band.
@@ -579,12 +669,37 @@ function readPageOcr(
       const allLost = r.rots.every((_, k) => r.noResult[k]);
       const subs = allLost && reopenPage && !signal?.aborted ? splitBand(r.band) : [r.band];
       if (subs.length > 1) {
+        stats.retries++;   // one re-read DECISION, however many sub-clips it issues
         parts = await retryBandAsSubClips(r, subs);
         // Every rotation is re-read, because every rotation was lost — and the pick
         // below compares their scores, which only means anything between reads of the
         // same shape. So the retry replaces the band's evidence wholesale.
         words = r.rots.map((_, k) => parts!.flatMap((p) => p.words[k] ?? []));
       }
+      // A band's two rotations are two SEPARATE pool jobs, and one can time out while
+      // the other returns. Counting the survivor UNOPPOSED is how a single 20 s
+      // hiccup on one crop flips a page's rotation lock, so a band whose evidence is
+      // not whole contributes nothing to the tally:
+      //  - no retry: it votes only if NEITHER rotation was a non-answer (and the
+      //    older "exactly one came back empty" guard still applies on top — an empty
+      //    read is an answer, but an unopposed one is still not a decision);
+      //  - retried: it votes only if the retry actually covered the WHOLE band —
+      //    every sub-clip rastered (half a band's mass is not the band's mass) and no
+      //    sub-clip of any rotation itself a non-answer. The length test pairs with
+      //    the abort break in `retryBandAsSubClips`: neither is reachable today, and
+      //    together they mean a truncated retry could never quietly vote as a whole
+      //    one if it ever became so.
+      //
+      // That same bar is what makes the band UNKNOWN. A withheld vote is not a
+      // harmless omission: it can move `lockSideTextRot` off a real rotation, and the
+      // lock decides which rotations the reciprocal strip scan reads — so it can move
+      // which strip the scan returns, which is a different anchor, not a missing one.
+      // A run that had to withhold one says so, and the caller decides whether a
+      // verdict may rest on it.
+      const whole = parts
+        ? parts.length === subs.length && r.rots.every((_, k) => parts!.every((p) => !p.noResult[k]))
+        : !r.rots.some((_, k) => r.noResult[k]);
+      if (!whole) stats.unknown++;
       // wordsToLabels wants each raster's OWN clip and PRE-rotation dims (it inverts
       // the rotation itself). A retried band emits its sub-clips in order along the
       // band, then drops what the overlap read twice.
@@ -601,22 +716,6 @@ function readPageOcr(
       // Score ONCE per candidate: the tally below and the pick both want it, and
       // `sort` would otherwise re-run it O(n log n) times over the same words.
       const cands = r.rots.map((rot, k) => ({ rot, k, score: rotScore(words[k]) }));
-      // A band's two rotations are two SEPARATE pool jobs, and one can time out while
-      // the other returns. Counting the survivor UNOPPOSED is how a single 20 s
-      // hiccup on one crop flips a page's rotation lock, so a band whose evidence is
-      // not whole contributes nothing to the tally:
-      //  - no retry: it votes only if NEITHER rotation was a non-answer (and the
-      //    older "exactly one came back empty" guard still applies on top — an empty
-      //    read is an answer, but an unopposed one is still not a decision);
-      //  - retried: it votes only if the retry actually covered the WHOLE band —
-      //    every sub-clip rastered (half a band's mass is not the band's mass) and no
-      //    sub-clip of any rotation itself a non-answer. The length test pairs with
-      //    the abort break in `retryBandAsSubClips`: neither is reachable today, and
-      //    together they mean a truncated retry could never quietly vote as a whole
-      //    one if it ever became so.
-      const whole = parts
-        ? parts.length === subs.length && r.rots.every((_, k) => parts!.every((p) => !p.noResult[k]))
-        : !r.rots.some((_, k) => r.noResult[k]);
       const blank = cands.reduce((n, c) => n + (words[c.k].length === 0 ? 1 : 0), 0);
       if (whole && blank !== 1) for (const c of cands) if (c.rot !== 0) rotMass[c.rot] += c.score;
       // Unchanged pick: highest score wins, and a tie keeps the first of [90, 270]
@@ -625,7 +724,8 @@ function readPageOcr(
       const best = cands.sort((a, b) => b.score - a.score)[0];
       recovered.push(...labelsAt(best.k, best.rot));
     }
-    return { recovered, ocrNo: parseSheetNumber(await sheetNo), sideTextRot: lockSideTextRot(rotMass) };
+    const sn = await sheetNo;
+    return { recovered, ocrNo: parseSheetNumber(sn.words), unknownSheetNo: sn.unknown, sideTextRot: lockSideTextRot(rotMass) };
   })();
 }
 
@@ -687,17 +787,27 @@ async function runAutoStitch(
   // Guard every OCR call: abort BEFORE the (slow) recognize, and fire onOcrStart
   // once so the UI can explain the wait. All OCR below goes through `ocr`.
   let ocrStarted = false;
+  // Every read the run makes goes through the wrapper below, so `calls` and
+  // `nonAnswers` are counted in ONE place rather than at each call site — a site
+  // that forgets to count is exactly the bug this change exists to fix (the strip
+  // scan and the sheet-number cell used to forget to ASK). `retries` and `unknown`
+  // belong to the decisions that consume the reads, and are counted there.
+  const ocrStats: OcrStats = { calls: 0, nonAnswers: 0, retries: 0, unknown: 0 };
   const rawOcr = opts.ocr;
   const ocr = rawOcr
     ? async (image: RawImage, o?: { onNoResult?: () => void }): Promise<OcrWord[]> => {
         checkAbort();
         if (!ocrStarted) { ocrStarted = true; opts.onOcrStart?.(); }
-        // `onNoResult` is passed straight through: the transport is the only thing
-        // that can tell an expired job budget from a crop with no text in it, and
-        // `readPageOcr` is the only thing that needs to know. The run's abort is
-        // added here, which is why the two opts shapes are the same but not the same
-        // object.
-        return rawOcr(image, { signal: ocrAbort?.signal, onNoResult: o?.onNoResult });
+        ocrStats.calls++;
+        // `onNoResult` is wrapped, not passed straight through: the transport is the
+        // only thing that can tell an expired job budget from a crop with no text in
+        // it, the run wants that counted whether or not this particular caller cares,
+        // and the caller's own hook still fires. The run's abort is added here, which
+        // is why the two opts shapes are the same but not the same object.
+        return rawOcr(image, {
+          signal: ocrAbort?.signal,
+          onNoResult: () => { ocrStats.nonAnswers++; o?.onNoResult?.(); },
+        });
       }
     : undefined;
   // How wide the reciprocal strip scan (pass 2) batches its reads. Sized off the
@@ -784,7 +894,7 @@ async function runAutoStitch(
         // `finally` below destroys this page as soon as the reads are ISSUED, long
         // before any of them settles, so a band that answers with nothing has to
         // load its own handle to be re-read. Never called unless that happens.
-        ocrRead = readPageOcr(mupdf, page, extract.view, drawingFrame, ocr, ocrAbort?.signal,
+        ocrRead = readPageOcr(mupdf, page, extract.view, drawingFrame, ocr, ocrStats, ocrAbort?.signal,
           () => doc.loadPage(pageIndex));
       }
     } finally {
@@ -816,9 +926,11 @@ async function runAutoStitch(
     let extract = p.extract;
     let ocrNo: number | null = null;
     let sideTextRot: 90 | 270 | undefined;
+    let unknownSheetNo = false;
     if (p.ocrRead) {
       const read = await p.ocrRead;
       ocrNo = read.ocrNo;
+      unknownSheetNo = read.unknownSheetNo;
       sideTextRot = read.sideTextRot;
       if (read.recovered.length) extract = { ...extract, labels: [...extract.labels, ...read.recovered] };
     }
@@ -847,7 +959,7 @@ async function runAutoStitch(
     pages.push({
       pageIndex, extract, printedNo: printedNo ?? pageIndex + 1, printedNoSource, drawingFrame,
       title: p.title, statedFtPerIn: p.statedFtPerIn, role: "tile", ctoCode,
-      sheetCode: null, sheetCodeDropped: false, pageLabel: p.pageLabel, sideTextRot,
+      sheetCode: null, sheetCodeDropped: false, pageLabel: p.pageLabel, sideTextRot, unknownSheetNo,
     });
     // Ref-bearing after the OCR merge: does the page carry any usable adjacency
     // signal? This is the feasibility denominator (see refPageIndices).
@@ -1100,21 +1212,58 @@ async function runAutoStitch(
      * and a chunk's strips must be rendered in index order on the way in), so a
      * chunk holds at most `OCR_CHUNK` strip rasters, each released when its probe
      * returns.
+     *
+     * AN UNKNOWN STRIP ENDS THE SCAN. The first-hit argument above rests on every
+     * strip before the winner having been READ and missed; a strip whose read was
+     * still a non-answer after its re-read was not read at all, so a hit found after
+     * it is not "the lowest-index hit", it is "the lowest-index hit among the strips
+     * that happened to answer this run". Taking it is exactly the flip this whole
+     * change exists to stop: the same four sheets anchored on a different physical
+     * matchline because one 20 s job budget expired. So the walk is in index order,
+     * and the first `unknown` it reaches — before any hit — makes the whole scan
+     * unknown. No further chunk is issued.
      */
     const scanStrips = async (
       starts: number[],
-      probe: (start: number) => Promise<RawAnchor | null>,
-    ): Promise<RawAnchor | null> => {
+      probe: (start: number) => Promise<StripProbe>,
+    ): Promise<StripScan> => {
       for (let s = 0; s < starts.length; s += OCR_CHUNK) {
         // `allSettled` attaches its handlers synchronously to every promise in the
         // array, so no rejection here can ever go unobserved.
         const settled = await Promise.allSettled(starts.slice(s, s + OCR_CHUNK).map((start) => probe(start)));
-        for (const r of settled) {
+        for (let k = 0; k < settled.length; k++) {
+          const r = settled[k];
           if (r.status === "rejected") throw r.reason;
-          if (r.value != null) return r.value;
+          if (r.value.kind === "unknown") return { kind: "unknown" };
+          if (r.value.kind === "hit") return { kind: "hit", strip: s + k, anchor: r.value.anchor };
         }
       }
-      return null;
+      return { kind: "miss" };
+    };
+
+    /**
+     * One strip read, and the ONE immediate re-read a non-answer earns.
+     *
+     * The re-read is of the SAME raster — no second render, no second page handle —
+     * and it is awaited inside the probe, so it goes out before the next CHUNK is
+     * issued rather than after the whole scan. One is the whole budget: a second
+     * expired job on the same crop is a crop this run is not going to read, and
+     * spending 20 s more to learn that again is what made the probe feel broken.
+     *
+     * Returns null for "still a non-answer" — the strip is UNKNOWN, which is not the
+     * `[]` a strip with no label in it returns.
+     */
+    const readStrip = async (image: RawImage): Promise<OcrWord[] | null> => {
+      let lost = false;
+      const first = await ocr!(image, { onNoResult: () => { lost = true; } });
+      if (!lost) return first;
+      // No re-read after an abort: the answer would arrive for a run that has already
+      // given up, and the strip is unknown either way.
+      if (opts.shouldAbort?.()) return null;
+      ocrStats.retries++;
+      let lostAgain = false;
+      const second = await ocr!(image, { onNoResult: () => { lostAgain = true; } });
+      return lostAgain ? null : second;
     };
 
     /**
@@ -1167,7 +1316,7 @@ async function runAutoStitch(
           const rots: readonly (90 | 270)[] = iPage.sideTextRot ? [iPage.sideTextRot] : [90, 270];
           const starts: number[] = [];
           for (let bx0 = rx0; bx0 < rx1; bx0 += 120) starts.push(bx0);
-          const hit = await scanStrips(starts, async (bx0) => {
+          const scan = await scanStrips(starts, async (bx0): Promise<StripProbe> => {
             const bx1 = Math.min(bx0 + 160, rx1);
             const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
             // Synchronous, and before this probe's first await: see `scanStrips`.
@@ -1176,21 +1325,32 @@ async function runAutoStitch(
             // 90 first, 270 only if 90 found nothing — the old loop's order, and the
             // reason a strip costs one OCR call rather than two when 90 hits.
             for (const rot of rots) {
-              const labels = wordsToLabels(await ocr!(rotateRaw(image, rot)), { edge: "left", clip }, bandScale, image.width, image.height, rot);
+              const words = await readStrip(rotateRaw(image, rot));
+              // A rotation still lost after its re-read makes the whole STRIP unknown,
+              // and the rotation after it is not read: what earns the 270 read is "90
+              // found nothing", and a non-answer never said that.
+              if (words == null) return { kind: "unknown" };
+              const labels = wordsToLabels(words, { edge: "left", clip }, bandScale, image.width, image.height, rot);
               for (const lab of labels) {
                 if (ocrRefNames(lab.text, jPage)) {
                   const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
                   // i's reciprocal label is INTERIOR (no outer edge → strongest); j's is at refJ.edge.
                   const reg = seamRegister(iPage, cx, cy, jPage, refJ.at.x, refJ.at.y, "x");
-                  return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x",
+                  return { kind: "hit", anchor: { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "x",
                     dFt: reg.perpDelta ?? FT(cx, scaleOf(iPage.pageIndex)) - FT(refJ.at.x, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
-                    along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined };
+                    along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined } };
                 }
               }
             }
-            return null;
+            return { kind: "miss" };
           });
-          if (hit) return hit;
+          if (scan.kind === "hit") return scan.anchor;
+          // Unknown claims NOTHING — the same as a miss, which is why it falls through
+          // to the one-sided stroke anchor below exactly as a miss does. What it must
+          // not do is pass for a clean "no reciprocal label on i", so it is counted:
+          // the run's verdict now rests on a read that never happened, and the caller
+          // is the one who decides whether to show a verdict like that.
+          if (scan.kind === "unknown") ocrStats.unknown++;
         } else {
           // Top/bottom ref: horizontal matchline, horizontal text (no rotation). Ref on
           // j's top edge → i's matching label near i's south interior; bottom → north.
@@ -1201,23 +1361,26 @@ async function runAutoStitch(
           for (let by0 = ry0; by0 < ry1; by0 += 120) starts.push(by0);
           // Horizontal text — one read per strip, so no rotation rule applies here;
           // the chunking is the only change.
-          const hit = await scanStrips(starts, async (by0) => {
+          const scan = await scanStrips(starts, async (by0): Promise<StripProbe> => {
             const by1 = Math.min(by0 + 160, ry1);
             const clip: [number, number, number, number] = [x0, by0, x1, by1];
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-            const labels = wordsToLabels(await ocr!(image), { edge: "top", clip }, bandScale, image.width, image.height, 0);
+            const words = await readStrip(image);
+            if (words == null) return { kind: "unknown" };
+            const labels = wordsToLabels(words, { edge: "top", clip }, bandScale, image.width, image.height, 0);
             for (const lab of labels) {
               if (ocrRefNames(lab.text, jPage)) {
                 const cx = (lab.x + lab.endX) / 2, cy = (lab.y + lab.endY) / 2;
                 const reg = seamRegister(iPage, cy, cx, jPage, refJ.at.y, refJ.at.x, "y");
-                return { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
+                return { kind: "hit", anchor: { pageI: iPage.pageIndex, yI: cy, pageJ: jPage.pageIndex, yJ: refJ.at.y, perp: "y",
                   dFt: reg.perpDelta ?? FT(cy, scaleOf(iPage.pageIndex)) - FT(refJ.at.y, scaleOf(jPage.pageIndex)), precise: reg.perpDelta != null,
-                  along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined };
+                  along: jIsStrip ? undefined : (reg.along ?? undefined), alongPrecise: jIsStrip ? false : reg.along != null, loDelta: reg.loDelta ?? undefined, hiDelta: reg.hiDelta ?? undefined, crI: reg.crI, crJ: reg.crJ, strokeI: reg.strokeI ?? undefined, strokeJ: reg.strokeJ ?? undefined } };
               }
             }
-            return null;
+            return { kind: "miss" };
           });
-          if (hit) return hit;
+          if (scan.kind === "hit") return scan.anchor;
+          if (scan.kind === "unknown") ocrStats.unknown++;   // see the vertical branch
         }
       } finally {
         page.destroy?.();
@@ -1306,7 +1469,7 @@ async function runAutoStitch(
     }
   }
 
-  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], refPageIndices, skipped, scaleWarnings };
+  if (!units.length) return { placements: [], rootFtPerIn: 0, alignedCount: 0, unplacedCount: 0, worstResidFt: 0, method: "none", poses: [], refPageIndices, skipped, scaleWarnings, ocrStats };
 
   // Unique numeric keys, stable order.
   units.forEach((u, i) => { u.key = i + 1; });
@@ -1374,7 +1537,7 @@ async function runAutoStitch(
       console.warn("[autoStitch] key-map detection failed:", e);
     }
     const res = stitchSheets(inputs, grid, anchors);
-    opts.onDebug?.({ anchors, result: res, inputs });
+    opts.onDebug?.({ anchors, result: res, inputs, unknownSheetNoPages: pages.filter((p) => p.unknownSheetNo).map((p) => p.pageIndex) });
     placementsByKey = res.placements;
     worstResidFt = res.worstResidFt;
     method = res.method;
@@ -1403,5 +1566,5 @@ async function runAutoStitch(
 
   const placements = layoutPlacements(poses, rootFtPerIn);
   const alignedCount = placements.filter((p) => p.aligned).length;
-  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, alongAnchored, worstAlongUncertaintyFt, worstAlongUncertaintySource, skipped, scaleWarnings };
+  return { placements, rootFtPerIn, alignedCount, unplacedCount: placements.length - alignedCount, worstResidFt, method, poses, refPageIndices, seamReport, alignmentVerdict, alongAnchored, worstAlongUncertaintyFt, worstAlongUncertaintySource, skipped, scaleWarnings, ocrStats };
 }
