@@ -16,7 +16,8 @@
     "test:run": "vitest run",
     "interop:check": "vitest run src/core/pdf/interop/exportInterop.test.ts",
     "stitch-eval": "vite-node scripts/stitch-eval.mjs",
-    "stitch-eval:check": "STITCH_EVAL_ASSERT_PLACEMENTS=scripts/fixtures/stitch-eval-placements.json vite-node scripts/stitch-eval.mjs"
+    "stitch-eval:check": "STITCH_EVAL_ASSERT_PLACEMENTS=scripts/fixtures/stitch-eval-placements.json vite-node scripts/stitch-eval.mjs",
+    "build:probe-bundle": "node scripts/build-probe-bundle.mjs"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",

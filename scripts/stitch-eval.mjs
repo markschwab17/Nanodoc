@@ -61,8 +61,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as zlib from "node:zlib";
 import * as crypto from "node:crypto";
+
+// The Node OCR transport — pool, PNG encoder, word mapping — lives in the engine now,
+// not in this script. The Lambda that pre-computes an auto-align verdict server-side
+// bundles the SAME module (`npm run build:probe-bundle`), so the harness and the server
+// drive one Node path instead of two copies free to drift apart. What stays here is what
+// is genuinely harness-only: the disk cache, the fault injector, and the placements assert.
+import {
+  encodePNG,
+  createNodeOcrPool,
+  toOcrWords,
+  OCR_NO_RESULT,
+  NODE_OCR_POOL_SIZE,
+} from "../src/features/stitch/autostitch/probeNode.ts";
 
 const REPO = process.cwd();
 const argv = process.argv.slice(2);
@@ -83,39 +95,12 @@ function parseRanges(s) {
   return out;
 }
 
-// ── PNG encode (RGBA 8-bit) — tesseract wants a well-formed buffer ───────────
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
-  return t;
-})();
-const crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-function chunk(type, data) {
-  const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
-  const t = Buffer.from(type, "ascii");
-  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
-  return Buffer.concat([len, t, data, crc]);
-}
-function encodePNG(width, height, rgba) {
-  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8; ihdr[9] = 6;
-  const stride = width * 4;
-  const raw = Buffer.alloc((stride + 1) * height);
-  for (let y = 0; y < height; y++) {
-    raw[y * (stride + 1)] = 0;
-    Buffer.from(rgba.buffer, rgba.byteOffset + y * stride, stride).copy(raw, y * (stride + 1) + 1);
-  }
-  return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw, { level: 6 })), chunk("IEND", Buffer.alloc(0))]);
-}
-
 // ── OCR (tesseract.js) with the shared disk cache ────────────────────────────
-// Recognition runs through the SAME pool the app uses (ocrPool.ts) — FIFO queue,
-// per-job timeout measured from dispatch, one worker retired on a hang — so the
-// harness exercises the production queueing code rather than a private copy of
-// it. Three workers here (the app sizes its pool off hardwareConcurrency, which
-// a headless run has no business inheriting).
+// Recognition runs through the SAME pool the app uses (ocrPool.ts, wired to
+// tesseract by probeNode.ts) — FIFO queue, per-job timeout measured from dispatch,
+// one worker retired on a hang — so the harness exercises the production queueing
+// code rather than a private copy of it. Three workers here (the app sizes its pool
+// off hardwareConcurrency, which a headless run has no business inheriting).
 // STITCH_EVAL_NO_OCR_CACHE=1 bypasses the cache entirely (read AND write) — every
 // image is re-OCR'd fresh and scratch-diag/ocr-cache.json is left untouched. Used
 // to take a cache-free timing baseline without clobbering the shared cache file
@@ -145,9 +130,10 @@ function hashImage(image) {
   h.update(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength));
   return h.digest("hex");
 }
-const OCR_POOL_SIZE = 3;
-const OCR_JOB_TIMEOUT_MS = 20_000;
-let poolPromise = null, NO_RESULT = null;
+// Three workers and the 20 s per-job budget both come from the engine, so the harness
+// cannot quietly measure a configuration the Lambda does not run.
+const OCR_POOL_SIZE = NODE_OCR_POOL_SIZE;
+let poolPromise = null;
 /**
  * The pool, memoised as a PROMISE rather than as the resolved object.
  *
@@ -157,6 +143,11 @@ let poolPromise = null, NO_RESULT = null;
  * own three tesseract workers, and only the last assignment is ever terminated.
  * The orphaned worker threads then keep the event loop alive and the harness never
  * exits — the run itself finishes and prints, and the process just hangs.
+ *
+ * The await that makes it a race is now tesseract.js's, and it is deliberately still
+ * here rather than at the top of the file: a fully cache-warm run answers every read
+ * from scratch-diag/ocr-cache.json and never reaches this, and loading the wasm
+ * package for it would cost seconds for nothing.
  */
 function ensurePool() {
   if (poolPromise) return poolPromise;
@@ -165,18 +156,13 @@ function ensurePool() {
   // next caller retries (the pool itself has the same retry rule), while the
   // callers already holding this promise still see the real error.
   const built = (async () => {
-    const { createOcrPool, OCR_NO_RESULT } = await import("../src/features/stitch/autostitch/ocrPool.ts");
     const { createWorker, PSM } = await import("tesseract.js");
-    NO_RESULT = OCR_NO_RESULT;
-    return createOcrPool({
+    return createNodeOcrPool({
+      createWorker,
+      PSM,
+      langPath: path.join(REPO, "public/ocr"),
+      cachePath: path.join(CACHE_DIR, "tesscache"),
       size: OCR_POOL_SIZE,
-      createWorker: async () => {
-        const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
-        try { await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT }); }
-        catch (err) { try { await w.terminate(); } catch { /* ignore */ } throw err; }
-        return w;
-      },
-      timeoutMs: () => OCR_JOB_TIMEOUT_MS,
       onTimeout: () => console.warn("[stitch-eval] OCR job timed out — retiring that worker"),
     });
   })();
@@ -203,9 +189,8 @@ async function ocr(image, opts) {
   // has never actually produced one: the harness's tesseract finishes a 7200 px band
   // well inside the 20 s budget where the browser build does not, which is why the
   // corpus cannot exercise the retry and must come out bit-identical.
-  if (res === NO_RESULT) { opts?.onNoResult?.(); return []; }
-  const words = [];
-  for (const wd of res.data.words ?? []) { if (wd.text?.trim()) words.push({ text: wd.text.trim(), confidence: wd.confidence, bbox: { ...wd.bbox } }); }
+  if (res === OCR_NO_RESULT) { opts?.onNoResult?.(); return []; }
+  const words = toOcrWords(res);
   if (!NO_OCR_CACHE) { cache[key] = words; cacheDirty = true; if (ocrCalls % 20 === 0) flushCache(); }
   return words;
 }
