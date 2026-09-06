@@ -27,6 +27,8 @@ import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
 import { layoutPlacements } from "@/features/stitch/autostitch/layout";
 import { parseScaleInput, isUniform, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
+import { modalProbeOutcome } from "./modalProbeGate";
+import { autoAlignUnavailableNote } from "./addToProjectCopy";
 import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain, type CachedProbePlacement } from "./commitPages";
 
 const THUMB_SCALE = 0.3;
@@ -130,7 +132,7 @@ export function AddPdfModal({
   /** Monotonic id; a probe reply whose docId != current is stale and ignored. */
   const probeDocIdRef = useRef(0);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
-  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped">("idle");
+  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped" | "too_slow">("idle");
   /** True once the probe reports OCR is in play (outlined-text sheets) — used to
    *  explain the longer wait in the "Checking alignment…" copy. */
   const [probeOcr, setProbeOcr] = useState(false);
@@ -140,6 +142,14 @@ export function AddPdfModal({
   /** True between posting a ProbeRequest and its terminal reply — the debounce
    *  window is NOT in flight, so aborting there has nothing to abort. */
   const probeInFlightRef = useRef(false);
+  /** The request last posted, kept so the automatic re-run can re-issue exactly it
+   *  (same pages, same bytes) under a fresh docId — the reply handler cannot reach
+   *  the effect that built it. */
+  const probeReqRef = useRef<ProbeRequest | null>(null);
+  /** Latched once the CURRENT request has spent its one automatic re-run; cleared
+   *  only where a new request is posted (below). This is what makes it one re-run
+   *  and not a loop on a set whose reads time out every single time. */
+  const probeRecheckSpentRef = useRef(false);
 
   /**
    * Stop whatever the probe is doing — the debounced request that has not been
@@ -213,21 +223,54 @@ export function AddPdfModal({
         return; // stale — superseded by a newer selection or load
       }
       probeInFlightRef.current = false;
+      // NEVER AN OFFER ON UNKNOWN EVIDENCE — the same rule the embed probe applies
+      // (`useEarnedAutoAlign`), because it is the same probe and the same promise.
+      // See `modalProbeGate`.
+      const outcome = modalProbeOutcome(msg, probeRecheckSpentRef.current);
+      if (outcome.kind === "recheck") {
+        // The one automatic re-run. The pool is NOT handed back — the re-run is about
+        // to read with it — and nothing user-visible is written, so the strip keeps
+        // saying "Checking alignment…" rather than flickering through an answer the
+        // hook is in the middle of refusing.
+        probeRecheckSpentRef.current = true;
+        const req = probeReqRef.current;
+        if (req) {
+          console.debug("[stitchProbe] unknown OCR reads — re-checking once", outcome.stats);
+          probeDocIdRef.current++;
+          probeInFlightRef.current = true;
+          const rerun: ProbeRequest = { ...req, docId: probeDocIdRef.current };
+          probeReqRef.current = rerun;
+          probeWorkerRef.current?.postMessage(rerun);
+          return;
+        }
+        // No request to re-issue (only reachable if one was never recorded): fall
+        // through to the honest answer rather than sit on "checking" forever.
+      }
+      // Nothing more will be read on this check.
       if (ocrIdle()) void shutdownOcr();
-      if ("aborted" in msg) {
+      if (outcome.kind === "skipped") {
         // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
         setProbe(null);
         setProbeState("skipped");
         return;
       }
-      if ("error" in msg) {
-        console.warn("[stitchProbe] failed:", msg.error);
+      if (outcome.kind === "error") {
+        console.warn("[stitchProbe] failed:", outcome.error);
         setProbe(null);
         setProbeState("error");
         return;
       }
-      console.debug("[stitchProbe] method", msg.method, "aligned", msg.alignedPageIndices.length, "/", msg.placements.length);
-      setProbe(msg);
+      if (outcome.kind !== "done") {
+        // Unknown reads twice over. Whatever this run decided rests on reads that
+        // never came back, so it is not offered — the pages still add, and the
+        // existing "took too long" copy says why (`addToProjectCopy`).
+        setProbe(null);
+        setProbeState("too_slow");
+        return;
+      }
+      const result = outcome.probe;
+      console.debug("[stitchProbe] method", result.method, "aligned", result.alignedPageIndices.length, "/", result.placements.length);
+      setProbe(result);
       setProbeState("done");
     };
     probeWorkerRef.current = w;
@@ -272,6 +315,10 @@ export function AddPdfModal({
         pageIndices: pages,
         userScale: null,
       };
+      // A request the SELECTION asked for earns a fresh entitlement to one automatic
+      // re-run; the re-run itself must not grant itself another (that is the loop).
+      probeRecheckSpentRef.current = false;
+      probeReqRef.current = req;
       probeWorkerRef.current?.postMessage(req);
     }, PROBE_DEBOUNCE_MS);
     return () => {
@@ -943,6 +990,14 @@ export function AddPdfModal({
             {probeOcr && " reading outlined text — this can take a few minutes"}
           </p>
         )}
+        {/* Two runs, both with reads that never came back. The EXISTING sentence for
+            exactly that, shared with the embed strip — no second wording for one
+            condition. */}
+        {probeState === "too_slow" && (
+          <p className="text-xs text-amber-600 dark:text-amber-500 text-right px-1">
+            {autoAlignUnavailableNote("too_slow")}
+          </p>
+        )}
         {/* Skipping the check is honest, not an error: unverified verdict, reason
             "check skipped" — plain add stays available, auto-align isn't offered. */}
         {probeState === "skipped" && (
@@ -969,12 +1024,15 @@ export function AddPdfModal({
             // A skipped check leaves the set unverified — auto-align isn't offered
             // (same honesty as cannot-verify); the plain add button stays enabled.
             const skipped = probeState === "skipped";
+            // Unknown reads twice: the run finished, but on evidence with a hole in
+            // it. Same treatment as a skipped check — add and place by hand.
+            const tooSlow = probeState === "too_slow";
             const unstitchable = probeState === "done" && feasibility?.status === "unstitchable";
             // Reason-aware: a set that LOOKS tiled but whose seams can't be physically
             // verified gets the honest "can't verify" copy instead of the bare
             // "unavailable" (which reads as "these aren't tiles at all").
             const cannotVerify = unstitchable && !!feasibility?.reason;
-            const disabled = adding || tooFew || checking || unstitchable || skipped;
+            const disabled = adding || tooFew || checking || unstitchable || skipped || tooSlow;
             const label = adding
               ? "Aligning…"
               : checking
@@ -983,13 +1041,15 @@ export function AddPdfModal({
               ? "Alignment check skipped"
               : cannotVerify
               ? "Can't verify alignment"
-              : unstitchable
+              : unstitchable || tooSlow
               ? "Auto-align unavailable"
               : `Add & auto-align ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""}`;
             const title = tooFew
               ? "Select at least 2 pages to auto-align"
               : skipped
               ? "Alignment check skipped — add pages and align manually"
+              : tooSlow
+              ? autoAlignUnavailableNote("too_slow")
               : cannotVerify
               ? "Can't verify alignment for this set — add pages and align manually"
               : unstitchable

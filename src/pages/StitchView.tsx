@@ -9,6 +9,7 @@ import { useStitchStore, selectEffectiveMinZoom, tileRasterUrl, type StitchTile,
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { postToCto } from "@/shared/ctoBridge";
+import { buildStitchSavedMessage } from "@/features/stitch/stitchSavedMessage";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
@@ -1111,13 +1112,12 @@ export default function StitchView() {
           throw new Error(text || `Save failed (${res.status})`);
         }
         const resultJson = await res.json().catch(() => null);
-        const pageUuid =
-          resultJson && typeof resultJson === "object" && typeof (resultJson as { pageUuid?: unknown }).pageUuid === "string"
-            ? (resultJson as { pageUuid: string }).pageUuid
-            : null;
         showNotification("Saved to Pursuit.", "success");
+        // Everything CTO is told about this save comes out of that response —
+        // `pageUuid` to refresh onto, and `documentFileId` when the server also filed
+        // the stitched PDF in the project's Documents. See `buildStitchSavedMessage`.
         postToCto(
-          { type: "nanodoc-stitch-saved", success: true, destination, manifest, pageUuid },
+          buildStitchSavedMessage({ destination, manifest, response: resultJson }),
           ctx.api_origin
         );
         return { ok: true };

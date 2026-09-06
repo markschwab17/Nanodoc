@@ -39,6 +39,24 @@
  *
  * The bar: every faulted run must produce the SAME placements and the SAME verdict as
  * the un-faulted one. A difference is a real non-determinism, not a harness artefact.
+ *
+ * PLACEMENTS SNAPSHOT. That bar used to be enforced by eye — the expectations below
+ * bind recall, verdict, residual and suspect count, and none of them moved when a lost
+ * OCR read slid a Belcourt sheet 39 ft along its matchline (fault case F5). The
+ * placements are the only thing that catches it, so they are now a tracked fixture:
+ *
+ *   STITCH_EVAL_ASSERT_PLACEMENTS=<path.json>  every set's placements must match the
+ *                                              file to 0.01 pt; a difference, a
+ *                                              missing set and an unexpected unit are
+ *                                              all REGRESSIONS (non-zero exit).
+ *   STITCH_EVAL_WRITE_PLACEMENTS=<path.json>   write them instead — how the fixture is
+ *                                              made, and how it is deliberately moved
+ *                                              when an engine change is meant to move
+ *                                              an answer. Merges: sets not in this run
+ *                                              keep whatever the file already said.
+ *
+ * `npm run stitch-eval:check` is this harness with the assert pointed at the tracked
+ * `scripts/fixtures/stitch-eval-placements.json`.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -113,6 +131,8 @@ const FAULT_CALLS = new Set(
     .map(Number).filter((n) => Number.isInteger(n) && n >= 0),
 );
 const LOG_OCR_CALLS = process.env.STITCH_EVAL_LOG_OCR_CALLS === "1";
+const ASSERT_PLACEMENTS = process.env.STITCH_EVAL_ASSERT_PLACEMENTS || "";
+const WRITE_PLACEMENTS = process.env.STITCH_EVAL_WRITE_PLACEMENTS || "";
 let readIndex = 0, faultsFired = 0;
 const CACHE_DIR = path.join(REPO, "scratch-diag");
 const CACHE_FILE = path.join(CACHE_DIR, "ocr-cache.json");
@@ -268,6 +288,54 @@ function groundTruthErrors(res, gt) {
   };
 }
 
+// ── placements snapshot ──────────────────────────────────────────────────────
+/**
+ * One key per PLACED UNIT, in placement order. Normally that is just the page index —
+ * but a page split at its own matchline commits TWICE (PG_SITE's page 1 is two strips),
+ * and keying those on the bare index would silently drop one of the two and check the
+ * other twice. The second and later occurrences get `#2`, `#3`, so the common case
+ * reads exactly as "page 4 is here" and the split case still has both halves bound.
+ */
+function placementKeys(placements) {
+  const seen = new Map();
+  return placements.map((p) => {
+    const n = (seen.get(p.pageIndex) ?? 0) + 1;
+    seen.set(p.pageIndex, n);
+    return n === 1 ? String(p.pageIndex) : `${p.pageIndex}#${n}`;
+  });
+}
+const placementSnapshot = (placements) => {
+  const keys = placementKeys(placements);
+  const out = {};
+  placements.forEach((p, i) => { out[keys[i]] = { x: p.x, y: p.y, width: p.width, height: p.height }; });
+  return out;
+};
+/** Differences against the fixture, in words a failure line can carry. Both sides are
+ *  already rounded to 2 dp, so 0.01 pt is a tolerance for the rounding boundary, not a
+ *  licence to move: a sheet that shifts is out by feet, not by hundredths of a point. */
+function placementDiffs(expected, actual) {
+  const out = [];
+  for (const [key, want] of Object.entries(expected)) {
+    const got = actual[key];
+    if (!got) { out.push(`unit ${key} was not placed at all`); continue; }
+    for (const field of ["x", "y", "width", "height"]) {
+      const d = Math.abs(got[field] - want[field]);
+      if (d > 0.01 + 1e-9) out.push(`unit ${key} ${field} ${got[field]} != ${want[field]} (${d.toFixed(2)} pt)`);
+    }
+  }
+  for (const key of Object.keys(actual)) if (!expected[key]) out.push(`unit ${key} is placed but the fixture has no such unit`);
+  return out;
+}
+
+const expectedPlacements = ASSERT_PLACEMENTS
+  ? (() => {
+      const abs = path.resolve(REPO, expandHome(ASSERT_PLACEMENTS));
+      if (!fs.existsSync(abs)) { console.error(`STITCH_EVAL_ASSERT_PLACEMENTS: no such file: ${abs}`); process.exit(2); }
+      return JSON.parse(fs.readFileSync(abs, "utf8"));
+    })()
+  : null;
+const writtenPlacements = WRITE_PLACEMENTS ? {} : null;
+
 // ── run ──────────────────────────────────────────────────────────────────────
 const VERDICT_RANK = { unverified: 0, partial: 1, verified: 2 };
 
@@ -353,6 +421,17 @@ for (const set of sets) {
   }
 
   const fail = (m) => row.failures.push(m);
+
+  // The placements snapshot. A set the fixture does not mention is a FAILURE, not a
+  // pass: the whole point is that every set in the run is bound, and "no expectation
+  // for this one" is exactly how a silent no-op check looks from the outside.
+  if (writtenPlacements) writtenPlacements[set.name] = placementSnapshot(row.placements);
+  if (expectedPlacements) {
+    const want = expectedPlacements[set.name];
+    if (!want) fail(`no placements fixture entry for this set (${path.basename(ASSERT_PLACEMENTS)})`);
+    else for (const d of placementDiffs(want, placementSnapshot(row.placements))) fail(`placement moved — ${d}`);
+  }
+
   if (set.minAligned != null && row.aligned < set.minAligned) fail(`aligned ${row.aligned} < ${set.minAligned}`);
   if (set.maxAligned != null && row.aligned > set.maxAligned) fail(`aligned ${row.aligned} > ${set.maxAligned} (false pairs)`);
   if (set.verdictFloor != null && VERDICT_RANK[row.verdict] < VERDICT_RANK[set.verdictFloor]) fail(`verdict ${row.verdict} < ${set.verdictFloor}`);
@@ -388,6 +467,18 @@ for (const set of sets) {
   rows.push(row);
 }
 flushCache();
+if (writtenPlacements) {
+  // MERGE, never replace: `--set X` with the write flag would otherwise wipe every
+  // other set's baseline out of the fixture in one keystroke.
+  const abs = path.resolve(REPO, expandHome(WRITE_PLACEMENTS));
+  const prior = fs.existsSync(abs) ? JSON.parse(fs.readFileSync(abs, "utf8")) : {};
+  const merged = { ...prior, ...writtenPlacements };
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, JSON.stringify(merged, null, 2) + "\n");
+  const kept = Object.keys(prior).filter((k) => !(k in writtenPlacements));
+  console.error(`wrote placements for ${Object.keys(writtenPlacements).length} set(s) to ${abs}` +
+    (kept.length ? ` (kept ${kept.length} untouched: ${kept.join(", ")})` : ""));
+}
 // Teardown must not resurrect a boot failure as the script's exit status: the run
 // itself already reported whatever that failure did to the results.
 const builtPool = poolPromise ? await poolPromise.catch(() => null) : null;
