@@ -380,7 +380,7 @@ describe("ocrService.attachOcrRpc (forwarding)", () => {
     expect(byId.get(100)).toBe("a");
   });
 
-  it("relays [] to the probe when conversion fails", async () => {
+  it("relays a NON-ANSWER to the probe when conversion fails", async () => {
     const { attachOcrRpc } = await import("./ocrService");
     const probe = new FakeWorker("probe");
     attachOcrRpc(probe as unknown as Worker);
@@ -389,9 +389,11 @@ describe("ocrService.attachOcrRpc (forwarding)", () => {
     conv.emit({ ocrId: conv.posted[0].ocrId, error: "boom" });
     await flush();
     const relay = probe.posted.find((p) => p.kind === "ocr-res");
-    // A conversion failure is a broken pipe, not an expired job budget: `noResult`
-    // is false, so the aligner does not re-read the band as sub-clips for it.
-    expect(relay).toEqual({ kind: "ocr-res", ocrId: 42, words: [], noResult: false });
+    // A conversion failure is a read that NEVER HAPPENED, and it used to be relayed as
+    // `noResult: false` — the same `[]` a wordless crop returns, so the aligner never
+    // re-read it and no counter recorded it. That is the silent read the probe-flip
+    // diagnosis pinned: an answer moves while `ocrStats` stays all zeros.
+    expect(relay).toEqual({ kind: "ocr-res", ocrId: 42, words: [], noResult: true });
   });
 
   it("tells the probe when a read was a NON-ANSWER, so the band can be re-read", async () => {
@@ -434,6 +436,34 @@ describe("ocrService.recognize — onNoResult", () => {
     await vi.advanceTimersByTimeAsync(0);
     await expect(pEmpty).resolves.toEqual([]);
     expect(empty).toBe(false);
+  });
+
+  /**
+   * The silent read — the one shape that changes an answer while every counter stays
+   * zero, and the one the harness structurally cannot produce (Node encodes its PNG
+   * synchronously, in-process: no worker, no RPC, no budget). Measured on Belcourt:
+   * the same three strip reads flagged are re-read and land identical placements;
+   * silently empty, the reciprocal anchor is lost and a sheet moves ~39 ft with
+   * `ocrStats` reading `61/0/0/0/0`.
+   */
+  it("fires when the CONVERSION worker fails — a read that never happened is not an empty crop", async () => {
+    const { recognize } = await import("./ocrService");
+    let flagged = false;
+    const p = recognize(IMG(), { onNoResult: () => { flagged = true; } });
+    const conv = FakeWorker.instances[0];
+    conv.emit({ ocrId: conv.posted[0].ocrId, error: "OffscreenCanvas 2d context unavailable" });
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(true);
+  });
+
+  it("fires when the pool's own worker REJECTS — a broken pipe is a non-answer", async () => {
+    h.recognize = async () => { throw new Error("recognize blew up"); };
+    const { recognize } = await import("./ocrService");
+    let flagged = false;
+    const p = recognize(IMG(), { onNoResult: () => { flagged = true; } });
+    convReply(0, "x");
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(true);
   });
 
   it("does NOT fire when the caller aborted — that is the caller's own doing", async () => {

@@ -201,9 +201,23 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
  * was torn down under it), not a crop that genuinely holds no text. The return type
  * stays `OcrWord[]` and stays `[]`, so every existing caller is unaffected; the hook
  * exists because `autoStitch` needs to tell the two apart to decide whether the same
- * clip is worth re-reading, and `[]` cannot carry that. A conversion or
- * transport THROW is deliberately not reported here — it is a broken pipe, not a
- * band that was too big, and re-rastering it four times would not help.
+ * clip is worth re-reading, and `[]` cannot carry that.
+ *
+ * A CONVERSION OR TRANSPORT THROW IS A NON-ANSWER TOO, and it used not to be. The
+ * `catch` below swallows a conversion-worker RPC that blew its own 30 s budget, a
+ * conversion worker that crashed (`onerror` fails EVERY outstanding conversion at
+ * once), an OffscreenCanvas that could not allocate, and a pool job that rejected — and
+ * it used to answer all of them with a bare `[]`, which tells the aligner the crop holds
+ * no text. That read never happened: no non-answer, no re-read, nothing in `unknown`,
+ * nothing in any counter the honesty gate reads. Measured on Belcourt (`stitch-eval`,
+ * `STITCH_EVAL_FAULT_SILENT_CALLS` against `STITCH_EVAL_FAULT_CALLS` on the SAME three
+ * strip reads): flagged, they are re-read and every placement is identical; silent, the
+ * reciprocal anchor is lost, a sheet moves 141 pt (~39 ft at 1"=20') and `ocrStats`
+ * still reads `61/0/0/0/0`. That is the browser probe answering differently on two runs
+ * of the same sheets with nothing marked unknown. The old argument for staying quiet
+ * ("re-rastering it four times would not help") belonged to the sub-clip retry; a retry
+ * is now ONE same-input re-read, and a second failure lands in `unknown` — the honest
+ * answer to a broken pipe.
  */
 export async function recognize(
   image: RawImage,
@@ -238,6 +252,9 @@ export async function recognize(
     return words;
   } catch (err) {
     console.warn("[ocrService] recognize failed:", err);
+    // Aborts excepted, exactly as the OCR_NO_RESULT branch above: a run the caller
+    // stopped must not look like a read that failed.
+    if (!opts?.signal?.aborted) opts?.onNoResult?.();
     return [];
   }
 }
