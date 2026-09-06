@@ -252,6 +252,25 @@ export function useEarnedAutoAlign(
   /** `performance.now()` when the current probe request was sent — for the
    *  settle-time log below. */
   const checkStartRef = useRef(0);
+  /**
+   * When the server race gives up, as an absolute clock.
+   *
+   * A REF, not a local, because the automatic unknown-reads re-check starts a SECOND
+   * browser probe with a fresh budget while the same race is still running (see
+   * `pollSessionRef`). Frozen at the first probe's budget, the poll expired mid-way
+   * through the re-check and the `too_slow` that re-check can produce had nothing left
+   * to rescue it. `startBrowserProbe` pushes it forward on every probe it posts.
+   */
+  const pollDeadlineRef = useRef(0);
+  /**
+   * The poll's own sleep, so it can be cancelled rather than merely ignored.
+   *
+   * The loop already re-tests `pollSessionRef` after every await, so a stale wake-up
+   * writes nothing — but an uncancelled 2 s timer keeps the closure (and the captured
+   * `CanvasProbeSet`, which holds the whole source PDF) alive past unmount, and leaves
+   * `vi.getTimerCount()` non-zero after teardown. Cleared on unmount and by `reset()`.
+   */
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The pending soft-budget timeout for the check in flight, if any. Cleared on
    *  settle, on unmount, and by every `stop()` (a superseded check or a reset) so it
    *  never fires for a check that is no longer the current one. */
@@ -297,6 +316,14 @@ export function useEarnedAutoAlign(
     if (budgetTimerRef.current !== null) {
       clearTimeout(budgetTimerRef.current);
       budgetTimerRef.current = null;
+    }
+  }, []);
+
+  /** Retire the poll's sleep. Idempotent; a no-op when no race is running. */
+  const clearPollTimer = useCallback(() => {
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
   }, []);
 
@@ -446,6 +473,7 @@ export function useEarnedAutoAlign(
     return () => {
       goneRef.current = true;
       clearBudget();
+      clearPollTimer();
       workerRef.current?.terminate();
       workerRef.current = null;
       void shutdownOcr();
@@ -485,6 +513,7 @@ export function useEarnedAutoAlign(
     // deliberately does not watch (see `pollSessionRef`).
     pollSessionRef.current++;
     browserOutcomeRef.current = "final";
+    clearPollTimer();
     // Same hole as the budget path: `stop()` bumps `docIdRef`, so the abandoned
     // probe's own reply is discarded as stale before it can release OCR. Nothing
     // else is running (this hook probes one at a time), so this is unconditional.
@@ -524,6 +553,9 @@ export function useEarnedAutoAlign(
       };
       checkStartRef.current = performance.now();
       browserOutcomeRef.current = "running";
+      // The race outlives THIS probe's budget, whichever probe this is: an automatic
+      // re-check pushes the deadline out with it.
+      pollDeadlineRef.current = Date.now() + budgetMs + SERVER_POLL_GRACE_MS;
       const requestedDocId = req.docId;
       ensureWorker().postMessage(req);
       budgetTimerRef.current = setTimeout(() => {
@@ -624,9 +656,12 @@ export function useEarnedAutoAlign(
       browserStarted: boolean,
     ) => {
       const live = () => !goneRef.current && pollSession === pollSessionRef.current;
-      // The deferred case has no worker to have stamped the clock yet.
-      if (!browserStarted) checkStartRef.current = performance.now();
-      const deadline = Date.now() + budgetMs + SERVER_POLL_GRACE_MS;
+      // The deferred case has no worker to have stamped the clock — or the deadline —
+      // yet. `startBrowserProbe` overwrites both the moment it posts.
+      if (!browserStarted) {
+        checkStartRef.current = performance.now();
+        pollDeadlineRef.current = Date.now() + budgetMs + SERVER_POLL_GRACE_MS;
+      }
       const hash = await planHashHex(server.plan);
       if (!live()) return;
 
@@ -644,6 +679,17 @@ export function useEarnedAutoAlign(
         });
 
         if (verdict === "use") {
+          // THE SET THIS VERDICT IS ABOUT MUST STILL BE THE ONE THE HOOK IS ASKING
+          // ABOUT. The automatic unknown-reads re-check re-derives the set from the
+          // canvas (`check` → `setRef.current = canvasProbeSet(tiles)`), so a drag or a
+          // deleted sheet between the first reply and the re-check leaves this race
+          // holding set A while the hook — and `run()`'s `movedSinceCheck`, which
+          // compares against `setRef.current` — has moved on to set B. Applying A's
+          // absolute placements then committed over the user's work with no stale
+          // guard in the way. Identity, not equality: a re-derived set is a new object
+          // even when it describes the same pages, and re-probing is the honest answer
+          // either way.
+          if (setRef.current !== set) return;
           const outcome = started ? browserOutcomeRef.current : "final-none";
           if (outcome === "final") return; // settled honestly — leave it alone
           if (outcome === "running") {
@@ -667,9 +713,14 @@ export function useEarnedAutoAlign(
         // the end of the window: three ways for the race to be over.
         if (serverPollIsExhausted(probe, hash)) return;
         if (browserOutcomeRef.current === "final") return;
-        if (Date.now() >= deadline) return;
+        if (Date.now() >= pollDeadlineRef.current) return;
 
-        await new Promise<void>((resolve) => setTimeout(resolve, SERVER_POLL_INTERVAL_MS));
+        await new Promise<void>((resolve) => {
+          pollTimerRef.current = setTimeout(() => {
+            pollTimerRef.current = null;
+            resolve();
+          }, SERVER_POLL_INTERVAL_MS);
+        });
         if (!live()) return;
         probe = await fetchServerProbe(server.url);
         if (!live()) return;
@@ -731,6 +782,12 @@ export function useEarnedAutoAlign(
         // lands exactly here, so the release belongs here too. A no-op when no pool
         // was ever built, which is the usual case.
         void shutdownOcr();
+        // …and no server verdict may paint over what this branch is about to write.
+        // `!auto` already did this above; the AUTOMATIC re-check is the case that
+        // matters — it deliberately leaves the race alive, and a canvas that lost a
+        // sheet between the discarded reply and the re-check lands exactly here. A
+        // late verdict must not turn `idle` or `mixed_sources` into an offer.
+        browserOutcomeRef.current = "final";
         // Null has two meanings and only one of them is "nothing to say". A canvas
         // built from two PDFs is a real answer the user can act on (align them one
         // document at a time), so it gets the note rather than silence.

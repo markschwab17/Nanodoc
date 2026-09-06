@@ -314,25 +314,41 @@ describe("classifyServerProbe", () => {
  * CTO edits a case, its own suite goes green, and the two repos quietly stop asserting
  * the same thing — which is precisely the failure these fixtures exist to catch.
  *
- * So when the CTO worktree is present beside this one, the bytes are compared. When it
- * is not (CI, a fresh clone, a machine that only has nanodoc) the check SKIPS with a
- * message rather than failing: a missing sibling repo is not a broken fixture.
+ * So the hash is PINNED as a literal, on both sides. A pinned constant fails in the repo
+ * that edited the file, immediately, on every machine — a sibling-path comparison only
+ * fails on a machine that happens to have both checkouts, which is one developer's
+ * laptop and no CI at all. Changing a fixture is therefore a deliberate two-repo edit:
+ * update the file, update the constant here, update the identical constant in CTO's
+ * `src/lib/site-sheet/__tests__/probe-request.test.ts`.
+ *
+ * The byte comparison against the CTO worktree is kept as an EXTRA, skipped with a
+ * message when that path is absent — it catches the case where both constants were
+ * updated but only one file was.
  */
 describe("the CTO fixture copies are byte-identical", () => {
   const CTO_FIXTURES =
     "/Users/markschwab/Documents/CTO-Website-worktrees/site-sheet/src/lib/site-sheet/__tests__/fixtures";
+  /** sha256 of the fixture bytes, pinned on BOTH sides of the copy. */
+  const PINNED: Record<string, string> = {
+    "probe-request.json": "9d297b452afa1c91d30d41325c2a00517bc783827dedb99b54bb485aa6aa71a7",
+    "plan-hash.json": "8d10210d2a59416e202fe7c06a2ed11f7cf29e4eac03184f0630758ec6671afd",
+  };
   const localFixture = (name: string) =>
     path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts/fixtures", name);
   const sha256 = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
 
-  for (const name of ["probe-request.json", "plan-hash.json"]) {
-    test(name, () => {
+  for (const [name, pinned] of Object.entries(PINNED)) {
+    test(`${name} matches its pinned hash`, () => {
+      expect(sha256(readFileSync(localFixture(name)))).toBe(pinned);
+    });
+
+    test(`${name} matches the CTO original, when it is on this machine`, () => {
       const upstream = path.join(CTO_FIXTURES, name);
       if (!existsSync(upstream)) {
         console.info(`[fixtures] skipped ${name}: no CTO worktree at ${CTO_FIXTURES}`);
         return;
       }
-      expect(sha256(readFileSync(localFixture(name)))).toBe(sha256(readFileSync(upstream)));
+      expect(sha256(readFileSync(upstream))).toBe(pinned);
     });
   }
 });

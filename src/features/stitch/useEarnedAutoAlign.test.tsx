@@ -1127,6 +1127,92 @@ describe("useEarnedAutoAlign — the server verdict", () => {
     expect(hook.status).not.toBe("offer");
   });
 
+  it("refuses a verdict for a set the automatic re-check has already moved on from", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    const finished = await storedOk();
+    let answer: unknown = pending;
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ probe: answer }) })));
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    const first = posted.at(-1)!.docId;
+
+    // The user drags a sheet, and the probe comes back with a hole in its evidence — so
+    // the hook silently re-checks, RE-DERIVING the set from the canvas as it now is.
+    useStitchStore.setState({
+      tiles: useStitchStore.getState().tiles.map((t, i) => (i === 0 ? { ...t, x: t.x + 40 } : t)),
+    });
+    act(() => workers[0].reply({ ...goodProbe(first, [0, 1]), ocrStats: holedStats(1) }));
+    expect(browserProbes()).toHaveLength(2); // the automatic re-check
+    expect(hook.status).toBe("checking");
+
+    // Now the verdict lands. Its `request` still matches — same pages, same scales —
+    // but it describes the canvas BEFORE the drag, and `run()`'s stale guard compares
+    // against the RE-CHECK's set, so nothing downstream would catch it.
+    answer = finished;
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(hook.status).toBe("checking");
+    expect(info.mock.calls.filter((c) => c.at(-1) === " (server)")).toHaveLength(0);
+    // No offer exists, so there is nothing for a click to commit over the drag.
+    await act(async () => { await hook.run(); });
+    expect(commitAutoAlign).not.toHaveBeenCalled();
+    info.mockRestore();
+  });
+
+  it("the poll deadline follows the automatic re-check, not the first budget", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ probe: pending }) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    const first = posted.at(-1)!.docId;
+    await act(async () => { await vi.advanceTimersByTimeAsync(50_000); });
+
+    // A holed reply at 50 s re-checks on a FRESH 60 s budget, so the browser probe now
+    // runs to ~110 s. A deadline frozen at the first budget expired at 80 s and left
+    // that re-check's own `too_slow` with nothing left to rescue it.
+    act(() => workers[0].reply({ ...goodProbe(first, [0, 1]), ocrStats: holedStats(1) }));
+    expect(browserProbes()).toHaveLength(2);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(40_000); }); // t = 90 s
+    const at90 = fetchMock.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); }); // t = 100 s
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(at90);
+  });
+
+  it("Re-check always asks the browser, never the row", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const probe = await storedOk();
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+    expect(hook.status).toBe("offer");
+    expect(browserProbes()).toHaveLength(0);
+
+    // Answering a Re-check from the same row would make the button a no-op.
+    act(() => hook.recheck());
+    expect(hook.status).toBe("checking");
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("leaves no poll timer behind on unmount", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ probe: pending }) })));
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    // The sleep holds the captured CanvasProbeSet — and with it the whole source PDF.
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    act(() => root.unmount());
+    expect(vi.getTimerCount()).toBe(0);
+    root = createRoot(container);
+  });
+
   it("names the OCR batch width on every browser probe, so both probes read alike", async () => {
     seedCanvas([0, 1]);
     mount();
