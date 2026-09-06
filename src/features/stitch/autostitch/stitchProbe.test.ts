@@ -12,7 +12,7 @@ describe("toProbeResult", () => {
       ],
       rootFtPerIn: 20, alignedCount: 2, unplacedCount: 1, worstResidFt: 0, method: "keymap", poses: [],
       refPageIndices: [0, 1], skipped: [], scaleWarnings: [],
-      ocrStats: { calls: 0, nonAnswers: 0, retries: 0, unknown: 0 },
+      ocrStats: { calls: 0, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 },
     };
     const probe = toProbeResult(res, 7);
     expect(probe.docId).toBe(7);

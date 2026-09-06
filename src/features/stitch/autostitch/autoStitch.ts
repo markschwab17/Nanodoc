@@ -84,13 +84,21 @@ export interface AutoStitchOptions {
  * sheet-number cell re-read, one per band handed to the sub-clip retry — which
  * issues several reads of its own, each of them counted in `calls`.
  *
- * `unknown` counts DECISIONS that could not be made because the evidence was still
- * a non-answer after its retry: a strip scan that had to stop rather than accept a
- * later strip, a sheet-number cell that stays unread, an edge band whose evidence
- * is not whole. `unknown > 0` means the run reached its verdict without evidence it
- * wanted; whether such a verdict may be SHOWN is the caller's decision.
+ * `unknown` counts READS that were still unanswered after their retry: a strip that
+ * had to stop the scan rather than let a later strip be accepted, a sheet-number
+ * cell that stays unread, an edge band that produced nothing whichever way it was
+ * turned and nothing again when it was cut up. `unknown > 0` means the run reached
+ * its verdict with a hole in the evidence.
+ *
+ * `withheldVotes` counts SIDE BANDS whose rotation vote was withheld because a
+ * rotation of them was lost. That is a weaker fault than `unknown` — the band still
+ * has a reading, and its labels are still used — but it is not nothing: the vote
+ * decides `lockSideTextRot`, and the lock decides which rotations the reciprocal
+ * strip scan reads, so a withheld vote can move which strip the scan returns. A
+ * band that is BOTH fully lost and a side band appears in both counts; they measure
+ * different things.
  */
-export interface OcrStats { calls: number; nonAnswers: number; retries: number; unknown: number }
+export interface OcrStats { calls: number; nonAnswers: number; retries: number; unknown: number; withheldVotes: number }
 
 export interface AutoStitchResult {
   placements: TilePlacement[];
@@ -403,22 +411,16 @@ interface RawAnchor { pageI: number; yI: number; pageJ: number; yJ: number; perp
   strokeI?: number; strokeJ?: number; }
 
 /**
- * What ONE strip of the reciprocal scan turned out to be.
+ * What one strip of the reciprocal scan turned out to be — and, for the same three
+ * answers, what the scan over a page's strips turned out to be.
  *
  * `miss` is evidence — this strip was READ and holds no reciprocal label, so the
  * scan may move on to the next one. `unknown` is the absence of evidence: the read
  * was still a NON-ANSWER after its one immediate re-read, so nothing at all is
  * known about this strip and the scan may NOT quietly move on (see `scanStrips`).
  */
-type StripProbe =
+type StripRead =
   | { kind: "hit"; anchor: RawAnchor }
-  | { kind: "miss" }
-  | { kind: "unknown" };
-
-/** What the scan over a page's strips turned out to be. `strip` is the winning
- *  strip's index in scan order — the lowest index that hit. */
-type StripScan =
-  | { kind: "hit"; strip: number; anchor: RawAnchor }
   | { kind: "miss" }
   | { kind: "unknown" };
 
@@ -565,27 +567,36 @@ function readPageOcr(
    * A NON-ANSWER here is not "this sheet has no number": it is the pool's budget
    * expiring on a cell that may well hold one, and "no number" sends the page to
    * the page-order fallback, which can misroute every `SEE SHEET n` on the set that
-   * resolves byPrinted. So the cell is re-read ONCE — the SAME raster, no second
-   * render and no second page handle — and if that is a non-answer too the number
-   * stays UNKNOWN rather than quietly becoming "none".
+   * resolves byPrinted. So the cell is read a SECOND time, and if that is a
+   * non-answer too the number stays UNKNOWN rather than quietly becoming "none".
    *
-   * Holding the raster across the first read is the only new retention here, and it
-   * is the smallest band on the page (0.2W x 0.12H): a few MB at 200 dpi, released
-   * the moment the retry decision is taken. The band rasters, which are ten times
-   * that, are still handed straight to the transport and never kept.
+   * The second read RE-RENDERS the cell, through `reopenPage` exactly as
+   * `retryBandAsSubClips` does — for the same two reasons. The caller destroyed its
+   * page as soon as the reads were ISSUED, and the transport TRANSFERS the raster it
+   * was given (`postMessage(…, [image.data.buffer])`), so by the time the first read
+   * settles both the page and the pixels are gone. Re-reading the same husk would
+   * throw, or come back `[]` with no non-answer reported at all — a clean miss, the
+   * very failure being fixed. No `reopenPage` (a caller that cannot re-open) means
+   * no second read, and the cell is unknown.
    */
   const readSheetNo = async (): Promise<{ words: OcrWord[]; unknown: boolean }> => {
     if (signal?.aborted) return { words: [], unknown: false };
-    const { image } = renderBand(mupdf, page, sheetNoBand(view).clip);
     let lost = false;
-    const first = await issue(image, () => { lost = true; });
+    const first = await issue(renderBand(mupdf, page, sheetNoBand(view).clip).image, () => { lost = true; });
     if (!lost) return { words: first, unknown: false };
-    // An aborted run re-reads nothing: the answer would arrive for a run that has
-    // already given up, and the cell is unknown either way.
-    if (signal?.aborted) return { words: [], unknown: true };
+    // An aborted run re-renders and re-reads nothing: the answer would arrive for a
+    // run that has already given up. The cell is unknown either way, and counted as
+    // such — the same bookkeeping `readStrip` does on the same decision.
+    if (signal?.aborted || !reopenPage) { stats.unknown++; return { words: [], unknown: true }; }
     stats.retries++;
+    // Synchronous end to end, so nothing can interleave on the non-re-entrant mupdf
+    // instance, and the handle is closed before the read is awaited.
+    const page2 = reopenPage();
+    let again: RawImage;
+    try { again = renderBand(mupdf, page2, sheetNoBand(view).clip).image; }
+    finally { page2.destroy?.(); }
     let lostAgain = false;
-    const second = await issue(image, () => { lostAgain = true; });
+    const second = await issue(again, () => { lostAgain = true; });
     if (!lostAgain) return { words: second, unknown: false };
     stats.unknown++;
     return { words: [], unknown: true };
@@ -689,17 +700,21 @@ function readPageOcr(
       //    the abort break in `retryBandAsSubClips`: neither is reachable today, and
       //    together they mean a truncated retry could never quietly vote as a whole
       //    one if it ever became so.
-      //
-      // That same bar is what makes the band UNKNOWN. A withheld vote is not a
-      // harmless omission: it can move `lockSideTextRot` off a real rotation, and the
-      // lock decides which rotations the reciprocal strip scan reads — so it can move
-      // which strip the scan returns, which is a different anchor, not a missing one.
-      // A run that had to withhold one says so, and the caller decides whether a
-      // verdict may rest on it.
       const whole = parts
         ? parts.length === subs.length && r.rots.every((_, k) => parts!.every((p) => !p.noResult[k]))
         : !r.rots.some((_, k) => r.noResult[k]);
-      if (!whole) stats.unknown++;
+      // Withholding a vote is not a harmless omission — it can move
+      // `lockSideTextRot` off a real rotation, and the lock decides which rotations
+      // the reciprocal strip scan reads, so it can move which strip the scan returns.
+      // But it is a WEAKER fault than an unread band: the band still has a reading and
+      // its labels are still used. It gets its own counter, on the bands that actually
+      // vote (only side bands do — see the `c.rot !== 0` guard below).
+      if (!whole && r.rots.length === 2) stats.withheldVotes++;
+      // UNKNOWN is the strong one: this band produced nothing readable at all —
+      // every rotation a non-answer, and then either no cut to make (too short, no
+      // page handle, aborted) or every sub-clip of the cut a non-answer too. A band
+      // in that state is a hole in the evidence, not a band that read blank.
+      if (allLost && (!parts || r.rots.every((_, k) => parts!.every((p) => p.noResult[k])))) stats.unknown++;
       // wordsToLabels wants each raster's OWN clip and PRE-rotation dims (it inverts
       // the rotation itself). A retried band emits its sub-clips in order along the
       // band, then drops what the overlap read twice.
@@ -792,7 +807,7 @@ async function runAutoStitch(
   // that forgets to count is exactly the bug this change exists to fix (the strip
   // scan and the sheet-number cell used to forget to ASK). `retries` and `unknown`
   // belong to the decisions that consume the reads, and are counted there.
-  const ocrStats: OcrStats = { calls: 0, nonAnswers: 0, retries: 0, unknown: 0 };
+  const ocrStats: OcrStats = { calls: 0, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 };
   const rawOcr = opts.ocr;
   const ocr = rawOcr
     ? async (image: RawImage, o?: { onNoResult?: () => void }): Promise<OcrWord[]> => {
@@ -1225,17 +1240,16 @@ async function runAutoStitch(
      */
     const scanStrips = async (
       starts: number[],
-      probe: (start: number) => Promise<StripProbe>,
-    ): Promise<StripScan> => {
+      probe: (start: number) => Promise<StripRead>,
+    ): Promise<StripRead> => {
       for (let s = 0; s < starts.length; s += OCR_CHUNK) {
         // `allSettled` attaches its handlers synchronously to every promise in the
         // array, so no rejection here can ever go unobserved.
         const settled = await Promise.allSettled(starts.slice(s, s + OCR_CHUNK).map((start) => probe(start)));
-        for (let k = 0; k < settled.length; k++) {
-          const r = settled[k];
+        for (const r of settled) {
           if (r.status === "rejected") throw r.reason;
           if (r.value.kind === "unknown") return { kind: "unknown" };
-          if (r.value.kind === "hit") return { kind: "hit", strip: s + k, anchor: r.value.anchor };
+          if (r.value.kind === "hit") return r.value;
         }
       }
       return { kind: "miss" };
@@ -1244,16 +1258,25 @@ async function runAutoStitch(
     /**
      * One strip read, and the ONE immediate re-read a non-answer earns.
      *
-     * The re-read is of the SAME raster — no second render, no second page handle —
-     * and it is awaited inside the probe, so it goes out before the next CHUNK is
-     * issued rather than after the whole scan. One is the whole budget: a second
+     * THE RE-READ RE-RENDERS THE CLIP, and it has to. Both production transports
+     * TRANSFER the raster on the way out — `postMessage(…, [image.data.buffer])` in
+     * the probe worker's `ocrViaMain`, and the conversion worker in `ocrService` —
+     * so the moment a read is issued its `RawImage` is a husk with a detached
+     * buffer. Handing that same object back would throw a DataCloneError up through
+     * `scanStrips` (killing the whole probe), or, on the path that swallows it,
+     * return `[]` with no `onNoResult` at all — a clean miss, which is the exact bug
+     * this change exists to remove, wearing a disguise. Rendering again costs one
+     * raster of one strip; the page handle is already open for the scan.
+     *
+     * The re-read is awaited inside the probe, so it goes out before the next CHUNK
+     * is issued rather than after the whole scan. One is the whole budget: a second
      * expired job on the same crop is a crop this run is not going to read, and
      * spending 20 s more to learn that again is what made the probe feel broken.
      *
      * Returns null for "still a non-answer" — the strip is UNKNOWN, which is not the
      * `[]` a strip with no label in it returns.
      */
-    const readStrip = async (image: RawImage): Promise<OcrWord[] | null> => {
+    const readStrip = async (image: RawImage, rerender: () => RawImage): Promise<OcrWord[] | null> => {
       let lost = false;
       const first = await ocr!(image, { onNoResult: () => { lost = true; } });
       if (!lost) return first;
@@ -1262,7 +1285,7 @@ async function runAutoStitch(
       if (opts.shouldAbort?.()) return null;
       ocrStats.retries++;
       let lostAgain = false;
-      const second = await ocr!(image, { onNoResult: () => { lostAgain = true; } });
+      const second = await ocr!(rerender(), { onNoResult: () => { lostAgain = true; } });
       return lostAgain ? null : second;
     };
 
@@ -1316,7 +1339,7 @@ async function runAutoStitch(
           const rots: readonly (90 | 270)[] = iPage.sideTextRot ? [iPage.sideTextRot] : [90, 270];
           const starts: number[] = [];
           for (let bx0 = rx0; bx0 < rx1; bx0 += 120) starts.push(bx0);
-          const scan = await scanStrips(starts, async (bx0): Promise<StripProbe> => {
+          const scan = await scanStrips(starts, async (bx0): Promise<StripRead> => {
             const bx1 = Math.min(bx0 + 160, rx1);
             const clip: [number, number, number, number] = [bx0, y0, bx1, y1];
             // Synchronous, and before this probe's first await: see `scanStrips`.
@@ -1325,7 +1348,10 @@ async function runAutoStitch(
             // 90 first, 270 only if 90 found nothing — the old loop's order, and the
             // reason a strip costs one OCR call rather than two when 90 hits.
             for (const rot of rots) {
-              const words = await readStrip(rotateRaw(image, rot));
+              const words = await readStrip(
+                rotateRaw(image, rot),
+                () => rotateRaw(renderBand(mupdf, page, clip, 150).image, rot),
+              );
               // A rotation still lost after its re-read makes the whole STRIP unknown,
               // and the rotation after it is not read: what earns the 270 read is "90
               // found nothing", and a non-answer never said that.
@@ -1361,11 +1387,11 @@ async function runAutoStitch(
           for (let by0 = ry0; by0 < ry1; by0 += 120) starts.push(by0);
           // Horizontal text — one read per strip, so no rotation rule applies here;
           // the chunking is the only change.
-          const scan = await scanStrips(starts, async (by0): Promise<StripProbe> => {
+          const scan = await scanStrips(starts, async (by0): Promise<StripRead> => {
             const by1 = Math.min(by0 + 160, ry1);
             const clip: [number, number, number, number] = [x0, by0, x1, by1];
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-            const words = await readStrip(image);
+            const words = await readStrip(image, () => renderBand(mupdf, page, clip, 150).image);
             if (words == null) return { kind: "unknown" };
             const labels = wordsToLabels(words, { edge: "top", clip }, bandScale, image.width, image.height, 0);
             for (const lab of labels) {

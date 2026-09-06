@@ -676,6 +676,17 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
   const words = (text: string, confidence = 90) => [{ text, confidence, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
   const tick = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+  /**
+   * Both production transports TRANSFER the raster on the way out — the probe
+   * worker's `ocrViaMain` posts `[image.data.buffer]`, and `ocrService` hands the
+   * buffer to its conversion worker — so a read leaves its `RawImage` a husk with a
+   * detached buffer. The stub does exactly that, and refuses to read one: a retry
+   * that hands the same object back fails HERE the way it would fail in a browser
+   * (DataCloneError, or a swallowed `[]` with no non-answer reported). Every retry
+   * in this fixture therefore has to have re-rendered its clip.
+   */
+  const transferAway = (img: any) => { structuredClone(img.data.buffer, { transfer: [img.data.buffer] }); };
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -724,8 +735,10 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     ];
     let n = 0;
     (capturePage as any).mockImplementation(() => pages[n++]);
+    const stripRenders: number[] = [];
     (renderBand as any).mockImplementation((_m: any, _p: any, clip: number[]) => {
       const strip = STRIP_STARTS.findIndex((x) => Math.abs(x - clip[0]) < 0.5);
+      if (strip >= 0) stripRenders.push(strip);
       return raster(strip >= 0 ? strip : EDGE_BAND);
     });
 
@@ -735,23 +748,25 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     let aborting = false;
     const attempts = new Map<string, number>();
     const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
-      const tag = tagOf(img);
+      if (img.data.length === 0) throw new Error("read of a DETACHED raster: the transport already took this buffer");
+      const tag = tagOf(img), rot = rotOf(img);
+      transferAway(img);
       if (tag === EDGE_BAND) {
         // Page 0's edge bands. "ZZZ" can never parse as a sheet ref, so the recovered
         // labels cannot hand page 0 the reciprocal edge ref and skip the very scan
         // under test; only where the CONFIDENCE lands matters here.
         if (opts.edgeRot == null) return [];
-        if (rotOf(img) === opts.edgeRot) return words("ZZZ", opts.edgeConf ?? 90);
+        if (rot === opts.edgeRot) return words("ZZZ", opts.edgeConf ?? 90);
         const other = opts.edgeOtherConf === undefined ? 51 : opts.edgeOtherConf;
         return other == null ? [] : words("ZZZ", other);
       }
       stripReads++;
-      (rotsByStrip.get(tag) ?? rotsByStrip.set(tag, []).get(tag)!).push(rotOf(img));
+      (rotsByStrip.get(tag) ?? rotsByStrip.set(tag, []).get(tag)!).push(rot);
       if (opts.slowStrips?.includes(tag)) await tick(20);
       if (opts.throwStrips?.includes(tag)) throw new Error(`strip ${tag} exploded`);
       // Counted per strip AND rotation: a strip is re-read at the same rotation, and
       // the two rotations of one strip are two separate pool jobs.
-      const key = `${tag}:${rotOf(img)}`;
+      const key = `${tag}:${rot}`;
       const nth = (attempts.get(key) ?? 0) + 1;
       attempts.set(key, nth);
       if (opts.lostStrips?.includes(tag) || (opts.flakyStrips?.includes(tag) && nth === 1)) {
@@ -767,7 +782,7 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
       ocr, userScale: 20, ocrConcurrency: opts.ocrConcurrency, onDebug: (d) => { debug = d; },
       shouldAbort: opts.abortOnLoss ? () => aborting : undefined,
     });
-    return { res, debug, rotsByStrip, stripReads };
+    return { res, debug, rotsByStrip, stripReads, stripRenders };
   };
 
   it("scans ONLY the rotation the edge bands proved, and both when they proved nothing", async () => {
@@ -878,19 +893,41 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     expect(halfDead.stripReads).toBe(10);  // no tally, no lock, both rotations scanned
   });
 
-  it("a strip that loses its first read and answers the re-read anchors exactly as a clean run", async () => {
+  it("a strip that loses its first read RE-RENDERS it, and anchors exactly as a clean run", async () => {
     // The whole point: a 20 s hiccup costs one extra read, not a different answer.
     const clean = await run({ edgeRot: 270, hitStrips: [2], ocrConcurrency: 3 });
     const flaky = await run({ edgeRot: 270, hitStrips: [2], flakyStrips: [2], ocrConcurrency: 3 });
     expect(clean.debug.anchors).toHaveLength(1);
     expect(flaky.debug.anchors).toHaveLength(1);
     expect(flaky.debug.anchors[0].dx).toBe(clean.debug.anchors[0].dx);
-    // One extra READ of strip 2, at the same rotation — and the SAME raster, which is
-    // why the re-read costs an OCR call and no render.
+    // One extra READ of strip 2, at the same rotation…
     expect(flaky.stripReads).toBe(clean.stripReads + 1);
     expect(flaky.rotsByStrip.get(2)).toEqual([270, 270]);
+    // …off a SECOND RENDER of that strip's clip. The first read's raster was taken by
+    // the transport (see `transferAway`), so re-reading the same object is not an
+    // option that exists — the stub throws on it, and this test would not be green.
+    expect(clean.stripRenders.filter((i) => i === 2)).toHaveLength(1);
+    expect(flaky.stripRenders.filter((i) => i === 2)).toHaveLength(2);
     expect(flaky.res.ocrStats.calls).toBe(clean.res.ocrStats.calls + 1);
-    expect(flaky.res.ocrStats).toMatchObject({ nonAnswers: 1, retries: 1, unknown: 0 });
+    expect(flaky.res.ocrStats).toMatchObject({ nonAnswers: 1, retries: 1, unknown: 0, withheldVotes: 0 });
+  });
+
+  it("within one chunk: a hit BELOW an unknown is still taken, a hit ABOVE it is not", async () => {
+    // Chunk 0 is strips 0-2, and both cases lose one strip and match another inside
+    // it — so the only thing that differs is which of the two has the lower index.
+    const below = await run({ edgeRot: 270, hitStrips: [1], lostStrips: [2], ocrConcurrency: 3 });
+    const cleanBelow = await run({ edgeRot: 270, hitStrips: [1], ocrConcurrency: 3 });
+    // Strip 1 was READ and matched, and nothing before it is in doubt: the unknown
+    // sits at a HIGHER index, so it cannot have been the real answer.
+    expect(below.debug.anchors).toHaveLength(1);
+    expect(below.debug.anchors[0].dx).toBe(cleanBelow.debug.anchors[0].dx);
+    expect(below.res.ocrStats).toMatchObject({ unknown: 0, retries: 1 });
+
+    // Reverse the two. Now the unknown precedes the match, so the match may not be
+    // taken: strip 1 might have held the real label and nobody will ever know.
+    const above = await run({ edgeRot: 270, hitStrips: [2], lostStrips: [1], ocrConcurrency: 3 });
+    expect(above.debug.anchors).toHaveLength(0);
+    expect(above.res.ocrStats).toMatchObject({ unknown: 1, retries: 1 });
   });
 
   it("a strip still lost after its re-read stops the scan — a LATER strip's match is NOT accepted", async () => {
@@ -906,6 +943,7 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     // Strip 1 was read exactly twice (the read and its one re-read), and the chunk
     // holding strip 3 was never issued.
     expect(lost.rotsByStrip.get(1)).toEqual([270, 270]);
+    expect(lost.stripRenders.filter((i) => i === 1)).toHaveLength(2);   // re-rendered
     expect(lost.rotsByStrip.has(3)).toBe(false);
     expect(lost.res.ocrStats).toMatchObject({ nonAnswers: 2, retries: 1, unknown: 1 });
   });
@@ -917,7 +955,7 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     // retried and nothing is unknown — which is the state every clean run must be in,
     // because it is what the caller reads to decide whether the verdict is showable.
     const clean = await run({ edgeRot: 270, hitStrips: [], ocrConcurrency: 3 });
-    expect(clean.res.ocrStats).toEqual({ calls: 7 + 5, nonAnswers: 0, retries: 0, unknown: 0 });
+    expect(clean.res.ocrStats).toEqual({ calls: 7 + 5, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 });
   });
 
   it("an aborted run does not spend the re-read", async () => {
@@ -926,6 +964,7 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
     // and the strip is unknown either way.
     const aborted = await run({ edgeRot: 270, hitStrips: [], lostStrips: [0], abortOnLoss: true, ocrConcurrency: 1 });
     expect(aborted.rotsByStrip.get(0)).toEqual([270]);   // read once, never re-read
+    expect(aborted.stripRenders.filter((i) => i === 0)).toHaveLength(1);  // nor re-rendered
     expect(aborted.res.ocrStats).toMatchObject({ nonAnswers: 1, retries: 0, unknown: 1 });
   });
 });
@@ -1113,26 +1152,30 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
    * Losing it does not mean "this sheet prints no number" — it means nothing was
    * read, and the two send the page to the same page-order fallback, which can
    * misroute every `SEE SHEET n` on the set that resolves byPrinted. So the cell is
-   * re-read once, from the SAME raster (the edge bands are re-read as sub-clips
-   * instead, because they are too big for one job; this one is not).
+   * read a second time, and that read RE-RENDERS it through `reopenPage`, the way
+   * the sub-clip retry does: by then the caller has destroyed its page AND the
+   * transport has taken the first raster's buffer, so there is nothing left to
+   * re-read. The stub below models both halves — it detaches what it is handed, and
+   * refuses a husk.
    */
   const SHEET_NO_CELL = (m: Meta) => m.x0 > 2000 && m.h < 200;
   const cellRenderCount = (renderBand: any) =>
     renderBand.mock.calls.filter((c: any[]) => c[2][0] > 2000 && c[2][3] - c[2][1] < 200).length;
+  const transferAway = (img: any) => { structuredClone(img.data.buffer, { transfer: [img.data.buffer] }); };
 
   it("re-reads the title-block cell once, and uses what the re-read recovers exactly as a first read", async () => {
     const readCell = async (lose: number) => {
       const { renderBand, fakeDoc, at } = await setup();
       (renderBand as any).mockClear();   // two runs in one test: count THIS one's renders
+      // Counted per PAGE, because the re-read is a different raster by construction.
       const tries = new Map<number, number>();
       const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+        if (img.data.length === 0) throw new Error("read of a DETACHED raster: the transport already took this buffer");
         const m = at(img);
+        transferAway(img);
         if (!SHEET_NO_CELL(m)) return [];
-        // Keyed on the RASTER, not the page: the re-read is of the same image, and
-        // this is what proves it.
-        const id = img.data[1];
-        const nth = (tries.get(id) ?? 0) + 1;
-        tries.set(id, nth);
+        const nth = (tries.get(m.page) ?? 0) + 1;
+        tries.set(m.page, nth);
         if (nth <= lose) { o?.onNoResult?.(); return []; }
         // Deliberately NOT page order — 1 and 2 the other way round — so a printedNo
         // that comes out right can only have come from this read.
@@ -1140,37 +1183,48 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
       });
       let debug: any = null;
       const res = await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
-      return { res, debug, ocr, cellRenders: cellRenderCount(renderBand) };
+      return { res, debug, ocr, fakeDoc, cellRenders: cellRenderCount(renderBand) };
     };
 
     const clean = await readCell(0);
     expect(clean.debug.inputs.map((u: any) => u.printedNo)).toEqual([2, 1]);
     expect(clean.debug.unknownSheetNoPages).toEqual([]);
-    expect(clean.res.ocrStats).toEqual({ calls: 2 * 7, nonAnswers: 0, retries: 0, unknown: 0 });
+    expect(clean.cellRenders).toBe(2);                          // one render per page
+
+    expect(clean.res.ocrStats).toEqual({ calls: 2 * 7, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 });
 
     const flaky = await readCell(1);
     expect(flaky.debug.inputs.map((u: any) => u.printedNo)).toEqual([2, 1]);
     expect(flaky.debug.unknownSheetNoPages).toEqual([]);
-    expect(flaky.cellRenders).toBe(2);                // one raster per page, read twice
+    // The cell was RE-RENDERED off a re-opened page: two renders and two handles per
+    // page. Nothing survives from the first read to re-use — the stub throws if you try.
+    expect(flaky.cellRenders).toBe(4);
+    // …and off page handles the retry opened for itself: two more than the otherwise
+    // identical clean run (whose own loadPage traffic — extraction, the keymap probe —
+    // is the same either way).
+    expect(flaky.fakeDoc.loadPage.mock.calls.length).toBe(clean.fakeDoc.loadPage.mock.calls.length + 2);
     expect(flaky.ocr).toHaveBeenCalledTimes(2 * 8);   // 7 reads + the cell's re-read
-    expect(flaky.res.ocrStats).toEqual({ calls: 2 * 8, nonAnswers: 2, retries: 2, unknown: 0 });
+    expect(flaky.res.ocrStats).toEqual({ calls: 2 * 8, nonAnswers: 2, retries: 2, unknown: 0, withheldVotes: 0 });
   });
 
   it("a title-block cell lost twice leaves the number UNKNOWN, not 'this sheet prints none'", async () => {
     const { renderBand, fakeDoc, at } = await setup();
     const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
-      if (SHEET_NO_CELL(at(img))) { o?.onNoResult?.(); return []; }
+      if (img.data.length === 0) throw new Error("read of a DETACHED raster: the transport already took this buffer");
+      const m = at(img);
+      transferAway(img);
+      if (SHEET_NO_CELL(m)) { o?.onNoResult?.(); return []; }
       return [];   // every edge band ANSWERS (with nothing): nothing else is retried
     });
     let debug: any = null;
     const res = await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
-    expect(cellRenderCount(renderBand)).toBe(2);      // re-read, not re-rendered
+    expect(cellRenderCount(renderBand)).toBe(4);      // rendered, then re-rendered
     // printedNo falls back to page order exactly as it does for a sheet that really
     // prints no number — which is precisely why the run has to say the read never
     // happened rather than let the fallback pass for a reading.
     expect(debug.inputs.map((u: any) => u.printedNo)).toEqual([1, 2]);
     expect(debug.unknownSheetNoPages).toEqual([0, 1]);
-    expect(res.ocrStats).toEqual({ calls: 2 * 8, nonAnswers: 4, retries: 2, unknown: 2 });
+    expect(res.ocrStats).toEqual({ calls: 2 * 8, nonAnswers: 4, retries: 2, unknown: 2, withheldVotes: 0 });
   });
 });
 
@@ -1283,31 +1337,40 @@ describe("rotation tally when a side band had to be retried", () => {
     expect(survived.stripReads).toBe(10);
   });
 
-  it("a band whose evidence is not whole is counted UNKNOWN — a withheld vote moves the lock", async () => {
-    // Both side bands are handled identically by the fixture, so every count below is
-    // per page x 2 bands.
+  it("an unread band is UNKNOWN; a band that reads but cannot vote is a WITHHELD VOTE", async () => {
+    // Only page 0 is OCR'd (page 1 carries an edge ref), so every count below is over
+    // its two side bands. The two counters answer different questions: `unknown` is
+    // "nothing came back", `withheldVotes` is "something came back but the rotation
+    // tally cannot use it".
     //
     // REPAIRED. Both rotations of the whole band were lost, the sub-clip retry read
-    // every one of them: the band votes, and nothing is unknown.
+    // every one of them: the band votes, and nothing is missing.
     const repaired = await run((sub, rot) =>
       sub < 0 ? null : (rot === 270 && sub === 0) ? 90 : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(repaired.res.ocrStats).toMatchObject({ retries: 2, unknown: 0 });
+    expect(repaired.res.ocrStats).toMatchObject({ retries: 2, unknown: 0, withheldVotes: 0 });
 
-    // NOT REPAIRED. One sub-clip of the retry was itself lost, so the band's evidence
-    // is not whole, it does not vote, and the page's rotation lock is decided without
-    // it — which is a different scan, not merely a smaller one. Counted.
+    // PARTLY REPAIRED. One sub-clip of the retry was itself lost. The band DID read —
+    // the other rotation's sub-clips all answered — so it is not unknown; but its
+    // evidence is not whole, so it does not vote, and the page's rotation lock is
+    // decided without it. That is a withheld vote, and it is not free: the lock
+    // decides which rotations the strip scan reads.
     const partial = await run((sub, rot) =>
       sub < 0 ? null
         : (rot === 90 && sub === 1) ? null
         : (rot === 270 && sub === 0) ? 90
         : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(partial.res.ocrStats).toMatchObject({ retries: 2, unknown: 2 });
+    expect(partial.res.ocrStats).toMatchObject({ retries: 2, unknown: 0, withheldVotes: 2 });
 
     // NEVER RETRIED. One rotation survived, so the band keeps its whole read and is
-    // not cut — but the lost rotation still leaves the survivor unopposed, the vote is
-    // still withheld, and the lock is still decided without it. Also counted, and no
-    // retry was earned.
+    // not cut — a whole read beats a cut one. Nothing is unknown, but the survivor is
+    // unopposed, so the vote is still withheld.
     const survivor = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : null) : undefined));
-    expect(survivor.res.ocrStats).toMatchObject({ retries: 0, unknown: 2 });
+    expect(survivor.res.ocrStats).toMatchObject({ retries: 0, unknown: 0, withheldVotes: 2 });
+
+    // NOTHING AT ALL. Every rotation of the whole band lost, and every sub-clip of
+    // the retry lost too. This is the band that is genuinely unread — and it is both:
+    // a hole in the evidence AND a vote the tally never got.
+    const dead = await run(() => null);
+    expect(dead.res.ocrStats).toMatchObject({ retries: 2, unknown: 2, withheldVotes: 2 });
   });
 });
