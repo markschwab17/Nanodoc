@@ -979,10 +979,8 @@ describe("reciprocal strip scan: known rotation, first-hit chunks", () => {
  * (2778 px). Horizontal bands also keep `wordsToLabels` honest and readable: at
  * rot 0 a word at local x maps to page `clipX0 + x`.
  */
-describe("a timed-out edge band is retried as overlapping sub-clips", () => {
+describe("a timed-out edge band is re-read WHOLE, never as sub-clips", () => {
   const VIEW: [number, number, number, number] = [0, 0, 2592, 1000];
-  const SUB_X = [0, 558, 1116, 1674];  // sub-clip origins along a top/bottom band
-  const SUB_LEN = 918;
   const lab = (text: string, cx: number, cy: number, w = 60, h = 14) =>
     ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle: 0, h, font: null });
 
@@ -1014,78 +1012,90 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
     }));
     const fakeDoc = { loadPage: vi.fn((i: number) => ({ idx: i, destroy: vi.fn() })) };
     const at = (img: any) => meta.get(img.data[1])!;
-    /** Which horizontal band a clip belongs to: they are the only over-budget ones. */
+    /** Which horizontal band a clip belongs to — the full-width ones. */
     const edgeOf = (m: Meta): "top" | "bottom" | null =>
-      (m.w > 2000 || Math.abs(m.w - SUB_LEN) < 1) ? (m.y0 === 0 ? "top" : "bottom") : null;
-    /** True for the WHOLE band read (2592 pt wide), false for one of its sub-clips. */
-    const isWhole = (m: Meta) => m.w > 2000;
-    /** The sub-clip's index along its band, or -1 if this is not a sub-clip. */
-    const subIndex = (m: Meta) =>
-      (edgeOf(m) && !isWhole(m) ? SUB_X.findIndex((x) => Math.abs(x - m.x0) < 0.5) : -1);
-    return { renderBand, fakeDoc, at, edgeOf, isWhole, subIndex, meta };
+      m.w > 2000 ? (m.y0 === 0 ? "top" : "bottom") : null;
+    /** Every render of a full-width band, in order — one per read attempt of it. */
+    const bandRenders = () => (renderBand as any).mock.calls
+      .map((c: any[]) => c[2] as number[]).filter((c: number[]) => c[2] - c[0] > 2000);
+    return { renderBand, fakeDoc, at, edgeOf, bandRenders, meta };
   };
 
   const word = (text: string, x0: number, confidence = 90) =>
     ({ text, confidence, bbox: { x0, y0: 0, x1: x0 + 60, y1: 12 } });
 
-  it("re-reads a band that answered nothing, and the sub-clips' labels reach the page's recovered set", async () => {
-    const { renderBand, fakeDoc, at, edgeOf, isWhole, subIndex } = await setup();
-    // Page 0's BOTTOM edge and page 1's TOP edge face each other. Both horizontal
-    // bands answer nothing on both pages; the side bands and the sheet-number cell
-    // answer with no words, which is an ANSWER and must not be retried.
-    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+  /**
+   * Both pages' facing horizontal bands lose their first `lose` reads and then answer.
+   * The words the re-read returns are the SAME words the first read would have — that
+   * is what a same-input re-read means, and the fixture must not smuggle in different
+   * evidence, because different evidence accepted as an answer is the bug.
+   */
+  const runBands = async (lose: number) => {
+    const { renderBand, fakeDoc, at, edgeOf, bandRenders } = await setup();
+    (renderBand as any).mockClear();
+    const tries = new Map<string, number>();
+    /** The job budget every re-read was issued with. */
+    const retryBudgets: (number | undefined)[] = [];
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void; timeoutMs?: number }) => {
       const m = at(img);
-      if (edgeOf(m) && isWhole(m)) { o?.onNoResult?.(); return []; }
-      const facing = m.page === 0 ? "bottom" : "top";
-      if (subIndex(m) === 2 && edgeOf(m) === facing) {
-        return [word(m.page === 0 ? "MATCH LINE SEE SHEET C-302" : "MATCH LINE SEE SHEET C-301", 600)];
-      }
-      return [];
+      const e = edgeOf(m);
+      if (!e) return [];   // side bands and the title cell answer, with nothing
+      const key = `${m.page}:${e}`;
+      const nth = (tries.get(key) ?? 0) + 1;
+      tries.set(key, nth);
+      if (nth <= lose) { o?.onNoResult?.(); return []; }
+      if (nth > 1) retryBudgets.push(o?.timeoutMs);
+      // Page 0's BOTTOM edge and page 1's TOP edge face each other.
+      if (e !== (m.page === 0 ? "bottom" : "top")) return [];
+      return [word(m.page === 0 ? "MATCH LINE SEE SHEET C-302" : "MATCH LINE SEE SHEET C-301", 600)];
     });
     let debug: any = null;
-    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
+    const res = await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
+    const recovered = debug.inputs.map((u: any) =>
+      u.extract.labels.filter((l: any) => l.font === "ocr").map((l: any) => [l.text, l.x, l.y]));
+    return { res, debug, ocr, fakeDoc, recovered, retryBudgets, bandRenders: bandRenders() };
+  };
 
-    // The retry loaded its own page handle — the caller's was destroyed when the
-    // reads were merely ISSUED. Two pages, each opened once to extract and once
-    // per retried band (top and bottom both answer nothing → 2 retries each).
-    expect(fakeDoc.loadPage.mock.calls.length).toBeGreaterThan(2);
-    // Sub-clips were rastered, in order along the band, and only for the top/bottom
-    // bands: the side bands are inside the budget and were never cut.
-    const subs = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[])
-      .filter((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1);
-    expect(subs.length).toBe(2 /* pages */ * 2 /* horizontal bands */ * 4 /* sub-clips */);
-    expect(subs.slice(0, 4).map((c: number[]) => c[0])).toEqual(SUB_X);
+  it("a band lost once and answered on the WHOLE re-read lands exactly what a clean run does", async () => {
+    // THE CASE THE RE-READ EXISTS FOR, and the reason it is a re-read rather than a
+    // second opinion: the run that faltered must be indistinguishable from the run that
+    // did not. Every label, at every coordinate, and the same anchor out of them.
+    const clean = await runBands(0);
+    const flaky = await runBands(1);
+    expect(flaky.recovered).toEqual(clean.recovered);
+    expect(flaky.debug.anchors).toEqual(clean.debug.anchors);
+    expect(clean.debug.anchors).toHaveLength(1);
+    expect(clean.debug.anchors[0].perp).toBe("y");   // a top/bottom ref pins y
 
-    // …and the recovered label landed at the SUB-CLIP's own origin plus the word's
-    // offset in it (1116 + 600), not at the band's.
-    const recovered = debug.inputs[0].extract.labels.filter((l: any) => l.font === "ocr");
-    expect(recovered.map((l: any) => l.text)).toContain("MATCH LINE SEE SHEET C-302");
-    expect(recovered.find((l: any) => l.text === "MATCH LINE SEE SHEET C-302").x).toBeCloseTo(1716, 6);
-    // …on the BOTTOM band, which is where page 0's callout was returned.
-    expect(recovered.find((l: any) => l.text === "MATCH LINE SEE SHEET C-302").y).toBeCloseTo(850, 6);
-    // The two pages now reference each other by code, entirely out of the retry.
-    expect(debug.anchors).toHaveLength(1);
-    expect(debug.anchors[0].perp).toBe("y"); // a top/bottom ref pins y
+    // The re-read rendered the SAME clip again — not a cut of it. Four bands re-read,
+    // and every band clip in the run is one of the two full-width ones.
+    expect(flaky.bandRenders.length).toBe(clean.bandRenders.length + 4);
+    const distinct = new Set(flaky.bandRenders.map((c: number[]) => c.join(",")));
+    expect([...distinct].sort()).toEqual([...new Set(clean.bandRenders.map((c: number[]) => c.join(",")))].sort());
+    // …off page handles it opened for itself: the caller's was destroyed when the reads
+    // were merely ISSUED.
+    expect(flaky.fakeDoc.loadPage.mock.calls.length).toBe(clean.fakeDoc.loadPage.mock.calls.length + 4);
+    // …on a DOUBLED budget. Re-reading the same crop on the clock that just expired
+    // mostly buys a second non-answer.
+    expect(flaky.retryBudgets).toEqual([40_000, 40_000, 40_000, 40_000]);
+
+    expect(clean.res.ocrStats).toEqual({ calls: 2 * 7, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 });
+    expect(flaky.res.ocrStats).toEqual({ calls: 2 * 9, nonAnswers: 4, retries: 4, unknown: 0, withheldVotes: 0 });
   });
 
-  it("collapses a callout the overlap made two sub-clips read", async () => {
-    const { fakeDoc, at, edgeOf, isWhole, subIndex } = await setup();
-    // Sub-clips 2 and 3 overlap on pages 1674..2034. The same callout is returned by
-    // both, at each one's own local offset, so both map to page x 1716.
-    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
-      const m = at(img);
-      if (edgeOf(m) && isWhole(m)) { o?.onNoResult?.(); return []; }
-      if (edgeOf(m) !== "top") return [];
-      const j = subIndex(m);
-      if (j === 2) return [word("MATCH LINE SEE SHEET C-302", 600)];
-      if (j === 3) return [word("MATCH LINE SEE SHEET C-302", 42)];
-      return [];
-    });
-    let debug: any = null;
-    await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, onDebug: (d) => { debug = d; } });
-    const hits = debug.inputs[0].extract.labels.filter((l: any) => l.text === "MATCH LINE SEE SHEET C-302");
-    expect(hits).toHaveLength(1);
-    expect(hits[0].x).toBeCloseTo(1716, 6);
+  it("a band lost TWICE recovers nothing and is UNKNOWN — no cut-up second opinion is accepted", async () => {
+    const twice = await runBands(2);
+    // Nothing was recovered from those bands, so the two pages never reference each
+    // other and no anchor is claimed. Before this change the band was cut into
+    // overlapping sub-clips whose labels — different evidence from the whole read —
+    // were accepted as a full answer, which is how two runs over the same sheets
+    // reached different verdicts with `unknown` at zero.
+    expect(twice.recovered).toEqual([[], []]);
+    expect(twice.debug.anchors).toHaveLength(0);
+    // Two reads per band, and no third: one re-read is the whole budget.
+    expect(twice.res.ocrStats).toEqual({ calls: 2 * 9, nonAnswers: 8, retries: 4, unknown: 4, withheldVotes: 0 });
+    // Horizontal bands do not vote on rotation, so nothing is withheld — but every one
+    // of them is `unknown`, which is the counter the probe's gates actually read.
   });
 
   it("does NOT retry a band that answered — an empty read is an answer", async () => {
@@ -1094,15 +1104,15 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
     const ocr = vi.fn(async () => []);
     await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20 });
     const clips = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[]);
-    expect(clips.some((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1)).toBe(false);
-    // 4 edge bands + the sheet-number cell, per page. Nothing more.
+    // 4 edge bands + the sheet-number cell, per page. Nothing more — no re-render at
+    // all, which is the clean-run guarantee: no new branch without a non-answer.
     expect(clips).toHaveLength(2 * 5);
     // 7 reads per page: top, bottom, left x2 rotations, right x2, sheet number.
     expect(ocr).toHaveBeenCalledTimes(2 * 7);
   });
 
-  it("an abort landing while the reads are in flight cancels the retry", async () => {
-    const { renderBand, fakeDoc, at, edgeOf, isWhole } = await setup();
+  it("an abort landing while the reads are in flight cancels the re-read", async () => {
+    const { renderBand, fakeDoc, at, edgeOf } = await setup();
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let aborting = false;
@@ -1119,7 +1129,7 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
     // `yieldToMain`) to trip the run's OCR signal, late enough to throw nothing.
     const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
       const m = at(img);
-      if (m.page === 0 && edgeOf(m) && isWhole(m)) {
+      if (m.page === 0 && edgeOf(m)) {
         await Promise.resolve();
         aborting = true;      // …after the burst was issued, before page 1's check
         o?.onNoResult?.();
@@ -1130,19 +1140,17 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
     });
     const run = autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, shouldAbort: () => aborting });
     await expect(run).rejects.toBeInstanceOf(AutoStitchAborted);
-    // Page 0's reads were all ISSUED and none of them threw: the retry decision is
+    // Page 0's reads were all ISSUED and none of them threw: the re-read decision is
     // genuinely reached below, it is the abort that declines it.
     expect(ocr).toHaveBeenCalledTimes(7);
     const rendersBefore = (renderBand as any).mock.calls.length;
 
     release();
-    // Let the parked page's reads settle and its retry decision be taken.
+    // Let the parked page's reads settle and its re-read decision be taken.
     await new Promise((r) => setTimeout(r, 20));
-    const clips = (renderBand as any).mock.calls.map((c: any[]) => c[2] as number[]);
-    expect(clips.some((c: number[]) => Math.abs(c[2] - c[0] - SUB_LEN) < 1)).toBe(false);
-    // Nothing at all was rastered after the abort — not one sub-clip, not one page.
+    // Nothing at all was rastered after the abort — not one band, not one page.
     expect((renderBand as any).mock.calls.length).toBe(rendersBefore);
-    expect(fakeDoc.loadPage).toHaveBeenCalledTimes(1); // the retry never re-opened it
+    expect(fakeDoc.loadPage).toHaveBeenCalledTimes(1); // the re-read never re-opened it
   });
 
   /**
@@ -1229,18 +1237,18 @@ describe("a timed-out edge band is retried as overlapping sub-clips", () => {
 });
 
 /**
- * The rotation tally across a retry. A side band's rotation is a property of the
+ * The rotation tally across a re-read. A side band's rotation is a property of the
  * BAND, and the tally is what locks the reciprocal strip scan to one rotation — so a
  * band whose evidence is not whole must not vote. `stripReads` is what a lock looks
  * like from outside: 5 strips at one rotation, or 10 at both.
  *
- * View 1000 x 2592 pt: the SIDE bands are over budget (7200 px tall → 4 sub-clips of
- * 918 pt stepping 558) and the horizontal ones are not.
+ * View 1000 x 2592 pt: the SIDE bands are the tall ones, and each is read at BOTH
+ * rotations off one raster. A lost rotation is re-read off a raster of its own — the
+ * same clip, the same dpi, the same rotation — so the count of tall-band renders is
+ * how many re-reads happened.
  */
-describe("rotation tally when a side band had to be retried", () => {
+describe("rotation tally when a side band rotation had to be re-read", () => {
   const VIEW: [number, number, number, number] = [0, 0, 1000, 2592];
-  const SUB_Y = [0, 558, 1116, 1674];
-  const SUB_LEN = 918;
   const STRIP_STARTS = [450, 570, 690, 810, 930];
   const DENSE = Array.from({ length: 5000 }, (_, i) => makeGeom([[400 + (i % 7), 300], [401 + (i % 7), 301]], false, i));
   const lab = (text: string, cx: number, cy: number, w = 120, h = 10) =>
@@ -1254,12 +1262,12 @@ describe("rotation tally when a side band had to be retried", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   /**
-   * `answer(sub, rot)` speaks for the side bands of page 0: `sub` is -1 for the
-   * WHOLE-band read and 0-3 for a sub-clip. `null` means a non-answer (the read
-   * reports `onNoResult` and resolves []), a number is that word's confidence, and
-   * `undefined` is a genuine empty read.
+   * `answer(pass, rot)` speaks for the side bands of page 0: `pass` is 1 for the
+   * first-pass read and 2 for the re-read of that same band at that same rotation.
+   * `null` means a non-answer (the read reports `onNoResult` and resolves []), a
+   * number is that word's confidence, and `undefined` is a genuine empty read.
    */
-  const run = async (answer: (sub: number, rot: 90 | 270) => number | null | undefined) => {
+  const run = async (answer: (pass: number, rot: 90 | 270) => number | null | undefined) => {
     const { capturePage } = await import("./captureDevice");
     const { renderBand } = await import("./bandRender");
     const pages = [
@@ -1267,15 +1275,18 @@ describe("rotation tally when a side band had to be retried", () => {
       { view: VIEW, words: [], geometry: [], shxLabels: [], labels: [lab("MATCH LINE SEE SHEET 1", 90, 1300)] },
     ];
     const meta = new Map<number, { x0: number; h: number }>();
-    const metaSub = new Map<number, number>();
+    const metaPass = new Map<number, number>();
+    /** Renders of each tall band so far, by its x origin: 1 = first pass, 2 = re-read. */
+    const passes = new Map<number, number>();
     let seq = 0;
     (renderBand as any).mockImplementation((_m: any, _p: any, clip: number[]) => {
       const id = ++seq;
       meta.set(id, { x0: clip[0], h: clip[3] - clip[1] });
-      const y0 = clip[1];
       // Green carries the id (survives rotateRaw); red-first after rotation = 90.
-      const sub = Math.abs((clip[3] - clip[1]) - SUB_LEN) < 1 ? SUB_Y.findIndex((y) => Math.abs(y - y0) < 0.5) : -1;
-      metaSub.set(id, sub);
+      const tall = clip[3] - clip[1] > 2000;
+      const pass = tall ? (passes.get(clip[0]) ?? 0) + 1 : 0;
+      if (tall) passes.set(clip[0], pass);
+      metaPass.set(id, pass);
       return { image: { width: 2, height: 1, data: new Uint8ClampedArray([255, id, 0, 255, 0, id, 255, 255]) }, scale: 1 };
     });
     let n = 0;
@@ -1283,63 +1294,60 @@ describe("rotation tally when a side band had to be retried", () => {
 
     const fakeDoc = { loadPage: vi.fn(() => ({ destroy: vi.fn() })) };
     let stripReads = 0;
-    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void }) => {
+    /** The job budget every re-read was issued with. */
+    const retryBudgets: (number | undefined)[] = [];
+    const ocr = vi.fn(async (img: any, o?: { onNoResult?: () => void; timeoutMs?: number }) => {
       const m = meta.get(img.data[1])!;
       const rot: 0 | 90 | 270 = img.width === 2 ? 0 : (img.data[0] === 255 ? 90 : 270);
       if (STRIP_STARTS.some((x) => Math.abs(x - m.x0) < 0.5)) { stripReads++; return []; }
-      const side = (Math.abs(m.x0) < 0.5 || Math.abs(m.x0 - 880) < 0.5) && (m.h > 2000 || Math.abs(m.h - SUB_LEN) < 1);
+      const side = (Math.abs(m.x0) < 0.5 || Math.abs(m.x0 - 880) < 0.5) && m.h > 2000;
       if (!side || rot === 0) return [];
-      const a = answer(metaSub.get(img.data[1])!, rot);
+      const pass = metaPass.get(img.data[1])!;
+      if (pass > 1) retryBudgets.push(o?.timeoutMs);
+      const a = answer(pass, rot);
       if (a === null) { o?.onNoResult?.(); return []; }
       // "ZZZ" can never parse as a sheet ref, so these reads cannot hand page 0 the
       // reciprocal edge ref and skip the very scan under test.
       return a === undefined ? [] : [{ text: "ZZZ", confidence: a, bbox: { x0: 0, y0: 0, x1: 1, y1: 1 } }];
     });
     const res = await autoStitch({} as any, fakeDoc as any, [0, 1], { ocr, userScale: 20, ocrConcurrency: 3 });
-    const subRenders = (renderBand as any).mock.calls
-      .filter((c: any[]) => Math.abs((c[2][3] - c[2][1]) - SUB_LEN) < 1).length;
     // WHOLE side-band rasters. Two on a clean run (one per side band, issued at both
     // rotations from the same pixmap); each extra one is a lost rotation being
     // re-read at full size.
     const sideRenders = (renderBand as any).mock.calls
       .filter((c: any[]) => (c[2][3] - c[2][1]) > 2000 && (Math.abs(c[2][0]) < 0.5 || Math.abs(c[2][0] - 880) < 0.5)).length;
-    return { stripReads, subRenders, sideRenders, res };
+    return { stripReads, sideRenders, retryBudgets, res };
   };
 
-  it("a band that needed the retry votes with its RETRIED mass, summed over the sub-clips", async () => {
-    // Both rotations of the whole band are non-answers, so the band is re-read. In
-    // the retry 270 reads a confident word on sub-clip 0 and 90 a worthless 51 on
-    // sub-clip 3: 40 vs 1 per band, 80 vs 2 over the page's two side bands — real,
-    // opposed evidence, which clears the floor and the 2x margin.
-    const locked = await run((sub, rot) =>
-      sub < 0 ? null : (rot === 270 && sub === 0) ? 90 : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(locked.subRenders).toBe(2 /* side bands */ * 4 /* sub-clips */);
+  it("a band that lost BOTH rotations is re-read whole at each, and votes with what the re-reads found", async () => {
+    // Both rotations of the band are lost, so both are re-read — the same clip, once
+    // per rotation. 270 comes back confident and 90 with a worthless 51: 40 vs 1 per
+    // band, 80 vs 2 over the page's two side bands, which clears the floor and the 2x
+    // margin. The band votes, because its evidence is whole again.
+    const locked = await run((pass, rot) => (pass === 1 ? null : rot === 270 ? 90 : 51));
+    expect(locked.sideRenders).toBe(2 /* first pass */ + 2 * 2 /* one per lost rotation */);
     expect(locked.stripReads).toBe(5);
+    expect(locked.retryBudgets).toEqual([40_000, 40_000, 40_000, 40_000]);
+    expect(locked.res.ocrStats).toMatchObject({ retries: 4, unknown: 0, withheldVotes: 0 });
   });
 
-  it("…but not if a sub-clip of the retry was itself a non-answer", async () => {
-    // Identical to above except one of 90's sub-clips also blew its budget. The
-    // band's evidence is no longer whole in both directions, so it does not vote —
-    // exactly the guard that stops one 20 s hiccup locking a page's rotation.
-    const unlocked = await run((sub, rot) =>
-      sub < 0 ? null
-        : (rot === 90 && sub === 1) ? null
-        : (rot === 270 && sub === 0) ? 90
-        : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(unlocked.subRenders).toBe(8); // it WAS retried…
-    expect(unlocked.stripReads).toBe(10); // …but the retry does not get to vote
+  it("…but not if a rotation is lost AGAIN — one re-read is the whole budget", async () => {
+    // Identical except 90 blows its budget twice. The band's evidence is not whole in
+    // both directions, so it does not vote — and there is no third read, and no cut-up
+    // stand-in for the read that never landed.
+    const unlocked = await run((pass, rot) => (pass === 1 ? null : rot === 270 ? 90 : null));
+    expect(unlocked.sideRenders).toBe(6);   // still exactly one re-read per lost rotation
+    expect(unlocked.stripReads).toBe(10);
+    expect(unlocked.res.ocrStats).toMatchObject({ retries: 4, unknown: 2, withheldVotes: 2 });
   });
 
-  it("a band with ONE surviving rotation is never CUT — its lost rotation is re-read whole", async () => {
-    // 270 read the band fine; only 90 was lost. The band therefore already HAS a
-    // whole-raster reading, and cutting it could only make that reading worse (a
-    // callout across a cut is truncated, or misread into a different valid-looking
-    // target) — and the two rotations' scores are compared against each other, which
-    // only means something between reads of the same shape. So no sub-clip…
-    const survived = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : null) : undefined));
-    expect(survived.subRenders).toBe(0);
-    // …but the lost rotation IS re-read, at full size: 2 first-pass side rasters + 1
-    // re-read each. Leaving it alone is what let a single 20 s hiccup move the lock.
+  it("a band with ONE surviving rotation re-reads only the rotation it lost", async () => {
+    // 270 read the band fine; only 90 was lost. The band is re-read at 90 alone — the
+    // rotation that failed, on the clip that failed — because the two rotations' scores
+    // are compared against each other and a score only means something between reads of
+    // the same shape.
+    const survived = await run((_pass, rot) => (rot === 270 ? 90 : null));
+    // 2 first-pass side rasters + 1 re-read each.
     expect(survived.sideRenders).toBe(4);
     // Here the re-read is lost again, so the band still does not vote: one rotation is
     // a non-answer, so counting the survivor would be counting it unopposed.
@@ -1347,28 +1355,19 @@ describe("rotation tally when a side band had to be retried", () => {
   });
 
   it("a rotation lost once and answered on the re-read votes exactly as a clean band does", async () => {
-    // THE CASE THE RE-READ EXISTS FOR. 270 answers confidently on both side bands; 90
-    // blows its budget on the first pass of each and answers on the second. The two
-    // bands' evidence is whole again, so the page locks to 270 and the reciprocal scan
-    // reads 5 strips at one rotation — the SAME answer as the run where nothing was
-    // ever lost. Before the re-read, both votes were withheld and the same sheets
-    // scanned 10 strips at both rotations: a different scan, and a verdict free to
-    // differ from run to run on identical input.
-    const clean = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : 51) : undefined));
+    // 270 answers confidently on both side bands; 90 blows its budget on the first pass
+    // of each and answers on the second. The two bands' evidence is whole again, so the
+    // page locks to 270 and the reciprocal scan reads 5 strips at one rotation — the
+    // SAME answer as the run where nothing was ever lost.
+    const clean = await run((_pass, rot) => (rot === 270 ? 90 : 51));
     expect(clean.stripReads).toBe(5);
     expect(clean.res.ocrStats).toMatchObject({ nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 });
 
-    let lost90 = 0;
-    const flaky = await run((sub, rot) => {
-      if (sub >= 0) return undefined;                 // never cut — nothing to answer for
-      if (rot === 270) return 90;
-      return ++lost90 <= 2 ? null : 51;               // one non-answer per side band, then it reads
-    });
+    const flaky = await run((pass, rot) => (rot === 270 ? 90 : pass === 1 ? null : 51));
     expect(flaky.stripReads).toBe(clean.stripReads);
     // `sideRenders` counts the shared `renderBand` mock, so both runs are in it:
     // the clean run's 2, then the flaky run's 2 first-pass rasters + 2 re-reads.
     expect(flaky.sideRenders - clean.sideRenders).toBe(4);
-    expect(flaky.subRenders).toBe(0);                 // whole, never cut
     expect(flaky.res.ocrStats).toMatchObject({ nonAnswers: 2, retries: 2, unknown: 0, withheldVotes: 0 });
   });
 
@@ -1378,36 +1377,27 @@ describe("rotation tally when a side band had to be retried", () => {
     // "nothing came back", `withheldVotes` is "something came back but the rotation
     // tally cannot use it".
     //
-    // REPAIRED. Both rotations of the whole band were lost, the sub-clip retry read
-    // every one of them: the band votes, and nothing is missing.
-    const repaired = await run((sub, rot) =>
-      sub < 0 ? null : (rot === 270 && sub === 0) ? 90 : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(repaired.res.ocrStats).toMatchObject({ retries: 2, unknown: 0, withheldVotes: 0 });
+    // REPAIRED. Both rotations lost, both re-read, both answered: the band votes, and
+    // nothing is missing.
+    const repaired = await run((pass, rot) => (pass === 1 ? null : rot === 270 ? 90 : 51));
+    expect(repaired.res.ocrStats).toMatchObject({ retries: 4, unknown: 0, withheldVotes: 0 });
 
-    // PARTLY REPAIRED. One sub-clip of the retry was itself lost. The band DID read —
-    // the other rotation's sub-clips all answered — so it is not unknown; but its
-    // evidence is not whole, so it does not vote, and the page's rotation lock is
-    // decided without it. That is a withheld vote, and it is not free: the lock
-    // decides which rotations the strip scan reads.
-    const partial = await run((sub, rot) =>
-      sub < 0 ? null
-        : (rot === 90 && sub === 1) ? null
-        : (rot === 270 && sub === 0) ? 90
-        : (rot === 90 && sub === 3) ? 51 : undefined);
-    expect(partial.res.ocrStats).toMatchObject({ retries: 2, unknown: 0, withheldVotes: 2 });
+    // ONE ROTATION STILL LOST. The band DID read — the other rotation's re-read landed
+    // — so its labels are used; but its evidence is not whole, so it does not vote, and
+    // the read that never came back is `unknown`. Withheld and unknown together, which
+    // is the point: the gates key on `unknown`, and there is no longer any way to be
+    // withheld without being seen by them.
+    const partial = await run((pass, rot) => (pass === 1 ? null : rot === 270 ? 90 : null));
+    expect(partial.res.ocrStats).toMatchObject({ retries: 4, unknown: 2, withheldVotes: 2 });
 
-    // A ROTATION LOST TWICE. One rotation survived, so the band is never cut — but its
-    // lost rotation is re-read whole, and lost again. The survivor is still unopposed,
-    // so the vote is withheld; and because the hole is a READ that never landed, it is
-    // `unknown` too. That is the point of the re-read's second half: the gates key on
-    // `unknown` alone, so a band in this state used to be invisible to them.
-    const survivor = await run((sub, rot) => (sub < 0 ? (rot === 270 ? 90 : null) : undefined));
+    // A ROTATION LOST TWICE, the other never lost at all. One re-read per band, and the
+    // survivor is still unopposed, so the vote is withheld and the hole is `unknown`.
+    const survivor = await run((_pass, rot) => (rot === 270 ? 90 : null));
     expect(survivor.res.ocrStats).toMatchObject({ retries: 2, unknown: 2, withheldVotes: 2 });
 
-    // NOTHING AT ALL. Every rotation of the whole band lost, and every sub-clip of
-    // the retry lost too. This is the band that is genuinely unread — and it is both:
-    // a hole in the evidence AND a vote the tally never got.
+    // NOTHING AT ALL. Every rotation lost, and lost again on its re-read. Two holes per
+    // band, and no vote.
     const dead = await run(() => null);
-    expect(dead.res.ocrStats).toMatchObject({ retries: 2, unknown: 2, withheldVotes: 2 });
+    expect(dead.res.ocrStats).toMatchObject({ retries: 4, unknown: 4, withheldVotes: 2 });
   });
 });

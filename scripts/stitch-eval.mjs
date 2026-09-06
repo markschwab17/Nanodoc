@@ -187,12 +187,14 @@ async function ocr(image, opts) {
   if (!NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
   ocrCalls++;
   const p = await ensurePool();
-  const res = await p.run(encodePNG(image.width, image.height, image.data));
-  // A timed-out job is a non-answer, not an empty sheet — never cache it, and tell
-  // the caller so it can re-read that band as sub-clips (`onNoResult`). This machine
-  // has never actually produced one: the harness's tesseract finishes a 7200 px band
-  // well inside the 20 s budget where the browser build does not, which is why the
-  // corpus cannot exercise the retry and must come out bit-identical.
+  // `opts.timeoutMs` is the aligner naming a budget for THIS read — the doubled one a
+  // re-read gets. Undefined on every ordinary read, which leaves the pool's own.
+  const res = await p.run(encodePNG(image.width, image.height, image.data), { timeoutMs: opts?.timeoutMs });
+  // A timed-out job is a non-answer, not an empty sheet — never cache it, and tell the
+  // caller so it re-reads that same clip once (`onNoResult`). This machine has never
+  // actually produced one: the harness's tesseract finishes a 7200 px band well inside
+  // the 20 s budget where the browser build does not, which is why the corpus cannot
+  // exercise the re-read and must come out bit-identical.
   if (res === OCR_NO_RESULT) { opts?.onNoResult?.(); return []; }
   const words = toOcrWords(res);
   if (!NO_OCR_CACHE) { cache[key] = words; cacheDirty = true; if (ocrCalls % 20 === 0) flushCache(); }

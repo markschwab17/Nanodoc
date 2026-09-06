@@ -155,6 +155,35 @@ describe("stitchProbe.worker OCR RPC — non-answers", () => {
     expect(flagged).toBe(true);
   });
 
+  it("the RPC backstop SCALES with the budget a re-read asks for", async () => {
+    // A re-read is dispatched on a doubled job budget (40 s). A fixed 25 s backstop
+    // would fire first and turn a job entitled to 40 s into a non-answer — and the
+    // caller has no second re-read to spend, so the band would go `unknown` for a
+    // reason that is purely an artefact of this timer.
+    const ocr = await withOcr();
+    vi.useFakeTimers();
+    let flagged = false;
+    const p = ocr(IMG(), { onNoResult: () => { flagged = true; }, timeoutMs: 40_000 });
+    // The budget rides on the request, so the main thread's pool honours the same one.
+    const req = sent.filter((m) => m.kind === "ocr-req").at(-1);
+    expect(req.timeoutMs).toBe(40_000);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(flagged).toBe(false);          // where the old fixed backstop would have fired
+    await vi.advanceTimersByTimeAsync(20_001);   // 40 s budget + the same 5 s of slack
+    await expect(p).resolves.toEqual([]);
+    expect(flagged).toBe(true);
+  });
+
+  it("an ordinary read still carries no budget, and still backstops at 25 s", async () => {
+    const ocr = await withOcr();
+    vi.useFakeTimers();
+    const p = ocr(IMG());
+    const req = sent.filter((m) => m.kind === "ocr-req").at(-1);
+    expect(req.timeoutMs).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(25_000);
+    await expect(p).resolves.toEqual([]);
+  });
+
   it("an ABORT is not a non-answer — the caller stopped it on purpose", async () => {
     const ocr = await withOcr();
     const ac = new AbortController();

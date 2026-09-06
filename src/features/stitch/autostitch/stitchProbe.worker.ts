@@ -9,6 +9,7 @@
  * Mirrors the mupdf-in-worker init pattern of src/core/pdf/tiles/tileRender.worker.ts.
  */
 import { autoStitch, AutoStitchAborted } from "./autoStitch";
+import { OCR_JOB_TIMEOUT_MS } from "./ocrPool";
 import { toProbeResult, type ProbeRequest, type ProbeMessage } from "./stitchProbe";
 import type { OcrWord, RawImage } from "./ocrService";
 
@@ -41,16 +42,23 @@ let abortUpTo = -1;
 // and each one settles only its own call.
 let ocrSeq = 0;
 const ocrPending = new Map<number, (words: OcrWord[], noResult: boolean) => void>();
-// Per-RPC backstop. Longer than the main-thread pool's own 20s per-job budget
-// (ocrService's OCR_JOB_TIMEOUT_MS), but the two are NOT measured from the same
-// instant and this one does not reliably come second: the pool's clock starts when a
-// worker DISPATCHES the job, this one when the request is POSTED. A page issues 7-13
-// reads at once onto a pool of 2-3 workers, so a read queued behind two others can
-// dispatch 5s or more after it was posted — and its 20s non-answer then lands at
-// t=25s+, after this fired. So reaching the backstop means one of two things, a lost
-// reply or a job whose budget expired while it waited, and it cannot tell them
-// apart; both are reported as NON-ANSWERS (see `finish`).
-const OCR_TIMEOUT_MS = 25_000;
+// Per-RPC backstop. Longer than the main-thread pool's own per-job budget
+// (OCR_JOB_TIMEOUT_MS), but the two are NOT measured from the same instant and this
+// one does not reliably come second: the pool's clock starts when a worker DISPATCHES
+// the job, this one when the request is POSTED. A page issues 7-13 reads at once onto
+// a pool of 2-3 workers, so a read queued behind two others can dispatch 5s or more
+// after it was posted — and its 20s non-answer then lands at t=25s+, after this
+// fired. So reaching the backstop means one of two things, a lost reply or a job
+// whose budget expired while it waited, and it cannot tell them apart; both are
+// reported as NON-ANSWERS (see `finish`).
+//
+// IT SCALES WITH THE JOB'S BUDGET. A re-read is dispatched with a DOUBLED budget
+// (RETRY_JOB_TIMEOUT_MS, named per call by the aligner); a fixed 25 s backstop would
+// then fire at 25 s on a job entitled to 40 s, turning the whole point of the longer
+// budget into a non-answer the caller can no longer retry. So the backstop is always
+// the job's own budget plus the same 5 s of slack it has always carried.
+const OCR_BACKSTOP_SLACK_MS = 5_000;
+const backstopFor = (jobBudgetMs?: number) => (jobBudgetMs ?? OCR_JOB_TIMEOUT_MS) + OCR_BACKSTOP_SLACK_MS;
 // Counts every RPC autoStitch makes through its `ocr` callback for the CURRENT
 // probe — reset at the top of `handle()` so a persistent worker's later probes
 // don't accumulate a prior run's count.
@@ -63,7 +71,7 @@ const OCR_TIMEOUT_MS = 25_000;
 let ocrCallCount = 0;
 function ocrViaMain(
   image: RawImage,
-  opts?: { signal?: AbortSignal; onNoResult?: () => void },
+  opts?: { signal?: AbortSignal; onNoResult?: () => void; timeoutMs?: number },
 ): Promise<OcrWord[]> {
   return new Promise((resolve) => {
     const signal = opts?.signal;
@@ -89,7 +97,7 @@ function ocrViaMain(
     // holds no text", and calling it that hides a lost band behind an empty answer.
     // The cost of being wrong is bounded — a retry is one extra pass over one band,
     // it is itself subject to the same backstop, and it never recurses.
-    const timer = setTimeout(() => finish([], true), OCR_TIMEOUT_MS);
+    const timer = setTimeout(() => finish([], true), backstopFor(opts?.timeoutMs));
     // Forwarding the abort is what actually stops the work. An aborted read is
     // usually still QUEUED in the main thread's pool, and a queued job has no
     // deadline of its own — resolving [] here alone would leave the pool grinding
@@ -99,7 +107,7 @@ function ocrViaMain(
       finish([]);
     };
     ocrPending.set(id, finish);
-    (self as any).postMessage({ kind: "ocr-req", ocrId: id, image }, [image.data.buffer]);
+    (self as any).postMessage({ kind: "ocr-req", ocrId: id, image, timeoutMs: opts?.timeoutMs }, [image.data.buffer]);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

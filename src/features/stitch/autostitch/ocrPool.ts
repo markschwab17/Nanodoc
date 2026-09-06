@@ -45,6 +45,30 @@ export function defaultOcrPoolSize(): number {
   return Math.min(3, Math.max(2, cores - 1));
 }
 
+/**
+ * The per-job OCR budget every transport in the tree runs, measured from DISPATCH.
+ *
+ * It lives HERE, with the mechanism that enforces it, rather than in each transport:
+ * the browser service, the probe worker's RPC backstop and the Node/Lambda pool all
+ * have to agree on it, and three copies of `20_000` is three chances to disagree.
+ */
+export const OCR_JOB_TIMEOUT_MS = 20_000;
+
+/**
+ * The budget ONE re-read gets: double.
+ *
+ * A read that blew the budget is re-read on exactly the same input (`autoStitch`
+ * re-renders the identical clip), so re-reading it on the same 20 s clock mostly buys
+ * a second non-answer — the crop was too slow, and it is no faster the second time.
+ * Doubling is what makes the re-read a genuine second chance rather than a formality,
+ * and it is bounded: one band, one extra read, never recursive.
+ *
+ * It is deliberately NOT the default. Every FIRST read keeps the 20 s budget, because
+ * the budget's other job is to stop a hung worker pinning a pool slot, and a run whose
+ * every read waited 40 s is a run the user has already abandoned.
+ */
+export const RETRY_JOB_TIMEOUT_MS = OCR_JOB_TIMEOUT_MS * 2;
+
 /** Anything that can OCR one input and be shut down — a tesseract worker fits structurally. */
 export interface OcrPoolWorker<Input, Result> {
   recognize(input: Input): Promise<Result>;
@@ -64,7 +88,8 @@ export interface OcrPoolOptions<Input, Result> {
   size: number;
   /** Builds one ready-to-use worker (already configured). Called at most `size` times concurrently-never. */
   createWorker: () => Promise<OcrPoolWorker<Input, Result>>;
-  /** Per-job budget in ms, read at DISPATCH time so tests can shorten it after the pool exists. */
+  /** Per-job budget in ms, read at DISPATCH time so tests can shorten it after the pool
+   *  exists. A job that names its own `timeoutMs` in `run` overrides this. */
   timeoutMs: () => number;
   /** Logging hook fired when a job times out. Must not throw. */
   onTimeout?: () => void;
@@ -79,8 +104,13 @@ export interface OcrPool<Input, Result> {
    * OCR_NO_RESULT and it never runs); aborting an in-flight job resolves
    * OCR_NO_RESULT immediately and ignores the result when it lands — the worker
    * itself is left alone and returns to the pool, because it is healthy.
+   *
+   * `timeoutMs`: this job's budget, overriding the pool's. Still measured from
+   * DISPATCH, so a longer budget is not spent waiting in the queue. It exists for the
+   * ONE re-read a lost read earns (`RETRY_JOB_TIMEOUT_MS`): re-reading the same crop
+   * on the same clock that just expired mostly buys a second non-answer.
    */
-  run(input: Input, opts?: { signal?: AbortSignal }): Promise<Result | OcrNoResult>;
+  run(input: Input, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<Result | OcrNoResult>;
   /**
    * Start booting one worker now, without a job. Callers use this to overlap the
    * (slow) first worker boot with their own pre-OCR work; it is a hint, so
@@ -99,6 +129,8 @@ interface Job<Input, Result> {
   settled: boolean;
   /** Kept so the job can take itself off `waiting` when it settles normally. */
   signal?: AbortSignal;
+  /** This job's own budget, or undefined for the pool's. Read at DISPATCH. */
+  timeoutMs?: number;
 }
 
 export function createOcrPool<Input, Result>(
@@ -259,7 +291,7 @@ export function createOcrPool<Input, Result>(
       // heap for zero pending work. recognize() re-arms it via prewarm().
       warm = false;
       pump();           // …and a replacement is created lazily if work remains
-    }, timeoutMs());
+    }, job.timeoutMs ?? timeoutMs());
     // `terminate()`'s handle on this dispatch. It has to do BOTH halves: clearing
     // the timer alone would strand the job forever (with the worker terminated,
     // the timer was the only thing left that would ever settle it), and settling
@@ -306,6 +338,7 @@ export function createOcrPool<Input, Result>(
         if (destroyed || opts?.signal?.aborted) { resolve(OCR_NO_RESULT); return; }
         const job: Job<Input, Result> = {
           input, resolve, reject, settled: false, signal: opts?.signal,
+          timeoutMs: opts?.timeoutMs,
         };
         if (job.signal) watchSignal(job, job.signal);
         queue.push(job);

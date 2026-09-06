@@ -30,7 +30,7 @@
 import * as zlib from "node:zlib";
 
 import { autoStitch, AutoStitchAborted, type OcrStats } from "./autoStitch";
-import { createOcrPool, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
+import { createOcrPool, OCR_JOB_TIMEOUT_MS as POOL_OCR_JOB_TIMEOUT_MS, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
 import { toProbeResult, type ProbeRequest, type ProbeResult } from "./stitchProbe";
 import type { OcrWord, RawImage } from "./ocrService";
 
@@ -55,10 +55,12 @@ export const ENGINE_VERSION: string =
  *  no business inheriting a number that describes the machine instead of the pool. */
 export const NODE_OCR_POOL_SIZE = 3;
 
-/** Per-job OCR budget, measured from DISPATCH (see `ocrPool.ts`). A job that blows it is a
- *  NON-ANSWER, not an empty sheet: `onNoResult` fires and the aligner re-reads the band as
- *  sub-clips. Same 20 s the harness has always used, and the same the Lambda runs. */
-export const OCR_JOB_TIMEOUT_MS = 20_000;
+/** Per-job OCR budget, measured from DISPATCH (see `ocrPool.ts`, which owns the constant so
+ *  the browser service, the probe worker's RPC backstop and this pool cannot drift apart).
+ *  A job that blows it is a NON-ANSWER, not an empty sheet: `onNoResult` fires and the
+ *  aligner re-reads that same clip once, on a DOUBLED budget it names per call. Same 20 s
+ *  the harness has always used, and the same the Lambda runs. */
+export const OCR_JOB_TIMEOUT_MS = POOL_OCR_JOB_TIMEOUT_MS;
 
 /** Whole-probe budget. The Lambda's own timeout is 300 s, so the engine must give up
  *  first and hand back a `status: "timeout"` row rather than being killed mid-write. */
@@ -270,12 +272,17 @@ export async function runProbe(req: ProbeNodeRequest, deps: ProbeNodeDeps): Prom
 
   const ocr = async (
     image: RawImage,
-    opts?: { signal?: AbortSignal; onNoResult?: () => void },
+    opts?: { signal?: AbortSignal; onNoResult?: () => void; timeoutMs?: number },
   ): Promise<OcrWord[]> => {
     ocrCalls++;
-    const res = await pool.run(encodePNG(image.width, image.height, image.data), { signal: opts?.signal });
-    // A non-answer is not an empty sheet. Say so, so the aligner re-reads the band as
-    // sub-clips instead of concluding the band holds no text — collapsing the two is
+    const res = await pool.run(
+      encodePNG(image.width, image.height, image.data),
+      // `timeoutMs` is the aligner naming a budget for THIS read — the doubled one a
+      // re-read gets. Undefined on every ordinary read, which leaves the pool's own.
+      { signal: opts?.signal, timeoutMs: opts?.timeoutMs },
+    );
+    // A non-answer is not an empty sheet. Say so, so the aligner re-reads that same
+    // clip instead of concluding the band holds no text — collapsing the two is
     // the exact non-determinism the `unknown` status exists to surface.
     if (res === OCR_NO_RESULT) { opts?.onNoResult?.(); return []; }
     return toOcrWords(res);

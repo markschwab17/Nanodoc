@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { pageEdgeBands, sheetNoBand, splitBand, dedupeLabels, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords, refPhraseWindows, SPLIT_MAX_PX, SPLIT_TARGET_PX, RETRY_OVERLAP_PX } from "./ocrBands";
+import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords, refPhraseWindows } from "./ocrBands";
 import type { OcrWord } from "./ocrService";
 
 describe("pageEdgeBands", () => {
@@ -267,98 +267,5 @@ describe("refPhraseWindows recovers a split MATCHLINE", () => {
 
   test("ordinary words on a line are not a callout", () => {
     expect(refPhraseWindows([W("GRAPHIC", 0, 0, 70, 12), W("SCALE", 80, 0, 130, 12), W("IN", 140, 0, 155, 12)])).toHaveLength(0);
-  });
-});
-
-describe("splitBand", () => {
-  const S = 200 / 72;
-  const px = (lo: number, hi: number) => Math.ceil(hi * S) - Math.floor(lo * S);
-  // A 36" side band in points: 864 x 7200 px at 200 dpi — the read that times out.
-  const SHEET = 36 * 72;
-  const LEFT = { edge: "left" as const, clip: [0, 0, 0.12 * SHEET, SHEET] as [number, number, number, number] };
-
-  test("a band inside the budget comes back as itself — nothing to retry with", () => {
-    const band = { edge: "left" as const, clip: [0, 0, 100, 3000 / S] as [number, number, number, number] };
-    expect(px(0, 3000 / S)).toBe(3000);
-    const out = splitBand(band);
-    expect(out).toHaveLength(1);
-    expect(out[0]).toBe(band); // the identical object, not a copy
-  });
-
-  test("one pixel over the budget is cut", () => {
-    expect(splitBand({ edge: "left", clip: [0, 0, 100, 3001 / S] }).length).toBeGreaterThan(1);
-  });
-
-  test("a 7200 px band becomes 4 sub-clips overlapping by 1000 px", () => {
-    const out = splitBand(LEFT);
-    // ceil(7200/2800) = 3 would leave 3067 px sub-clips at this overlap — over the
-    // budget the cut exists to respect — so the count is raised to 4.
-    expect(out).toHaveLength(4);
-    for (const s of out) {
-      expect(s.edge).toBe("left");
-      expect([s.clip[0], s.clip[2]]).toEqual([0, 0.12 * SHEET]); // short edge untouched
-      expect(px(s.clip[1], s.clip[3])).toBeLessThanOrEqual(SPLIT_MAX_PX);
-    }
-    expect(out[0].clip[1]).toBe(LEFT.clip[1]);                   // pinned to the start
-    expect(out[3].clip[3]).toBe(LEFT.clip[3]);                   // and to the end
-    for (let i = 1; i < out.length; i++) {
-      expect(out[i].clip[1]).toBeGreaterThan(out[i - 1].clip[1]);          // ordered
-      expect(out[i].clip[1]).toBeLessThan(out[i - 1].clip[3]);             // no gap
-      // Measured in points and scaled: floor/ceil on each end can inflate a span by
-      // a pixel, and the overlap is exact by construction.
-      expect(Math.round((out[i - 1].clip[3] - out[i].clip[1]) * S)).toBe(RETRY_OVERLAP_PX);
-    }
-  });
-
-  test("a wide top band is cut along X — the long edge decides, not the edge name", () => {
-    const top = { edge: "top" as const, clip: [0, 0, SHEET, 0.15 * SHEET] as [number, number, number, number] };
-    const out = splitBand(top);
-    expect(out).toHaveLength(4);
-    for (const s of out) {
-      expect([s.clip[1], s.clip[3]]).toEqual([0, 0.15 * SHEET]); // Y untouched
-      expect(px(s.clip[0], s.clip[2])).toBeLessThanOrEqual(SPLIT_MAX_PX);
-    }
-    expect(out[0].clip[0]).toBe(0);
-    expect(out[3].clip[2]).toBe(SHEET);
-  });
-
-  test("however long the band and whatever the overlap, no sub-clip is over budget", () => {
-    for (const inches of [17, 24, 36, 42, 48, 60, 96, 200]) {
-      for (const ov of [0, 200, 1000, 2000, 9999]) {
-        const band = { edge: "right" as const, clip: [0, 0, 100, inches * 72] as [number, number, number, number] };
-        const out = splitBand(band, ov);
-        for (const s of out) expect(px(s.clip[1], s.clip[3])).toBeLessThanOrEqual(SPLIT_MAX_PX);
-        expect(out[out.length - 1].clip[3]).toBe(inches * 72); // always covers the band
-      }
-    }
-  });
-
-  test("the count starts at the ceil(long / 2800) rule and is only raised to fit", () => {
-    // At a 200 px overlap the starting count always fits, so the rule stands as-is.
-    const out = splitBand(LEFT, 200);
-    expect(out).toHaveLength(Math.ceil(7200 / SPLIT_TARGET_PX));
-  });
-});
-
-describe("dedupeLabels", () => {
-  const lab = (text: string, x: number, y: number, w = 60, h = 12) =>
-    ({ text, x, y, endX: x + w, endY: y + h, angle: 0, h, font: "ocr" });
-
-  test("the same callout read by two overlapping sub-clips survives once", () => {
-    const out = dedupeLabels([lab("SEE SHEET 6", 100, 400), lab("SEE SHEET 6", 100.4, 401.2)]);
-    expect(out).toHaveLength(1);
-    expect(out[0].y).toBe(400); // first occurrence wins, so sub-clip order is kept
-  });
-
-  test("two real callouts reading the same text are both kept", () => {
-    expect(dedupeLabels([lab("MATCH LINE", 100, 400), lab("MATCH LINE", 100, 1800)])).toHaveLength(2);
-  });
-
-  test("different text in the same place is not a duplicate", () => {
-    expect(dedupeLabels([lab("SEE SHEET 6", 100, 400), lab("SEE SHEET 8", 100, 400)])).toHaveLength(2);
-  });
-
-  test("a box that moved further than the tolerance is kept", () => {
-    expect(dedupeLabels([lab("SEE SHEET 6", 100, 400), lab("SEE SHEET 6", 100, 407)])).toHaveLength(2);
   });
 });

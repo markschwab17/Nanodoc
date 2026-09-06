@@ -31,7 +31,7 @@
 // (If a path 404s after a tesseract.js upgrade, check `ls node_modules/tesseract.js/dist`.)
 import workerUrl from "tesseract.js/dist/worker.min.js?url";
 import coreUrl from "tesseract.js-core/tesseract-core-simd.wasm.js?url";
-import { createOcrPool, defaultOcrPoolSize, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
+import { createOcrPool, defaultOcrPoolSize, OCR_JOB_TIMEOUT_MS, OCR_NO_RESULT, type OcrPool } from "./ocrPool";
 
 export interface RawImage { width: number; height: number; data: Uint8ClampedArray }
 export interface OcrWord {
@@ -47,11 +47,12 @@ const OCR_TIMEOUT_MS = 30_000;
 // RPC). Because it starts at dispatch, not at queueing, a job that waited
 // behind three others still gets its full budget; 20s is comfortably above the
 // slowest real band-OCR we have measured and well below "the user gave up".
-// Overridable only via __setOcrJobTimeoutMsForTest so production always uses
-// OCR_JOB_TIMEOUT_MS; kept as its own mutable binding (rather than exporting
-// the constant directly) because ESM named exports are read-only bindings — a
-// test importer cannot reassign them.
-const OCR_JOB_TIMEOUT_MS = 20_000;
+// The constant itself lives in ocrPool.ts, with the mechanism that enforces it and
+// alongside the doubled budget one RE-READ gets (`RETRY_JOB_TIMEOUT_MS`, passed per
+// call by the aligner). Overridable only via __setOcrJobTimeoutMsForTest so
+// production always uses OCR_JOB_TIMEOUT_MS; kept as its own mutable binding (rather
+// than exporting the constant directly) because ESM named exports are read-only
+// bindings — a test importer cannot reassign them.
 let ocrJobTimeoutMs = OCR_JOB_TIMEOUT_MS;
 
 /** Test-only: shorten the recognition-job timeout so hang tests don't wait the real 20s. */
@@ -190,18 +191,23 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
  * `signal`: aborting drops a still-queued job outright (it never runs) and
  * makes an in-flight one's result be ignored; either way the call resolves [].
  *
+ * `timeoutMs`: this read's own job budget, overriding the pool's. The aligner passes
+ * it for the ONE re-read a lost read earns, and only for that — see
+ * `RETRY_JOB_TIMEOUT_MS`. It bounds the recognition job only; the conversion-worker
+ * RPC keeps its own OCR_TIMEOUT_MS.
+ *
  * `onNoResult`: fired when the pool answered OCR_NO_RESULT and the caller did NOT
  * abort — i.e. this read is a NON-ANSWER (the job blew its 20 s budget, or the pool
  * was torn down under it), not a crop that genuinely holds no text. The return type
  * stays `OcrWord[]` and stays `[]`, so every existing caller is unaffected; the hook
- * exists because `autoStitch` needs to tell the two apart to decide whether a band
- * is worth re-reading as sub-clips, and `[]` cannot carry that. A conversion or
+ * exists because `autoStitch` needs to tell the two apart to decide whether the same
+ * clip is worth re-reading, and `[]` cannot carry that. A conversion or
  * transport THROW is deliberately not reported here — it is a broken pipe, not a
  * band that was too big, and re-rastering it four times would not help.
  */
 export async function recognize(
   image: RawImage,
-  opts?: { signal?: AbortSignal; onNoResult?: () => void },
+  opts?: { signal?: AbortSignal; onNoResult?: () => void; timeoutMs?: number },
 ): Promise<OcrWord[]> {
   try {
     // Kick the first worker's boot off BEFORE converting, so the wasm+traineddata
@@ -214,7 +220,7 @@ export async function recognize(
     // the pool drop an already-converted job.
     if (opts?.signal?.aborted) return [];
 
-    const result = await jobs.run(blob, { signal: opts?.signal });
+    const result = await jobs.run(blob, { signal: opts?.signal, timeoutMs: opts?.timeoutMs });
     if (result === OCR_NO_RESULT) {
       // Timed out, aborted, or torn down. An ABORT is the caller's own doing and
       // must not look like a failed read (it would have the aligner retry work it
@@ -286,6 +292,9 @@ export async function shutdownOcr(): Promise<void> {
  * abandoned run leaves dozens of jobs sitting in the pool's queue — and a queued
  * job has no deadline of its own. Aborting drops the queued ones outright.
  *
+ * A request may name its own `timeoutMs` — the doubled budget the aligner gives one
+ * re-read — which is passed straight through to `recognize`.
+ *
  * The reply carries `noResult` when `recognize` reported a NON-ANSWER (see its
  * `onNoResult`). It rides along on the existing message rather than as a second
  * one so the reply stays a single settle per ocrId.
@@ -309,6 +318,9 @@ export function attachOcrRpc(probeWorker: Worker): void {
       words = await recognize(d.image as RawImage, {
         signal: ctrl.signal,
         onNoResult: () => { noResult = true; },
+        // The probe worker names the budget for a RE-READ (double). Undefined on
+        // every ordinary read, which leaves the pool's own.
+        timeoutMs: typeof d.timeoutMs === "number" ? d.timeoutMs : undefined,
       });
     } finally {
       outstanding.delete(d.ocrId);

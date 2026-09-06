@@ -201,6 +201,31 @@ describe("ocrService.recognize — per-job dispatch-time timeout", () => {
     await expect(pNext).resolves.toEqual([WORD("fresh")]);
   });
 
+  it("a per-call timeoutMs overrides the pool's budget for that read alone", async () => {
+    // The aligner names this for exactly one thing: the single re-read a lost read
+    // earns. It must reach the POOL — a longer budget the pool never hears about is a
+    // read that times out at the old one and a band that goes `unknown` for nothing.
+    vi.useFakeTimers();
+    const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");
+    __setOcrJobTimeoutMsForTest(100);
+    h.recognize = () => new Promise(() => { /* hangs forever */ });
+
+    let lostLong = false;
+    const pLong = recognize(IMG(), { timeoutMs: 500, onNoResult: () => { lostLong = true; } });
+    convReply(0, "long");
+    await vi.advanceTimersByTimeAsync(0);
+
+    // t=200: twice the pool's budget, and this read is untouched.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(lostLong).toBe(false);
+    expect(h.workers[0].terminateCalls).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(301);
+    await expect(pLong).resolves.toEqual([]);
+    expect(lostLong).toBe(true);
+    expect(h.workers[0].terminateCalls).toBe(1);
+  });
+
   it("does not charge a job for the time it spent queued", async () => {
     vi.useFakeTimers();
     const { recognize, __setOcrJobTimeoutMsForTest } = await import("./ocrService");

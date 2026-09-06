@@ -132,6 +132,48 @@ describe("createOcrPool — timeouts", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("a job's OWN timeoutMs overrides the pool's, and is still charged from DISPATCH", async () => {
+    // The doubled budget a re-read gets. It has to be per JOB — the pool is shared with
+    // every first read in the run, and those keep the ordinary budget, whose other job
+    // is to stop a hung worker pinning a slot.
+    vi.useFakeTimers();
+    try {
+      const p = pool(1, 100);
+      const a = p.run("a", { timeoutMs: 300 });  // its own budget
+      const b = p.run("b");                      // queued behind it, on the pool's
+      await vi.advanceTimersByTimeAsync(0);
+      expect(created.length).toBe(1);
+
+      // t=150: well past the pool's 100 ms, and "a" is untouched because it asked for 300.
+      await vi.advanceTimersByTimeAsync(150);
+      expect(created[0].terminated).toBe(0);
+      created[0].open.resolve("A");
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(a).resolves.toBe("A");
+
+      // "b" dispatched at t=150 and gets the POOL's 100 ms, from ITS dispatch — the
+      // longer budget belongs to the job that asked for it, not to the queue.
+      await vi.advanceTimersByTimeAsync(99);
+      expect(created[0].terminated).toBe(0);
+      await vi.advanceTimersByTimeAsync(2);
+      await expect(b).resolves.toBe(OCR_NO_RESULT);
+      expect(created[0].terminated).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("a job that hangs past its OWN budget times out at that budget, not the pool's", async () => {
+    vi.useFakeTimers();
+    try {
+      const p = pool(1, 100);
+      const a = p.run("a", { timeoutMs: 300 });
+      await vi.advanceTimersByTimeAsync(299);
+      expect(created[0].terminated).toBe(0);     // the pool's 100 ms came and went
+      await vi.advanceTimersByTimeAsync(2);
+      await expect(a).resolves.toBe(OCR_NO_RESULT);
+      expect(created[0].terminated).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("a hung job resolves OCR_NO_RESULT and retires ONLY its own worker", async () => {
     vi.useFakeTimers();
     try {
