@@ -71,7 +71,41 @@ export interface AutoStitchOptions {
   /** Diagnostic hook: surfaces the raw solver inputs/result (pairs, anchors) for
    *  the Node stitch-diag harness. Never used in production. */
   onDebug?: (d: { anchors: StitchAnchor[]; result: StitchResult; inputs: SheetInput[]; unknownSheetNoPages: number[] }) => void;
+  /** Diagnostic hook: one entry per OCR read the run issues, fired when that read
+   *  SETTLES (so the callback order is completion order and `index` is issue order —
+   *  the two disagreeing is itself a finding). Exists for the evidence dump the
+   *  probe-determinism diagnosis diffs run against run; never used in production, and
+   *  the engine reads nothing back from it. */
+  onOcrRead?: (r: OcrReadTrace) => void;
 }
+
+/**
+ * One OCR read, as the diagnostic dump sees it.
+ *
+ * `index` is the read's ISSUE order — the same counter as `OcrStats.calls`, and the
+ * same index `stitch-eval`'s fault switches name. `words` is the transport's answer
+ * verbatim and IN ORDER, because "the re-read recovered different labels" and "the
+ * same labels in a different order" are different bugs and both change what
+ * `wordsToLabels` produces.
+ */
+export interface OcrReadTrace {
+  index: number;
+  /** `edge` a page-edge band, `sheetNo` the title-block cell, `strip` a reciprocal interior strip. */
+  kind: "edge" | "sheetNo" | "strip";
+  pageIndex: number;
+  rot: 0 | 90 | 270;
+  /** This read REPLACES one the transport could not answer. */
+  retry: boolean;
+  width: number;
+  height: number;
+  /** The transport could not answer (budget expired / reply lost) — not "no text here". */
+  nonAnswer: boolean;
+  words: string[];
+}
+
+/** What a call site tells the central `ocr` wrapper about the read it is making.
+ *  Consumed ONLY by `onOcrRead`; never forwarded to the transport. */
+interface OcrReadTag { kind: OcrReadTrace["kind"]; pageIndex: number; rot: 0 | 90 | 270; retry?: boolean }
 /**
  * What the run's OCR channel actually did. `calls` and `nonAnswers` are counted
  * centrally, in the one `ocr` wrapper every read goes through; `retries` and
@@ -537,9 +571,10 @@ function lockSideTextRot(mass: Record<90 | 270, number>): 90 | 270 | undefined {
 function readPageOcr(
   mupdf: any,
   page: any,
+  pageIndex: number,
   view: [number, number, number, number],
   drawingFrame: [number, number, number, number] | null,
-  ocr: (image: RawImage, opts?: { onNoResult?: () => void; timeoutMs?: number }) => Promise<OcrWord[]>,
+  ocr: (image: RawImage, opts?: { onNoResult?: () => void; timeoutMs?: number; tag?: OcrReadTag }) => Promise<OcrWord[]>,
   stats: OcrStats,
   signal?: AbortSignal,
   reopenPage?: () => any,
@@ -548,8 +583,8 @@ function readPageOcr(
   // not in a sweep afterwards: `renderBand` can throw part-way through the band
   // loop, and the reads issued before it would then be rejected with nobody
   // listening. The real awaits below still see every rejection.
-  const issue = (image: RawImage, onNoResult?: () => void, timeoutMs?: number): Promise<OcrWord[]> => {
-    const p = ocr(image, { onNoResult, timeoutMs });
+  const issue = (image: RawImage, onNoResult?: () => void, timeoutMs?: number, tag?: OcrReadTag): Promise<OcrWord[]> => {
+    const p = ocr(image, { onNoResult, timeoutMs, tag });
     p.catch(() => { /* surfaced below */ });
     return p;
   };
@@ -566,9 +601,13 @@ function readPageOcr(
       // The rotated copies go straight into `issue` and are never bound to a local:
       // the side band's own raster is dead the moment both rotations exist.
       reads.push({ band, scale, w, h, rots: [90, 270], noResult,
-        words: [issue(rotateRaw(image, 90), mark(0)), issue(rotateRaw(image, 270), mark(1))] });
+        words: [
+          issue(rotateRaw(image, 90), mark(0), undefined, { kind: "edge", pageIndex, rot: 90 }),
+          issue(rotateRaw(image, 270), mark(1), undefined, { kind: "edge", pageIndex, rot: 270 }),
+        ] });
     } else {
-      reads.push({ band, scale, w, h, rots: [0], noResult, words: [issue(image, mark(0))] });
+      reads.push({ band, scale, w, h, rots: [0], noResult,
+        words: [issue(image, mark(0), undefined, { kind: "edge", pageIndex, rot: 0 })] });
     }
   }
   /**
@@ -594,7 +633,8 @@ function readPageOcr(
   const readSheetNo = async (): Promise<{ words: OcrWord[]; unknown: boolean }> => {
     if (signal?.aborted) return { words: [], unknown: false };
     let lost = false;
-    const first = await issue(renderBand(mupdf, page, sheetNoBand(view).clip).image, () => { lost = true; });
+    const first = await issue(renderBand(mupdf, page, sheetNoBand(view).clip).image, () => { lost = true; },
+      undefined, { kind: "sheetNo", pageIndex, rot: 0 });
     if (!lost) return { words: first, unknown: false };
     // An aborted run re-renders and re-reads nothing: the answer would arrive for a
     // run that has already given up. The cell is unknown either way, and counted as
@@ -608,7 +648,8 @@ function readPageOcr(
     try { again = renderBand(mupdf, page2, sheetNoBand(view).clip).image; }
     finally { page2.destroy?.(); }
     let lostAgain = false;
-    const second = await issue(again, () => { lostAgain = true; });
+    const second = await issue(again, () => { lostAgain = true; },
+      undefined, { kind: "sheetNo", pageIndex, rot: 0, retry: true });
     if (!lostAgain) return { words: second, unknown: false };
     stats.unknown++;
     return { words: [], unknown: true };
@@ -656,6 +697,7 @@ function readPageOcr(
       rot === 0 ? again : rotateRaw(again, rot),
       () => { lostAgain = true; },
       RETRY_JOB_TIMEOUT_MS,
+      { kind: "edge", pageIndex, rot, retry: true },
     );
     return lostAgain ? null : words;
   };
@@ -808,23 +850,42 @@ async function runAutoStitch(
   // belong to the decisions that consume the reads, and are counted there.
   const ocrStats: OcrStats = { calls: 0, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 };
   const rawOcr = opts.ocr;
+  const trace = opts.onOcrRead;
   const ocr = rawOcr
-    ? async (image: RawImage, o?: { onNoResult?: () => void; timeoutMs?: number }): Promise<OcrWord[]> => {
+    ? async (image: RawImage, o?: { onNoResult?: () => void; timeoutMs?: number; tag?: OcrReadTag }): Promise<OcrWord[]> => {
         checkAbort();
         if (!ocrStarted) { ocrStarted = true; opts.onOcrStart?.(); }
+        const index = ocrStats.calls;
         ocrStats.calls++;
+        // Captured before the read so the trace can report it: `tag` never reaches the
+        // transport (its opts shape has no such field), and with no `onOcrRead` hook
+        // nothing below runs at all.
+        const { width, height } = image;
+        let traced = false;
         // `onNoResult` is wrapped, not passed straight through: the transport is the
         // only thing that can tell an expired job budget from a crop with no text in
         // it, the run wants that counted whether or not this particular caller cares,
         // and the caller's own hook still fires. The run's abort is added here, which
         // is why the two opts shapes are the same but not the same object.
-        return rawOcr(image, {
+        const words = await rawOcr(image, {
           signal: ocrAbort?.signal,
-          onNoResult: () => { ocrStats.nonAnswers++; o?.onNoResult?.(); },
+          onNoResult: () => {
+            ocrStats.nonAnswers++;
+            traced = true;
+            o?.onNoResult?.();
+          },
           // Undefined on every ordinary read (the transport's own budget applies); set
           // only by the ONE re-read a lost read earns.
           timeoutMs: o?.timeoutMs,
         });
+        if (trace && o?.tag) {
+          trace({
+            index, kind: o.tag.kind, pageIndex: o.tag.pageIndex, rot: o.tag.rot,
+            retry: o.tag.retry === true, width, height, nonAnswer: traced,
+            words: words.map((w) => w.text),
+          });
+        }
+        return words;
       }
     : undefined;
   // How wide the reciprocal strip scan (pass 2) batches its reads. Sized off the
@@ -911,7 +972,7 @@ async function runAutoStitch(
         // `finally` below destroys this page as soon as the reads are ISSUED, long
         // before any of them settles, so a band that answers with nothing has to
         // load its own handle to be re-read. Never called unless that happens.
-        ocrRead = readPageOcr(mupdf, page, extract.view, drawingFrame, ocr, ocrStats, ocrAbort?.signal,
+        ocrRead = readPageOcr(mupdf, page, pageIndex, extract.view, drawingFrame, ocr, ocrStats, ocrAbort?.signal,
           () => doc.loadPage(pageIndex));
       }
     } finally {
@@ -1281,16 +1342,16 @@ async function runAutoStitch(
      * Returns null for "still a non-answer" — the strip is UNKNOWN, which is not the
      * `[]` a strip with no label in it returns.
      */
-    const readStrip = async (image: RawImage, rerender: () => RawImage): Promise<OcrWord[] | null> => {
+    const readStrip = async (image: RawImage, rerender: () => RawImage, tag: OcrReadTag): Promise<OcrWord[] | null> => {
       let lost = false;
-      const first = await ocr!(image, { onNoResult: () => { lost = true; } });
+      const first = await ocr!(image, { onNoResult: () => { lost = true; }, tag });
       if (!lost) return first;
       // No re-read after an abort: the answer would arrive for a run that has already
       // given up, and the strip is unknown either way.
       if (opts.shouldAbort?.()) return null;
       ocrStats.retries++;
       let lostAgain = false;
-      const second = await ocr!(rerender(), { onNoResult: () => { lostAgain = true; } });
+      const second = await ocr!(rerender(), { onNoResult: () => { lostAgain = true; }, tag: { ...tag, retry: true } });
       return lostAgain ? null : second;
     };
 
@@ -1356,6 +1417,7 @@ async function runAutoStitch(
               const words = await readStrip(
                 rotateRaw(image, rot),
                 () => rotateRaw(renderBand(mupdf, page, clip, 150).image, rot),
+                { kind: "strip", pageIndex: iPage.pageIndex, rot },
               );
               // A rotation still lost after its re-read makes the whole STRIP unknown,
               // and the rotation after it is not read: what earns the 270 read is "90
@@ -1396,7 +1458,8 @@ async function runAutoStitch(
             const by1 = Math.min(by0 + 160, ry1);
             const clip: [number, number, number, number] = [x0, by0, x1, by1];
             const { image, scale: bandScale } = renderBand(mupdf, page, clip, 150);
-            const words = await readStrip(image, () => renderBand(mupdf, page, clip, 150).image);
+            const words = await readStrip(image, () => renderBand(mupdf, page, clip, 150).image,
+              { kind: "strip", pageIndex: iPage.pageIndex, rot: 0 });
             if (words == null) return { kind: "unknown" };
             const labels = wordsToLabels(words, { edge: "top", clip }, bandScale, image.width, image.height, 0);
             for (const lab of labels) {

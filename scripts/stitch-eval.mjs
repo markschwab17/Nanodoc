@@ -32,6 +32,34 @@
  *   STITCH_EVAL_LOG_OCR_CALLS=1   print every read's index and pixel size, which is
  *                                 how you pick the indices above.
  *
+ * DELAY FAULTS — the REAL timeout, not a stand-in for one. `STITCH_EVAL_FAULT_CALLS`
+ * SHORT-CIRCUITS: it never reaches the pool, so the pool's dispatch timer never fires,
+ * no worker is retired, no replacement is booted and no wall clock is spent. Everything
+ * the browser actually does around a lost read is therefore unexercised by it — and
+ * that machinery is where the residual browser flip is suspected to live. So:
+ *
+ *   STITCH_EVAL_FAULT_DELAY_CALLS=3,7  those reads GO TO THE POOL and the worker holds
+ *                                 them past their own budget (`timeoutMs + 1 s`, so a
+ *                                 re-read's doubled budget is honoured too). The pool's
+ *                                 real dispatch-time timeout fires, it retires that
+ *                                 worker, boots a replacement, and the aligner's
+ *                                 re-read path runs exactly as it does in the browser.
+ *   STITCH_EVAL_FAULT_DELAY_EVERY=8   the same, on every 8th read (7, 15, 23, …) —
+ *                                 ~12% of reads, spread across every call class.
+ *
+ * A delayed read BYPASSES the disk cache (a warm cache would answer it before the pool
+ * ever saw it, disarming the fault); its RE-READ is an ordinary read at a NEW index and
+ * hits the cache normally, which is what makes "the re-read answers" reachable here.
+ * Delay faults are slow by construction — a whole budget each, ~21 s.
+ *
+ *   STITCH_EVAL_DUMP_EVIDENCE=<path.json>   write, per set: every OCR read (issue
+ *                                 index, kind, page, rotation, retry flag, dims,
+ *                                 whether the transport answered, and the word texts IN
+ *                                 ORDER), the completion order, the solver's pairs and
+ *                                 anchors, and the verdict inputs. Two dumps diffed say
+ *                                 WHICH read first differed and HOW — the question the
+ *                                 placements fixture can only answer with "one did".
+ *
  * Indices are 0-based, count EVERY read the aligner makes (cache hits included — a
  * warm cache must not move them), and RESET PER SET, so `--set X FAULT_CALLS=3` means
  * the 4th read of set X whichever other sets ran. A retry re-reads the same clip as a
@@ -78,6 +106,7 @@ import {
   toOcrWords,
   OCR_NO_RESULT,
   NODE_OCR_POOL_SIZE,
+  OCR_JOB_TIMEOUT_MS,
 } from "../src/features/stitch/autostitch/probeNode.ts";
 
 const REPO = process.cwd();
@@ -119,10 +148,54 @@ const FAULT_CALLS = new Set(
     .split(",").map((s) => s.trim()).filter((s) => s !== "")
     .map(Number).filter((n) => Number.isInteger(n) && n >= 0),
 );
+// The DELAY faults — see the header. Same index space as FAULT_CALLS (0-based, every
+// read, per set), but these reach the pool and blow its budget for real.
+const FAULT_DELAY_CALLS = new Set(
+  String(process.env.STITCH_EVAL_FAULT_DELAY_CALLS ?? "")
+    .split(",").map((s) => s.trim()).filter((s) => s !== "")
+    .map(Number).filter((n) => Number.isInteger(n) && n >= 0),
+);
+const FAULT_DELAY_EVERY = Number(process.env.STITCH_EVAL_FAULT_DELAY_EVERY ?? "") || 0;
+// How far PAST the job's own budget the worker holds the result. One second: enough
+// that the pool's timer has certainly fired first, short enough that a faulted run is
+// only ~a budget slower per fault.
+const FAULT_DELAY_SLACK_MS = 1_000;
+const delayedRead = (idx) =>
+  FAULT_DELAY_CALLS.has(idx) || (FAULT_DELAY_EVERY > 0 && (idx + 1) % FAULT_DELAY_EVERY === 0);
+const DELAY_FAULTS_ARMED = FAULT_DELAY_CALLS.size > 0 || FAULT_DELAY_EVERY > 0;
+/**
+ * Inputs the wrapped worker must HOLD, and for how long.
+ *
+ * Keyed on the exact PNG Buffer handed to `pool.run` — the same object reaches
+ * `worker.recognize`, and it is the only thing that crosses the pool boundary, so it is
+ * the only way an index-keyed fault can name one job once it is inside the queue.
+ */
+const heldInputs = new Map();
+/**
+ * SILENT faults — a read that comes back `[]` and never says so.
+ *
+ * The browser has one path the harness otherwise cannot reach: `ocrService.recognize`
+ * wraps the whole pipeline in a `try/catch` and answers `[]` on ANY throw — a
+ * conversion-worker RPC that blew its own 30 s budget, a crashed conversion worker
+ * (which fails every outstanding conversion at once), an OffscreenCanvas that could
+ * not allocate — and that path deliberately does NOT call `onNoResult`. So the read
+ * never happened and the aligner is told the crop holds no text: no non-answer, no
+ * re-read, no `unknown`, nothing in any counter. This switch is that shape, and it is
+ * the control against `STITCH_EVAL_FAULT_CALLS` (same read, flagged).
+ */
+const FAULT_SILENT_CALLS = new Set(
+  String(process.env.STITCH_EVAL_FAULT_SILENT_CALLS ?? "")
+    .split(",").map((s) => s.trim()).filter((s) => s !== "")
+    .map(Number).filter((n) => Number.isInteger(n) && n >= 0),
+);
 const LOG_OCR_CALLS = process.env.STITCH_EVAL_LOG_OCR_CALLS === "1";
+const DUMP_EVIDENCE = process.env.STITCH_EVAL_DUMP_EVIDENCE || "";
 const ASSERT_PLACEMENTS = process.env.STITCH_EVAL_ASSERT_PLACEMENTS || "";
 const WRITE_PLACEMENTS = process.env.STITCH_EVAL_WRITE_PLACEMENTS || "";
-let readIndex = 0, faultsFired = 0;
+let readIndex = 0, faultsFired = 0, delayFaultsFired = 0;
+/** Reads this SET delay-faulted, by index — carried into the evidence dump so a diff
+ *  can tell "this read differs" from "this read is the one we broke". */
+let delayFaultedIdx = new Set();
 const CACHE_DIR = path.join(REPO, "scratch-diag");
 const CACHE_FILE = path.join(CACHE_DIR, "ocr-cache.json");
 fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -161,8 +234,42 @@ function ensurePool() {
   // callers already holding this promise still see the real error.
   const built = (async () => {
     const { createWorker, PSM } = await import("tesseract.js");
+    /**
+     * The delay-fault wrapper, and it sits at the WORKER, not at the transport.
+     *
+     * That placement is the whole point: a held `recognize` is indistinguishable from a
+     * crop tesseract is genuinely still chewing on, so the pool takes its real path —
+     * the dispatch timer fires, `onTimeout` logs, the job settles `OCR_NO_RESULT`,
+     * THIS worker is terminated and a replacement is booted for the queue behind it.
+     * Nothing about the fault is visible to `ocrPool.ts` or to the aligner.
+     *
+     * The hold does not run tesseract first. It could — the words would be discarded
+     * either way, since the pool has already answered by the time they land — and it
+     * would cost a full recognise per fault for nothing. The image's real words still
+     * reach the cache: the RE-READ renders the identical clip, hashes the same, and
+     * takes the ordinary path.
+     *
+     * `unref`, so a hold outliving the run cannot keep the process alive after the
+     * pool has been terminated under it.
+     */
+    const withDelayFaults = (make) => async (...args) => {
+      const w = await make(...args);
+      return {
+        recognize: (input) => {
+          const hold = heldInputs.get(input);
+          if (hold == null) return w.recognize(input);
+          heldInputs.delete(input);
+          return new Promise((resolve) => {
+            const t = setTimeout(() => resolve({ data: { words: [] } }), hold);
+            t.unref?.();
+          });
+        },
+        setParameters: (p) => w.setParameters(p),
+        terminate: () => w.terminate(),
+      };
+    };
     return createNodeOcrPool({
-      createWorker,
+      createWorker: DELAY_FAULTS_ARMED ? withDelayFaults(createWorker) : createWorker,
       PSM,
       langPath: path.join(REPO, "public/ocr"),
       cachePath: path.join(CACHE_DIR, "tesscache"),
@@ -183,13 +290,21 @@ async function ocr(image, opts) {
   // and the read comes back empty — which is what a 20 s job-budget expiry looks like
   // to the aligner.
   if (FAULT_CALLS.has(idx)) { faultsFired++; opts?.onNoResult?.(); return []; }
+  // Deliberately NO `onNoResult` — that omission IS the fault (see FAULT_SILENT_CALLS).
+  if (FAULT_SILENT_CALLS.has(idx)) { faultsFired++; return []; }
+  // A DELAY fault has to reach the pool, so it jumps the cache: a warm cache would
+  // answer here and the pool would never see the job at all.
+  const delay = delayedRead(idx) ? (opts?.timeoutMs ?? OCR_JOB_TIMEOUT_MS) + FAULT_DELAY_SLACK_MS : 0;
   const key = hashImage(image);
-  if (!NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
+  if (!delay && !NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
   ocrCalls++;
   const p = await ensurePool();
+  const png = encodePNG(image.width, image.height, image.data);
+  if (delay) { delayFaultsFired++; delayFaultedIdx.add(idx); heldInputs.set(png, delay); }
   // `opts.timeoutMs` is the aligner naming a budget for THIS read — the doubled one a
   // re-read gets. Undefined on every ordinary read, which leaves the pool's own.
-  const res = await p.run(encodePNG(image.width, image.height, image.data), { timeoutMs: opts?.timeoutMs });
+  const res = await p.run(png, { timeoutMs: opts?.timeoutMs });
+  heldInputs.delete(png); // no-op once the worker took it; matters if the job never dispatched
   // A timed-out job is a non-answer, not an empty sheet — never cache it, and tell the
   // caller so it re-reads that same clip once (`onNoResult`). This machine has never
   // actually produced one: the harness's tesseract finishes a 7200 px band well inside
@@ -327,6 +442,38 @@ const expectedPlacements = ASSERT_PLACEMENTS
   : null;
 const writtenPlacements = WRITE_PLACEMENTS ? {} : null;
 
+// ── evidence dump ────────────────────────────────────────────────────────────
+/**
+ * Everything one run knew, in a shape two runs can be diffed on.
+ *
+ * The placements fixture answers "did the answer move". This answers the next
+ * question — WHICH read first differed, and how — which is the only one that names a
+ * mechanism. Reads are keyed and sorted by ISSUE index (`OcrStats.calls`, the same
+ * index the fault switches name); `completionOrder` records the order they SETTLED in,
+ * because a consumer that walks results out of issue order is one of the candidate
+ * mechanisms and the two lists disagreeing is how it would show.
+ */
+const evidence = DUMP_EVIDENCE ? {} : null;
+/** Rounded so a dump diff shows real movement, not float noise. */
+const r2 = (n) => (typeof n === "number" && Number.isFinite(n) ? Math.round(n * 100) / 100 : n);
+const anchorDigest = (a) => ({
+  i: a.i, j: a.j, perp: a.perp ?? null, dx: r2(a.dx), dy: r2(a.dy),
+  precise: a.precise === true, along: r2(a.along), alongPrecise: a.alongPrecise === true,
+  strokeI: r2(a.strokeI), strokeJ: r2(a.strokeJ),
+});
+const pairDigest = (p) => ({
+  i: p.i, j: p.j, channel: p.channel, conf: p.conf,
+  dxFt: r2(p.dxFt), dyFt: r2(p.dyFt), weight: r2(p.weight), residFt: r2(p.residFt),
+});
+const seamDigest = (s) => ({
+  i: s.i, j: s.j, pages: s.pageIndexes, status: s.status,
+  channel: s.detail?.channel ?? null, perpAxis: s.detail?.perpAxis ?? null,
+  perpDeltaFt: r2(s.detail?.perpDeltaFt), strokeSource: s.detail?.strokeSource ?? null,
+  alongAnchored: s.detail?.alongAnchored ?? null, alongDecisive: s.detail?.alongDecisive ?? null,
+  marginRatio: r2(s.detail?.marginRatio), residFt: r2(s.detail?.residFt),
+  perpResidFt: r2(s.detail?.perpResidFt), reason: s.detail?.reason ?? null,
+});
+
 // ── run ──────────────────────────────────────────────────────────────────────
 const VERDICT_RANK = { unverified: 0, partial: 1, verified: 2 };
 
@@ -355,7 +502,12 @@ for (const set of sets) {
   const before = ocrCalls;
   // Per-set, so a fault index names the same read whichever sets are in the run.
   readIndex = 0;
+  delayFaultedIdx = new Set();
   const faultsBefore = faultsFired;
+  const delayFaultsBefore = delayFaultsFired;
+  // Per-read trace + the solver's own inputs, collected only when a dump was asked for.
+  const reads = [], completionOrder = [];
+  let debugSeen = null;
   // `ocrConcurrency` tells autoStitch how wide the transport behind `ocr` really is,
   // so its reciprocal strip scan batches to THIS pool rather than guessing. The
   // browser default derives from `navigator.hardwareConcurrency`, which Node only
@@ -363,7 +515,15 @@ for (const set of sets) {
   // derivation floors at 2) — and even on a newer Node it would describe the
   // machine, not the three workers built below. Passing the real size is the only
   // way the two agree.
-  const res = await autoStitch(mupdf, doc, parseRanges(set.pages ?? "0-9"), { userScale: set.scale ?? 20, ocr, ocrConcurrency: OCR_POOL_SIZE });
+  const res = await autoStitch(mupdf, doc, parseRanges(set.pages ?? "0-9"), {
+    userScale: set.scale ?? 20, ocr, ocrConcurrency: OCR_POOL_SIZE,
+    // Both hooks are diagnostic and both are undefined unless a dump was asked for, so
+    // an ordinary run — every gate run, every fault battery — is untouched by them.
+    ...(evidence ? {
+      onOcrRead: (t) => { reads.push(t); completionOrder.push(t.index); },
+      onDebug: (d) => { debugSeen = d; },
+    } : {}),
+  });
   flushCache();
   row.seconds = (Date.now() - t0) / 1000;
   row.ocrCalls = ocrCalls - before;
@@ -375,6 +535,7 @@ for (const set of sets) {
   row.ocrStats = res.ocrStats ?? null;
   row.reads = readIndex;
   row.faults = faultsFired - faultsBefore;
+  row.delayFaults = delayFaultsFired - delayFaultsBefore;
   row.aligned = res.alignedCount;
   row.method = res.method;
   row.verdict = res.alignmentVerdict ?? "unverified";
@@ -400,6 +561,39 @@ for (const set of sets) {
   row.alongAnchored = res.alongAnchored ? [...anchoredSet].sort((a, b) => a - b) : null;
   row.demoted = res.alongAnchored ? placedPages.filter((p) => !anchoredSet.has(p)) : [];
   row.alongUncertaintyFt = res.worstAlongUncertaintyFt ?? 0;
+
+  if (evidence) {
+    evidence[set.name] = {
+      // Faults this run injected, so a dump carries its own provenance.
+      faults: { noAnswer: [...FAULT_CALLS].sort((a, b) => a - b), delayed: [...delayFaultedIdx].sort((a, b) => a - b) },
+      ocrStats: row.ocrStats,
+      // Issue order. Every read the run made, whatever order it settled in.
+      reads: [...reads].sort((a, b) => a.index - b.index).map((t) => ({
+        index: t.index, kind: t.kind, page: t.pageIndex, rot: t.rot, retry: t.retry,
+        px: `${t.width}x${t.height}`, nonAnswer: t.nonAnswer,
+        delayFaulted: delayFaultedIdx.has(t.index),
+        words: t.words,
+      })),
+      // Settle order. Equal to `reads`' index order on a run where nothing was
+      // consumed out of turn; different is a finding, not noise.
+      completionOrder,
+      anchors: (debugSeen?.anchors ?? []).map(anchorDigest),
+      pairs: (debugSeen?.result?.pairs ?? []).map(pairDigest),
+      unknownSheetNoPages: debugSeen?.unknownSheetNoPages ?? [],
+      verdict: {
+        method: res.method,
+        alignmentVerdict: res.alignmentVerdict ?? null,
+        alignedCount: res.alignedCount,
+        worstResidFt: r2(res.worstResidFt),
+        alongAnchored: row.alongAnchored,
+        worstAlongUncertaintyFt: r2(res.worstAlongUncertaintyFt),
+        worstAlongUncertaintySource: res.worstAlongUncertaintySource ?? null,
+        seams: (res.seamReport ?? []).map(seamDigest),
+        suspectSeams: (res.seamReport ?? []).filter((s) => s.status === "suspect").map((s) => s.pageIndexes),
+      },
+      placements: placementSnapshot(row.placements),
+    };
+  }
 
   if (set.groundTruth) {
     const gtPath = expandHome(set.groundTruth);
@@ -489,6 +683,12 @@ if (expectedPlacements) {
 }
 
 flushCache();
+if (evidence) {
+  const abs = path.resolve(REPO, expandHome(DUMP_EVIDENCE));
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, JSON.stringify(evidence, null, 2) + "\n");
+  console.error(`wrote evidence for ${Object.keys(evidence).length} set(s) to ${abs}`);
+}
 if (writtenPlacements) {
   // MERGE, never replace: `--set X` with the write flag would otherwise wipe every
   // other set's baseline out of the fixture in one keystroke.
@@ -530,6 +730,12 @@ if (AS_JSON) {
     const asked = [...FAULT_CALLS].sort((a, b) => a - b).join(",");
     console.log(`\nFAULTS INJECTED at read ${asked} of each set: ` +
       rows.filter((r) => !r.skipped).map((r) => `${r.name} ${r.faults}/${r.reads} reads`).join("; "));
+  }
+  if (DELAY_FAULTS_ARMED) {
+    const asked = FAULT_DELAY_CALLS.size ? [...FAULT_DELAY_CALLS].sort((a, b) => a - b).join(",") : "";
+    console.log(`\nDELAY FAULTS (real pool timeout + worker retire) at ${asked || "—"}` +
+      (FAULT_DELAY_EVERY ? ` and every ${FAULT_DELAY_EVERY}th read` : "") + ": " +
+      rows.filter((r) => !r.skipped).map((r) => `${r.name} ${r.delayFaults}/${r.reads} reads`).join("; "));
   }
   console.log("");
   for (const r of rows) {
