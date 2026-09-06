@@ -38,6 +38,20 @@
  * with Re-check still there — rather than a verdict that happens to rest on whichever
  * reads came back this time.
  *
+ * THE ANSWER MAY ALREADY EXIST. CTO's droplet probes the combined PDF on the way out of
+ * the combine, with a Lambda running THIS repo's engine bundle, and stores the verdict on
+ * `site_sheet_sources.probe`. When the takeoff flow hands one over, `check()` takes it
+ * instead of spending the minute — but only when it is provably an answer to the SAME
+ * question: the same engine commit (`ENGINE_VERSION`), the same plan (`planHashHex`), the
+ * same page set and scales (`serverProbeRequestMatches` against `canvasProbeSet`), and a
+ * canvas nobody has touched since the check began. A row still being computed is polled
+ * briefly (2 s apart, 20 s in total, with the strip saying exactly what it says for any
+ * check in flight); anything else — an older CTO, a different build, a `status` of
+ * `unknown`/`timeout`/`error`, a plan since edited — is not a verdict, and the worker runs
+ * as it always has. Never a gate, only a shortcut: every failure lands on the same probe
+ * that would have run anyway. `recheck()` is the user asking THIS browser to look again,
+ * so it never consults the row.
+ *
  * `check()` also carries a soft time budget (`PROBE_BUDGET_MS`): if the worker has not
  * settled 60s after the request went out, the hook sends the probe the same abort it
  * would send on a superseded check, and reports `unavailable`/`too_slow` — "it never
@@ -58,6 +72,8 @@ import { commitAutoAlign, type CommitResult } from "./commitPages";
 import { AutoStitchAborted, type OcrStats } from "./autostitch/autoStitch";
 import type { AutoAlignUnavailableReason } from "./addToProjectCopy";
 import { canvasProbeSet, hasMixedSources, movedSinceCheck, type CanvasProbeSet } from "./earnedAutoAlignSet";
+import { ENGINE_VERSION } from "./autostitch/engineVersion";
+import { classifyServerProbe, planHashHex, type ServerProbe } from "./ctoSessionSource";
 
 /** How long a probe gets before the hook stops waiting and says so instead. */
 const PROBE_BUDGET_MS = 60_000;
@@ -67,6 +83,50 @@ const PROBE_BUDGET_MS = 60_000;
  *  aligner cannot finish spun forever with no way out but closing the modal. */
 const RECHECK_BUDGET_MS = 3 * PROBE_BUDGET_MS;
 
+/**
+ * OCR batch width for every browser probe this hook runs.
+ *
+ * Named rather than left to `defaultOcrPoolSize()` because the SERVER probe runs at 3
+ * (`probeNode.ts`, `NODE_OCR_POOL_SIZE`) and the two have to be interchangeable: the
+ * aligner stops issuing strips once one has hit, so the chunk width decides which
+ * bands are read and what the honesty counters say. A 4-core laptop chunking at 2 and
+ * a Lambda chunking at 3 are two different questions. Placements are unaffected —
+ * this changes what is READ, not how the reads are solved.
+ */
+const BROWSER_OCR_CONCURRENCY = 3;
+
+/** How often a `pending` server verdict is re-read, and for how long in total. Past
+ *  the window the editor stops waiting and probes in the browser — a check that sits
+ *  on a spinner waiting for somebody else's job is exactly what this feature is
+ *  supposed to remove. */
+const SERVER_POLL_INTERVAL_MS = 2_000;
+const SERVER_POLL_WINDOW_MS = 20_000;
+
+/** The `[probe]` line for a verdict nobody in this browser computed. Same shape as
+ *  every other settle line — the `ms` is how long the EDITOR waited (a hit is instant;
+ *  a poll is however long the Lambda still had to run), the counters are the server's
+ *  own, and ` (server)` says where the answer came from. */
+const SERVER_SOURCE = " (server)";
+
+/**
+ * Re-read the stored verdict. `null` for anything that is not a probe object — a 4xx
+ * on an expired token, a 5xx, a network drop, a body that is not JSON.
+ *
+ * Never throws and never distinguishes those cases, deliberately: every one of them
+ * means the same thing to the caller ("no verdict from here"), and the caller's answer
+ * to that is already the right one — run the browser probe.
+ */
+async function fetchServerProbe(url: string): Promise<unknown> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { probe?: unknown } | null;
+    return json?.probe ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Session knowledge the canvas cannot supply. Remembered between checks. */
 export interface EarnedAutoAlignContext {
   /** Sheet identity CTO already knows, by page index (the plan's labels). Free — CTO
@@ -75,6 +135,23 @@ export interface EarnedAutoAlignContext {
   pageCodes?: Map<number, string>;
   /** Matches the commit that placed the grid, so a re-align produces identical tiles. */
   removeWhiteBackground?: boolean;
+  /**
+   * The verdict CTO's droplet already computed for this page set
+   * (`site_sheet_sources.probe`, handed over by `GET /api/nanodoc/pdf`).
+   *
+   * Only honoured on the check that SUPPLIES it — a later `check()` (Add PDF added
+   * sheets, the user pressed Re-check) is asking about a canvas this verdict was never
+   * about, and runs the browser probe. `null`/absent is the ordinary case: an older
+   * CTO build, a row whose probe never ran, a session that is not a takeoff handoff.
+   */
+  serverProbe?: unknown;
+  /** The RAW stitch plan the verdict must hash to — the same object CTO sent, unparsed
+   *  and un-reserialised, because the hash is over `JSON.stringify` of exactly it. */
+  plan?: unknown;
+  /** `GET /api/nanodoc/probe?token=…`, for re-reading a verdict that was still being
+   *  computed when the editor opened. Absent means a pending row cannot be polled, so
+   *  it is treated as no verdict. */
+  probeUrl?: string | null;
 }
 
 export type EarnedAutoAlignStatus =
@@ -186,16 +263,16 @@ export function useEarnedAutoAlign(
    *  noise, not honesty: "we were never told" is what a missing tally means, and
    *  omitting the counters says exactly that. */
   const logSettle = useCallback(
-    (settled: string, stats: OcrStats | null, calls: number | undefined, rerun: boolean) => {
+    (settled: string, stats: OcrStats | null, calls: number | undefined, rerun: boolean, source = "") => {
       const ms = Math.round(performance.now() - checkStartRef.current);
       if (!stats) {
-        console.info("[probe] %s: %d ms, %s OCR calls", settled, ms, calls == null ? "?" : String(calls));
+        console.info("[probe] %s: %d ms, %s OCR calls%s", settled, ms, calls == null ? "?" : String(calls), source);
         return;
       }
       console.info(
         "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
         settled, ms, stats.calls, stats.nonAnswers, stats.retries, stats.unknown, stats.withheldVotes,
-        rerun ? " (auto re-check)" : "",
+        source || (rerun ? " (auto re-check)" : ""),
       );
     },
     [],
@@ -347,13 +424,171 @@ export function useEarnedAutoAlign(
     setStatus("idle");
   }, [stop]);
 
+  /**
+   * Ask the worker. Everything from the request to the soft time budget — the path a
+   * check has always taken, extracted so the server shortcut above it can fall back
+   * into it from anywhere (a verdict that does not fit, a poll that ran out of time, a
+   * canvas that moved while a verdict was being fetched).
+   *
+   * Assumes `stop()` has already run and `setStatus("checking")` has been set: it
+   * posts on the CURRENT `docIdRef`, which is what makes a fallback a continuation of
+   * the same check rather than a new one.
+   */
+  const startBrowserProbe = useCallback(
+    (set: CanvasProbeSet, budgetMs: number) => {
+      const req: ProbeRequest = {
+        docId: docIdRef.current,
+        pdfBytes: set.pdfBytes,
+        pageIndices: set.pageIndices,
+        // The canvas's OWN scales, unlike the modal's uniform-only probe: this run has
+        // to answer the question the commit will ask, because its placements are the
+        // ones the commit reuses.
+        userScale: set.uniformScale,
+        pageScales: set.pageScales.size ? [...set.pageScales] : undefined,
+        pageCodes: ctxRef.current.pageCodes?.size ? [...ctxRef.current.pageCodes] : undefined,
+        // Named, not inferred from this machine — see BROWSER_OCR_CONCURRENCY.
+        ocrConcurrency: BROWSER_OCR_CONCURRENCY,
+      };
+      checkStartRef.current = performance.now();
+      const requestedDocId = req.docId;
+      ensureWorker().postMessage(req);
+      budgetTimerRef.current = setTimeout(() => {
+        budgetTimerRef.current = null;
+        // Belt-and-braces: `stop()`/`reset()` already clear this timer on every
+        // superseded check, so this should be unreachable, but a reply landing in
+        // the same tick as the timeout is not worth a race with `goneRef`.
+        if (goneRef.current || requestedDocId !== docIdRef.current) return;
+        // No reply at all, so not even a round-trip count: the short line's "?".
+        logSettle("unavailable", null, undefined, autoRerunRef.current);
+        // The SAME abort a superseded check (or a plain "Add pages" re-check) would
+        // send — the worker does not need a different message to know to give up.
+        stop();
+        // …and hand tesseract's workers back, which nothing else will now do. The
+        // reply handler's `shutdownOcr()` is guarded by the docId staleness check,
+        // and `stop()` has just bumped `docIdRef` — so the worker's eventual
+        // `{aborted:true}` is dropped BEFORE it can reach that release, and 160-240
+        // MB stayed held until the component unmounted. No `ocrIdle()` guard is
+        // needed here (AddPdfModal has one because it debounces and can have a
+        // replacement already queued): this hook runs one probe at a time and
+        // `stop()` has just abandoned it.
+        void shutdownOcr();
+        setReason("too_slow");
+        setDetail(undefined);
+        setStatus("unavailable");
+      }, budgetMs);
+    },
+    [ensureWorker, stop, logSettle],
+  );
+
+  /**
+   * The server shortcut, end to end.
+   *
+   * Three outcomes, and only the first of them skips the worker:
+   *
+   *  - the stored verdict is for THIS engine build, THIS plan and THIS page set (and
+   *    nothing has moved on the canvas since the check began) → take it, run it through
+   *    the same `autoAlignGate` a worker reply goes through, and settle;
+   *  - a probe is genuinely still running (`pending`, not past its expiry) → re-read
+   *    `GET /api/nanodoc/probe` every 2 s for at most 20 s, with the strip still saying
+   *    "Checking whether these sheets can be auto-aligned…", then give up on it;
+   *  - anything else — no row, an older row, a different build, a plan since edited, a
+   *    different page set, a status of `unknown`/`timeout`/`error` → no verdict.
+   *
+   * Every path that is not "take it" ends in `startBrowserProbe`, so a server that is
+   * down, slow, wrong or simply absent costs the user nothing but the poll window.
+   *
+   * `docId` is the check this began for: every await is a place the user could have
+   * superseded it (Add PDF, Re-check) or left the page, so the guard is re-tested after
+   * each one and a stale resolution writes nothing.
+   */
+  const resolveServerVerdict = useCallback(
+    async (
+      docId: number,
+      set: CanvasProbeSet,
+      budgetMs: number,
+      server: { probe: unknown; plan: unknown; url: string | null; pageCodes: ReadonlyMap<number, string> | null },
+    ) => {
+      const live = () => !goneRef.current && docId === docIdRef.current;
+      checkStartRef.current = performance.now();
+      const hash = await planHashHex(server.plan);
+      let probe = server.probe;
+      const deadline = Date.now() + SERVER_POLL_WINDOW_MS;
+
+      for (;;) {
+        if (!live()) return;
+        const verdict = classifyServerProbe({
+          probe,
+          engineVersion: ENGINE_VERSION,
+          planHash: hash,
+          canvas: set,
+          pageCodes: server.pageCodes,
+          nowMs: Date.now(),
+        });
+
+        if (verdict === "use") {
+          // The same guard `run()` applies, applied earlier: the verdict's placements
+          // are ABSOLUTE, and a canvas the user has dragged since this check started is
+          // not the canvas it describes. Probe it here rather than presenting an offer
+          // that would immediately go stale.
+          if (movedSinceCheck(set, useStitchStore.getState().tiles)) break;
+          const row = probe as ServerProbe;
+          const result = row.result as ProbeResult;
+          probeRef.current = result;
+          const gate = autoAlignGate(result, set.pageIndices);
+          if (gate.offered) {
+            setSheets(gate.sheets);
+            setStatus("offer");
+          } else {
+            setReason(gate.reason);
+            setDetail(gate.detail);
+            setStatus("unavailable");
+          }
+          logSettle(
+            gate.offered ? "offer" : "unavailable",
+            (row.ocrStats as OcrStats | null) ?? null,
+            row.ocrStats?.calls,
+            false,
+            SERVER_SOURCE,
+          );
+          return;
+        }
+
+        if (verdict !== "wait" || !server.url || Date.now() >= deadline) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, SERVER_POLL_INTERVAL_MS));
+        if (!live()) return;
+        probe = await fetchServerProbe(server.url);
+      }
+
+      if (!live()) return;
+      startBrowserProbe(set, budgetMs);
+    },
+    [logSettle, startBrowserProbe],
+  );
+
   const check = useCallback(
     // `budgetMs` and `auto` are internal-only — `recheck` below passes the longer
     // leash, and the reply handler passes `auto` for its one silent re-run. Not part
     // of the public `EarnedAutoAlign["check"]` signature; TS allows the wider
     // function here.
-    (ctx?: EarnedAutoAlignContext, budgetMs: number = PROBE_BUDGET_MS, auto = false) => {
+    (ctx?: EarnedAutoAlignContext, budgetMs: number = PROBE_BUDGET_MS, auto = false, skipServer = false) => {
+      // The server verdict is honoured only on the check that HANDS IT OVER, and never
+      // for the two internal reruns: `recheck()` is the user asking this browser to
+      // look again (answering it from a row would make the button a no-op), and the
+      // automatic re-check exists precisely because a probe answered on holed
+      // evidence — re-serving a stored verdict would answer with the same hole.
+      const server =
+        !auto && !skipServer && ctx?.serverProbe != null
+          ? {
+              probe: ctx.serverProbe,
+              plan: ctx.plan,
+              url: ctx.probeUrl ?? null,
+              // Read AFTER the merge below, so a check that supplies codes and a
+              // verdict in one call compares against the codes it just supplied.
+              pageCodes: null as ReadonlyMap<number, string> | null,
+            }
+          : null;
       if (ctx) ctxRef.current = { ...ctxRef.current, ...ctx };
+      if (server) server.pageCodes = ctxRef.current.pageCodes ?? null;
       stop();
       // A check the USER asked for earns a fresh entitlement to one automatic re-check.
       // The automatic re-check must not grant itself another — that is the loop.
@@ -389,51 +624,24 @@ export function useEarnedAutoAlign(
         return;
       }
       setStatus("checking");
-      const req: ProbeRequest = {
-        docId: docIdRef.current,
-        pdfBytes: set.pdfBytes,
-        pageIndices: set.pageIndices,
-        // The canvas's OWN scales, unlike the modal's uniform-only probe: this run has
-        // to answer the question the commit will ask, because its placements are the
-        // ones the commit reuses.
-        userScale: set.uniformScale,
-        pageScales: set.pageScales.size ? [...set.pageScales] : undefined,
-        pageCodes: ctxRef.current.pageCodes?.size ? [...ctxRef.current.pageCodes] : undefined,
-      };
-      checkStartRef.current = performance.now();
-      const requestedDocId = req.docId;
-      ensureWorker().postMessage(req);
-      budgetTimerRef.current = setTimeout(() => {
-        budgetTimerRef.current = null;
-        // Belt-and-braces: `stop()`/`reset()` already clear this timer on every
-        // superseded check, so this should be unreachable, but a reply landing in
-        // the same tick as the timeout is not worth a race with `goneRef`.
-        if (goneRef.current || requestedDocId !== docIdRef.current) return;
-        // No reply at all, so not even a round-trip count: the short line's "?".
-        logSettle("unavailable", null, undefined, autoRerunRef.current);
-        // The SAME abort a superseded check (or a plain "Add pages" re-check) would
-        // send — the worker does not need a different message to know to give up.
-        stop();
-        // …and hand tesseract's workers back, which nothing else will now do. The
-        // reply handler's `shutdownOcr()` is guarded by the docId staleness check,
-        // and `stop()` has just bumped `docIdRef` — so the worker's eventual
-        // `{aborted:true}` is dropped BEFORE it can reach that release, and 160-240
-        // MB stayed held until the component unmounted. No `ocrIdle()` guard is
-        // needed here (AddPdfModal has one because it debounces and can have a
-        // replacement already queued): this hook runs one probe at a time and
-        // `stop()` has just abandoned it.
-        void shutdownOcr();
-        setReason("too_slow");
-        setDetail(undefined);
-        setStatus("unavailable");
-      }, budgetMs);
+      // THE SHORTCUT. A verdict CTO's droplet already computed for exactly this page
+      // set, this plan and this engine build is the same answer the worker below would
+      // spend a minute of OCR reaching. `resolveServerVerdict` takes it when it fits,
+      // waits briefly when one is still being computed, and otherwise starts the very
+      // browser probe this branch skipped. Only for the check that CARRIED the verdict:
+      // see `EarnedAutoAlignContext.serverProbe`.
+      if (server) {
+        void resolveServerVerdict(docIdRef.current, set, budgetMs, server);
+        return;
+      }
+      startBrowserProbe(set, budgetMs);
     },
-    [ensureWorker, stop, logSettle],
+    [stop, startBrowserProbe, resolveServerVerdict],
   );
 
   // The user asking again on purpose gets a much longer answer window, but not an
   // infinite one — see RECHECK_BUDGET_MS.
-  const recheck = useCallback(() => check(undefined, RECHECK_BUDGET_MS), [check]);
+  const recheck = useCallback(() => check(undefined, RECHECK_BUDGET_MS, false, true), [check]);
 
   // The automatic re-check the reply handler fires when a reply came back with unknown
   // reads. A FRESH normal budget, not the Re-check leash: this is not the user asking

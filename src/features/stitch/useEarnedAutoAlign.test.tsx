@@ -43,9 +43,17 @@ vi.mock("mupdf", () => ({
 import { useEarnedAutoAlign, type EarnedAutoAlign } from "./useEarnedAutoAlign";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { autoAlignUnavailableNote } from "./addToProjectCopy";
+import { ENGINE_VERSION } from "./autostitch/engineVersion";
+import { planHashHex } from "./ctoSessionSource";
 import type { StitchTile } from "./stitchTypes";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** The REAL `setTimeout`, captured before any test installs a fake clock.
+ *  `crypto.subtle.digest` (the plan hash) completes on the event loop, and a faked
+ *  clock does not turn it — so the server-verdict tests below need one genuine
+ *  macrotask to let the hash, and the async check waiting on it, land. */
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
 
 // ── the stubbed worker ───────────────────────────────────────────────────────
 interface Posted { kind?: string; docId: number; pageIndices?: number[]; pageCodes?: [number, string][] }
@@ -402,8 +410,8 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     // check that had been grinding through OCR for a minute made no OCR calls at all,
     // and padding the long format with NaNs is noise, not honesty.
     expect(info).toHaveBeenCalledWith(
-      "[probe] %s: %d ms, %s OCR calls",
-      "unavailable", expect.any(Number), "?",
+      "[probe] %s: %d ms, %s OCR calls%s",
+      "unavailable", expect.any(Number), "?", "",
     );
     info.mockRestore();
 
@@ -446,8 +454,8 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     // is real and the other four were never reported, so the short line prints the one
     // number that exists and says nothing about the four that do not.
     expect(info).toHaveBeenCalledWith(
-      "[probe] %s: %d ms, %s OCR calls",
-      "aborted", expect.any(Number), "42",
+      "[probe] %s: %d ms, %s OCR calls%s",
+      "aborted", expect.any(Number), "42", "",
     );
     info.mockRestore();
   });
@@ -720,5 +728,238 @@ describe("useEarnedAutoAlign — unknown OCR reads", () => {
       expect(hook.status).toBe("unavailable");
       expect(hook.reason).toBe("too_slow");
     });
+  });
+});
+
+/**
+ * THE SERVER VERDICT.
+ *
+ * CTO's droplet probes the combined PDF the moment it is built, so by the time the
+ * editor opens the answer is usually already sitting on the row. These are the rules
+ * that decide whether that answer is allowed to stand in for the minute of OCR the
+ * worker would otherwise spend — and every one of them fails towards the worker, never
+ * towards a verdict the editor cannot bind to what is on the canvas.
+ */
+describe("useEarnedAutoAlign — the server verdict", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  /** The plan the verdict was computed for. Hashed verbatim — key order included. */
+  const PLAN = {
+    version: 1,
+    mode: "auto",
+    entries: [
+      { kind: "takeoff", pageUuid: "u-1", scaleFeetPerInch: 20, label: "C5.00 GRADING" },
+      { kind: "takeoff", pageUuid: "u-2", scaleFeetPerInch: 20, label: "C5.01 GRADING" },
+    ],
+  };
+  const PROBE_URL = "https://cto.example/api/nanodoc/probe?token=t";
+
+  /** A stored row that answers exactly what `seedCanvas([0, 1])` puts on the canvas. */
+  async function storedOk(over: Record<string, unknown> = {}) {
+    return {
+      v: 1,
+      engine: ENGINE_VERSION,
+      status: "ok",
+      planHash: await planHashHex(PLAN),
+      request: { pageIndices: [0, 1], userScale: 20, pageScales: [[0, 20], [1, 20]], pageCodes: [] },
+      result: goodProbe(0, [0, 1]),
+      ocrStats: CLEAN_STATS,
+      ms: 41_000,
+      computedAt: new Date().toISOString(),
+      ...over,
+    };
+  }
+
+  /** A row whose Lambda is still running, good for the full pending TTL. */
+  async function storedPending(over: Record<string, unknown> = {}) {
+    const now = Date.now();
+    return {
+      v: 1,
+      status: "pending",
+      startedAt: new Date(now).toISOString(),
+      ttlMs: 720_000,
+      expiresAt: new Date(now + 720_000).toISOString(),
+      planHash: await planHashHex(PLAN),
+      ...over,
+    };
+  }
+
+  /** Browser probes that were actually posted to a worker (aborts excluded). */
+  const browserProbes = () => posted.filter((p) => !p.kind);
+
+  /** Start a check and let its asynchronous half run to its first real decision —
+   *  the plan hash resolves on the event loop, which `vi.advanceTimersByTime` cannot
+   *  turn (see `realSetTimeout`). */
+  async function checkWith(ctx: Parameters<typeof hook.check>[0]) {
+    await act(async () => {
+      hook.check(ctx);
+      await new Promise<void>((r) => realSetTimeout(r, 0));
+    });
+  }
+
+  it("takes a verdict for exactly this page set — offer, no worker, '(server)' on the line", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const probe = await storedOk();
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+
+    expect(hook.status).toBe("offer");
+    expect(hook.sheets).toBe(2);
+    // The whole point: the worker was never even constructed.
+    expect(workers).toHaveLength(0);
+    expect(browserProbes()).toHaveLength(0);
+    expect(info).toHaveBeenCalledWith(
+      "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
+      "offer", expect.any(Number), CLEAN_STATS.calls, 0, 0, 0, 0, " (server)",
+    );
+    info.mockRestore();
+  });
+
+  it("commits the SERVER's placements, so the solver never runs twice", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const probe = await storedOk();
+    await checkWith({ serverProbe: probe, plan: PLAN });
+    expect(hook.status).toBe("offer");
+    await act(async () => { await hook.run(); });
+    const input = commitAutoAlign.mock.calls.at(-1)![0] as { cached?: { placements?: unknown[] } };
+    expect(input.cached?.placements).toEqual(probe.result.placements);
+  });
+
+  it("discards a verdict from a different engine build", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const probe = await storedOk({ engine: "0ffbeef" });
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+
+    expect(hook.status).toBe("checking");
+    expect(browserProbes()).toHaveLength(1);
+    act(() => workers[0].reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+  });
+
+  it("discards a verdict computed for a different plan", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const probe = await storedOk({ planHash: "0".repeat(64) });
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("discards a verdict computed for a different page set", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    // Same plan, same build — but the canvas reads 20 ft/in on both sheets and this
+    // verdict was computed with the second at 40.
+    const probe = await storedOk({
+      request: { pageIndices: [0, 1], userScale: null, pageScales: [[0, 20], [1, 40]], pageCodes: [] },
+    });
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("discards a status that is not a verdict — an evidence hole is not an answer", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const probe = await storedOk({ status: "unknown" });
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("runs the browser probe when there is no stored verdict at all", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    await checkWith({ serverProbe: null, plan: PLAN, probeUrl: PROBE_URL });
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("waits on a probe still running — polling every 2 s — then gives up after 20 s", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ probe: pending }) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    // The strip says the same thing it says for any check in flight.
+    expect(hook.status).toBe("checking");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenLastCalledWith(PROBE_URL);
+    expect(browserProbes()).toHaveLength(0);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(14_000); });
+    expect(browserProbes()).toHaveLength(1);
+    expect(hook.status).toBe("checking");
+  });
+
+  it("takes the verdict the moment a poll returns one", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending();
+    const finished = await storedOk();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ probe: ++calls >= 2 ? finished : pending }),
+    })));
+
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+
+    expect(hook.status).toBe("offer");
+    expect(browserProbes()).toHaveLength(0);
+    expect(workers).toHaveLength(0);
+  });
+
+  it("does not wait on a pending row whose job died — it probes at once", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const now = Date.now();
+    const dead = await storedPending({
+      startedAt: new Date(now - 800_000).toISOString(),
+      expiresAt: new Date(now - 80_000).toISOString(),
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkWith({ serverProbe: dead, plan: PLAN, probeUrl: PROBE_URL });
+    expect(browserProbes()).toHaveLength(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not wait on a pending probe for somebody else's plan", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const pending = await storedPending({ planHash: "f".repeat(64) });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await checkWith({ serverProbe: pending, plan: PLAN, probeUrl: PROBE_URL });
+    expect(browserProbes()).toHaveLength(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Re-check always asks the browser, never the row", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    const probe = await storedOk();
+    await checkWith({ serverProbe: probe, plan: PLAN, probeUrl: PROBE_URL });
+    expect(hook.status).toBe("offer");
+    expect(browserProbes()).toHaveLength(0);
+
+    await act(async () => { hook.recheck(); });
+    expect(hook.status).toBe("checking");
+    expect(browserProbes()).toHaveLength(1);
+  });
+
+  it("names the OCR batch width on every browser probe, so both probes read alike", async () => {
+    seedCanvas([0, 1]);
+    mount();
+    await act(async () => { hook.check(); });
+    expect((posted.at(-1) as { ocrConcurrency?: number }).ocrConcurrency).toBe(3);
   });
 });

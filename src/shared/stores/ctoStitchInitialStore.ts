@@ -14,6 +14,11 @@ export interface CtoStitchInitialPdf {
    *  — and typing it here would drag the stitch feature's types onto the plain
    *  viewer's boot path. */
   plan?: unknown;
+  /** Raw `probe` from the same response — the auto-align verdict CTO's droplet
+   *  already computed for this plan (`site_sheet_sources.probe`). Unparsed here for
+   *  the same reason `plan` is: only the stitch feature knows how to judge it, and
+   *  the plain viewer's boot path must not learn. */
+  probe?: unknown;
 }
 
 interface CtoStitchInitialState {

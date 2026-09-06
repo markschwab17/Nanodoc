@@ -41,13 +41,11 @@ export { OCR_NO_RESULT };
  * `scripts/build-probe-bundle.mjs` (`define: { __ENGINE_VERSION__: "<git short hash>" }`)
  * and written alongside the bundle as `dist-probe/ENGINE_VERSION`.
  *
- * `"dev"` when the identifier was never substituted — i.e. every non-bundled run
- * (vite-node, vitest, the diag harness). A server verdict stamped `"dev"` can never
- * match the editor's own constant, which is exactly the desired outcome: a verdict
- * from an unversioned build is not interchangeable and must not be trusted.
+ * Re-exported rather than defined here: the EDITOR needs the same constant to decide
+ * whether a stored verdict came from its own build, and this file is Node-only
+ * (`node:zlib`, `Buffer`). `engineVersion.ts` is the one definition both sides read.
  */
-export const ENGINE_VERSION: string =
-  typeof __ENGINE_VERSION__ !== "undefined" && __ENGINE_VERSION__ ? __ENGINE_VERSION__ : "dev";
+export { ENGINE_VERSION } from "./engineVersion";
 
 /** Workers in the Node pool. Three, everywhere — see `ocrPool.ts`'s ceiling note: it is
  *  the width every probe timing was measured at, and the harness's placements fixture was

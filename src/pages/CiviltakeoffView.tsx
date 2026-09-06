@@ -218,9 +218,16 @@ export default function CiviltakeoffView() {
           const { useCtoStitchInitialStore } = await import("@/shared/stores/ctoStitchInitialStore");
           // `stitchPlan` (when this CTO build sends one) lets the stitch view place
           // the sheets itself instead of opening the page picker — see StitchView.
-          useCtoStitchInitialStore
-            .getState()
-            .setInitial({ pdfBytes: data, fileName: name, plan: json?.stitchPlan ?? null });
+          // `probe`, when the row has one, is the auto-align verdict CTO's droplet
+          // already computed for that plan; the earned check uses it instead of
+          // spending a minute of OCR, but only when it matches this build and this
+          // page set exactly (see `classifyServerProbe`). Absent on every older CTO.
+          useCtoStitchInitialStore.getState().setInitial({
+            pdfBytes: data,
+            fileName: name,
+            plan: json?.stitchPlan ?? null,
+            probe: json?.probe ?? null,
+          });
           // KEEP THE QUERY. The handoff (the PDF bytes and the plan) only lives in
           // memory, so a reload of a bare `/stitch` lands in the plain editor with no
           // CTO context at all. With the params still on the URL, StitchView can send

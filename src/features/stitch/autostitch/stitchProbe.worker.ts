@@ -120,7 +120,7 @@ let latestDocId = 0;
 let queue: Promise<void> = Promise.resolve();
 
 async function handle(req: ProbeRequest) {
-  const { docId, pdfBytes, pageIndices, userScale, pageScales, pageCodes } = req;
+  const { docId, pdfBytes, pageIndices, userScale, pageScales, pageCodes, ocrConcurrency } = req;
   if (docId !== latestDocId) return; // superseded before we started — skip
   ocrCallCount = 0;
   try {
@@ -132,6 +132,9 @@ async function handle(req: ProbeRequest) {
         userScale,
         pageScales: pageScales ? new Map(pageScales) : undefined,
         pageCodes: pageCodes ? new Map(pageCodes) : undefined,
+        // Undefined leaves `autoStitch` to size the batch off this machine's cores.
+        // The takeoff-flow hook always names 3 — see `ProbeRequest.ocrConcurrency`.
+        ocrConcurrency,
         ocr: ocrViaMain,
         shouldAbort: () => abortUpTo >= docId,
         onOcrStart: () => self.postMessage({ kind: "ocrPhase", docId }),

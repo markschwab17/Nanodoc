@@ -26,6 +26,7 @@ import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
 import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
 import {
   STITCH_SESSION_LOST,
+  ctoProbeUrl,
   isStitchSessionLost,
   stitchHandoffRecovery,
 } from "@/features/stitch/ctoSessionSource";
@@ -462,7 +463,18 @@ export default function StitchView() {
         // step strip is the only surface the offer has, and a probe nobody can see is
         // pure cost.
         if (!ctx.embed) return;
-        earnedCheck({ pageCodes: parsed.pageCodes, removeWhiteBackground: true });
+        earnedCheck({
+          pageCodes: parsed.pageCodes,
+          removeWhiteBackground: true,
+          // The verdict CTO's droplet already computed for this plan, if any, plus
+          // what binds it: the RAW plan (hashed, un-reserialised) and where to re-read
+          // a row that was still computing when this window opened. The check uses it
+          // only when engine build, plan hash and page set all match; otherwise it
+          // probes in the browser exactly as it always has.
+          serverProbe: initial.probe ?? null,
+          plan: initial.plan,
+          probeUrl: ctoProbeUrl(ctx),
+        });
       } catch (e) {
         // Cancelled by the user: the commit threw before writing anything, so
         // the canvas is untouched. No error copy — just hand them the picker.

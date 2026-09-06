@@ -98,3 +98,230 @@ export function stitchHandoffRecovery(search: string): { search: string } | null
     !!params.get("token");
   return enough ? { search: params.toString() } : null;
 }
+
+// ─── the server-computed auto-align verdict ──────────────────────────────────
+//
+// CTO combines the selected sheets into one PDF and, on the droplet, hands that PDF
+// and the stitch plan to a Lambda running THIS repo's engine bundle. The verdict lands
+// on `site_sheet_sources.probe` and travels here next to the plan
+// (`GET /api/nanodoc/pdf` → `probe`), with `GET /api/nanodoc/probe?token=` to re-read a
+// row that was still computing when the editor opened.
+//
+// Everything below is the editor's half of ONE rule: a server verdict is usable only
+// when it answers the SAME question this build's browser probe would have asked. Same
+// engine commit, same plan, same page set. Anything else — an older row, a different
+// build, a plan edited since, a canvas that has moved — is not a verdict at all, and
+// the browser probe runs exactly as it does today. Never a gate, only a shortcut.
+
+/** The inputs a probe ran with. Compared field-for-field against `canvasProbeSet`;
+ *  the droplet derives it with `deriveProbeRequest` (a port of `parseStitchPlan` plus
+ *  the commit's scale fill), which is what makes the two comparable at all. */
+export interface ServerProbeRequest {
+  pageIndices: number[];
+  userScale: number | null;
+  /** `[pageIndex, feetPerInch][]` — DENSE: the commit stamps a scale on every tile. */
+  pageScales: Array<[number, number]>;
+  /** `[pageIndex, sheetCode][]`, absent when the plan named none. */
+  pageCodes?: Array<[number, string]> | null;
+}
+
+/** The stored `site_sheet_sources.probe` object, as the wire hands it over. Every
+ *  field optional: this is untrusted JSON from a row a future droplet may extend. */
+export interface ServerProbe {
+  v?: number;
+  engine?: string | null;
+  status?: string;
+  planHash?: string;
+  request?: ServerProbeRequest | null;
+  /** A `ProbeResult` when `status === 'ok'`. Left `unknown` here so this module stays
+   *  free of the aligner's types; the hook narrows it. */
+  result?: unknown;
+  ocrStats?: { calls: number; nonAnswers: number; retries: number; unknown: number; withheldVotes: number } | null;
+  ms?: number;
+  computedAt?: string;
+  error?: string;
+  /** Pending rows only — how long the claim is believed. */
+  ttlMs?: number;
+  expiresAt?: string;
+  startedAt?: string;
+}
+
+/** The shape of the stored object this build understands. Mirrors the droplet's
+ *  `PROBE_VERSION`; a row stamped anything else is refused rather than guessed at. */
+export const SERVER_PROBE_VERSION = 1;
+
+/** What the editor should do about a stored verdict.
+ *  - `use`  — it answers this canvas's question; take it and skip the worker.
+ *  - `wait` — a probe is genuinely still running; poll before giving up on it.
+ *  - `none` — no verdict here. Run the browser probe, as always. */
+export type ServerProbeVerdict = "use" | "wait" | "none";
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * `sha256(JSON.stringify(plan))`, hex — the third implementation of the dullest hash
+ * that could work (CTO's `src/lib/site-sheet/plan-hash.ts` and the droplet's
+ * `plan-hash.js` are the other two). Deliberately NOT canonical JSON: all three hash
+ * the object `JSON.parse`d out of the same `site_sheet_sources.plan` jsonb, so the key
+ * order is byte-for-byte identical, and anything smarter is a third place the three can
+ * silently diverge.
+ *
+ * `null` — never a throw and never a hash of nothing — for a plan that will not
+ * serialise, and for an environment with no `crypto.subtle` (an insecure origin). A
+ * null hash matches no verdict, so the browser probe runs: failing closed is the only
+ * safe reading of "I cannot bind this verdict to a plan".
+ */
+export async function planHashHex(plan: unknown): Promise<string | null> {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(plan);
+  } catch {
+    return null;
+  }
+  if (typeof json !== "string") return null;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return null;
+  try {
+    const digest = await subtle.digest("SHA-256", new TextEncoder().encode(json));
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+/** Floating-point equality for a scale that made a round trip through JSON. The two
+ *  sides read the same numbers out of the same plan, so this is a guard against
+ *  serialisation noise, not a tolerance anybody is meant to rely on. */
+const SCALE_EPSILON = 1e-9;
+const sameScale = (a: number | null, b: number | null): boolean =>
+  a == null || b == null ? a == null && b == null : Math.abs(a - b) <= SCALE_EPSILON;
+
+const sortedPairs = <T,>(pairs: Iterable<[number, T]>): Array<[number, T]> =>
+  [...pairs].sort((x, y) => x[0] - y[0]);
+
+/**
+ * Did the stored probe ask the question this canvas is asking?
+ *
+ * `pageIndices` and `pageCodes` must be equal outright; scales are compared to
+ * `SCALE_EPSILON`. `pageCodes` is normalised (`?? []` on both sides) because "the plan
+ * named no sheet codes" reaches the two sides as an absent field and as an empty map —
+ * and it IS compared, because a probe that knew the sheet numbers and one that had to
+ * OCR them out of a title block can reach different answers about the same pages.
+ */
+export function serverProbeRequestMatches(
+  request: ServerProbeRequest | null | undefined,
+  canvas: {
+    pageIndices: readonly number[];
+    uniformScale: number | null;
+    pageScales: ReadonlyMap<number, number>;
+  },
+  pageCodes?: ReadonlyMap<number, string> | null,
+): boolean {
+  if (!isPlainRecord(request)) return false;
+  if (!Array.isArray(request.pageIndices) || !Array.isArray(request.pageScales)) return false;
+
+  if (request.pageIndices.length !== canvas.pageIndices.length) return false;
+  if (!request.pageIndices.every((i, n) => i === canvas.pageIndices[n])) return false;
+
+  const wantScale = typeof request.userScale === "number" ? request.userScale : null;
+  if (!sameScale(wantScale, canvas.uniformScale)) return false;
+
+  const theirs = sortedPairs(request.pageScales as Array<[number, number]>);
+  const ours = sortedPairs(canvas.pageScales);
+  if (theirs.length !== ours.length) return false;
+  if (!theirs.every(([i, s], n) => i === ours[n][0] && sameScale(s, ours[n][1]))) return false;
+
+  const theirCodes = sortedPairs((request.pageCodes ?? []) as Array<[number, string]>);
+  const ourCodes = sortedPairs(pageCodes ?? new Map<number, string>());
+  if (theirCodes.length !== ourCodes.length) return false;
+  if (!theirCodes.every(([i, c], n) => i === ourCodes[n][0] && c === ourCodes[n][1])) return false;
+
+  return true;
+}
+
+/**
+ * Is a `pending` row a probe that is still running, or one whose job died?
+ *
+ * The droplet writes `expiresAt` (and `startedAt` + `ttlMs`) precisely so a reader need
+ * not know its constants. A pending row past its expiry is a droplet task that fell
+ * over mid-job — the editor must treat it as no verdict at all rather than sit on a
+ * spinner waiting for a Lambda nobody is running. A row carrying neither clock cannot
+ * be believed either, so it expires immediately.
+ */
+export function isServerProbePending(probe: ServerProbe, nowMs: number): boolean {
+  const explicit = Date.parse(probe.expiresAt ?? "");
+  if (Number.isFinite(explicit)) return explicit > nowMs;
+  const started = Date.parse(probe.startedAt ?? "");
+  const ttl = typeof probe.ttlMs === "number" && Number.isFinite(probe.ttlMs) ? probe.ttlMs : null;
+  if (!Number.isFinite(started) || ttl == null) return false;
+  return started + ttl > nowMs;
+}
+
+/**
+ * The whole gate, as one pure decision.
+ *
+ * `planHash` is what the editor computed for the plan it loaded (`planHashHex`); `null`
+ * means it could not compute one, which is a mismatch like any other. `engineVersion`
+ * is this build's `ENGINE_VERSION`.
+ *
+ * Note what is NOT here: whether the canvas has moved since the check. That needs the
+ * store, so the hook applies `movedSinceCheck` on top — a verdict's placements are
+ * ABSOLUTE, and one taken over a canvas the user has since dragged would throw their
+ * work away exactly as a stale browser probe would.
+ */
+export function classifyServerProbe(opts: {
+  probe: unknown;
+  engineVersion: string;
+  planHash: string | null;
+  canvas: {
+    pageIndices: readonly number[];
+    uniformScale: number | null;
+    pageScales: ReadonlyMap<number, number>;
+  };
+  pageCodes?: ReadonlyMap<number, string> | null;
+  nowMs: number;
+}): ServerProbeVerdict {
+  const { probe, engineVersion, planHash, canvas, pageCodes, nowMs } = opts;
+  if (!isPlainRecord(probe)) return "none";
+  const row = probe as ServerProbe;
+  // A version this build does not know is refused outright — including for the pending
+  // wait, because "pending" only means what this build thinks it means at v1.
+  if (row.v !== SERVER_PROBE_VERSION) return "none";
+
+  if (row.status === "pending") {
+    // A pending row already carries the hash of the plan it is being computed for. If
+    // that is not OUR plan, waiting twenty seconds to discover so is pure cost. A row
+    // with no hash yet is given the benefit of the doubt.
+    if (typeof row.planHash === "string" && row.planHash !== planHash) return "none";
+    return isServerProbePending(row, nowMs) ? "wait" : "none";
+  }
+
+  // `unknown` (the probe answered on evidence with a hole in it), `timeout`, `error`,
+  // and anything a future droplet invents: not a verdict, and never presented as one.
+  if (row.status !== "ok") return "none";
+  if (typeof row.engine !== "string" || row.engine !== engineVersion) return "none";
+  if (typeof planHash !== "string" || row.planHash !== planHash) return "none";
+  if (!isPlainRecord(row.result) || !Array.isArray((row.result as { placements?: unknown }).placements)) {
+    return "none";
+  }
+  if (!serverProbeRequestMatches(row.request, canvas, pageCodes)) return "none";
+  return "use";
+}
+
+/**
+ * `GET /api/nanodoc/probe?token=…` for this session, or null when the session has no
+ * usable credential.
+ *
+ * Deliberately the SAME token as the PDF fetch: the endpoint verifies it the same way,
+ * and anyone holding it can already fetch the document the verdict is about. Null when
+ * either half is missing, which the caller reads as "a pending row cannot be polled" —
+ * so the editor stops waiting on it and probes in the browser.
+ */
+export function ctoProbeUrl(ctx: { api_origin?: string | null; token?: string | null } | null | undefined): string | null {
+  const origin = ctx?.api_origin?.replace(/\/+$/, "");
+  const token = ctx?.token;
+  if (!origin || !token) return null;
+  return `${origin}/api/nanodoc/probe?token=${encodeURIComponent(token)}`;
+}

@@ -25,6 +25,16 @@ export interface ProbeRequest {
    *  it so the probe answers the same question the commit will; AddPdfModal has no
    *  plan and sends nothing. */
   pageCodes?: [number, string][];
+  /** OCR batch width — how many band reads `autoStitch` issues at once.
+   *
+   *  Absent means "size it off this machine" (`defaultOcrPoolSize`, 2-3 by core
+   *  count). The takeoff flow's earned check sends 3 EXPLICITLY, because the server
+   *  probe (`probeNode.ts`, `NODE_OCR_POOL_SIZE`) runs at 3 and the chunk width is not
+   *  merely a speed knob: the aligner stops issuing strips once one has hit, so a run
+   *  chunked two-at-a-time reads a different set of bands than one chunked three, and
+   *  its OCR tally — the counters the honesty gate reasons about — differs. Two probes
+   *  meant to be interchangeable have to read the same way. */
+  ocrConcurrency?: number;
 }
 
 export interface ProbeResult {
