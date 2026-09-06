@@ -392,12 +392,13 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     expect(posted.filter((p) => p.kind === "abort" && p.docId === docId)).toHaveLength(1);
     expect(hook.status).toBe("unavailable");
     expect(hook.reason).toBe("too_slow");
-    // NaN, not 0: the budget expired with no reply, so nobody ever told us ANY of the
-    // counts — and printing 0 claimed a check that had been grinding through OCR for a
-    // minute had made no OCR calls at all.
+    // The SHORT line: the budget expired with no reply, so nobody ever told us any of
+    // the counts — not even the round-trip one. "?" says that; printing 0 would claim a
+    // check that had been grinding through OCR for a minute made no OCR calls at all,
+    // and padding the long format with NaNs is noise, not honesty.
     expect(info).toHaveBeenCalledWith(
-      "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
-      "unavailable", expect.any(Number), NaN, NaN, NaN, NaN, NaN, "",
+      "[probe] %s: %d ms, %s OCR calls",
+      "unavailable", expect.any(Number), "?",
     );
     info.mockRestore();
 
@@ -437,10 +438,11 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     act(() => hook.check());
     act(() => workers[0].reply({ docId: posted.at(-1)!.docId, aborted: true, ocrCalls: 42 }));
     // An aborted probe threw, so there is no OcrStats behind it: the round-trip count
-    // is real and the other four are NaN — "nobody told us", not "none happened".
+    // is real and the other four were never reported, so the short line prints the one
+    // number that exists and says nothing about the four that do not.
     expect(info).toHaveBeenCalledWith(
-      "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
-      "aborted", expect.any(Number), 42, NaN, NaN, NaN, NaN, "",
+      "[probe] %s: %d ms, %s OCR calls",
+      "aborted", expect.any(Number), "42",
     );
     info.mockRestore();
   });
@@ -624,6 +626,60 @@ describe("useEarnedAutoAlign — unknown OCR reads", () => {
     expect(requests()).toHaveLength(4);
     act(() => workers.at(-1)!.reply(clean(requests().at(-1)!.docId, [0, 1])));
     expect(hook.status).toBe("offer");
+  });
+
+  it("the automatic re-check keeps the OCR pool — it is about to read with it", () => {
+    // Handing tesseract back between the discarded reply and the re-check made the
+    // re-check pay a full pool boot and briefly held two pools' worth of memory.
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    shutdownOcr.mockClear();
+    act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("checking");
+    expect(shutdownOcr).not.toHaveBeenCalled();
+    // …and the re-check's own settle releases it, exactly like any other settle.
+    act(() => workers.at(-1)!.reply(clean(requests().at(-1)!.docId, [0, 1])));
+    expect(shutdownOcr).toHaveBeenCalled();
+  });
+
+  it("reset() during the automatic re-check stops it dead — no third probe", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+    expect(requests()).toHaveLength(2);
+
+    const inFlight = requests().at(-1)!.docId;
+    act(() => hook.reset());
+    expect(hook.status).toBe("idle");
+    // The abandoned re-check's own reply is stale and writes nothing…
+    act(() => workers.at(-1)!.reply(clean(inFlight, [0, 1])));
+    expect(hook.status).toBe("idle");
+    // …and nothing re-armed itself: no third request ever went out.
+    expect(requests()).toHaveLength(2);
+    // The pool is handed back by reset(), not left held by the skipped release above.
+    expect(shutdownOcr).toHaveBeenCalled();
+  });
+
+  it("a user check AFTER a reset still gets its own single automatic re-check", () => {
+    // The latch belongs to a check, not to the session — and a reset in the middle of
+    // one must not leave it stuck in either position.
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+    act(() => hook.reset());
+
+    act(() => hook.check());
+    expect(requests()).toHaveLength(3);
+    act(() => workers.at(-1)!.reply(holed(requests().at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("checking");
+    expect(requests()).toHaveLength(4);          // its one re-check, granted afresh
+    act(() => workers.at(-1)!.reply(holed(requests().at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
+    expect(requests()).toHaveLength(4);          // and no more than one
   });
 
   it("a reply with no ocrStats at all behaves exactly as before — shown, not re-checked", () => {

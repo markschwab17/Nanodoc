@@ -67,19 +67,6 @@ const PROBE_BUDGET_MS = 60_000;
  *  aligner cannot finish spun forever with no way out but closing the modal. */
 const RECHECK_BUDGET_MS = 3 * PROBE_BUDGET_MS;
 
-/**
- * The counters for a settle nobody could report.
- *
- * `NaN`, not 0. A budget that expired never got a reply, and an aborted or errored
- * probe has no `AutoStitchResult` to take a tally from — printing 0 there claimed a
- * check that had been grinding through OCR for a minute had made no OCR calls at all,
- * which is the same class of lie as treating a timed-out read as an empty crop. `%d`
- * renders `NaN` as "NaN", which reads as "not reported"; every decision below tests
- * `> 0`, which is false for `NaN`, so an unreported tally can never trigger a re-check
- * or suppress a verdict.
- */
-const UNREPORTED: OcrStats = { calls: NaN, nonAnswers: NaN, retries: NaN, unknown: NaN, withheldVotes: NaN };
-
 /** Session knowledge the canvas cannot supply. Remembered between checks. */
 export interface EarnedAutoAlignContext {
   /** Sheet identity CTO already knows, by page index (the plan's labels). Free — CTO
@@ -188,15 +175,31 @@ export function useEarnedAutoAlign(
    *  Shared by a normal worker reply, by the budget expiring, and by a reply that is
    *  thrown away in favour of the automatic re-check — all three are ways a check
    *  stopped waiting, and the discarded one is the one whose cost would otherwise
-   *  vanish (its wall-clock and its reads are NOT included in the re-check's line). */
-  const logSettle = useCallback((settled: string, stats: OcrStats, rerun: boolean) => {
-    const ms = Math.round(performance.now() - checkStartRef.current);
-    console.info(
-      "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
-      settled, ms, stats.calls, stats.nonAnswers, stats.retries, stats.unknown, stats.withheldVotes,
-      rerun ? " (auto re-check)" : "",
-    );
-  }, []);
+   *  vanish (its wall-clock and its reads are NOT included in the re-check's line).
+   *
+   *  TWO formats, because there are two kinds of settle. A settle behind an
+   *  `AutoStitchResult` has the full tally and prints it. A settle that has none — an
+   *  abort, an error, a budget that expired without any reply — has only the worker's
+   *  own round-trip count, and prints the SHORT line this log has always used for that
+   *  case. Padding the long format with placeholders printed `NaN non-answers, NaN
+   *  retries, …` on the commonest line in the file (a user-caused abort), which is
+   *  noise, not honesty: "we were never told" is what a missing tally means, and
+   *  omitting the counters says exactly that. */
+  const logSettle = useCallback(
+    (settled: string, stats: OcrStats | null, calls: number | undefined, rerun: boolean) => {
+      const ms = Math.round(performance.now() - checkStartRef.current);
+      if (!stats) {
+        console.info("[probe] %s: %d ms, %s OCR calls", settled, ms, calls == null ? "?" : String(calls));
+        return;
+      }
+      console.info(
+        "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
+        settled, ms, stats.calls, stats.nonAnswers, stats.retries, stats.unknown, stats.withheldVotes,
+        rerun ? " (auto re-check)" : "",
+      );
+    },
+    [],
+  );
 
   // Callbacks live in refs so `check`/`run` stay stable and a caller need not
   // memoise its handlers to avoid re-probing.
@@ -220,39 +223,41 @@ export function useEarnedAutoAlign(
       if (goneRef.current || msg.docId !== docIdRef.current) return; // stale
       // The worker answered — the budget that was watching this same check is moot.
       clearBudget();
-      // The probe is done with tesseract either way; 160-240 MB is worth handing back
-      // (`ensurePool` rebuilds it lazily if another check follows).
-      void shutdownOcr();
       const rerun = autoRerunRef.current;
-      // A probe that threw carries only its round-trip count — there is no
-      // `AutoStitchResult` behind it to take the rest from. See `UNREPORTED`.
-      const spent = (calls?: number): OcrStats => ({ ...UNREPORTED, calls: calls ?? NaN });
-      if ("aborted" in msg) { setStatus("idle"); logSettle("aborted", spent(msg.ocrCalls), rerun); return; }
+      // Tesseract's 160-240 MB goes back on every path that ENDS here (`ensurePool`
+      // rebuilds it lazily). Deliberately not at the top of the handler: the automatic
+      // re-check below starts another probe immediately, and shutting the pool down
+      // first made that probe pay a full pool boot AND briefly hold two pools' worth
+      // of memory. The re-check's own settle releases it, exactly like any other.
+      const releaseOcr = () => { void shutdownOcr(); };
+      if ("aborted" in msg) { releaseOcr(); setStatus("idle"); logSettle("aborted", null, msg.ocrCalls, rerun); return; }
       if ("error" in msg) {
         // A failed check is not a failed feature: the sheets are already on the canvas
         // in a grid, and the honest thing is to say the seams were not verified rather
         // than offer a button on a probe that never finished.
+        releaseOcr();
         console.warn("[earnedAutoAlign] probe failed:", msg.error);
         probeRef.current = null;
         setReason("unverified");
         setDetail(undefined);
         setStatus("unavailable");
-        logSettle("error", spent(msg.ocrCalls), rerun);
+        logSettle("error", null, msg.ocrCalls, rerun);
         return;
       }
-      // NEVER A VERDICT ON UNKNOWN EVIDENCE (see the header). `> 0` is deliberately
-      // false for an absent tally: a reply with no `ocrStats` is a stub or an older
-      // worker, and the old behaviour — show what came back — is the safe reading.
-      const stats = msg.ocrStats ?? spent(msg.ocrCalls);
-      if (stats.unknown > 0) {
+      // NEVER A VERDICT ON UNKNOWN EVIDENCE (see the header). A reply with no
+      // `ocrStats` is a stub or an older worker: nobody told us, and the old
+      // behaviour — show what came back — is the safe reading of that.
+      const stats = msg.ocrStats ?? null;
+      if (stats && stats.unknown > 0) {
         if (!autoRecheckSpentRef.current) {
           autoRecheckSpentRef.current = true;
           // Logged before it is thrown away, so the run's cost is on the record and
           // the reason for the second run is visible: this line is the only place the
           // discarded reply is ever mentioned.
-          logSettle("re-checking", stats, rerun);
+          logSettle("re-checking", stats, msg.ocrCalls, rerun);
           // Status stays "checking" and nothing else is written, so the strip does not
           // flicker: `check` re-asserts exactly the values a check in flight already has.
+          // No `releaseOcr()`: the re-check is about to read with that same pool.
           autoRecheckRef.current();
           return;
         }
@@ -260,14 +265,16 @@ export function useEarnedAutoAlign(
         // showing it would be the flip the whole exercise exists to stop. The time
         // budget's answer is the true one — and it is the one unavailable reason that
         // keeps the Re-check action (TakeoffModeStrip), which is what the user wants.
+        releaseOcr();
         probeRef.current = null;
         setSheets(0);
         setReason("too_slow");
         setDetail(undefined);
         setStatus("unavailable");
-        logSettle("unavailable", stats, rerun);
+        logSettle("unavailable", stats, msg.ocrCalls, rerun);
         return;
       }
+      releaseOcr();
       probeRef.current = msg;
       const gate = autoAlignGate(msg, setRef.current?.pageIndices ?? []);
       if (gate.offered) {
@@ -278,7 +285,7 @@ export function useEarnedAutoAlign(
         setDetail(gate.detail);
         setStatus("unavailable");
       }
-      logSettle(gate.offered ? "offer" : "unavailable", stats, rerun);
+      logSettle(gate.offered ? "offer" : "unavailable", stats, msg.ocrCalls, rerun);
     };
     workerRef.current = w;
     return w;
@@ -363,6 +370,12 @@ export function useEarnedAutoAlign(
       const set = canvasProbeSet(tiles);
       setRef.current = set;
       if (!set) {
+        // This check posts nothing, so nothing downstream will hand tesseract back —
+        // and the reply handler now KEEPS the pool alive across an automatic re-check.
+        // A canvas that lost a sheet between the discarded reply and the re-check
+        // lands exactly here, so the release belongs here too. A no-op when no pool
+        // was ever built, which is the usual case.
+        void shutdownOcr();
         // Null has two meanings and only one of them is "nothing to say". A canvas
         // built from two PDFs is a real answer the user can act on (align them one
         // document at a time), so it gets the note rather than silence.
@@ -396,7 +409,8 @@ export function useEarnedAutoAlign(
         // superseded check, so this should be unreachable, but a reply landing in
         // the same tick as the timeout is not worth a race with `goneRef`.
         if (goneRef.current || requestedDocId !== docIdRef.current) return;
-        logSettle("unavailable", UNREPORTED, autoRerunRef.current);
+        // No reply at all, so not even a round-trip count: the short line's "?".
+        logSettle("unavailable", null, undefined, autoRerunRef.current);
         // The SAME abort a superseded check (or a plain "Add pages" re-check) would
         // send — the worker does not need a different message to know to give up.
         stop();
