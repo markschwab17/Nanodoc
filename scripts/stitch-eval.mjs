@@ -18,6 +18,27 @@
  * cache stitch-diag uses, so the two share every result. Set
  * STITCH_EVAL_NO_OCR_CACHE=1 to bypass that cache (read AND write) for a cold,
  * cache-free timing run — every image is re-OCR'd and the cache file is untouched.
+ *
+ * FAULT INJECTION. This machine's tesseract has never once blown the 20 s job budget
+ * (see the note by `ocr` below), so the corpus cannot reach the aligner's non-answer
+ * paths on its own — and those paths are exactly the ones that make the BROWSER probe
+ * answer differently on two runs of the same sheets. Two env switches make them
+ * reachable here, where the answer can be diffed against a baseline:
+ *
+ *   STITCH_EVAL_FAULT_CALLS=3,7   those OCR reads return the pool's non-answer
+ *                                 (`OCR_NO_RESULT`: `onNoResult` fires, `[]` comes
+ *                                 back) WITHOUT running tesseract, exactly as a
+ *                                 timed-out job does.
+ *   STITCH_EVAL_LOG_OCR_CALLS=1   print every read's index and pixel size, which is
+ *                                 how you pick the indices above.
+ *
+ * Indices are 0-based, count EVERY read the aligner makes (cache hits included — a
+ * warm cache must not move them), and RESET PER SET, so `--set X FAULT_CALLS=3` means
+ * the 4th read of set X whichever other sets ran. A retry re-reads the same clip as a
+ * NEW index, so faulting index N exercises the retry without faulting the retry too.
+ *
+ * The bar: every faulted run must produce the SAME placements and the SAME verdict as
+ * the un-faulted one. A difference is a real non-determinism, not a harness artefact.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -82,6 +103,17 @@ function encodePNG(width, height, rgba) {
 // to take a cache-free timing baseline without clobbering the shared cache file
 // that stitch-diag also reads.
 const NO_OCR_CACHE = process.env.STITCH_EVAL_NO_OCR_CACHE === "1";
+// See the header. `readIndex` counts every read of the CURRENT set (cache hits and
+// faults included) so an index means the same read on a warm cache as on a cold one.
+// The empty-string filter is load-bearing: `"".split(",")` is `[""]` and `Number("")`
+// is 0, so without it an UNSET switch faulted read #0 of every set.
+const FAULT_CALLS = new Set(
+  String(process.env.STITCH_EVAL_FAULT_CALLS ?? "")
+    .split(",").map((s) => s.trim()).filter((s) => s !== "")
+    .map(Number).filter((n) => Number.isInteger(n) && n >= 0),
+);
+const LOG_OCR_CALLS = process.env.STITCH_EVAL_LOG_OCR_CALLS === "1";
+let readIndex = 0, faultsFired = 0;
 const CACHE_DIR = path.join(REPO, "scratch-diag");
 const CACHE_FILE = path.join(CACHE_DIR, "ocr-cache.json");
 fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -133,6 +165,14 @@ function ensurePool() {
   return built;
 }
 async function ocr(image, opts) {
+  const idx = readIndex++;
+  if (LOG_OCR_CALLS) console.log(`[ocr] #${idx} ${image.width}x${image.height}`);
+  // Injected non-answer. Ahead of the cache on purpose: a fault has to fire whether or
+  // not this raster has been read before, or a warm cache would quietly disarm it. This
+  // is byte-for-byte what the pool's OCR_NO_RESULT path does below — `onNoResult` fires
+  // and the read comes back empty — which is what a 20 s job-budget expiry looks like
+  // to the aligner.
+  if (FAULT_CALLS.has(idx)) { faultsFired++; opts?.onNoResult?.(); return []; }
   const key = hashImage(image);
   if (!NO_OCR_CACHE && cache[key]) { ocrHits++; return cache[key]; }
   ocrCalls++;
@@ -254,6 +294,9 @@ for (const set of sets) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), "application/pdf");
   const t0 = Date.now();
   const before = ocrCalls;
+  // Per-set, so a fault index names the same read whichever sets are in the run.
+  readIndex = 0;
+  const faultsBefore = faultsFired;
   // `ocrConcurrency` tells autoStitch how wide the transport behind `ocr` really is,
   // so its reciprocal strip scan batches to THIS pool rather than guessing. The
   // browser default derives from `navigator.hardwareConcurrency`, which Node only
@@ -265,6 +308,14 @@ for (const set of sets) {
   flushCache();
   row.seconds = (Date.now() - t0) / 1000;
   row.ocrCalls = ocrCalls - before;
+  // What the OCR channel did, straight from the aligner (autoStitch's OcrStats): reads
+  // made, reads the transport could not answer, re-read decisions, reads still unknown
+  // after their retry, and side bands whose rotation vote was withheld. On a clean run
+  // every one but `calls` is 0; anything else means this run reached its answer with a
+  // hole in the evidence, and the answer must be read with that in mind.
+  row.ocrStats = res.ocrStats ?? null;
+  row.reads = readIndex;
+  row.faults = faultsFired - faultsBefore;
   row.aligned = res.alignedCount;
   row.method = res.method;
   row.verdict = res.alignmentVerdict ?? "unverified";
@@ -348,14 +399,24 @@ if (AS_JSON) {
   const pad = (s, n) => String(s).padEnd(n);
   const NAMEW = 32;
   console.log(`\nstitch-eval · ${MANIFEST}\n`);
-  console.log(`${pad("set", NAMEW)}${pad("aligned", 9)}${pad("method", 11)}${pad("verdict", 12)}${pad("worstResid", 12)}${pad("suspect", 9)}${pad("skipped", 9)}${pad("refPg", 7)}${pad("ocr", 6)}time`);
-  console.log("-".repeat(110));
+  // `ocr` is tesseract MISSES (a warm cache reads 0); `calls/na/rt/unk/wh` is what the
+  // aligner's own OCR channel did — see OcrStats. The two answer different questions:
+  // the first is "what did this run cost", the second "what did this run not know".
+  const statsCell = (s) => (s ? `${s.calls}/${s.nonAnswers}/${s.retries}/${s.unknown}/${s.withheldVotes}` : "—");
+  console.log(`${pad("set", NAMEW)}${pad("aligned", 9)}${pad("method", 11)}${pad("verdict", 12)}${pad("worstResid", 12)}${pad("suspect", 9)}${pad("skipped", 9)}${pad("refPg", 7)}${pad("ocr", 6)}${pad("calls/na/rt/unk/wh", 20)}time`);
+  console.log("-".repeat(130));
   for (const r of rows) {
     if (r.skipped) { console.log(`${pad(r.name, NAMEW)}SKIPPED — ${r.skipped}`); continue; }
     console.log(
       `${pad(r.name, NAMEW)}${pad(r.aligned, 9)}${pad(r.method, 11)}${pad(r.verdict, 12)}` +
-      `${pad(`${r.worstResidFt.toFixed(2)} ft`, 12)}${pad(`${r.suspect}/${r.seams}`, 9)}${pad(r.skippedSheets, 9)}${pad(r.refPages, 7)}${pad(r.ocrCalls, 6)}${r.seconds.toFixed(1)}s`,
+      `${pad(`${r.worstResidFt.toFixed(2)} ft`, 12)}${pad(`${r.suspect}/${r.seams}`, 9)}${pad(r.skippedSheets, 9)}${pad(r.refPages, 7)}${pad(r.ocrCalls, 6)}` +
+      `${pad(statsCell(r.ocrStats), 20)}${r.seconds.toFixed(1)}s`,
     );
+  }
+  if (FAULT_CALLS.size) {
+    const asked = [...FAULT_CALLS].sort((a, b) => a - b).join(",");
+    console.log(`\nFAULTS INJECTED at read ${asked} of each set: ` +
+      rows.filter((r) => !r.skipped).map((r) => `${r.name} ${r.faults}/${r.reads} reads`).join("; "));
   }
   console.log("");
   for (const r of rows) {

@@ -42,6 +42,7 @@ vi.mock("mupdf", () => ({
 
 import { useEarnedAutoAlign, type EarnedAutoAlign } from "./useEarnedAutoAlign";
 import { useStitchStore } from "@/shared/stores/stitchStore";
+import { autoAlignUnavailableNote } from "./addToProjectCopy";
 import type { StitchTile } from "./stitchTypes";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -62,6 +63,11 @@ class FakeWorker {
   reply(msg: unknown) { this.onmessage?.({ data: msg } as MessageEvent<unknown>); }
 }
 (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+/** What a clean OCR channel reports: reads made, nothing lost. */
+const CLEAN_STATS = { calls: 12, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 };
+/** …and one that reached its answer with a hole in the evidence. */
+const holedStats = (unknown = 1) => ({ calls: 12, nonAnswers: 2, retries: 1, unknown, withheldVotes: 0 });
 
 /** The probe payload of a set that clears every bar of the gate. */
 const goodProbe = (docId: number, pages: number[]) => ({
@@ -386,10 +392,13 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     expect(posted.filter((p) => p.kind === "abort" && p.docId === docId)).toHaveLength(1);
     expect(hook.status).toBe("unavailable");
     expect(hook.reason).toBe("too_slow");
-    // "?" not 0: the budget expired with no reply, so nobody ever told us the count —
-    // and printing 0 claimed a check that had been grinding through OCR for a minute
-    // had made no OCR calls at all.
-    expect(info).toHaveBeenCalledWith("[probe] %s: %d ms, %s OCR calls", "unavailable", expect.any(Number), "?");
+    // NaN, not 0: the budget expired with no reply, so nobody ever told us ANY of the
+    // counts — and printing 0 claimed a check that had been grinding through OCR for a
+    // minute had made no OCR calls at all.
+    expect(info).toHaveBeenCalledWith(
+      "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
+      "unavailable", expect.any(Number), NaN, NaN, NaN, NaN, NaN, "",
+    );
     info.mockRestore();
 
     // A reply that lands after the budget already gave up must not resurrect it.
@@ -427,7 +436,12 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     act(() => hook.check());
     act(() => workers[0].reply({ docId: posted.at(-1)!.docId, aborted: true, ocrCalls: 42 }));
-    expect(info).toHaveBeenCalledWith("[probe] %s: %d ms, %s OCR calls", "aborted", expect.any(Number), "42");
+    // An aborted probe threw, so there is no OcrStats behind it: the round-trip count
+    // is real and the other four are NaN — "nobody told us", not "none happened".
+    expect(info).toHaveBeenCalledWith(
+      "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s",
+      "aborted", expect.any(Number), 42, NaN, NaN, NaN, NaN, "",
+    );
     info.mockRestore();
   });
 
@@ -502,5 +516,148 @@ describe("useEarnedAutoAlign — probe time budget", () => {
     // Not just guarded by goneRef — the timeout itself is gone.
     expect(vi.getTimerCount()).toBe(0);
     root = createRoot(container);
+  });
+});
+
+/**
+ * NEVER A VERDICT ON UNKNOWN EVIDENCE.
+ *
+ * `ocrStats.unknown > 0` means the aligner answered without a read it asked for twice.
+ * Those reads are the whole reason two probes of the SAME four sheets disagreed, so a
+ * reply carrying one is not shown: the hook re-runs the check ONCE, and if the second
+ * run has a hole too it says the check took too long rather than pick a side.
+ */
+describe("useEarnedAutoAlign — unknown OCR reads", () => {
+  const LINE = "[probe] %s: %d ms, %d OCR calls, %d non-answers, %d retries, %d unknown, %d withheld%s";
+  /** Probe REQUESTS only — `posted` also carries every `{kind:"abort"}`. */
+  const requests = () => posted.filter((p) => !p.kind);
+  const holed = (docId: number, pages: number[]) => ({ ...goodProbe(docId, pages), ocrStats: holedStats() });
+  const clean = (docId: number, pages: number[]) => ({ ...goodProbe(docId, pages), ocrStats: CLEAN_STATS });
+
+  it("a clean reply is shown at once — no second probe", () => {
+    seedCanvas([0, 1]);
+    mount();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    act(() => hook.check());
+    act(() => workers[0].reply(clean(posted.at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+    expect(requests()).toHaveLength(1);
+    expect(info).toHaveBeenCalledWith(LINE, "offer", expect.any(Number), 12, 0, 0, 0, 0, "");
+    info.mockRestore();
+  });
+
+  it("a reply with an unknown read is never shown — one silent re-check, then the answer", () => {
+    seedCanvas([0, 1]);
+    mount();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    act(() => hook.check());
+    const first = posted.at(-1)!.docId;
+
+    // The reply that would have been an OFFER. It is thrown away instead.
+    act(() => workers[0].reply(holed(first, [0, 1])));
+    expect(hook.status).toBe("checking");          // no flicker: still checking
+    expect(hook.sheets).toBe(0);
+    expect(hook.reason).toBeUndefined();
+    expect(requests()).toHaveLength(2);            // …because a second probe went out
+    expect(requests().at(-1)!.docId).not.toBe(first);
+    expect(info).toHaveBeenCalledWith(LINE, "re-checking", expect.any(Number), 12, 2, 1, 1, 0, "");
+    // Nothing to run on while the re-check is in flight.
+    void hook.run();
+    expect(commitAutoAlign).not.toHaveBeenCalled();
+
+    // The re-check comes back whole, and THAT is what the user is shown.
+    act(() => workers.at(-1)!.reply(clean(requests().at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+    expect(hook.sheets).toBe(2);
+    expect(info).toHaveBeenCalledWith(LINE, "offer", expect.any(Number), 12, 0, 0, 0, 0, " (auto re-check)");
+    info.mockRestore();
+  });
+
+  it("unknown twice: the honest 'took too long', with Re-check still offered", () => {
+    seedCanvas([0, 1]);
+    mount();
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    act(() => hook.check());
+    act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+    act(() => workers.at(-1)!.reply(holed(requests().at(-1)!.docId, [0, 1])));
+
+    expect(hook.status).toBe("unavailable");
+    expect(hook.reason).toBe("too_slow");
+    expect(hook.sheets).toBe(0);
+    // The EXISTING copy, and the one unavailable reason TakeoffModeStrip keeps a
+    // Re-check button on — which is the right next step for a hole in the evidence.
+    expect(autoAlignUnavailableNote(hook.reason!))
+      .toBe("Auto-align isn't available for these sheets — the check took too long");
+    expect(info).toHaveBeenCalledWith(LINE, "unavailable", expect.any(Number), 12, 2, 1, 1, 0, " (auto re-check)");
+    // ONE re-check, not a loop.
+    expect(requests()).toHaveLength(2);
+    info.mockRestore();
+  });
+
+  it("an offer is not taken from a probe whose evidence had a hole", () => {
+    // The failure this guards: adopting the discarded reply as `probeRef` would let the
+    // user commit placements the hook had just refused to stand behind.
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+    act(() => workers.at(-1)!.reply(holed(requests().at(-1)!.docId, [0, 1])));
+    void hook.run();
+    expect(commitAutoAlign).not.toHaveBeenCalled();
+    expect(hook.status).toBe("unavailable");
+  });
+
+  it("a fresh user check re-arms the one automatic re-check", () => {
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+    act(() => workers.at(-1)!.reply(holed(requests().at(-1)!.docId, [0, 1])));
+    expect(requests()).toHaveLength(2);
+
+    // The user asks again (the Re-check the strip offers). That check is entitled to
+    // its own automatic re-check — the latch belongs to a check, not to the session.
+    act(() => hook.recheck());
+    expect(requests()).toHaveLength(3);
+    act(() => workers.at(-1)!.reply(holed(requests().at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("checking");
+    expect(requests()).toHaveLength(4);
+    act(() => workers.at(-1)!.reply(clean(requests().at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+  });
+
+  it("a reply with no ocrStats at all behaves exactly as before — shown, not re-checked", () => {
+    // Absent is "nobody told us", and the old behaviour (show what came back) is the
+    // safe reading of it. `undefined > 0` is false, which is what makes that so.
+    seedCanvas([0, 1]);
+    mount();
+    act(() => hook.check());
+    act(() => workers[0].reply(goodProbe(posted.at(-1)!.docId, [0, 1])));
+    expect(hook.status).toBe("offer");
+    expect(requests()).toHaveLength(1);
+  });
+
+  describe("its budget", () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("the automatic re-check runs on a FRESH normal budget", () => {
+      // Not the Re-check leash: this is not the user asking again, it is the hook
+      // declining to answer, so it stays inside the same "never grinds" promise.
+      seedCanvas([0, 1]);
+      mount();
+      act(() => hook.check());
+      act(() => vi.advanceTimersByTime(59_000));    // the FIRST check's budget, nearly up
+      act(() => workers[0].reply(holed(posted.at(-1)!.docId, [0, 1])));
+      expect(hook.status).toBe("checking");
+
+      // The first check's remaining 1s does not end the re-check…
+      act(() => vi.advanceTimersByTime(59_999));
+      expect(hook.status).toBe("checking");
+      // …but 60s from ITS OWN start does.
+      act(() => vi.advanceTimersByTime(2));
+      expect(hook.status).toBe("unavailable");
+      expect(hook.reason).toBe("too_slow");
+    });
   });
 });

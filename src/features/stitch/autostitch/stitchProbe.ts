@@ -4,7 +4,7 @@
  * file so `toProbeResult` is unit-testable without spawning a worker.
  */
 import type { TilePlacement, PlacedSheetPose } from "./layout";
-import type { AutoStitchResult } from "./autoStitch";
+import type { AutoStitchResult, OcrStats } from "./autoStitch";
 import type { StitchMethod, SeamReportEntry, AlignmentVerdict } from "./stitchCore";
 
 export interface ProbeRequest {
@@ -46,9 +46,21 @@ export interface ProbeResult {
   worstAlongUncertaintyFt?: number;
   /** Where that figure came from — `"bound"` means nothing measured it. */
   worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
-  /** How many OCR round-trips (worker → main thread) this probe made. Counted in
-   *  the worker where `autoStitch` calls its `ocr` callback (`ocrViaMain`); logged
-   *  by `useEarnedAutoAlign` alongside probe wall-clock time. */
+  /** What the run's OCR channel actually did — see `OcrStats`. THE FIELD THE HOOK
+   *  REASONS ABOUT: `ocrStats.unknown > 0` means the aligner reached this result
+   *  without a read it wanted, so the result must not be presented as a verdict
+   *  (`useEarnedAutoAlign` re-checks once, then says the check took too long).
+   *
+   *  Optional because a reply can carry no stats at all: the failure paths below
+   *  have no `AutoStitchResult` to take them from, and a stubbed worker in a test
+   *  need not supply them. Absent is read as "nobody told us", NOT as zero — every
+   *  comparison here is `> 0`, which is false for `undefined` and for `NaN`. */
+  ocrStats?: OcrStats;
+  /** How many OCR round-trips this probe made — kept for compatibility with
+   *  everything that read it before `ocrStats` existed, and now simply
+   *  `ocrStats.calls`. (It used to be the WORKER's own RPC tally; the two differ
+   *  only for reads `ocrViaMain` declines to issue because the run is already
+   *  aborting, and such a run never reaches this result.) */
   ocrCalls?: number;
 }
 
@@ -62,7 +74,11 @@ export type ProbeMessage =
    *  error — the modal treats it as a skipped check, no toast. */
   | { docId: number; aborted: true; ocrCalls?: number };
 
-export function toProbeResult(res: AutoStitchResult, docId: number, ocrCalls?: number): ProbeResult {
+export function toProbeResult(res: AutoStitchResult, docId: number): ProbeResult {
+  // Read once, defensively: `AutoStitchResult.ocrStats` is a required field, but this
+  // is the boundary a stubbed/older aligner crosses, and a missing tally must degrade
+  // to "unreported" rather than throw on the way out of a probe that otherwise worked.
+  const stats: OcrStats | undefined = res.ocrStats;
   return {
     docId,
     placements: res.placements,
@@ -77,6 +93,7 @@ export function toProbeResult(res: AutoStitchResult, docId: number, ocrCalls?: n
     alongAnchored: res.alongAnchored,
     worstAlongUncertaintyFt: res.worstAlongUncertaintyFt,
     worstAlongUncertaintySource: res.worstAlongUncertaintySource,
-    ocrCalls,
+    ocrStats: stats,
+    ocrCalls: stats?.calls,
   };
 }

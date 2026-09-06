@@ -54,6 +54,12 @@ const OCR_TIMEOUT_MS = 25_000;
 // Counts every RPC autoStitch makes through its `ocr` callback for the CURRENT
 // probe — reset at the top of `handle()` so a persistent worker's later probes
 // don't accumulate a prior run's count.
+//
+// Only the FAILURE paths report it now. A probe that finished carries `autoStitch`'s
+// own `ocrStats` out instead (`toProbeResult`), which counts the same reads plus the
+// four things this tally cannot see — non-answers, retries, unknown reads, withheld
+// votes. A probe that threw has no `AutoStitchResult` to take those from, and "we
+// spent N round-trips getting nowhere" is still worth saying.
 let ocrCallCount = 0;
 function ocrViaMain(
   image: RawImage,
@@ -125,7 +131,7 @@ async function handle(req: ProbeRequest) {
     } finally {
       doc.destroy?.();
     }
-    const msg: ProbeMessage = toProbeResult(res, docId, ocrCallCount);
+    const msg: ProbeMessage = toProbeResult(res, docId);
     self.postMessage(msg);
   } catch (err) {
     // An abort is not a failure — report it as skipped so the modal shows no toast.

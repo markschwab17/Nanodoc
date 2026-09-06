@@ -30,6 +30,7 @@ vi.mock("./autoStitch", async (importOriginal) => {
           placements: [], rootFtPerIn: 20, alignedCount: 0, unplacedCount: 0,
           worstResidFt: 0, method: "none", poses: [], refPageIndices: [],
           skipped: [], scaleWarnings: [],
+          ocrStats: { calls: 9, nonAnswers: 1, retries: 1, unknown: 0, withheldVotes: 0 },
         });
       });
     }),
@@ -163,5 +164,25 @@ describe("stitchProbe.worker OCR RPC — non-answers", () => {
     await expect(p).resolves.toEqual([]);
     expect(flagged).toBe(false);
     expect(sent.some((m) => m.kind === "ocr-abort")).toBe(true);
+  });
+});
+
+describe("stitchProbe.worker result shaping", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { delete (self as any).onmessage; });
+
+  it("a finished probe posts the ALIGNER's OCR tally, not just a round-trip count", async () => {
+    // The worker's own `ocrCallCount` cannot see non-answers, retries, unknown reads or
+    // withheld votes — and `unknown` is the one the hook refuses to show a verdict on.
+    // Dropping the tally here would leave the hook blind with no test failing.
+    await loadWorker();
+    post(request(1));
+    await settle();
+    stitch.release!();
+    await settle();
+    const res = sent.find((m) => m && !m.kind && m.docId === 1);
+    expect(res).toBeTruthy();
+    expect(res.ocrStats).toEqual({ calls: 9, nonAnswers: 1, retries: 1, unknown: 0, withheldVotes: 0 });
+    expect(res.ocrCalls).toBe(9);
   });
 });
