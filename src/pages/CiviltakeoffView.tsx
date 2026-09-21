@@ -7,18 +7,19 @@
  * so we avoid React #185 infinite loop (no state/result of fetch in deps).
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Editor from "./Editor";
 import {
   parseCiviltakeoffViewParams,
   hasCiviltakeoffToken,
+  displayNameFor,
 } from "@/shared/civiltakeoffViewParams";
+import { applyUrlTheme } from "@/shared/urlTheme";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { usePDFStore } from "@/shared/stores/pdfStore";
 import { useTabStore } from "@/shared/stores/tabStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
-import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { useUIStore } from "@/shared/stores/uiStore";
 import { useESignStore } from "@/shared/stores/esignStore";
@@ -39,6 +40,14 @@ export default function CiviltakeoffView() {
 
   // Guard: only one fetch per distinct URL (no setState, so no extra renders/effect re-runs)
   const lastFetchedSearchRef = useRef<string | null>(null);
+
+  // Theme (`?theme=dark|light`) BEFORE anything paints: main.tsx already applied it at boot so the
+  // loading screen is dark too, and this re-applies on a client-side navigation that carries a
+  // different theme. useLayoutEffect (not useEffect) so it lands before the first paint of this
+  // route, and before the PDF-fetch effect below runs.
+  useLayoutEffect(() => {
+    applyUrlTheme(location.search);
+  }, [location.search]);
 
   // Listen for CTO postMessage: go to page without reload (scroll + highlight), or open another PDF as new tab
   useEffect(() => {
@@ -89,6 +98,8 @@ export default function CiviltakeoffView() {
               doc: "document_file",
               token,
               api_origin: apiOrigin,
+              embed: params.embed === "1",
+              theme: params.theme,
             });
           }
           const url = `${apiOrigin}/api/nanodoc/pdf?token=${encodeURIComponent(token)}`;
@@ -186,14 +197,7 @@ export default function CiviltakeoffView() {
         }
         const arrayBuffer = await pdfRes.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
-        const name =
-          params.doc === "soils_report"
-            ? "soils_report.pdf"
-            : params.doc === "bid_docs"
-              ? "bid_docs.pdf"
-              : params.doc === "document_file" && params.file_name?.trim()
-                ? (params.file_name.trim().toLowerCase().endsWith(".pdf") ? params.file_name.trim() : params.file_name.trim() + ".pdf")
-                : "document.pdf";
+        const name = displayNameFor(params);
 
         // Persist CTO context so Save / stitch can use it
         if (params.project && params.doc && params.token) {
@@ -203,13 +207,32 @@ export default function CiviltakeoffView() {
             token: params.token,
             api_origin: params.api_origin,
             project_name: params.project_name ?? undefined,
+            embed: params.embed === "1",
+            theme: params.theme,
           });
         }
 
         // Stitch mode: do not load into editor; pass PDF to stitch view and navigate
         if (params.stitch === "1") {
-          useCtoStitchInitialStore.getState().setInitial({ pdfBytes: data, fileName: name });
-          navigate("/stitch");
+          // Lazy: the stitch feature (and its stores) must not load on the plain /view boot path.
+          const { useCtoStitchInitialStore } = await import("@/shared/stores/ctoStitchInitialStore");
+          // `stitchPlan` (when this CTO build sends one) lets the stitch view place
+          // the sheets itself instead of opening the page picker — see StitchView.
+          // `probe`, when the row has one, is the auto-align verdict CTO's droplet
+          // already computed for that plan; the earned check uses it instead of
+          // spending a minute of OCR, but only when it matches this build and this
+          // page set exactly (see `classifyServerProbe`). Absent on every older CTO.
+          useCtoStitchInitialStore.getState().setInitial({
+            pdfBytes: data,
+            fileName: name,
+            plan: json?.stitchPlan ?? null,
+            probe: json?.probe ?? null,
+          });
+          // KEEP THE QUERY. The handoff (the PDF bytes and the plan) only lives in
+          // memory, so a reload of a bare `/stitch` lands in the plain editor with no
+          // CTO context at all. With the params still on the URL, StitchView can send
+          // the browser back through this route and the session comes back.
+          navigate({ pathname: "/stitch", search: window.location.search });
           return;
         }
 

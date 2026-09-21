@@ -4,6 +4,7 @@
  */
 
 import type { StitchTile } from "./stitchTypes";
+import { ABSOLUTE_MIN_ZOOM, FIT_VIEWPORT_MARGIN, MIN_ZOOM, PT_PER_INCH } from "./stitchConstants";
 
 /** Canvas point (e.g. from clientToCanvas). */
 export interface CanvasPoint {
@@ -66,12 +67,12 @@ export function tileLocalToCanvas(
  * Hit-test: find the first tile (in reverse draw order = top-most first) that contains the canvas point.
  * Returns tile and canvas point, or null if no tile hit.
  */
-export function hitTestTileAtPoint(
+export function hitTestTileAtPoint<T extends TilePose>(
   canvasPoint: CanvasPoint,
-  tiles: StitchTile[],
+  tiles: readonly T[],
   /** If true, iterate tiles in reverse order (top-most first). Default true. */
   topMostFirst = true
-): { tile: StitchTile; point: CanvasPoint } | null {
+): { tile: T; point: CanvasPoint } | null {
   const order = topMostFirst ? [...tiles].reverse() : tiles;
   for (const tile of order) {
     const local = canvasToTileLocal(canvasPoint, tile);
@@ -125,6 +126,161 @@ export function computeTwoPointAlignment(
   const y = centerY - h / 2;
 
   return { x, y, rotation: R_deg };
+}
+
+/**
+ * "Align to neighbour", the DEFAULT one-point move: slide the tile so the point clicked
+ * on it lands on the point clicked on the fixed sheet.
+ *
+ * Mark: "sheets rarely rotate, it's mostly stacking and aligning the points." A plan
+ * set comes off one plotter at one orientation, so the second point mostly served to
+ * re-derive a rotation of zero — and any imprecision in it became a real, wrong
+ * rotation. Rotation and size are left exactly as they were; this is a translation and
+ * nothing else.
+ */
+export function computeAlignTranslation(
+  movingTile: TilePose,
+  movingPoint: CanvasPoint,
+  fixedPoint: CanvasPoint
+): { x: number; y: number } {
+  return {
+    x: movingTile.x + (fixedPoint.x - movingPoint.x),
+    y: movingTile.y + (fixedPoint.y - movingPoint.y),
+  };
+}
+
+/**
+ * "Align to neighbour" with **Rotate too**: the moving tile's two clicked points are
+ * carried onto the two points clicked on the fixed sheet.
+ *
+ * Same two-point maths as `computeTwoPointAlignment` (the moving tile is the target and
+ * the fixed sheet's points are the reference), with ONE addition: when `matchScale` is
+ * on the tile is also scaled uniformly so the two distances match. Scale is a real
+ * decision — a sheet plotted at a different scale must be resized, a sheet plotted at
+ * the same scale must NOT be — so it is a toggle, off by default, and with it off this
+ * returns exactly what `computeTwoPointAlignment` returns plus the unchanged size.
+ *
+ * Derivation: the tile maps local (u,v) to canvas as
+ *   canvas = centre + R·(s·(u - w0/2), s·(v - h0/2))
+ * with s the uniform scale (1 when `matchScale` is off) — the rotation is unchanged by
+ * a uniform scale, so R comes from the two directions exactly as before, and the centre
+ * falls out of pinning the first point.
+ */
+export function computeAlignToNeighbour(
+  movingTile: TilePose,
+  movingPointsCanvas: [CanvasPoint, CanvasPoint],
+  fixedPointsCanvas: [CanvasPoint, CanvasPoint],
+  matchScale = false
+): { x: number; y: number; width: number; height: number; rotation: number } {
+  const w0 = movingTile.width;
+  const h0 = movingTile.height;
+  const unchanged = {
+    x: movingTile.x,
+    y: movingTile.y,
+    width: w0,
+    height: h0,
+    rotation: movingTile.rotation ?? 0,
+  };
+
+  const local1 = canvasToTileLocal(movingPointsCanvas[0], movingTile);
+  const local2 = canvasToTileLocal(movingPointsCanvas[1], movingTile);
+  if (!local1 || !local2) return unchanged;
+  const du = local2.u - local1.u;
+  const dv = local2.v - local1.v;
+  const localLen = Math.hypot(du, dv);
+  const [B1, B2] = fixedPointsCanvas;
+  const refLen = Math.hypot(B2.x - B1.x, B2.y - B1.y);
+  // Two coincident clicks say nothing about rotation or scale — leave the tile alone
+  // rather than divide by zero and fling it off the canvas.
+  if (localLen <= 0 || refLen <= 0) return unchanged;
+
+  const scale = matchScale ? refLen / localLen : 1;
+  const R_rad = Math.atan2(B2.y - B1.y, B2.x - B1.x) - Math.atan2(dv, du);
+  let R_deg = (R_rad * 180) / Math.PI;
+  R_deg = ((R_deg % 360) + 360) % 360;
+  if (R_deg > 180) R_deg -= 360;
+
+  const width = w0 * scale;
+  const height = h0 * scale;
+  const cos = Math.cos(R_rad);
+  const sin = Math.sin(R_rad);
+  const relU = (local1.u - w0 / 2) * scale;
+  const relV = (local1.v - h0 / 2) * scale;
+  const centerX = B1.x - (relU * cos - relV * sin);
+  const centerY = B1.y - (relU * sin + relV * cos);
+
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+    rotation: R_deg,
+  };
+}
+
+/**
+ * Carry one member of a GROUP through the same rigid transform a move applied to the
+ * sheet that was actually clicked.
+ *
+ * A group has to keep its internal spacing — that is the whole reason it exists — so
+ * when "Align to neighbour" moves one member, every other member follows through the
+ * same map: the point `origin` lands on `target`, everything rotates by `rotationDeg`
+ * about that point, and (only when Match scale is on) everything scales by `scale`
+ * about it too. With no rotation and no scale this is a plain translation, which is the
+ * default case and by far the common one.
+ */
+export function rigidGroupPose(
+  member: TilePose,
+  origin: CanvasPoint,
+  target: CanvasPoint,
+  rotationDeg: number,
+  scale: number
+): { x: number; y: number; width: number; height: number; rotation: number } {
+  const rad = (rotationDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const cx = member.x + member.width / 2;
+  const cy = member.y + member.height / 2;
+  const dx = (cx - origin.x) * scale;
+  const dy = (cy - origin.y) * scale;
+  const width = member.width * scale;
+  const height = member.height * scale;
+  const centerX = target.x + (dx * cos - dy * sin);
+  const centerY = target.y + (dx * sin + dy * cos);
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+    rotation: (member.rotation ?? 0) + rotationDeg,
+  };
+}
+
+/**
+ * How far the SECOND point misses, in feet, after an "Align to neighbour" move.
+ *
+ * The first point lands exactly (the transform pins it), and the rotation makes the
+ * two spans parallel — so everything the move could not reconcile shows up as the
+ * difference in LENGTH between the span the user drew on the moving sheet and the span
+ * they drew on the fixed one. That is a measurement of THIS interaction, taken after
+ * the move, not a stale figure from whatever the auto-aligner last thought about the
+ * pair.
+ *
+ * Canvas units are points and a canvas inch is `feetPerInch` feet of ground (every
+ * tile is sized to the composition's reference scale at commit), so the conversion is
+ * one division.
+ *
+ * Meaningless when **Match scale** is on: the scale is then chosen to make the two
+ * spans equal, so this is 0 by construction and the caller must not show it.
+ */
+export function seamMissFt(
+  movingPoints: [CanvasPoint, CanvasPoint],
+  fixedPoints: [CanvasPoint, CanvasPoint],
+  feetPerInch: number
+): number {
+  const moved = distance(movingPoints[0], movingPoints[1]);
+  const target = distance(fixedPoints[0], fixedPoints[1]);
+  return (Math.abs(moved - target) / PT_PER_INCH) * feetPerInch;
 }
 
 /**
@@ -295,4 +451,83 @@ export function getGroupBounds(
     width: maxX - minX,
     height: maxY - minY,
   };
+}
+
+/** A rectangle in canvas space. */
+export interface Bounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Everything the user should be able to see: the canvas page rect UNION every
+ * tile's AABB (rotation included). Tiles routinely sit outside the page — a
+ * plan set auto-aligned onto an 8.5×11 default spills far past it — and a view
+ * that only ever fits the page would hide them.
+ *
+ * Deliberately NOT the same as `contentExportBounds` in stitchExport.ts: this is
+ * about what the viewport shows, export semantics are their own thing.
+ */
+export function contentBounds(
+  tiles: TilePose[],
+  canvasWidth: number,
+  canvasHeight: number
+): Bounds {
+  let minX = 0;
+  let minY = 0;
+  let maxX = canvasWidth;
+  let maxY = canvasHeight;
+  for (const t of tiles) {
+    const aabb = getTileAABB(t);
+    minX = Math.min(minX, aabb.x);
+    minY = Math.min(minY, aabb.y);
+    maxX = Math.max(maxX, aabb.x + aabb.width);
+    maxY = Math.max(maxY, aabb.y + aabb.height);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * The zoom at which `bounds` exactly fits a viewport, leaving `margin` (a
+ * fraction of the viewport, split between the two sides) as slack.
+ *
+ * Returns MIN_ZOOM when there is nothing measurable to fit against — an
+ * unmeasured viewport (width/height 0 before layout) or degenerate bounds — so
+ * callers get the everyday floor rather than 0 or Infinity.
+ */
+export function fitZoomFor(
+  bounds: Bounds,
+  viewportWidth: number,
+  viewportHeight: number,
+  margin: number = FIT_VIEWPORT_MARGIN
+): number {
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) return MIN_ZOOM;
+  if (!(bounds.width > 0) || !(bounds.height > 0)) return MIN_ZOOM;
+  const availableWidth = viewportWidth * (1 - margin);
+  const availableHeight = viewportHeight * (1 - margin);
+  const zoom = Math.min(availableWidth / bounds.width, availableHeight / bounds.height);
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : MIN_ZOOM;
+}
+
+/**
+ * The lower zoom bound the UI should enforce right now.
+ *
+ * MIN_ZOOM (0.25) is fine for a single page, but Mark's complaint was that with
+ * a set of huge plan sheets placed you "cannot zoom far enough out to see all
+ * the pages" — 0.25 is nowhere near enough. So the floor drops to HALF the
+ * fit-the-whole-composition zoom (half, so you can always pull back visibly
+ * further than a plain fit), never rising above MIN_ZOOM and never falling
+ * below ABSOLUTE_MIN_ZOOM.
+ */
+export function effectiveMinZoomFor(
+  bounds: Bounds,
+  viewportWidth: number,
+  viewportHeight: number,
+  margin: number = FIT_VIEWPORT_MARGIN
+): number {
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) return MIN_ZOOM;
+  const fit = fitZoomFor(bounds, viewportWidth, viewportHeight, margin);
+  return Math.min(MIN_ZOOM, Math.max(ABSOLUTE_MIN_ZOOM, fit * 0.5));
 }

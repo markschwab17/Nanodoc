@@ -6,11 +6,20 @@
 import { describe, expect, test } from "vitest";
 import {
   canvasToTileLocal,
+  computeAlignToNeighbour,
+  computeAlignTranslation,
+  rigidGroupPose,
+  seamMissFt,
   computeResizedPose,
+  computeTwoPointAlignment,
+  contentBounds,
+  effectiveMinZoomFor,
+  fitZoomFor,
   getGroupBounds,
   getTileAABB,
   tileLocalToCanvas,
 } from "./stitchGeometry";
+import { ABSOLUTE_MIN_ZOOM, MIN_ZOOM } from "./stitchConstants";
 import type { StitchTile } from "./stitchTypes";
 
 function makeTile(partial: Partial<StitchTile>): StitchTile {
@@ -149,5 +158,318 @@ describe("canvasToTileLocal / tileLocalToCanvas", () => {
       expect(back.u).toBeCloseTo(u, 6);
       expect(back.v).toBeCloseTo(v, 6);
     }
+  });
+});
+
+describe("contentBounds", () => {
+  test("with no tiles it is exactly the canvas rect", () => {
+    expect(contentBounds([], 612, 792)).toEqual({ x: 0, y: 0, width: 612, height: 792 });
+  });
+
+  test("a tile inside the canvas does not shrink the bounds", () => {
+    const inside = makeTile({ x: 100, y: 100, width: 50, height: 50 });
+    expect(contentBounds([inside], 612, 792)).toEqual({ x: 0, y: 0, width: 612, height: 792 });
+  });
+
+  test("tiles outside the canvas extend it in both directions", () => {
+    const left = makeTile({ x: -200, y: -50, width: 100, height: 100 });
+    const right = makeTile({ x: 900, y: 1000, width: 100, height: 100 });
+    expect(contentBounds([left, right], 612, 792)).toEqual({
+      x: -200,
+      y: -50,
+      width: 1200, // -200 → 1000
+      height: 1150, // -50 → 1100
+    });
+  });
+
+  test("rotation counts: the union uses the rotated AABB", () => {
+    // 100x50 at (0,0) rotated 90° about its centre (50,25) occupies x∈[25,75], y∈[-0,50]
+    const rotated = makeTile({ x: 0, y: 0, width: 100, height: 50, rotation: 90 });
+    const aabb = getTileAABB(rotated);
+    const bounds = contentBounds([rotated], 10, 10);
+    expect(bounds.y).toBeCloseTo(Math.min(0, aabb.y), 6);
+    expect(bounds.height).toBeCloseTo(Math.max(10, aabb.y + aabb.height) - bounds.y, 6);
+  });
+});
+
+describe("fitZoomFor", () => {
+  test("landscape content in a square viewport is limited by width", () => {
+    // 1000x100 into 500x500 with 5% slack → 475/1000
+    expect(fitZoomFor({ x: 0, y: 0, width: 1000, height: 100 }, 500, 500)).toBeCloseTo(0.475, 6);
+  });
+
+  test("portrait content in a square viewport is limited by height", () => {
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 1000 }, 500, 500)).toBeCloseTo(0.475, 6);
+  });
+
+  test("the margin is slack on the viewport, not the content", () => {
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 200, 200, 0)).toBeCloseTo(2, 6);
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 200, 200, 0.5)).toBeCloseTo(1, 6);
+  });
+
+  test("an unmeasured viewport or degenerate bounds falls back to MIN_ZOOM", () => {
+    expect(fitZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 0, 0)).toBe(MIN_ZOOM);
+    expect(fitZoomFor({ x: 0, y: 0, width: 0, height: 0 }, 500, 500)).toBe(MIN_ZOOM);
+  });
+});
+
+describe("effectiveMinZoomFor", () => {
+  test("small content never raises the floor above MIN_ZOOM", () => {
+    // A tiny composition fits at zoom 4.75; half of that is still way above MIN_ZOOM.
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 100, height: 100 }, 500, 500)).toBe(MIN_ZOOM);
+  });
+
+  test("big content drops the floor to half the fit zoom", () => {
+    // 10000x10000 into 500x500 → fit 0.0475, half = 0.02375 (above the absolute floor).
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 10000, height: 10000 }, 500, 500)).toBeCloseTo(
+      0.02375,
+      6
+    );
+  });
+
+  test("never below ABSOLUTE_MIN_ZOOM, however huge the composition", () => {
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 5e6, height: 5e6 }, 500, 500)).toBe(
+      ABSOLUTE_MIN_ZOOM
+    );
+  });
+
+  test("an unmeasured viewport keeps the everyday floor", () => {
+    expect(effectiveMinZoomFor({ x: 0, y: 0, width: 10000, height: 10000 }, 0, 0)).toBe(MIN_ZOOM);
+  });
+});
+
+describe("computeAlignToNeighbour", () => {
+  const moving = makeTile({ id: "m", x: 0, y: 0, width: 200, height: 100 });
+
+  test("with Match scale off it is the existing two-point alignment, size untouched", () => {
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 20, y: 30 },
+      { x: 160, y: 70 },
+    ];
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 500, y: 400 },
+      { x: 610, y: 500 },
+    ];
+    const pose = computeAlignToNeighbour(moving, movingPoints, fixedPoints, false);
+    const legacy = computeTwoPointAlignment(fixedPoints, moving, movingPoints);
+    expect(pose.x).toBeCloseTo(legacy.x, 9);
+    expect(pose.y).toBeCloseTo(legacy.y, 9);
+    expect(pose.rotation).toBeCloseTo(legacy.rotation, 9);
+    expect(pose.width).toBe(moving.width);
+    expect(pose.height).toBe(moving.height);
+  });
+
+  test("lands the two clicked points exactly on the two target points", () => {
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 20, y: 30 },
+      { x: 160, y: 70 },
+    ];
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 500, y: 400 },
+      { x: 500 + Math.hypot(140, 40), y: 400 },
+    ];
+    const pose = computeAlignToNeighbour(moving, movingPoints, fixedPoints, false);
+    const placed = { ...moving, ...pose };
+    // A1 must sit on B1 …
+    const local1 = canvasToTileLocal(movingPoints[0], moving)!;
+    const at1 = tileLocalToCanvas(local1.u, local1.v, placed);
+    expect(at1.x).toBeCloseTo(fixedPoints[0].x, 6);
+    expect(at1.y).toBeCloseTo(fixedPoints[0].y, 6);
+    // … and A2 on B2, because the two spans are the same length here.
+    const local2 = canvasToTileLocal(movingPoints[1], moving)!;
+    const at2 = tileLocalToCanvas(local2.u, local2.v, placed);
+    expect(at2.x).toBeCloseTo(fixedPoints[1].x, 6);
+    expect(at2.y).toBeCloseTo(fixedPoints[1].y, 6);
+  });
+
+  test("Match scale resizes uniformly so both points land", () => {
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 50, y: 50 },
+      { x: 150, y: 50 },
+    ];
+    // Target span is 200 — twice the 100 clicked on the moving sheet.
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 400, y: 300 },
+      { x: 600, y: 300 },
+    ];
+    const pose = computeAlignToNeighbour(moving, movingPoints, fixedPoints, true);
+    expect(pose.width).toBeCloseTo(400, 6);
+    expect(pose.height).toBeCloseTo(200, 6);
+    const placed = { ...moving, ...pose };
+    const l1 = canvasToTileLocal(movingPoints[0], moving)!;
+    const at1 = tileLocalToCanvas(l1.u * 2, l1.v * 2, placed);
+    expect(at1.x).toBeCloseTo(400, 6);
+    expect(at1.y).toBeCloseTo(300, 6);
+    const l2 = canvasToTileLocal(movingPoints[1], moving)!;
+    const at2 = tileLocalToCanvas(l2.u * 2, l2.v * 2, placed);
+    expect(at2.x).toBeCloseTo(600, 6);
+    expect(at2.y).toBeCloseTo(300, 6);
+  });
+
+  test("works from an already rotated tile", () => {
+    const rotated = makeTile({ id: "r", x: 10, y: 20, width: 200, height: 100, rotation: 37 });
+    const movingPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 40, y: 60 },
+      { x: 120, y: 90 },
+    ];
+    const fixedPoints: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 900, y: 100 },
+      { x: 900 + Math.hypot(80, 30), y: 100 },
+    ];
+    const pose = computeAlignToNeighbour(rotated, movingPoints, fixedPoints, false);
+    const placed = { ...rotated, ...pose };
+    const l1 = canvasToTileLocal(movingPoints[0], rotated)!;
+    const at1 = tileLocalToCanvas(l1.u, l1.v, placed);
+    expect(at1.x).toBeCloseTo(900, 6);
+    expect(at1.y).toBeCloseTo(100, 6);
+  });
+
+  test("two coincident clicks leave the tile exactly where it was", () => {
+    const pose = computeAlignToNeighbour(
+      moving,
+      [{ x: 10, y: 10 }, { x: 10, y: 10 }],
+      [{ x: 500, y: 500 }, { x: 600, y: 500 }],
+      true
+    );
+    expect(pose).toEqual({ x: 0, y: 0, width: 200, height: 100, rotation: 0 });
+  });
+});
+
+describe("seamMissFt", () => {
+  /** 1" = 20', so 72 canvas points (one inch) = 20 ft. */
+  test("reports how far the second point misses, in feet", () => {
+    // The moving span is 72 pt (= 20 ft) and the target span is 79.2 pt (= 22 ft).
+    const miss = seamMissFt(
+      [{ x: 0, y: 0 }, { x: 72, y: 0 }],
+      [{ x: 500, y: 300 }, { x: 579.2, y: 300 }],
+      20
+    );
+    expect(miss).toBeCloseTo(2, 6);
+  });
+
+  test("is zero when the two spans are the same length, whatever their direction", () => {
+    const miss = seamMissFt(
+      [{ x: 0, y: 0 }, { x: 30, y: 40 }], // 50 pt
+      [{ x: 100, y: 100 }, { x: 100, y: 150 }], // 50 pt
+      20
+    );
+    expect(miss).toBeCloseTo(0, 9);
+  });
+
+  test("scales with the composition, not with the canvas", () => {
+    const pts: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 72, y: 0 },
+    ];
+    const target: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 144, y: 0 },
+    ];
+    // One inch of miss: 20 ft at 1"=20', 50 ft at 1"=50'.
+    expect(seamMissFt(pts, target, 20)).toBeCloseTo(20, 6);
+    expect(seamMissFt(pts, target, 50)).toBeCloseTo(50, 6);
+  });
+
+  test("does not care which span is longer", () => {
+    const a: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 144, y: 0 },
+    ];
+    const b: [{ x: number; y: number }, { x: number; y: number }] = [
+      { x: 0, y: 0 },
+      { x: 72, y: 0 },
+    ];
+    expect(seamMissFt(a, b, 20)).toBeCloseTo(seamMissFt(b, a, 20), 9);
+  });
+});
+
+describe("computeAlignTranslation — the default one-point move", () => {
+  const moving = makeTile({ id: "m", x: 40, y: 25, width: 200, height: 100, rotation: 0 });
+
+  test("slides the tile so the clicked point lands on the target point", () => {
+    const pose = computeAlignTranslation(moving, { x: 60, y: 45 }, { x: 500, y: 300 });
+    expect(pose).toEqual({ x: 480, y: 280 });
+    // The clicked point really is on the target now.
+    expect(pose.x + (60 - moving.x)).toBe(500);
+    expect(pose.y + (45 - moving.y)).toBe(300);
+  });
+
+  test("leaves rotation and size ALONE — that is the whole point of one-point mode", () => {
+    const rotated = makeTile({ id: "r", x: 0, y: 0, width: 200, height: 100, rotation: 12 });
+    const pose = computeAlignTranslation(rotated, { x: 10, y: 10 }, { x: 60, y: 90 });
+    // The helper returns a position only; nothing else can change.
+    expect(Object.keys(pose).sort()).toEqual(["x", "y"]);
+    expect(pose).toEqual({ x: 50, y: 80 });
+  });
+
+  test("carries a point on a rotated tile exactly onto the target", () => {
+    const rotated = makeTile({ id: "r", x: 10, y: 20, width: 200, height: 100, rotation: 37 });
+    const clicked = tileLocalToCanvas(150, 30, rotated);
+    const target = { x: 900, y: 400 };
+    const pose = computeAlignTranslation(rotated, clicked, target);
+    const placed = { ...rotated, ...pose };
+    const landed = tileLocalToCanvas(150, 30, placed);
+    expect(landed.x).toBeCloseTo(target.x, 9);
+    expect(landed.y).toBeCloseTo(target.y, 9);
+    expect(placed.rotation).toBe(37);
+  });
+
+  test("a point already on the target moves nothing", () => {
+    const pose = computeAlignTranslation(moving, { x: 100, y: 100 }, { x: 100, y: 100 });
+    expect(pose).toEqual({ x: moving.x, y: moving.y });
+  });
+});
+
+describe("rigidGroupPose — a group moves as one thing", () => {
+  const member = makeTile({ id: "m2", x: 300, y: 100, width: 200, height: 100, rotation: 0 });
+
+  test("a plain translation carries every member by the same delta", () => {
+    const pose = rigidGroupPose(member, { x: 100, y: 100 }, { x: 500, y: 400 }, 0, 1);
+    expect(pose.x).toBeCloseTo(300 + 400, 9);
+    expect(pose.y).toBeCloseTo(100 + 300, 9);
+    expect(pose.width).toBe(200);
+    expect(pose.rotation).toBe(0);
+  });
+
+  test("keeps the spacing between two members exactly", () => {
+    const a = makeTile({ id: "a", x: 0, y: 0, width: 100, height: 100 });
+    const b = makeTile({ id: "b", x: 150, y: 40, width: 100, height: 100 });
+    const origin = { x: 10, y: 10 };
+    const target = { x: 800, y: 620 };
+    const pa = rigidGroupPose(a, origin, target, 37, 1);
+    const pb = rigidGroupPose(b, origin, target, 37, 1);
+    const before = Math.hypot(b.x - a.x, b.y - a.y);
+    const after = Math.hypot(pb.x - pa.x, pb.y - pa.y);
+    expect(after).toBeCloseTo(before, 9);
+    expect(pa.rotation).toBe(37);
+    expect(pb.rotation).toBe(37);
+  });
+
+  test("rotates the whole group about the point that is being pinned", () => {
+    // A member one unit to the RIGHT of the pinned point ends up one unit BELOW it
+    // after a 90° turn (canvas y grows downwards).
+    const one = makeTile({ id: "one", x: 100, y: -50, width: 100, height: 100 }); // centre (150, 0)
+    const pose = rigidGroupPose(one, { x: 50, y: 0 }, { x: 50, y: 0 }, 90, 1);
+    expect(pose.x + pose.width / 2).toBeCloseTo(50, 9);
+    expect(pose.y + pose.height / 2).toBeCloseTo(100, 9);
+  });
+
+  test("scales distances and sizes together about the pinned point", () => {
+    const pose = rigidGroupPose(member, { x: 100, y: 100 }, { x: 100, y: 100 }, 0, 2);
+    expect(pose.width).toBe(400);
+    expect(pose.height).toBe(200);
+    // Its centre was (400,150), i.e. (300,50) from the origin; doubled that is (600,100).
+    expect(pose.x + pose.width / 2).toBeCloseTo(700, 9);
+    expect(pose.y + pose.height / 2).toBeCloseTo(200, 9);
+  });
+
+  test("agrees with the one-point move for the sheet that was clicked", () => {
+    const moving = makeTile({ id: "m", x: 40, y: 25, width: 200, height: 100 });
+    const clicked = { x: 60, y: 45 };
+    const target = { x: 500, y: 300 };
+    const direct = computeAlignTranslation(moving, clicked, target);
+    const viaGroup = rigidGroupPose(moving, clicked, target, 0, 1);
+    expect(viaGroup.x).toBeCloseTo(direct.x, 9);
+    expect(viaGroup.y).toBeCloseTo(direct.y, 9);
   });
 });

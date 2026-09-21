@@ -79,13 +79,26 @@ function hashImage(image) {
   return h.digest("hex");
 }
 
-let worker = null;
-async function ensureWorker() {
-  if (worker) return worker;
-  const { createWorker, PSM } = await import("tesseract.js");
-  worker = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
-  await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-  return worker;
+// Memoised as a PROMISE, not as the resolved worker: autoStitch issues a whole
+// page's band reads at once, so an `if (worker) return worker` guard that only
+// publishes after its awaits lets every concurrent caller boot its OWN tesseract
+// worker — and only the last one is ever terminated, so the orphans keep the event
+// loop alive and the script never exits.
+let workerPromise = null;
+function ensureWorker() {
+  if (workerPromise) return workerPromise;
+  // A FAILED boot must not be memoised — a cached rejected promise would rethrow
+  // the first error for the rest of the run. Clear the memo so the next call
+  // retries; callers already holding this promise still see the real error.
+  const built = (async () => {
+    const { createWorker, PSM } = await import("tesseract.js");
+    const w = await createWorker("eng", 1, { langPath: path.join(REPO, "public/ocr"), gzip: true, cachePath: path.join(CACHE_DIR, "tesscache") });
+    await w.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+    return w;
+  })();
+  workerPromise = built;
+  built.catch(() => { if (workerPromise === built) workerPromise = null; });
+  return built;
 }
 
 async function ocr(image) {
@@ -122,7 +135,9 @@ for (const scale of SCALES) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), "application/pdf");
   let debug = null;
   const t0 = Date.now();
-  const res = await autoStitch(mupdf, doc, PAGES, { userScale: scale, ocr, onDebug: (d) => { debug = d; } });
+  // One tesseract worker here (not a pool), so the OCR channel is strictly serial:
+  // batching the strip scan any wider would only queue reads a hit will discard.
+  const res = await autoStitch(mupdf, doc, PAGES, { userScale: scale, ocr, ocrConcurrency: 1, onDebug: (d) => { debug = d; } });
   flushCache();
   console.log(`\n========== SCALE ${scale}  (${((Date.now() - t0) / 1000).toFixed(1)}s, ocr ${ocrCalls} calls / ${ocrHits} hits) ==========`);
   reportRun(scale, res, debug);
@@ -134,7 +149,9 @@ for (const scale of SCALES) {
 }
 
 flushCache();
-if (worker) await worker.terminate();
+// Never let a boot failure resurface as the script's exit status at teardown.
+const builtWorker = workerPromise ? await workerPromise.catch(() => null) : null;
+if (builtWorker) await builtWorker.terminate();
 
 // topology comparison
 if (SCALES.length >= 2) compareTopology(runs);
@@ -166,6 +183,15 @@ function keyToPage(inputs, key) {
 function reportRun(scale, res, debug) {
   const inputs = debug?.inputs;
   console.log(`method=${res.method} aligned=${res.alignedCount} unplaced=${res.unplacedCount} worstResid=${res.worstResidFt}ft refPages=[${res.refPageIndices.map(p=>p+1).join(",")}]`);
+  if (res.alongAnchored) {
+    const placed = [...new Set(res.poses.filter(p => p.posFt).map(p => p.pageIndex))].sort((a, b) => a - b);
+    const anchored = new Set(res.alongAnchored);
+    const loose = placed.filter(p => !anchored.has(p));
+    console.log(`ALONG-ANCHORED: [${res.alongAnchored.map(p => p + 1).join(",")}]` +
+      (loose.length ? `   NOT anchored (free to slide): [${loose.map(p => p + 1).join(",")}]  ±${res.worstAlongUncertaintyFt ?? 0}ft` : ""));
+  }
+  if (res.skipped?.length) console.log(`SKIPPED (not tiles): ${res.skipped.map(s => `p${s.pageIndex + 1}:${s.role}`).join("  ")}`);
+  if (res.scaleWarnings?.length) console.log(`SCALE WARNINGS: ${res.scaleWarnings.map(w => `p${w.pageIndex + 1} stated ${w.statedFtPerIn} vs used ${w.usedFtPerIn}`).join("  ")}`);
   if (debug?.anchors?.length) {
     console.log("ANCHORS:");
     for (const a of debug.anchors) { const perp = a.perp ?? "x"; const d = perp === "y" ? a.dy : a.dx; console.log(`  ${keyToPage(inputs, a.i)} -> ${keyToPage(inputs, a.j)}  d${perp}=${(d ?? 0).toFixed(1)}ft  perp=${perp}`); }

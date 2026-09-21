@@ -9,22 +9,57 @@
  * always unrotated (rotated tiles are filtered out upstream), so the wrapper is
  * translate-only and a canvas-space drag delta maps 1:1 to tile-local px.
  *
- * Interactions:
- *   1. A draw surface (below the region rects) captures empty-canvas box drags →
- *      `onManualBox` (a new manual hide-box).
- *   2. Each region rect can be MOVED (drag body), RESIZED (8 hover handles), and
- *      DELETED (✕). A press that barely moves is a CLICK → toggle keep/hide.
- * Regions stay stored as fractions of tile size; edits rewrite the fraction rect.
+ * ── One meaning per gesture ──────────────────────────────────────────────────
+ * Mark (2026-09-04): "The X appears like you are trying to delete an accidental
+ * selection area. The interaction to have it delete vs drag and drop it
+ * somewhere else doesn't make sense." The old box overloaded a single drag: the
+ * body relocated the CONTENT, a barely-moved press silently toggled hide/keep,
+ * and a bare ✕ deleted the box. Now:
  *
- * Colour: red dashed = will hide (enabled), amber dashed = off (kept). Handles
- * and the ✕ are sized in screen px (÷ zoom) so they stay usable at any zoom.
+ *   draw on empty canvas → a new hide box
+ *   drag the box BODY    → MOVE THE BOX (which area gets hidden)
+ *   drag the 8 handles   → resize the box
+ *   drag the GRIP        → move the CONTENT somewhere else (ghost follows, Esc cancels)
+ *   toolbar              → Hide / Keep, Put back (when moved), Cancel
+ *   Delete / Backspace   → remove the SELECTED box
+ *
+ * A box means one thing — "this area will be hidden" — and every box says which
+ * state it is in *in words*, not by colour alone. There is no click-to-toggle
+ * and no bare ✕ anywhere: the control that drops a box is labelled **Cancel**,
+ * because Mark read "Remove" as "delete this area from the sheet".
+ *
+ * The controls float clear of the box, so reaching them means leaving it. Three
+ * things keep them reachable — Mark: "when you move your mouse to the hover
+ * interactions they disappear and you cannot interact with them":
+ *   • a click SELECTS the box and pins its controls until you click elsewhere or
+ *     press Esc;
+ *   • an invisible padded BRIDGE (a DOM child of the box, so it counts as
+ *     "inside" for pointerenter/leave) spans the box, the controls and 12 screen
+ *     px around them;
+ *   • a 300 ms linger before hover chrome is hidden.
+ *
+ * Colours are FIXED and chrome is sized in SCREEN px (÷ zoom): see
+ * `cleanupBoxModel.ts` for both, and for the toolbar's above/below placement.
  */
 
-import { useRef, useState } from "react";
-import { useStitchStore, type StitchTile } from "@/shared/stores/stitchStore";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Move, X } from "lucide-react";
+import { useStitchStore, tileRasterUrl, type StitchTile } from "@/shared/stores/stitchStore";
+import { isTypingTarget } from "../useStitchKeyboard";
 import type { CleanupRegion } from "./cleanupDetect";
-import { clampOffsetToCanvas, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
+import { clampOffsetToCanvas, moveRegion, resizeRegion, type FRect, type ResizeHandle } from "./regionEdit";
 import { cssClipToRect } from "./clipRegions";
+import {
+  cleanupBoxChrome,
+  cleanupBoxColors,
+  cleanupBoxLabel,
+  cleanupBoxState,
+  toolbarPlacement,
+  GRIP_INK,
+  HOVER_LINGER_MS,
+  TOOLBAR_EST_W_PX,
+  type ToolbarPlacement,
+} from "./cleanupBoxModel";
 import type { CanvasRect } from "../imageUtils";
 import { MIN_ERASE_SIZE, REGION_DRAG_THRESHOLD_PX, RESIZE_CURSORS } from "../stitchConstants";
 
@@ -43,11 +78,11 @@ export interface TileProposalUI {
   regions: CleanupRegionUI[];
 }
 
-const KIND_LABEL: Record<CleanupRegion["kind"], string> = {
-  "title-block": "Title block",
-  "match-margin": "Match margin",
-  manual: "Manual",
-};
+/** Which box the keyboard acts on. */
+export interface CleanupSelection {
+  tileId: string;
+  index: number;
+}
 
 const HANDLES: ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 // each handle's center as a fraction of the region box
@@ -55,6 +90,9 @@ const HANDLE_POS: Record<ResizeHandle, { fx: number; fy: number }> = {
   nw: { fx: 0, fy: 0 }, n: { fx: 0.5, fy: 0 }, ne: { fx: 1, fy: 0 }, e: { fx: 1, fy: 0.5 },
   se: { fx: 1, fy: 1 }, s: { fx: 0.5, fy: 1 }, sw: { fx: 0, fy: 1 }, w: { fx: 0, fy: 0.5 },
 };
+
+export const GRIP_TITLE = "Drag to move this content somewhere else";
+export const CANCEL_TITLE = "Cancel this box";
 
 interface CleanupReviewProps {
   proposals: TileProposalUI[];
@@ -70,102 +108,238 @@ interface CleanupReviewProps {
   onManualBox: (rect: CanvasRect) => void;
 }
 
-/** One editable region: drag body to RELOCATE its content, hover handles to
- *  resize the source, ✕ to delete, a barely-moved press to toggle keep/hide. */
+/**
+ * One editable box. Drag the BODY to move the box, the handles to resize it, and
+ * the grip above it to move the sheet's content out from under it. The toolbar
+ * beside the grip carries every discrete action, each with a word on it.
+ */
 function RegionBox({
-  region, tileId, index, tileX, tileY, tileW, tileH, canvasW, canvasH, zoom, clientToCanvas, onToggle, onUpdate, onDelete, onRelocate,
+  region, tileId, index, tileX, tileY, tileW, tileH, canvasW, canvasH, zoom, selected, contentDragRef,
+  clientToCanvas, onSelect, onToggle, onUpdate, onDelete, onRelocate,
 }: {
   region: CleanupRegionUI; tileId: string; index: number;
   tileX: number; tileY: number; tileW: number; tileH: number; canvasW: number; canvasH: number; zoom: number;
+  selected: boolean;
+  /** Shared with the parent: true while ANY box is mid content-drag, so Esc goes
+   *  to cancelling that drag rather than to clearing the selection. */
+  contentDragRef: React.MutableRefObject<boolean>;
   clientToCanvas: CleanupReviewProps["clientToCanvas"];
+  onSelect: (sel: CleanupSelection) => void;
   onToggle: (t: string, i: number) => void;
   onUpdate: (t: string, i: number, r: FRect) => void;
   onDelete: (t: string, i: number) => void;
   onRelocate: (t: string, i: number, move: { dx: number; dy: number } | null) => void;
 }) {
   const [hover, setHover] = useState(false);
-  const [active, setActive] = useState(false); // a drag is in progress — keep handles mounted even if the pointer leaves
-  const drag = useRef<{ mode: "move" | ResizeHandle; sx: number; sy: number; rect: FRect; startMove: { dx: number; dy: number }; moved: boolean } | null>(null);
+  const [active, setActive] = useState(false); // a drag is in progress — keep the chrome mounted even if the pointer leaves
+  const [placement, setPlacement] = useState<ToolbarPlacement>("above");
+  // The toolbar's real width, once the DOM knows it — the hover bridge has to
+  // reach the far end of the row, and the row's width is content-driven.
+  const [toolbarW, setToolbarW] = useState(TOOLBAR_EST_W_PX);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const lingerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drag = useRef<
+    | { kind: "box"; sx: number; sy: number; rect: FRect; moved: boolean }
+    | { kind: "resize"; handle: ResizeHandle; sx: number; sy: number; rect: FRect }
+    | { kind: "content"; sx: number; sy: number; rect: FRect; startMove: { dx: number; dy: number } }
+    | null
+  >(null);
 
+  const state = cleanupBoxState(region);
+  const colors = cleanupBoxColors(state);
   const left = region.rect.x * tileW, top = region.rect.y * tileH;
   const width = region.rect.w * tileW, height = region.rect.h * tileH;
-  const hpx = 11 / zoom;                               // handle box, ≈11 screen px
-  const threshold = REGION_DRAG_THRESHOLD_PX / zoom;   // move vs click, in canvas units
+  const chrome = cleanupBoxChrome(width, height, zoom, placement, toolbarW);
+  const threshold = REGION_DRAG_THRESHOLD_PX / zoom;   // "did the pointer really move?", in canvas units
   const minWFrac = MIN_ERASE_SIZE / tileW, minHFrac = MIN_ERASE_SIZE / tileH;
+  const show = hover || active || selected;
 
-  const begin = (mode: "move" | ResizeHandle) => (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    const c = clientToCanvas(e.clientX, e.clientY);
-    if (!c) return;
-    drag.current = { mode, sx: c.x, sy: c.y, rect: region.rect, startMove: region.move ?? { dx: 0, dy: 0 }, moved: mode !== "move" };
-    setActive(true);
+  // The pill row flips below the box when the box's top edge is too close to the
+  // top of the window — otherwise the grip, the ONLY way to move content, would
+  // be the first thing clipped off-screen. Measured, not guessed: the overlay
+  // lives inside a pan/zoom transform, so only the real rect knows where it is.
+  useLayoutEffect(() => {
+    if (!show) return;
+    const r = boxRef.current?.getBoundingClientRect();
+    if (r) setPlacement(toolbarPlacement(r.top));
+    const t = toolbarRef.current?.getBoundingClientRect();
+    // getBoundingClientRect is in SCREEN px already — exactly what the model wants.
+    if (t && t.width > 0) setToolbarW((prev) => (Math.abs(prev - t.width) > 0.5 ? t.width : prev));
+  }, [show, left, top, width, height, zoom, state]);
+
+  // A 300 ms grace period on leave: clipping the edge of the box on the way to a
+  // control must not tear the control away mid-reach.
+  const cancelLinger = () => {
+    if (lingerRef.current) { clearTimeout(lingerRef.current); lingerRef.current = null; }
+  };
+  const enter = () => { cancelLinger(); setHover(true); };
+  const leave = () => {
+    cancelLinger();
+    lingerRef.current = setTimeout(() => { lingerRef.current = null; setHover(false); }, HOVER_LINGER_MS);
+  };
+  useEffect(() => cancelLinger, []);
+
+  const capture = (e: React.PointerEvent) => {
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
   };
+  const beginBox = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    onSelect({ tileId, index });
+    const c = clientToCanvas(e.clientX, e.clientY);
+    if (!c) return;
+    drag.current = { kind: "box", sx: c.x, sy: c.y, rect: region.rect, moved: false };
+    setActive(true);
+    capture(e);
+  };
+  const beginResize = (handle: ResizeHandle) => (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    onSelect({ tileId, index });
+    const c = clientToCanvas(e.clientX, e.clientY);
+    if (!c) return;
+    drag.current = { kind: "resize", handle, sx: c.x, sy: c.y, rect: region.rect };
+    setActive(true);
+    capture(e);
+  };
+  const beginContent = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    onSelect({ tileId, index });
+    const c = clientToCanvas(e.clientX, e.clientY);
+    if (!c) return;
+    drag.current = { kind: "content", sx: c.x, sy: c.y, rect: region.rect, startMove: region.move ?? { dx: 0, dy: 0 } };
+    contentDragRef.current = true;
+    setActive(true);
+    capture(e);
+  };
+
   const move = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
+    // The handles and the grip are DOM children of the box and carry this same
+    // handler, so without this the box's own onPointerMove would run it a second
+    // time for every move during a resize or a content drag.
+    e.stopPropagation();
     const c = clientToCanvas(e.clientX, e.clientY);
     if (!c) return;
     const dx = c.x - d.sx, dy = c.y - d.sy;
-    if (d.mode === "move") {
-      if (!d.moved && Math.hypot(dx, dy) < threshold) return; // still a click
+    if (d.kind === "box") {
+      // A click that jitters by a pixel must not nudge the box — below the
+      // threshold this press is still just "select".
+      if (!d.moved && Math.hypot(dx, dy) < threshold) return;
       d.moved = true;
-      // Relocate: accumulate onto the region's existing offset. Clamp to the
-      // whole composite canvas so the piece can leave its sheet's frame and land
-      // anywhere on the bigger stitched page (but stays exportable).
+      onUpdate(tileId, index, moveRegion(d.rect, dx / tileW, dy / tileH));
+    } else if (d.kind === "resize") {
+      onUpdate(tileId, index, resizeRegion(d.rect, d.handle, dx / tileW, dy / tileH, minWFrac, minHFrac));
+    } else {
+      // Relocate the CONTENT: accumulate onto the region's existing offset and
+      // clamp to the whole composite canvas, so the piece can leave its sheet's
+      // frame and land anywhere on the stitched page (but stays exportable).
       const off = clampOffsetToCanvas(
         d.rect, d.startMove.dx + dx / tileW, d.startMove.dy + dy / tileH,
         tileX, tileY, tileW, tileH, canvasW, canvasH
       );
       const cleared = Math.abs(off.dx) < RELOCATE_EPS && Math.abs(off.dy) < RELOCATE_EPS;
       onRelocate(tileId, index, cleared ? null : off);
-    } else {
-      onUpdate(tileId, index, resizeRegion(d.rect, d.mode, dx / tileW, dy / tileH, minWFrac, minHFrac));
     }
   };
   const end = (e: React.PointerEvent) => {
-    const d = drag.current;
     drag.current = null;
+    contentDragRef.current = false;
     setActive(false);
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-    if (d && d.mode === "move" && !d.moved) onToggle(tileId, index); // click → toggle
   };
+
+  // Esc during a CONTENT drag puts the piece back where it started. The listener
+  // is on `window` in the capture phase deliberately: StitchView's "Esc leaves
+  // clean-up review" handler is a capture listener on `document`, and capture
+  // runs window → document, so this one gets first refusal and stops the whole
+  // review from being torn down mid-drag.
+  useEffect(() => {
+    const d = drag.current;
+    if (!active || !d || d.kind !== "content") return;
+    const startMove = d.startMove;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      drag.current = null;
+      contentDragRef.current = false;
+      setActive(false);
+      const zeroed = Math.abs(startMove.dx) < RELOCATE_EPS && Math.abs(startMove.dy) < RELOCATE_EPS;
+      onRelocate(tileId, index, zeroed ? null : startMove);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [active, tileId, index, onRelocate, contentDragRef]);
+
+  const fontSize = 11 / zoom;
+  /** Every toolbar control: a word, never a bare glyph. */
+  const buttonStyle = (on: boolean): React.CSSProperties => ({
+    display: "flex",
+    alignItems: "center",
+    gap: 3 / zoom,
+    padding: `0 ${6 / zoom}px`,
+    height: "100%",
+    border: "none",
+    background: on ? colors.chip : "transparent",
+    color: on ? "#fff" : "#1f2937",
+    fontSize,
+    lineHeight: 1,
+    fontWeight: on ? 600 : 500,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  });
+  const stop = (e: React.PointerEvent) => e.stopPropagation();
 
   return (
     <div
-      className={`absolute border-2 border-dashed ${region.move ? "border-sky-500 bg-sky-500/10 hover:bg-sky-500/20" : region.enabled ? "border-red-500 bg-red-500/15 hover:bg-red-500/25" : "border-amber-500 bg-amber-500/10 hover:bg-amber-500/20"}`}
-      style={{ left, top, width, height, pointerEvents: "auto", cursor: "move", touchAction: "none" }}
-      title={`${KIND_LABEL[region.kind]} — drag to relocate · handles to resize · ✕ to delete · click to ${region.enabled ? "keep in place" : "hide in place"}`}
-      onPointerEnter={() => setHover(true)}
-      onPointerLeave={() => setHover(false)}
-      onPointerDown={begin("move")}
+      ref={boxRef}
+      className="absolute"
+      data-cleanup-box
+      style={{
+        left, top, width, height,
+        border: `${2 / zoom}px dashed ${colors.border}`,
+        background: hover && !active ? colors.fillHover : colors.fill,
+        // A selected box gets a solid halo so it is obvious what Delete removes.
+        boxShadow: selected ? `0 0 0 ${2 / zoom}px ${colors.border}` : undefined,
+        pointerEvents: "auto",
+        cursor: "move",
+        touchAction: "none",
+      }}
+      title="Drag to move this box · handles resize · grip above moves the content"
+      onPointerEnter={enter}
+      onPointerLeave={leave}
+      onPointerDown={beginBox}
       onPointerMove={move}
       onPointerUp={end}
     >
+      {/* State word — a box never relies on its colour alone. */}
       <span
-        className={`absolute left-0 top-0 px-1 font-medium leading-tight text-white pointer-events-none ${region.move ? "bg-sky-600/85" : region.enabled ? "bg-red-600/80" : "bg-amber-600/80"}`}
-        style={{ fontSize: 11 / zoom, transformOrigin: "left top" }}
+        className="absolute left-0 top-0 font-medium leading-tight text-white pointer-events-none"
+        style={{ background: colors.chip, padding: `0 ${4 / zoom}px`, fontSize, transformOrigin: "left top" }}
       >
-        {KIND_LABEL[region.kind]}{region.move ? " · moved" : region.enabled ? "" : " · off"}
+        {cleanupBoxLabel(region.kind, state)}
       </span>
 
-      {(hover || active) && HANDLES.map((h) => {
+      {show && HANDLES.map((h) => {
         const p = HANDLE_POS[h];
         return (
           <div
             key={h}
-            onPointerDown={begin(h)}
+            onPointerDown={beginResize(h)}
             onPointerMove={move}
             onPointerUp={end}
             style={{
               position: "absolute",
-              left: p.fx * width - hpx / 2,
-              top: p.fy * height - hpx / 2,
-              width: hpx,
-              height: hpx,
+              left: p.fx * width - chrome.handle / 2,
+              top: p.fy * height - chrome.handle / 2,
+              width: chrome.handle,
+              height: chrome.handle,
               background: "#fff",
-              border: `${1 / zoom}px solid ${region.move ? "#0ea5e9" : region.enabled ? "#ef4444" : "#f59e0b"}`,
+              border: `${1 / zoom}px solid ${colors.border}`,
               cursor: RESIZE_CURSORS[h],
               touchAction: "none",
             }}
@@ -173,32 +347,149 @@ function RegionBox({
         );
       })}
 
-      {(hover || active) && (
-        <button
-          type="button"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => { e.stopPropagation(); onDelete(tileId, index); }}
-          title="Delete this region"
-          style={{
-            position: "absolute",
-            right: -hpx * 0.7,
-            top: -hpx * 1.7,
-            width: hpx * 1.5,
-            height: hpx * 1.5,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: "9999px",
-            background: "#dc2626",
-            color: "#fff",
-            fontSize: hpx,
-            lineHeight: 1,
-            border: "none",
-            cursor: "pointer",
-          }}
-        >
-          ✕
-        </button>
+      {show && (
+        <>
+          {/* Invisible bridge across the gap between the box and its controls —
+              a DOM CHILD of the box, so pointerenter/leave (which treat
+              descendants as "inside") never see the transit as leaving.
+              Mounted only while hovering or dragging: a merely SELECTED box keeps
+              its controls anyway, and a permanent bridge would block drawing a
+              new box in the strip above this one.
+
+              It carries NO onPointerLeave. `pointerleave` fires on a child when
+              the pointer moves to its PARENT, so a bridge that armed the linger
+              on leave would start the hide countdown on the return trip from the
+              controls back onto the box — Mark's original complaint, one step
+              later. The box's own onPointerLeave already covers this subtree. */}
+          {(hover || active) && (
+            <div
+              data-cleanup-bridge
+              aria-hidden
+              onPointerEnter={enter}
+              // A press here would otherwise bubble into beginBox and start a box
+              // drag from a point that is not on the box. Hover target only.
+              onPointerDown={stop}
+              style={{
+                position: "absolute",
+                left: chrome.bridge.left,
+                top: chrome.bridge.top,
+                width: chrome.bridge.width,
+                height: chrome.bridge.height,
+                zIndex: -1, // behind the box body and the controls
+                background: "transparent",
+              }}
+            />
+          )}
+
+          {/* The move handle: the ONE gesture that moves the sheet's content,
+              floating clear of the box so it can never be confused with moving
+              the box itself. Four arrows in an ink pill — "make it obvious". */}
+          <div
+            role="button"
+            aria-label={GRIP_TITLE}
+            title={GRIP_TITLE}
+            data-cleanup-grip
+            onPointerEnter={enter}
+            onPointerDown={beginContent}
+            onPointerMove={move}
+            onPointerUp={end}
+            style={{
+              position: "absolute",
+              left: chrome.grip.left,
+              top: chrome.grip.top,
+              width: chrome.grip.width,
+              height: chrome.grip.height,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxSizing: "border-box",
+              borderRadius: 9999,
+              background: GRIP_INK,
+              color: "#fff",
+              border: `${1.5 / zoom}px solid #fff`,
+              boxShadow: `0 ${1 / zoom}px ${3 / zoom}px rgba(0,0,0,0.35)`,
+              cursor: "move",
+              touchAction: "none",
+            }}
+          >
+            <Move
+              style={{ width: chrome.grip.width * 0.6, height: chrome.grip.height * 0.6 }}
+              strokeWidth={2.5}
+              aria-hidden
+            />
+          </div>
+
+          {/* Discrete actions. Each says what it does. */}
+          <div
+            ref={toolbarRef}
+            onPointerEnter={enter}
+            onPointerDown={stop}
+            onPointerMove={stop}
+            style={{
+              position: "absolute",
+              left: chrome.toolbar.left,
+              top: chrome.toolbar.top,
+              height: chrome.toolbar.height,
+              display: "flex",
+              alignItems: "stretch",
+              borderRadius: 4 / zoom,
+              overflow: "hidden",
+              background: "#fff",
+              border: `${1 / zoom}px solid ${colors.border}`,
+              boxShadow: `0 ${1 / zoom}px ${3 / zoom}px rgba(0,0,0,0.25)`,
+              touchAction: "none",
+            }}
+          >
+            {state === "moved" ? (
+              // Hide/Keep would be inert on a moved box (Apply hides its source
+              // either way), so the only honest choices here are put it back or
+              // drop the box.
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onRelocate(tileId, index, null); }}
+                title="Put this content back where it came from"
+                style={buttonStyle(false)}
+              >
+                Put back
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); if (!region.enabled) onToggle(tileId, index); }}
+                  aria-pressed={state === "hidden"}
+                  title="Hide this area"
+                  style={buttonStyle(state === "hidden")}
+                >
+                  Hide
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); if (region.enabled) onToggle(tileId, index); }}
+                  aria-pressed={state === "kept"}
+                  title="Leave this area as it is"
+                  style={buttonStyle(state === "kept")}
+                >
+                  Keep
+                </button>
+              </>
+            )}
+            {/* "Cancel" and not "Remove": Mark read Remove as "delete this area
+                from the sheet", which is the opposite of what it does — it drops
+                the BOX and leaves the sheet alone. No trash icon, for the same
+                reason. (The review bar's own Cancel button, which abandons the
+                whole review, stays a normal button down there.) */}
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDelete(tileId, index); }}
+              title={CANCEL_TITLE}
+              style={{ ...buttonStyle(false), borderLeft: `${1 / zoom}px solid ${colors.border}` }}
+            >
+              <X style={{ width: fontSize, height: fontSize }} strokeWidth={2.5} aria-hidden />
+              Cancel
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -217,8 +508,47 @@ export function CleanupReview({
   const zoom = useStitchStore((s) => s.zoomLevel) || 1;
   const canvasW = useStitchStore((s) => s.canvasWidth);
   const canvasH = useStitchStore((s) => s.canvasHeight);
-  const [box, setBox] = useState<{ start: { x: number; y: number }; current: { x: number; y: number } } | null>(null);
+  // The in-progress draw box lives in a REF as well as in state: the ref is what
+  // the pointerup handler reads (a handler closes over the `box` from the render
+  // it was created in, which is stale for a press-and-release that React batches
+  // into one commit), while the state exists only to paint the live rectangle.
+  type DrawBox = { start: { x: number; y: number }; current: { x: number; y: number } };
+  const [box, setBox] = useState<DrawBox | null>(null);
+  const boxRef = useRef<DrawBox | null>(null);
   const drawingRef = useRef(false);
+  const setDrawBox = (b: DrawBox | null) => { boxRef.current = b; setBox(b); };
+  const [selected, setSelected] = useState<CleanupSelection | null>(null);
+  const contentDragRef = useRef(false);
+
+  // Delete / Backspace removes the SELECTED box — never a tile, and never while
+  // the user is typing somewhere. Capture on `window` so it lands before the
+  // canvas-level key handling on `document`.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // A selected box's controls stay pinned until you click elsewhere or press
+        // Esc. Deselecting is the FIRST thing Esc does; only a second Esc (with
+        // nothing selected) falls through to StitchView's "leave the review".
+        // A content drag in flight owns Esc outright — that box cancels its move.
+        if (contentDragRef.current || !selectedRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setSelected(null);
+        return;
+      }
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const sel = selectedRef.current;
+      if (!sel || isTypingTarget()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onDeleteRegion(sel.tileId, sel.index);
+      setSelected(null); // indices shift after a removal
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [onDeleteRegion]);
 
   return (
     <>
@@ -233,13 +563,20 @@ export function CleanupReview({
           const c = clientToCanvas(e.clientX, e.clientY);
           if (!c) return;
           drawingRef.current = true;
-          setBox({ start: c, current: c });
-          (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+          setSelected(null); // pressing empty paper deselects
+          setDrawBox({ start: c, current: c });
+          try {
+            (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+          } catch (_) {
+            /* no pointer capture (jsdom, or a pointer already gone) — the drag
+               still works off the surface's own move/up handlers */
+          }
         }}
         onPointerMove={(e) => {
           if (!drawingRef.current) return;
           const c = clientToCanvas(e.clientX, e.clientY);
-          if (c) setBox((prev) => (prev ? { ...prev, current: c } : null));
+          const prev = boxRef.current;
+          if (c && prev) setDrawBox({ ...prev, current: c });
         }}
         onPointerUp={(e) => {
           if (!drawingRef.current) return;
@@ -249,21 +586,25 @@ export function CleanupReview({
           } catch (_) {
             /* pointer already released */
           }
-          setBox((prev) => {
-            if (prev) {
-              const x = Math.min(prev.start.x, prev.current.x);
-              const y = Math.min(prev.start.y, prev.current.y);
-              const w = Math.abs(prev.current.x - prev.start.x);
-              const h = Math.abs(prev.current.y - prev.start.y);
-              if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onManualBox({ x, y, w, h });
-            }
-            return null;
-          });
+          // `onManualBox` used to be called from INSIDE the setBox updater. React
+          // treats updaters as pure and re-invokes them under StrictMode, so every
+          // hand-drawn box was added TWICE in dev — which is how one box over a
+          // title column reported "2 hidden" and then (two identical even-odd
+          // holes cancelling each other out) masked nothing at all. Read the box
+          // from the ref, clear it, THEN report exactly once.
+          const prev = boxRef.current;
+          setDrawBox(null);
+          if (!prev) return;
+          const x = Math.min(prev.start.x, prev.current.x);
+          const y = Math.min(prev.start.y, prev.current.y);
+          const w = Math.abs(prev.current.x - prev.start.x);
+          const h = Math.abs(prev.current.y - prev.start.y);
+          if (w >= MIN_ERASE_SIZE && h >= MIN_ERASE_SIZE) onManualBox({ x, y, w, h });
         }}
         onPointerLeave={() => {
           if (!drawingRef.current) return;
           drawingRef.current = false;
-          setBox(null);
+          setDrawBox(null);
         }}
       />
 
@@ -298,11 +639,11 @@ export function CleanupReview({
               pointerEvents: "none",
             }}
           >
-            {/* Live cut-out preview for relocated regions: a copy of the sheet
-                image clipped to the source rect, translated by the offset — the
-                content shows at its new spot while you drag (source still shows
-                via StitchTile until Apply). */}
-            {tile.imageDataUrl && p.regions.map((r, i) => {
+            {/* Live cut-out preview ("ghost") for relocated regions: a copy of the
+                sheet image clipped to the source rect, translated by the offset —
+                the sheet's OWN pixels show at the new spot while the grip is
+                dragged (source still shows via StitchTile until Apply). */}
+            {tileRasterUrl(tile) && p.regions.map((r, i) => {
               if (!r.move) return null;
               const clip = cssClipToRect(tile.width, tile.height, {
                 x: r.rect.x * tile.width, y: r.rect.y * tile.height,
@@ -311,7 +652,7 @@ export function CleanupReview({
               return (
                 <img
                   key={`reloc-${i}`}
-                  src={tile.imageDataUrl}
+                  src={tileRasterUrl(tile)}
                   alt=""
                   draggable={false}
                   className="absolute inset-0 w-full h-full select-none"
@@ -338,7 +679,10 @@ export function CleanupReview({
                 canvasW={canvasW}
                 canvasH={canvasH}
                 zoom={zoom}
+                selected={selected?.tileId === p.tileId && selected.index === i}
+                contentDragRef={contentDragRef}
                 clientToCanvas={clientToCanvas}
+                onSelect={setSelected}
                 onToggle={onToggleRegion}
                 onUpdate={onUpdateRegion}
                 onDelete={onDeleteRegion}

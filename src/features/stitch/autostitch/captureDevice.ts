@@ -10,6 +10,9 @@ const CURVE_STEPS = 8; // chords per bezier when flattening
 // so sub-threshold paths (hatching, glyph detail, tiny symbols) are pure noise.
 // On heavy sheets this drops ~90% of captured paths → no OOM, faster downstream.
 const MIN_GEOM_EXTENT_PT = 3;
+// Floats per geometry arena chunk (see `intern`). 64 k floats = 256 KB, i.e. one
+// buffer per ~16 k short paths.
+const ARENA_FLOATS = 1 << 16;
 
 /** fz matrix concat: result = m * n, both [a,b,c,d,e,f]. */
 function matMul(m: number[], n: number[]): number[] {
@@ -22,10 +25,85 @@ function matMul(m: number[], n: number[]): number[] {
     m[4] * n[1] + m[5] * n[3] + n[5],
   ];
 }
-const apply = (m: number[], x: number, y: number): [number, number] => [
-  m[0] * x + m[2] * y + m[4],
-  m[1] * x + m[3] * y + m[5],
-];
+const applyX = (m: number[], x: number, y: number): number => m[0] * x + m[2] * y + m[4];
+const applyY = (m: number[], x: number, y: number): number => m[1] * x + m[3] * y + m[5];
+
+/**
+ * The stroke-geometry half of a capture, on its own.
+ *
+ * `capturePage` and `capturePageGeometry` share it: one flattens text as well, the
+ * other does not. Kept as a factory (rather than module state) because the arena
+ * below is per-capture — two captures running against the same module must not
+ * hand out views into each other's chunks.
+ */
+function createPathCapture(): { geometry: Geom[]; walkPath: (path: any, ctm: number[]) => void } {
+  const geometry: Geom[] = [];
+  let gid = 0;
+  // Points accumulate FLAT (x,y,x,y,...) in one reused scratch array, so a path
+  // costs one Float32Array at flush() instead of one JS array per point. Reused
+  // across paths because a dense sheet walks hundreds of thousands of them.
+  const cur: number[] = [];
+
+  // Kept paths are copied into a CHUNKED arena and handed out as subarray views.
+  // A dense sheet keeps ~67 k paths; a private Float32Array each means 67 k
+  // ArrayBuffers, and the per-buffer bookkeeping (view + buffer object + a
+  // rounded-up backing store) outweighs the ~40 B of floats a short path holds.
+  // One buffer per ARENA_FLOATS instead costs a view per path and nothing else.
+  // Only paths that SURVIVE the prune are written, so no chunk is kept alive by
+  // geometry that was thrown away.
+  let arena = new Float32Array(ARENA_FLOATS);
+  let arenaUsed = 0;
+  const intern = (n: number): Float32Array => {
+    if (arenaUsed + n > arena.length) {
+      arena = new Float32Array(Math.max(ARENA_FLOATS, n));
+      arenaUsed = 0;
+    }
+    const view = arena.subarray(arenaUsed, arenaUsed + n);
+    for (let i = 0; i < n; i++) view[i] = cur[i];
+    arenaUsed += n;
+    return view;
+  };
+  const walkPath = (path: any, ctm: number[]) => {
+    let closed = false;
+    let px = 0, py = 0;
+    // Track the page-space bbox as we go so flush() can reject a tiny path in O(1).
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const push = (x: number, y: number) => {
+      const wx = applyX(ctm, x, y), wy = applyY(ctm, x, y);
+      cur.push(wx, wy);
+      if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
+      if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
+    };
+    const flush = () => {
+      // Drop tiny paths: no stitch segment (≥8ft) or cleanup border (full-span)
+      // can live in a sub-MIN_GEOM_EXTENT_PT bounding box. ~90% of paths on a
+      // heavy sheet, so this is the memory/throughput win.
+      if (cur.length >= 4 && Math.hypot(maxX - minX, maxY - minY) >= MIN_GEOM_EXTENT_PT) {
+        geometry.push({ id: gid++, pts: intern(cur.length), closed });
+      }
+      cur.length = 0; closed = false; minX = minY = Infinity; maxX = maxY = -Infinity;
+    };
+    path.walk({
+      moveTo(x: number, y: number) { flush(); px = x; py = y; push(x, y); },
+      lineTo(x: number, y: number) { px = x; py = y; push(x, y); },
+      curveTo(x1: number, y1: number, x2: number, y2: number, x3: number, y3: number) {
+        const x0 = px, y0 = py;
+        for (let k = 1; k <= CURVE_STEPS; k++) {
+          const t = k / CURVE_STEPS, u = 1 - t;
+          push(
+            u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+            u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3
+          );
+        }
+        px = x3; py = y3;
+      },
+      closePath() { closed = true; if (cur.length >= 2) cur.push(cur[0], cur[1]); },
+    });
+    flush();
+  };
+
+  return { geometry, walkPath };
+}
 
 /**
  * Run a page through a capture Device, returning glyphs (visible + invisible
@@ -36,8 +114,7 @@ const apply = (m: number[], x: number, y: number): [number, number] => [
 export function capturePage(mupdf: any, page: any): PageExtract {
   const visAtoms: Atom[] = [];
   const shxAtoms: Atom[] = [];
-  const geometry: Geom[] = [];
-  let gid = 0;
+  const { geometry, walkPath } = createPathCapture();
 
   const walkText = (text: any, ctm: number[], bucket: Atom[]) => {
     let span: { m: number[]; ucs: number }[] = [];
@@ -74,46 +151,6 @@ export function capturePage(mupdf: any, page: any): PageExtract {
     flushSpan();
   };
 
-  const walkPath = (path: any, ctm: number[]) => {
-    let cur: [number, number][] = [];
-    let closed = false;
-    let px = 0, py = 0;
-    // Track the page-space bbox as we go so flush() can reject a tiny path in O(1).
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    const push = (x: number, y: number) => {
-      const p = apply(ctm, x, y);
-      cur.push(p);
-      if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
-      if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
-    };
-    const flush = () => {
-      // Drop tiny paths: no stitch segment (≥8ft) or cleanup border (full-span)
-      // can live in a sub-MIN_GEOM_EXTENT_PT bounding box. ~90% of paths on a
-      // heavy sheet, so this is the memory/throughput win.
-      if (cur.length >= 2 && Math.hypot(maxX - minX, maxY - minY) >= MIN_GEOM_EXTENT_PT) {
-        geometry.push({ id: `g${gid++}`, pts: cur, closed });
-      }
-      cur = []; closed = false; minX = minY = Infinity; maxX = maxY = -Infinity;
-    };
-    path.walk({
-      moveTo(x: number, y: number) { flush(); px = x; py = y; push(x, y); },
-      lineTo(x: number, y: number) { px = x; py = y; push(x, y); },
-      curveTo(x1: number, y1: number, x2: number, y2: number, x3: number, y3: number) {
-        const x0 = px, y0 = py;
-        for (let k = 1; k <= CURVE_STEPS; k++) {
-          const t = k / CURVE_STEPS, u = 1 - t;
-          push(
-            u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
-            u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3
-          );
-        }
-        px = x3; py = y3;
-      },
-      closePath() { closed = true; if (cur.length) cur.push(cur[0]); },
-    });
-    flush();
-  };
-
   const device = new mupdf.Device({
     fillText: (text: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
     strokeText: (text: any, _s: any, ctm: any) => walkText(text, ctm as unknown as number[], visAtoms),
@@ -130,4 +167,28 @@ export function capturePage(mupdf: any, page: any): PageExtract {
   const vis = reconstruct(visAtoms);
   const shx = reconstruct(shxAtoms);
   return { view, labels: vis.labels, words: vis.words, shxLabels: shx.labels as Label[], geometry };
+}
+
+/**
+ * Stroke geometry ONLY — no glyphs, no `reconstruct`.
+ *
+ * The align loupe's line snapping needs the paths and nothing else, and on a dense
+ * sheet the text half of `capturePage` (hundreds of thousands of glyph atoms, then
+ * word/label reconstruction) is most of the work and all of the peak memory. This
+ * path skips it entirely: no fillText/strokeText/ignoreText handlers are installed,
+ * so mupdf never materialises the glyph walk.
+ *
+ * Returned in mupdf page space (points, y-down), identical to `capturePage().geometry`.
+ */
+export function capturePageGeometry(mupdf: any, page: any): { view: [number, number, number, number]; geometry: Geom[] } {
+  const { geometry, walkPath } = createPathCapture();
+  const device = new mupdf.Device({
+    fillPath: (path: any, _eo: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
+    strokePath: (path: any, _s: any, ctm: any) => walkPath(path, ctm as unknown as number[]),
+  });
+  page.run(device, mupdf.Matrix.identity);
+  (device as any).close?.();
+  (device as any).destroy?.();
+  const bounds = page.getBounds();
+  return { view: [bounds[0], bounds[1], bounds[2], bounds[3]], geometry };
 }

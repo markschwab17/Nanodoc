@@ -5,12 +5,14 @@
 import type { ComponentProps } from "react";
 import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
+import { cn } from "@/lib/utils";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowUpToLine,
   CheckSquare,
+  Combine,
   Crosshair,
   Crop,
   Download,
@@ -27,6 +29,7 @@ import {
   Expand,
   Save,
   Shrink,
+  Scissors,
   Sparkles,
   Stamp,
   Trash2,
@@ -54,12 +57,17 @@ export interface StitchToolbarProps {
   onClearCrop: () => void;
   onSaveAndFlatten: (openInEditor: boolean) => void;
   isSaving: boolean;
-  /** When true, show "Save to Civiltakeoff" button (CTO session). */
+  /** When true, show "Save to Pursuit" button (CTO session). */
   showSaveToCto?: boolean;
   onSaveToCto?: () => void;
   onDownloadForTraining?: () => void;
   isExportingTraining?: boolean;
   cropRect: { x: number; y: number; w: number; h: number } | null;
+  /** "Align to neighbour": the revamped manual align (pick the moving sheet, then two
+   *  points each side). In takeoff mode it REPLACES the old two-point entry; outside it
+   *  it sits beside it until the old one is retired. */
+  alignNeighbourMode: boolean;
+  onAlignNeighbourModeChange: (active: boolean) => void;
   pointAlignMode: boolean;
   canEnterPointAlign: boolean;
   onPointAlignModeChange: (active: boolean) => void;
@@ -74,12 +82,29 @@ export interface StitchToolbarProps {
   onPanModeChange: (active: boolean) => void;
   onSelectToolActivate: () => void;
   onClearSession?: () => void;
-  /** Clean-Composite: detect + review title-block/match-margin hide-regions. */
-  onCleanup?: () => void;
+  /** Trim: open the hide-region review WITHOUT running detection — draw by hand. */
+  onTrimOpen?: () => void;
+  /** Auto-detect: run title-block / match-margin detection into the open review.
+   *  Kept a SEPARATE button from Trim — Mark: "it is a 2-part tool, either AI or
+   *  manual", and one sparkle on the only button said the whole tool was AI. */
+  onAutoDetect?: () => void;
   /** True while the clean-up review overlay is active. */
   cleanupActive?: boolean;
   /** True while a clean-up detection pass is in flight (before review opens). */
   cleanupBusy?: boolean;
+  /** Rings the Delete content button for a few seconds — the step-3 "no title
+   *  blocks found" fallback pointing at the manual eraser. */
+  highlightDeleteContent?: boolean;
+  /** True when hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1, `embed=1`): hides the Back-to-editor link, replacing it with a Cancel button that calls `onCancel`. */
+  embed?: boolean;
+  /** Called when Cancel is clicked in embed mode. */
+  onCancel?: () => void;
+  /** Takeoff-v2 mode (the site-sheet builder): the step strip above owns the
+   *  brand row and the one save, and CTO's own panel header owns Cancel — so
+   *  the brand/Cancel row, "Clear session" and the whole Export group are
+   *  hidden here. Add PDF stays (adding a sheet later is allowed) and so does
+   *  Help. Every arrange tool — align, crop, clean-up, scale — is untouched. */
+  takeoffMode?: boolean;
 }
 
 const POINT_ALIGN_STEP_LABELS = [
@@ -106,12 +131,13 @@ function IconButtonWithTooltip({
   label,
   tooltipDescription,
   children,
+  className,
   ...buttonProps
 }: ComponentProps<typeof Button> & { title: string; label: string; tooltipDescription?: string }) {
   const tooltipText = tooltipDescription ?? label;
   return (
     <div className="relative group inline-flex">
-      <Button size="icon" className="h-7 w-7 shrink-0" title={title} {...buttonProps}>
+      <Button size="icon" className={cn("h-7 w-7 shrink-0", className)} title={title} {...buttonProps}>
         {children}
       </Button>
       <span
@@ -140,6 +166,8 @@ export function StitchToolbar({
   onDownloadForTraining,
   isExportingTraining,
   cropRect,
+  alignNeighbourMode,
+  onAlignNeighbourModeChange,
   pointAlignMode,
   canEnterPointAlign,
   onPointAlignModeChange,
@@ -154,9 +182,14 @@ export function StitchToolbar({
   onPanModeChange,
   onSelectToolActivate,
   onClearSession,
-  onCleanup,
+  onTrimOpen,
+  onAutoDetect,
   cleanupActive,
   cleanupBusy,
+  highlightDeleteContent,
+  embed,
+  onCancel,
+  takeoffMode,
 }: StitchToolbarProps) {
   // Shallow-picked subscription: avoids re-rendering the whole toolbar on
   // store changes it doesn't use (e.g. panOffset during panning). Tile
@@ -329,7 +362,7 @@ export function StitchToolbar({
   // but hasn't interacted with any tool for 15 seconds
   const [showHelpNudge, setShowHelpNudge] = useState(false);
   const nudgeDismissedRef = useRef(false);
-  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || hasSelection || Boolean(cleanupActive);
+  const anyToolActive = panMode || contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || alignNeighbourMode || hasSelection || Boolean(cleanupActive);
 
   useEffect(() => {
     // Don't show if: no tiles, user already interacted, nudge was dismissed, or tour is running
@@ -361,13 +394,23 @@ export function StitchToolbar({
   return (
     <header className="flex flex-col gap-1.5 border-b shrink-0 px-2.5 py-2 bg-muted/30">
       <div className="flex items-center gap-1.5 flex-wrap text-xs">
-        <div className="flex items-center gap-1.5">
-          <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
-            <ArrowLeft className="h-3.5 w-3.5" />
-          </Link>
-          <span className="font-semibold text-sm">Stitch PDFs</span>
-        </div>
-        <div className="h-5 w-px bg-border" aria-hidden />
+        {!takeoffMode && (
+          <>
+            <div className="flex items-center gap-1.5">
+              {embed ? (
+                <Button variant="ghost" size="sm" className="h-7 shrink-0" title="Cancel and close" onClick={onCancel}>
+                  Cancel
+                </Button>
+              ) : (
+                <Link to="/editor" title="Back to editor" className={buttonVariants({ variant: "ghost", size: "icon", className: "h-7 w-7 shrink-0" })}>
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </Link>
+              )}
+              <span className="font-semibold text-sm">Stitch PDFs</span>
+            </div>
+            <div className="h-5 w-px bg-border" aria-hidden />
+          </>
+        )}
         <div className="flex items-center gap-0.5" role="group" aria-label="History">
           <Button variant="outline" size="icon" className="h-7 w-7 shrink-0" disabled={!canUndo} title="Undo (Ctrl+Z)" onClick={undo}>
             <Undo2 className="h-3.5 w-3.5" />
@@ -379,7 +422,7 @@ export function StitchToolbar({
         <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-1.5" role="group" aria-label="Tools" data-tour="stitch-tools">
           <IconButtonWithTooltip
-            variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode ? "default" : "outline"}
+            variant={!panMode && !contentDeleteMode && !deleteElementMode && !pointAlignMode && !scaleAlignMode && !alignNeighbourMode ? "default" : "outline"}
             title="Select and move tiles (Ctrl+A: select all)"
             label="Select"
             onClick={onSelectToolActivate}
@@ -415,7 +458,7 @@ export function StitchToolbar({
             <FilePlus className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
         )}
-        {onClearSession && (
+        {onClearSession && !takeoffMode && (
           <IconButtonWithTooltip variant="outline" title="Clear session and start fresh (removes all tiles, resets canvas)" label="Clear session" onClick={onClearSession}>
             <RotateCcw className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
@@ -426,6 +469,11 @@ export function StitchToolbar({
           variant={contentDeleteMode ? "secondary" : "outline"}
           title={deleteContentTip}
           label="Delete content"
+          className={
+            highlightDeleteContent
+              ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
+              : undefined
+          }
           onClick={() => {
             onPanModeChange(false);
             setContentDeleteMode((v) => !v);
@@ -449,6 +497,17 @@ export function StitchToolbar({
         </div>
         <div className="flex items-center gap-0.5" data-tour="stitch-align-tools">
         <IconButtonWithTooltip
+          variant={alignNeighbourMode ? "secondary" : "outline"}
+          title="Align to neighbour: click a point on the sheet that stays, then the matching point on the sheet to move — that sheet slides over to meet it. Turn on 'Rotate too' for a sheet that is also turned (two points each side)."
+          label="Align to neighbour"
+          tooltipDescription={"Click a point on the sheet that STAYS, then the matching point on the sheet to MOVE — that second sheet slides over to meet it, unrotated and unresized.\nFor a sheet that IS turned, switch on \"Rotate too (2 points)\": two points on the sheet that stays, then the two that match them.\nSheets you cannot click at each step fade back, and a magnifier follows the cursor so you can hit the line, not near it."}
+          disabled={!hasTiles && !alignNeighbourMode}
+          onClick={() => onAlignNeighbourModeChange(!alignNeighbourMode)}
+        >
+          <Combine className="h-3.5 w-3.5 shrink-0" />
+        </IconButtonWithTooltip>
+        {!takeoffMode && (
+        <IconButtonWithTooltip
           variant={pointAlignMode ? "secondary" : "outline"}
           title={canEnterPointAlign
             ? "One PDF is locked as reference. Align another PDF to it by selecting two point pairs (ref point 1 → target point 1, then ref point 2 → target point 2)."
@@ -469,6 +528,7 @@ export function StitchToolbar({
         >
           <Crosshair className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
+        )}
         <IconButtonWithTooltip
           variant={scaleAlignMode ? "secondary" : "outline"}
           title={canEnterScaleAlign
@@ -491,17 +551,33 @@ export function StitchToolbar({
           <Ruler className="h-3.5 w-3.5 shrink-0" />
         </IconButtonWithTooltip>
         </div>
-        {onCleanup && (
-          <IconButtonWithTooltip
-            variant={cleanupActive ? "secondary" : "outline"}
-            disabled={!hasTiles || cleanupBusy || cleanupActive}
-            title="Clean up: auto-detect title blocks and match-line margins to hide so the sheets read as one continuous drawing. Review the boxes, toggle any off, or draw your own, then Apply."
-            label={cleanupActive ? "Reviewing…" : "Clean up"}
-            tooltipDescription="Auto-detect title blocks & match-line margins to hide, so the sheets read as one continuous drawing. Review, toggle, or draw your own boxes, then Apply."
-            onClick={onCleanup}
-          >
-            <Sparkles className="h-3.5 w-3.5 shrink-0" />
-          </IconButtonWithTooltip>
+        {(onTrimOpen || onAutoDetect) && (
+          <div className="flex items-center gap-1" role="group" aria-label="Trim">
+            {onTrimOpen && (
+              <IconButtonWithTooltip
+                variant={cleanupActive ? "secondary" : "outline"}
+                disabled={!hasTiles || cleanupBusy || cleanupActive}
+                title="Trim: hide title blocks and margins by drawing boxes, then Apply"
+                label={cleanupActive ? "Reviewing…" : "Trim"}
+                tooltipDescription="Draw boxes over the parts of each sheet to hide — title blocks, match-line margins — so the set reads as one continuous drawing. Then Apply."
+                onClick={onTrimOpen}
+              >
+                <Scissors className="h-3.5 w-3.5 shrink-0" />
+              </IconButtonWithTooltip>
+            )}
+            {onAutoDetect && (
+              <IconButtonWithTooltip
+                variant="outline"
+                disabled={!hasTiles || cleanupBusy}
+                title="Auto-detect title blocks and matchline margins"
+                label="Auto-detect"
+                tooltipDescription="Let the detector propose the boxes. They are added to the review — anything you drew by hand stays."
+                onClick={onAutoDetect}
+              >
+                <Sparkles className="h-3.5 w-3.5 shrink-0" />
+              </IconButtonWithTooltip>
+            )}
+          </div>
         )}
         <IconButtonWithTooltip variant="outline" title="Crop output to the bounding box of all tiles" label="Crop to content" onClick={onCropCanvas}>
           <Crop className="h-3.5 w-3.5 shrink-0" />
@@ -614,7 +690,9 @@ export function StitchToolbar({
           </IconButtonWithTooltip>
         </div>
         <div className="flex-1 min-w-2" />
-        <div className="flex items-center gap-0.5" role="group" aria-label="Export" data-tour="stitch-export">
+        {!takeoffMode && (
+          <>
+            <div className="flex items-center gap-0.5" role="group" aria-label="Export" data-tour="stitch-export">
           <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Download stitched PDF" label={isSaving ? "Saving…" : "Download"} onClick={() => onSaveAndFlatten(false)}>
             <Download className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
@@ -622,7 +700,7 @@ export function StitchToolbar({
             <Save className="h-3.5 w-3.5 shrink-0" />
           </IconButtonWithTooltip>
           {showSaveToCto && onSaveToCto && (
-            <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Save stitched PDF to Civiltakeoff" label="Save to Civiltakeoff" onClick={onSaveToCto}>
+            <IconButtonWithTooltip variant="outline" disabled={isSaving || tileCount === 0} title="Save stitched PDF to Pursuit" label="Save to Pursuit" onClick={onSaveToCto}>
               <Upload className="h-3.5 w-3.5 shrink-0" />
             </IconButtonWithTooltip>
           )}
@@ -638,7 +716,9 @@ export function StitchToolbar({
             </IconButtonWithTooltip>
           )}
         </div>
-        <div className="h-5 w-px bg-border" aria-hidden />
+            <div className="h-5 w-px bg-border" aria-hidden />
+          </>
+        )}
         <div className="relative inline-flex">
           <IconButtonWithTooltip variant="outline" title="Need help? Take a guided tour of the stitch tools" label="Help" onClick={() => { nudgeDismissedRef.current = true; setShowHelpNudge(false); startTour("stitch"); }}>
             <HelpCircle className="h-3.5 w-3.5 shrink-0" />

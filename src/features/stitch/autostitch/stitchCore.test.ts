@@ -1,5 +1,6 @@
-import { describe, it, test, expect } from "vitest";
-import { tokenVote, stitchSheets, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
+import { describe, it, test, expect, vi } from "vitest";
+import { tokenVote, stitchSheets, effectiveSheetCode, buildCodeToNo, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
+import { makeGeom } from "./types";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -41,7 +42,7 @@ describe("stitchSheets", () => {
 
   it("stitches two sheets by geometry alone (no tokens/matchlines) past identical boilerplate", () => {
     const VIEW: [number, number, number, number] = [0, 0, 3024, 2160];
-    const seg = (id: string, x1: number, y1: number, x2: number, y2: number): Geom => ({ id, pts: [[x1, y1], [x2, y2]], closed: false });
+    const seg = (_id: string, x1: number, y1: number, x2: number, y2: number): Geom => makeGeom([[x1, y1], [x2, y2]]);
     // A distinctive drawing shape — VARIED lengths/angles so each segment's
     // (len,angle) signature is unique and segVote matches by index (each ≥8ft).
     const SHAPE: [number, number][] = [[90, 0], [0, 70], [110, 35], [45, -55], [75, 25], [0, 95], [60, 60], [130, 15], [30, 80], [85, -40], [50, 50], [0, 120], [100, 65], [40, -70], [95, 30], [70, 90], [120, -25], [55, 45]];
@@ -141,8 +142,8 @@ describe("matchline label single-axis integration", () => {
     // Modest overlap linework (true world offset 30,430) that segVote's wrong
     // window misses — proves the loose axis can't be pinned from the label prior.
     const world: [number, number][] = [[60, 440], [95, 470], [130, 435], [170, 465], [120, 450], [200, 475]];
-    const geomAt = (id: string, ox: number, oy: number): Geom =>
-      ({ id, closed: false, pts: world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]) });
+    const geomAt = (_id: string, ox: number, oy: number): Geom =>
+      makeGeom(world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]));
     const mk = (no: number, labels: Label[], g: Geom): SheetInput => ({
       id: String(no), no, scale: 20, view: VIEW,
       extract: { view: VIEW, shxLabels: labels, labels, words: labels, geometry: [g] } as PageExtract,
@@ -220,7 +221,7 @@ describe("bandSeamPrior abutment floor", () => {
 describe("matchlineStrokePrior", () => {
   it("takes the perpendicular offset from the matchline STROKES, not the labels", () => {
     const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
-    const hstroke = (id: string, y: number): Geom => ({ id, pts: [[40, y], [2550, y]], closed: false });
+    const hstroke = (_id: string, y: number): Geom => makeGeom([[40, y], [2550, y]]);
     // Sheet 1: matchline near the y1 edge (label at y=1600), stroke at y=1550.
     // Sheet 2: matchline near the y0 edge (label at y=120), stroke at y=170.
     // Labels sit at DIFFERENT offsets from their strokes (50 vs 50 but opposite),
@@ -236,7 +237,7 @@ describe("matchlineStrokePrior", () => {
 
   it("returns null when the matchlines don't cross-reference", () => {
     const VIEW: [number, number, number, number] = [0, 0, 2592, 1728];
-    const hstroke = (id: string, y: number): Geom => ({ id, pts: [[40, y], [2550, y]], closed: false });
+    const hstroke = (_id: string, y: number): Geom => makeGeom([[40, y], [2550, y]]);
     const s1 = { no: 1, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 99)", 1200, 1600)], view: VIEW, geometry: [hstroke("a", 1550)] } };
     const s2 = { no: 2, scale: 20, sheetCode: null, raw: { shxLabels: [lbl("MATCHLINE (SEE SHEET 88)", 1200, 120)], view: VIEW, geometry: [hstroke("b", 170)] } };
     expect(matchlineStrokePrior(s1, s2)).toBeNull();
@@ -248,7 +249,7 @@ describe("buildGeomFurnitureFilter", () => {
     const boilerPts: [number, number][] = [[100, 100], [300, 100], [300, 200]];
     const sheet = (key: number, unique: [number, number][]) => ({
       key,
-      raw: { geometry: [{ id: "b", pts: boilerPts.map((p) => [...p] as [number, number]), closed: false }, { id: "u", pts: unique, closed: false }] },
+      raw: { geometry: [makeGeom(boilerPts), makeGeom(unique)] },
     });
     const sheets = [
       sheet(1, [[500, 500], [600, 600]]),
@@ -257,8 +258,8 @@ describe("buildGeomFurnitureFilter", () => {
       sheet(4, [[120, 700], [220, 760]]),
     ];
     const gf = buildGeomFurnitureFilter(sheets, 3);
-    expect(gf.isFurniture({ id: "x", pts: boilerPts.map((p) => [...p] as [number, number]), closed: false })).toBe(true);
-    expect(gf.isFurniture({ id: "y", pts: [[500, 500], [600, 600]], closed: false })).toBe(false);
+    expect(gf.isFurniture(makeGeom(boilerPts))).toBe(true);
+    expect(gf.isFurniture(makeGeom([[500, 500], [600, 600]]))).toBe(false);
   });
 
   // Regression (Bug A): visible-text sets carry stray render-mode-3 glyphs, so
@@ -388,8 +389,8 @@ describe("stitchSheets anchor channel", () => {
   };
   const Z = zigFt();
   // Materialize Z shifted by (dxFt,dyFt) in local feet, converted to page pts.
-  const shifted = (dxFt: number, dyFt: number, id: string): Geom =>
-    ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]) });
+  const shifted = (dxFt: number, dyFt: number, _id: string): Geom =>
+    makeGeom(Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]));
   const mk = (no: number, geometry: Geom[]): SheetInput => ({
     id: String(no), no, scale: SCALE, view: VIEW,
     extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -499,7 +500,7 @@ describe("stitchSheets anchor channel", () => {
 
 describe("seamCrossings + crossingConsensus", () => {
   // A vertical matchline at x=cross; a horizontal (transverse) segment crosses it.
-  const seg = (id: string, pts: [number, number][]): Geom => ({ id, closed: false, pts });
+  const seg = (_id: string, pts: [number, number][]): Geom => makeGeom(pts);
 
   it("records a transverse crossing's along-station and excludes parallel linework", () => {
     // Vertical matchline (axis "v") at x=1000 pt. A horizontal street segment ending
@@ -591,8 +592,8 @@ describe("stitchSheets fully-2D-precise (crossing) anchor", () => {
     return pts;
   };
   const Z = zigFt();
-  const shifted = (dxFt: number, dyFt: number, id: string): Geom =>
-    ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]) });
+  const shifted = (dxFt: number, dyFt: number, _id: string): Geom =>
+    makeGeom(Z.map(([x, y]): [number, number] => [ftToPt(x - dxFt), ftToPt(y - dyFt)]));
   const mk = (no: number, geometry: Geom[]): SheetInput => ({
     id: String(no), no, scale: SCALE, view: VIEW,
     extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -702,8 +703,8 @@ describe("scale-invariance (pt-derived windows)", () => {
   };
   const Zpt = zigPt();
   const OFFSET_PT = 900; // fixed page-point separation between the two sheets' copies
-  const shiftPt = (dxPt: number, dyPt: number, id: string): Geom =>
-    ({ id, closed: false, pts: Zpt.map(([x, y]): [number, number] => [x - dxPt, y - dyPt]) });
+  const shiftPt = (dxPt: number, dyPt: number, _id: string): Geom =>
+    makeGeom(Zpt.map(([x, y]): [number, number] => [x - dxPt, y - dyPt]));
   const mk = (no: number, scale: number, geometry: Geom[]): SheetInput => ({
     id: String(no), no, scale, view: VIEW,
     extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
@@ -784,10 +785,9 @@ describe("unit stitching (frames + printed numbers + strip refs)", () => {
     return pts;
   };
   /** Materialize a world-ft polyline into a unit whose frame origin sits at (ox, oy) world-ft. */
-  const geomFor = (id: string, world: [number, number][], ox: number, oy: number) => [{
-    id, closed: false,
-    pts: world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)]),
-  }];
+  const geomFor = (_id: string, world: [number, number][], ox: number, oy: number) => [
+    makeGeom(world.map(([wx, wy]): [number, number] => [ftToPt(wx - ox), ftToPt(wy - oy)])),
+  ];
   const zA = zig(175, 15, 1);  // in the unit1/unit2 overlap band
   const zB = zig(345, 25, 2);  // in the unit2/unit3 overlap band
   const unit1: SheetInput = {
@@ -847,9 +847,9 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
   // the matchline-strength floor). Different dash lengths across sheets keep segVote
   // from matching, so the pair resolves via the precise stroke anchor alone.
   const VIEW: [number, number, number, number] = [0, 0, 1600, 1080]; // W=444ft @20
-  const vDash = (x: number, tag: string, dashLen: number): Geom[] => {
+  const vDash = (x: number, _tag: string, dashLen: number): Geom[] => {
     const g: Geom[] = [];
-    for (let y = 100; y < 900; y += 50) g.push({ id: `${tag}${y}`, pts: [[x, y], [x, y + dashLen]], closed: false });
+    for (let y = 100; y < 900; y += 50) g.push(makeGeom([[x, y], [x, y + dashLen]]));
     return g;
   };
   const mkG = (no: number, geometry: Geom[]): SheetInput => ({
@@ -898,7 +898,7 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
       return pts;
     };
     const Z = zig();
-    const geomAt = (ox: number, id: string): Geom => ({ id, closed: false, pts: Z.map(([x, y]): [number, number] => [ftToPt(x - ox), y]) });
+    const geomAt = (ox: number, _id: string): Geom => makeGeom(Z.map(([x, y]): [number, number] => [ftToPt(x - ox), y]));
     const s1: SheetInput = {
       id: "1", no: 1, printedNo: 1, scale: 20, view: V,
       extract: { view: V, shxLabels: [], words: [], labels: [lbl2("MATCHLINE (SEE SHEET 2)", 2450, 850)], geometry: [geomAt(0, "z1")] } as PageExtract,
@@ -914,6 +914,131 @@ describe("stitchSheets seam verification (cannot-align gate)", () => {
     expect(seam!.status).toBe("plausible");
     expect(res.alignmentVerdict).toBe("unverified");
   });
+
+  // ── T0 Task 1: the honesty gate measures the seam's OWN matchline ────────────
+  // The failure the gate had (the since-deleted `facingStroke`): it re-picked the STRONGEST dashed line in
+  // the facing band. On a real civil sheet that is a parking row or a border, not
+  // the matchline, so a seam whose own strokes agree to 0.00 ft was reported as
+  // 4-192 ft off and the whole reference set came back `unverified`.
+  const decoyView: [number, number, number, number] = [0, 0, 1600, 1080]; // 444x300 ft @20
+  const vDashN = (x: number, _tag: string, dashLen: number): Geom[] => {
+    const g: Geom[] = [];
+    for (let y = 100; y < 900; y += 50) g.push(makeGeom([[x, y], [x, y + dashLen]]));
+    return g;
+  };
+  const mkDecoy = (no: number, geometry: Geom[]): SheetInput => ({
+    id: String(no), no, scale: 20, view: decoyView,
+    extract: { view: decoyView, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+  // Sheet 1: its matchline at x=1280 (dash total 0.40 of the width) PLUS a stronger
+  // "parking row" at x=1424 — 40 ft further out (FT(144pt,20)) at 0.70 of the width,
+  // so it wins any strength-ranked pick of the facing band. Sheet 2's matchline is at
+  // x=200. At the anchor's dx=300 ft the two matchlines coincide exactly
+  // (FT(1280)=355.6 == 300+FT(200)); the parking row sits 40 ft away.
+  const decoySheets = () => [
+    mkDecoy(1, [...vDashN(1280, "match-i", 40), ...vDashN(1424, "parking-i", 70)]),
+    mkDecoy(2, vDashN(200, "match-j", 56)),
+  ];
+
+  it("(d) the band's strongest line is a decoy 40ft off — the anchor's own strokes agree -> verified", () => {
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true,
+      along: 0, alongPrecise: true,           // along pinned by crossing consensus
+      strokeI: 1280, strokeJ: 200,            // the seam's OWN located matchlines
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("own");
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.status).toBe("verified");
+    expect(res.alignmentVerdict).toBe("verified");
+  });
+
+  it("(d2) the SAME geometry with no stroke picks falls back to ALL band candidates", () => {
+    // Regression guard for the old behaviour: with no located matchline to compare
+    // against, all the gate can do is match the two bands' candidates — and it must
+    // consider ALL of them (the decoy is only ONE of sheet 1's candidates; its true
+    // matchline is in the same band), so the seam is not condemned on the decoy.
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true, along: 0, alongPrecise: true,
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("band");
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.status).toBe("verified");
+  });
+
+  it("(d3) a seam with NO matchline near the other sheet's line is still suspect", () => {
+    // The gate must not become vacuous. Here sheet 1 draws only the parking row
+    // (x=1424) — at the solved dx=300 nothing on sheet 1 lies within 3 ft of sheet
+    // 2's matchline and nothing on sheet 2 lies within 3 ft of sheet 1's line, so
+    // the two sheets demonstrably do not share a seam: suspect.
+    const res = stitchSheets([mkDecoy(1, vDashN(1424, "parking-i", 70)), mkDecoy(2, vDashN(200, "match-j", 56))],
+      undefined, [{
+        i: 1, j: 2, dx: 300, perp: "x", precise: true, along: 0, alongPrecise: true,
+        strokeI: 1424, strokeJ: 200,
+      }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("own");
+    expect(seam.detail.perpDeltaFt!).toBeGreaterThan(3);
+    expect(seam.status).toBe("suspect");
+    expect(res.alignmentVerdict).toBe("unverified");
+  });
+
+  it("(d4) an alias-ambiguous along vote no longer condemns a stroke-verified seam", () => {
+    // Margin < 1.3 on the ALONG axis used to mark the seam suspect outright. When the
+    // cross-seam axis is confirmed by coincident matchline strokes only the slide
+    // along the line is unproven — that is `plausible` (alongDecisive: false), not a
+    // red flag. (PG_SITE p3-p4: strokes agree to 0.00 ft, along margin 1.04.)
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true, strokeI: 1280, strokeJ: 200,
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.detail.alongDecisive).toBe(false);
+    expect(seam.status).toBe("plausible");
+  });
+
+  it("(d5) a seam rescued by a NEARBY band line is plausible, never verified", () => {
+    // The anchor named the parking row as the matchline, so the seam's own two
+    // strokes sit 40 ft apart; sheet 1's REAL matchline still lands exactly on sheet
+    // 2's line, so the seam is not contradicted. That is enough to clear `suspect`
+    // and nowhere near enough to call verified — the placement rests on a line the
+    // seam never claimed.
+    const res = stitchSheets(decoySheets(), undefined, [{
+      i: 1, j: 2, dx: 300, perp: "x", precise: true, along: 0, alongPrecise: true,
+      strokeI: 1424, strokeJ: 200,
+    }]);
+    const seam = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(seam.detail.strokeSource).toBe("band-rescue");
+    expect(seam.detail.perpDeltaFt).toBeLessThanOrEqual(3);
+    expect(seam.detail.alongDecisive).toBe(true);
+    expect(seam.status).toBe("plausible");
+    expect(res.alignmentVerdict).not.toBe("verified");
+  });
+
+  it("(e) worstResidFt is reported on a matchline-only set (was always 0 without tokens)", () => {
+    // A 2x2 block of fully-2D-precise anchors whose loop does NOT close: 1->2->4 puts
+    // unit 4 at x=370, 1->3->4 puts it at x=350. There is not a token pair in the
+    // set, so the old token-only computation reported 0.00 ft however badly the block
+    // was placed; the honest number is the seams' own disagreement with the solve.
+    const mk4 = (no: number): SheetInput => ({
+      id: String(no), no, scale: 20, view: decoyView,
+      extract: { view: decoyView, shxLabels: [], labels: [], words: [], geometry: [] } as PageExtract,
+    });
+    const A = (i: number, j: number, perp: "x" | "y", d: number, along: number) =>
+      (perp === "x" ? { i, j, dx: d, perp, precise: true, along, alongPrecise: true }
+                    : { i, j, dy: d, perp, precise: true, along, alongPrecise: true });
+    const res = stitchSheets([mk4(1), mk4(2), mk4(3), mk4(4)], undefined, [
+      A(1, 2, "x", 350, 0), A(3, 4, "x", 350, 0),
+      A(1, 3, "y", 250, 0), A(2, 4, "y", 250, 20),
+    ]);
+    expect(res.placements.size).toBe(4);
+    expect(res.worstResidFt).toBeGreaterThan(0);
+    const seams = res.seamReport!;
+    expect(seams.length).toBe(4);
+    expect(seams.every((s) => s.detail.residFt != null)).toBe(true);
+    expect(seams.some((s) => (s.detail.residFt ?? 0) > 0)).toBe(true);
+  });
 });
 
 describe("oneSidedStrokeAnchor", () => {
@@ -921,11 +1046,11 @@ describe("oneSidedStrokeAnchor", () => {
   // A full-width DASHED horizontal matchline at cross-y=Y (dashes sum well past the
   // matchline-strength floor and span most of the width), plus a couple of vertical
   // "streets" that terminate at the line (seam crossings).
-  const matchlineH = (Y: number, tag: string): Geom[] => {
+  const matchlineH = (Y: number, _tag: string): Geom[] => {
     const g: Geom[] = [];
-    for (let x = 150; x < 950; x += 50) g.push({ id: `${tag}m${x}`, pts: [[x, Y], [x + 32, Y]], closed: false });
-    g.push({ id: `${tag}s1`, pts: [[320, Y], [320, Y + 220]], closed: false }); // street crossing
-    g.push({ id: `${tag}s2`, pts: [[640, Y], [640, Y + 220]], closed: false });
+    for (let x = 150; x < 950; x += 50) g.push(makeGeom([[x, Y], [x + 32, Y]]));
+    g.push(makeGeom([[320, Y], [320, Y + 220]])); // street crossing
+    g.push(makeGeom([[640, Y], [640, Y + 220]]));
     return g;
   };
 
@@ -953,5 +1078,220 @@ describe("oneSidedStrokeAnchor", () => {
     const iGeom = matchlineH(900, "i");
     const r = oneSidedStrokeAnchor(iGeom, view, [], view, { x: 500, y: 100 }, "bottom", 20);
     expect(r).toBeNull();
+  });
+});
+
+// ── T0 Task 5: overlay/notes sheets out of tiling; seam-only pairs need a ref ──
+describe("sheet roles and the band-seam gate", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 2592, 1728]; // 720 x 480 ft @20
+  const ftToPt = (ft: number) => ft * 3.6;
+  /** 14 distinctly-signatured segments on one horizontal line at `cyFt` (feet). */
+  const seamCluster = (cyFt: number, _tag: string): Geom[] => {
+    const g: Geom[] = [];
+    for (let i = 0; i < 14; i++) {
+      const cx = 120 + i * 40, len = 12 + i * 2, ang = ((i * 13) % 170) + 5;
+      const r = (ang * Math.PI) / 180;
+      const dx = (Math.cos(r) * len) / 2, dy = (Math.sin(r) * len) / 2;
+      g.push(makeGeom([
+        [ftToPt(cx - dx), ftToPt(cyFt - dy)], [ftToPt(cx + dx), ftToPt(cyFt + dy)],
+      ]));
+    }
+    return g;
+  };
+  const mk = (no: number, geometry: Geom[], role?: SheetInput["role"]): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW, role,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry } as PageExtract,
+  });
+  // A's content sits in its BOTTOM band, B's identical content in its TOP band, ~0.92
+  // of the sheet height apart: the band-seam channel's abutting case.
+  const A = () => mk(1, seamCluster(460, "a"));
+  const B = () => mk(2, seamCluster(18.4, "b"));
+
+  it("a two-sheet set still bonds on the band seam alone", () => {
+    const res = stitchSheets([A(), B()]);
+    const pair = res.pairs.find((r) => r.channel);
+    expect(pair?.channel).toBe("seam");
+    expect(res.placements.size).toBe(2);
+  });
+
+  it("on a 4+ sheet set a band seam with no reference or matchline is refused", () => {
+    // Repeated axis-aligned EDGE content is not distinctive across a large set — one
+    // sheet border looks much like another — so the weakest channel in the ladder
+    // needs corroboration that the two sheets are neighbours. (El Centro bonded an
+    // Overall Site Plan, a Drainage Plan and a General Notes sheet this way.)
+    const res = stitchSheets([A(), B(), mk(3, []), mk(4, [])]);
+    expect(res.pairs.every((r) => r.channel !== "seam")).toBe(true);
+    expect(res.method).toBe("none");
+  });
+
+  it("a non-tile sheet is dropped from the pair search entirely", () => {
+    const res = stitchSheets([A(), mk(2, seamCluster(18.4, "b"), "notes")]);
+    expect(res.pairs.filter((r) => r.channel)).toHaveLength(0);
+    expect(res.method).toBe("none");
+  });
+
+  it("an overall plan cannot be collaged onto the tiles it overlays", () => {
+    const res = stitchSheets([A(), mk(2, seamCluster(18.4, "b"), "overall")]);
+    expect(res.placements.size).toBe(0);
+  });
+
+  it("role defaults to tile when the caller does not classify", () => {
+    const res = stitchSheets([mk(1, seamCluster(460, "a"), undefined), B()]);
+    expect(res.placements.size).toBe(2);
+  });
+});
+
+// ── Fix round 1: the ALONG-matchline axis ────────────────────────────────────
+describe("along-axis anchoring", () => {
+  const VIEW: [number, number, number, number] = [0, 0, 1600, 1080]; // 444 x 300 ft @20
+  const mk = (no: number, extra: Partial<SheetInput> = {}): SheetInput => ({
+    id: String(no), no, scale: 20, view: VIEW, pageIndex: no - 1,
+    extract: { view: VIEW, shxLabels: [], labels: [], words: [], geometry: [] } as PageExtract,
+    ...extra,
+  });
+  /** A fully-2D-precise anchor: pins BOTH axes, so it anchors the along axis. */
+  const cross = (i: number, j: number, d = 350) =>
+    ({ i, j, dx: d, perp: "x" as const, precise: true, along: 0, alongPrecise: true });
+  /** A stroke-only anchor: pins the PERPENDICULAR axis and leaves along free. */
+  const strokeOnly = (i: number, j: number, d = 350) =>
+    ({ i, j, dx: d, perp: "x" as const, precise: true });
+
+  it("stops at a seam that never fixed the along axis", () => {
+    // 1=2 (both axes) — 2=3 (across only) — 3=4 (both axes). Units 3 and 4 are placed
+    // and rigid with each other, but nothing says where they sit ALONG the seam they
+    // share with 2, so they can slide. The walk starts at the solve's root (unit 2,
+    // the most-connected) and must not cross the 2-3 seam.
+    const res = stitchSheets([mk(1), mk(2), mk(3), mk(4)], undefined, [cross(1, 2), strokeOnly(2, 3), cross(3, 4)]);
+    expect(res.placements.size).toBe(4);
+    expect(res.alongAnchored).toEqual([0, 1]);
+    const at = (a: number, b: number) => res.seamReport!.find((s) => (s.i === a && s.j === b) || (s.i === b && s.j === a))!;
+    expect(at(1, 2).detail.alongAnchored).toBe(true);
+    expect(at(2, 3).detail.alongAnchored).toBe(false);
+    expect(at(3, 4).detail.alongAnchored).toBe(true);
+  });
+
+  it("every seam fixing the along axis anchors the whole set", () => {
+    const res = stitchSheets([mk(1), mk(2), mk(3)], undefined, [cross(1, 2), cross(2, 3)]);
+    expect(res.alongAnchored).toEqual([0, 1, 2]);
+  });
+
+  it("the sibling-strip shortcut does NOT propagate along-anchoring", () => {
+    // Two strips of one page share an overlap column, which fixes them relative to
+    // EACH OTHER and says nothing about where either sits along the matchline it
+    // shares with a neighbour. `alongDecisive` still reads true for that seam (it is
+    // used for the seam's own status); the anchoring walk ignores it.
+    const res = stitchSheets(
+      [mk(1, { pageIndex: 0, siblingKey: 2 }), mk(2, { pageIndex: 0, siblingKey: 1 }), mk(3, { pageIndex: 1 })],
+      undefined,
+      [strokeOnly(1, 2), cross(2, 3)],
+    );
+    const sib = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(sib.detail.alongDecisive).toBe(true);   // siblings ⇒ decisive, for its own status
+    expect(sib.detail.alongAnchored).toBe(false);  // but it anchors nothing
+    // Page 0 has TWO placed units and only one of them is anchored, so the page is
+    // not claimed: a page is anchored only when every unit it placed is.
+    expect(res.alongAnchored).toEqual([1]);
+  });
+
+  it("a sibling seam does not anchor even with a strong vote of its own", () => {
+    // The overlap column between two strips gives the segment vote a huge margin —
+    // it is matching the SAME content twice. On the reference set that margin is 14
+    // and the two strips end up 147 ft apart from where they belong.
+    const res = stitchSheets(
+      [mk(1, { pageIndex: 0, siblingKey: 2 }), mk(2, { pageIndex: 0, siblingKey: 1 })],
+      undefined,
+      [{ i: 1, j: 2, dx: 350, perp: "x", precise: true, along: 0, alongPrecise: true }],
+    );
+    const sib = res.seamReport!.find((s) => (s.i === 1 && s.j === 2) || (s.i === 2 && s.j === 1))!;
+    expect(sib.detail.alongAnchored).toBe(false);
+    expect(res.alongAnchored).toEqual([]);
+  });
+
+  it("reports how far an un-anchored unit could slide", () => {
+    const res = stitchSheets([mk(1), mk(2)], undefined, [strokeOnly(1, 2)]);
+    expect(res.alongAnchored).toEqual([0]); // only the root
+    expect(typeof res.worstAlongUncertaintyFt).toBe("number");
+  });
+
+  it("never reports ZERO uncertainty while a unit is un-anchored", () => {
+    // A DECLINED joint sweep is all the sweep-based figure can measure, and most sets
+    // never run one — so the honest "± N ft" came back as ±0 ft on exactly the sets
+    // whose along axis is least resolved, which reads as "pinned". With no runner-up
+    // vote to measure either, the floor is the sheets' own extent along the seam:
+    // slide further than that and there is nothing left to match. 1080 pt at 1"=20'
+    // is 300 ft.
+    const res = stitchSheets([mk(1), mk(2)], undefined, [strokeOnly(1, 2)]);
+    expect(res.alongAnchored).toEqual([0]);
+    expect(res.worstAlongUncertaintyFt).toBeGreaterThan(0);
+    expect(res.worstAlongUncertaintyFt).toBeCloseTo(300, 0);
+  });
+
+  it("a fully anchored set still reports zero — nothing is free to slide", () => {
+    const res = stitchSheets([mk(1), mk(2)], undefined, [cross(1, 2)]);
+    expect(res.alongAnchored).toEqual([0, 1]);
+    expect(res.worstAlongUncertaintyFt).toBe(0);
+  });
+});
+
+describe("sheet codes reaching the driver", () => {
+  it("does not re-derive a code that was dropped for a collision", () => {
+    // resolveSheetCodes found "A1" on two pages and took it from both. The unit's own
+    // title-block read still says A1 — and handing it back is exactly the bug: one
+    // "SEE SHEET A1" would then anchor an arbitrary one of the two.
+    expect(effectiveSheetCode({ sheetCode: null, sheetCodeDropped: true }, "A1")).toBeNull();
+  });
+
+  it("still lets a page nothing has named take its own title-block read", () => {
+    // Not the same case: no decision was made about this page, so its strip-local
+    // read is new information rather than a resurrection.
+    expect(effectiveSheetCode({ sheetCode: null }, "C2.01")).toBe("C2.01");
+    expect(effectiveSheetCode({ sheetCode: null, sheetCodeDropped: false }, "C2.01")).toBe("C2.01");
+  });
+
+  it("prefers the resolved code over the unit's own read", () => {
+    expect(effectiveSheetCode({ sheetCode: "CD102" }, "A1")).toBe("CD102");
+  });
+
+  it("resolves a callout only to a code ONE page claims", () => {
+    const warn = vi.fn();
+    const map = buildCodeToNo(
+      [
+        { no: 1, pageIndex: 0, sheetCode: "C2.01" },
+        { no: 2, pageIndex: 1, sheetCode: "C2.02" },
+      ],
+      warn,
+    );
+    // `normCode` folds case, spaces and hyphens — dots are part of the code.
+    expect(map.get("C2.01")).toBe(1);
+    expect(map.get("C2.02")).toBe(2);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("drops a code two PAGES claim rather than picking the last one, and says so", () => {
+    const warn = vi.fn();
+    const map = buildCodeToNo(
+      [
+        { no: 1, pageIndex: 0, sheetCode: "A1" },
+        { no: 2, pageIndex: 1, sheetCode: "A-1" }, // same code, different separator
+        { no: 3, pageIndex: 2, sheetCode: "C3" },
+      ],
+      warn,
+    );
+    expect(map.has("A1")).toBe(false);
+    expect(map.get("C3")).toBe(3);
+    expect(warn.mock.calls.join(" ")).toContain('sheet code "A1" is claimed by pages 0, 1');
+  });
+
+  it("keeps a code the two STRIPS of one page share — that is one sheet, not two", () => {
+    const warn = vi.fn();
+    const map = buildCodeToNo(
+      [
+        { no: 1, pageIndex: 4, sheetCode: "C5.00" },
+        { no: 2, pageIndex: 4, sheetCode: "C5.00" },
+      ],
+      warn,
+    );
+    expect(map.has("C5.00")).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

@@ -17,38 +17,34 @@ import {
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { useFileSystem } from "@/shared/hooks/useFileSystem";
-import { useStitchStore } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { PDFRenderer } from "@/core/pdf/PDFRenderer";
-import { makeWhiteTransparentInPlace } from "@/features/stitch/imageUtils";
-import { getTileAABB } from "@/features/stitch/stitchGeometry";
-import { autoStitch } from "@/features/stitch/autostitch/autoStitch";
-import { attachOcrRpc, recognize } from "./autostitch/ocrService";
+import { attachOcrRpc, recognize, shutdownOcr } from "./autostitch/ocrService";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
+import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import { layoutPlacements, frameMask, type TilePlacement } from "@/features/stitch/autostitch/layout";
+import { layoutPlacements } from "@/features/stitch/autostitch/layout";
+import { parseScaleInput, isUniform, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
+import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
+import { modalProbeOutcome } from "./modalProbeGate";
+import { autoAlignUnavailableNote } from "./addToProjectCopy";
+import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain, type CachedProbePlacement } from "./commitPages";
 
 const THUMB_SCALE = 0.3;
-const TILE_RENDER_SCALE = 1.5;
-const MARGIN = 20;
-const GAP = 10;
-const TILES_PER_ROW = 3;
 
-/** Yield to the event loop so the tab stays responsive during long PDF work. */
-function yieldToMain(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
+/** How long a page selection must hold still before the probe walks it. Long
+ *  enough that ticking six boxes in a row starts one probe, short enough that a
+ *  settled selection feels immediate. */
+const PROBE_DEBOUNCE_MS = 400;
 
-function imageDataToDataUrl(imageData: ImageData): string {
-  const canvas = document.createElement("canvas");
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-  ctx.putImageData(imageData, 0, 0);
-  return canvas.toDataURL("image/png");
-}
+/** How long the modal waits for a probe reply before it stops waiting and says so.
+ *  The SAME soft budget the embed probe has always had (`useEarnedAutoAlign`), and it
+ *  is per REQUEST — so the one automatic re-run gets a fresh 60 s rather than the
+ *  worst case being two unbounded probes back to back. Nothing here abandons the
+ *  pages: the plain add stays enabled the whole time, and Skip check is on screen for
+ *  every second of the wait. */
+const PROBE_BUDGET_MS = 60_000;
 
 type SourceTab = "device" | "cto";
 
@@ -57,16 +53,32 @@ export function AddPdfModal({
   onClose,
   initialPdf,
   onInitialConsumed,
+  sessionSourcePdf,
+  onAutoAlignResult,
+  onPagesAdded,
 }: {
   open: boolean;
   onClose: () => void;
   initialPdf?: { pdfBytes: Uint8Array; fileName: string } | null;
   onInitialConsumed?: () => void;
+  /** How many sheets the auto-align run could not place, reported after every
+   *  "Add and auto-align" from this modal. In takeoff-v2 mode that number is the
+   *  step strip's "need placing" count and the coach mark's badge — a run
+   *  started HERE has to move them just as a plan-driven run does, or the strip
+   *  goes on claiming everything is placed. */
+  onAutoAlignResult?: (unalignedCount: number) => void;
+  /** A PLAIN add landed: the pages are on the canvas but nothing has decided whether
+   *  they can be aligned. The takeoff strip re-probes the WHOLE canvas — auto-align is
+   *  earned, and the sheets it was last offered about are no longer what is there. No
+   *  payload: the check reads the canvas itself, which is the only way the offer can
+   *  cover plan sheets and added sheets as one composite. */
+  onPagesAdded?: () => void;
+  /** The site-sheet source PDF for the life of the stitch session (unlike `initialPdf`,
+   *  which is consumed once). Offered as an extra entry in the "From Pursuit" list
+   *  so switching to a project document doesn't lose the user's selected takeoff sheets. */
+  sessionSourcePdf?: { pdfBytes: Uint8Array; fileName: string } | null;
 }) {
   const fileSystem = useFileSystem();
-  const addTiles = useStitchStore((s) => s.addTiles);
-  const setReferenceScaleFeetPerInch = useStitchStore((s) => s.setReferenceScaleFeetPerInch);
-  const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
   const [sourceTab, setSourceTab] = useState<SourceTab>("device");
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -82,8 +94,21 @@ export function AddPdfModal({
   /** Progress while adding pages to canvas. */
   const [addingProgress, setAddingProgress] = useState({ done: 0, total: 0 });
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
-  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). Empty = do not set. */
+  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). A typed value always wins
+   *  as the commit's reference scale. Empty = don't override: a canvas that already
+   *  has sheets keeps its own reference scale, and only an empty canvas falls back to
+   *  the selection's own resolved scale (see `referenceBaseline`). */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
+  /** Per-page scale text, keyed by page index; empty/absent = use the set scale above. */
+  const [pageScaleText, setPageScaleText] = useState<Map<number, string>>(new Map());
+  const pageScales = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const [i, t] of pageScaleText) { const n = parseScaleInput(t); if (n != null) m.set(i, n); }
+    return m;
+  }, [pageScaleText]);
+  const uniformScale = useMemo(() => parseScaleInput(scaleFeetPerInch), [scaleFeetPerInch]);
+  /** The ticked pages, ascending. Drives the commit AND the feasibility probe. */
+  const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const [_ctoListening, setCtoListening] = useState(false);
   /** User-visible error for failed loads/adds (corrupt file, password, etc). */
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -92,6 +117,12 @@ export function AddPdfModal({
   const [ctoDocumentsLoading, setCtoDocumentsLoading] = useState(false);
   const [ctoDocumentsError, setCtoDocumentsError] = useState<string | null>(null);
   const ctoDocumentsRespondedRef = useRef(false);
+  // The site-sheet source, kept selectable as the first "From Pursuit" entry for the
+  // life of the stitch session — never sent to the CTO document-list request.
+  const ctoDocumentsWithSession = useMemo(
+    () => withSessionSource(ctoDocuments, sessionSourcePdf),
+    [ctoDocuments, sessionSourcePdf]
+  );
   /** Prevents the file-picker / initial-PDF effect from re-triggering after
    *  the first run within a single modal session (open→close cycle). */
   const hasTriggeredFileOpenRef = useRef(false);
@@ -109,17 +140,100 @@ export function AddPdfModal({
   /** Monotonic id; a probe reply whose docId != current is stale and ignored. */
   const probeDocIdRef = useRef(0);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
-  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped">("idle");
+  const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped" | "too_slow">("idle");
   /** True once the probe reports OCR is in play (outlined-text sheets) — used to
    *  explain the longer wait in the "Checking alignment…" copy. */
   const [probeOcr, setProbeOcr] = useState(false);
 
-  /** Stop the currently-running probe (plain add, Skip check, close, Change file).
-   *  Posts an abort for the current docId; the worker throws AutoStitchAborted at
-   *  its next checkpoint and replies `{aborted:true}` (no error toast). */
-  const abortProbe = useCallback(() => {
-    probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+  /** Pending debounce timer for the selection-driven probe (see the probe effect). */
+  const probeTimerRef = useRef<number | null>(null);
+  /** True between posting a ProbeRequest and its terminal reply — the debounce
+   *  window is NOT in flight, so aborting there has nothing to abort. */
+  const probeInFlightRef = useRef(false);
+  /** The request last posted, kept so the automatic re-run can re-issue exactly it
+   *  (same pages, same bytes) under a fresh docId — the reply handler cannot reach
+   *  the effect that built it. CLEARED on every settle and by `stopProbe`: it holds
+   *  the document's bytes, and this modal stays mounted for the whole life of the
+   *  stitch view, so a request left here after the modal closed pinned a PDF nobody
+   *  was looking at any more. */
+  const probeReqRef = useRef<ProbeRequest | null>(null);
+  /** The pending budget for the request in flight (see PROBE_BUDGET_MS). */
+  const probeBudgetRef = useRef<number | null>(null);
+  /** Latched once the CURRENT request has spent its one automatic re-run; cleared
+   *  only where a new request is posted (below). This is what makes it one re-run
+   *  and not a loop on a set whose reads time out every single time. */
+  const probeRecheckSpentRef = useRef(false);
+
+  /** Retire the budget watching the request in flight. It belongs to THAT request:
+   *  every settle, every supersede and the re-run all end it. */
+  const clearProbeBudget = useCallback(() => {
+    if (probeBudgetRef.current != null) {
+      window.clearTimeout(probeBudgetRef.current);
+      probeBudgetRef.current = null;
+    }
   }, []);
+
+  /**
+   * Stop whatever the probe is doing — the debounced request that has not been
+   * posted yet AND the run already in the worker.
+   *
+   * `"skip"`   the user chose not to wait (Skip check / plain add): the run is
+   *            aborted and reported as skipped, either by the worker's
+   *            `{aborted:true}` reply or — when nothing had been posted yet —
+   *            synchronously here, because no reply is coming.
+   * `"supersede"` a NEW probe is about to replace this one (selection changed,
+   *            new document, modal closed): the docId is bumped so the old run's
+   *            reply, abort or result, is stale and ignored.
+   */
+  const stopProbe = useCallback((mode: "skip" | "supersede") => {
+    if (probeTimerRef.current != null) {
+      window.clearTimeout(probeTimerRef.current);
+      probeTimerRef.current = null;
+    }
+    clearProbeBudget();
+    const inFlight = probeInFlightRef.current;
+    if (inFlight) probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+    probeInFlightRef.current = false;
+    // Nothing is going to re-issue this one, and it holds the whole PDF.
+    probeReqRef.current = null;
+    if (mode === "supersede") probeDocIdRef.current++;
+    else if (!inFlight) setProbeState("skipped");
+  }, [clearProbeBudget]);
+
+  /**
+   * Post a probe request and start its budget. The one place a request is sent, so
+   * the debounced first check and the automatic re-run cannot drift apart: same
+   * bookkeeping, same wall-clock promise, and the re-run's budget is its OWN 60 s.
+   *
+   * On expiry the worker is told to give up (the same abort a superseded check
+   * sends), the docId is bumped so its eventual reply is stale, tesseract's workers
+   * are handed back — nothing else will now do it, since that stale reply is dropped
+   * before it reaches the handler's release — and the modal says the check took too
+   * long instead of sitting on a spinner.
+   */
+  const postProbe = useCallback((req: ProbeRequest) => {
+    clearProbeBudget();
+    probeReqRef.current = req;
+    probeInFlightRef.current = true;
+    probeWorkerRef.current?.postMessage(req);
+    const requested = req.docId;
+    probeBudgetRef.current = window.setTimeout(() => {
+      probeBudgetRef.current = null;
+      // Belt-and-braces: every supersede clears this timer, so a budget for a request
+      // that is no longer the current one should be unreachable.
+      if (requested !== probeDocIdRef.current) return;
+      probeWorkerRef.current?.postMessage({ kind: "abort", docId: probeDocIdRef.current });
+      probeDocIdRef.current++;
+      probeInFlightRef.current = false;
+      probeReqRef.current = null;
+      void shutdownOcr();
+      setProbe(null);
+      setProbeState("too_slow");
+    }, PROBE_BUDGET_MS);
+  }, [clearProbeBudget]);
+
+  /** Skip the check and move on (Skip check button, plain add). */
+  const abortProbe = useCallback(() => stopProbe("skip"), [stopProbe]);
 
   const releaseDoc = useCallback(() => {
     try {
@@ -154,26 +268,131 @@ export function AddPdfModal({
         return;
       }
       if ((ev.data as any)?.kind) return; // ocr-req frames are handled by attachOcrRpc
-      if (msg.docId !== probeDocIdRef.current) return; // stale — superseded by a newer load
-      if ("aborted" in msg) {
+      // Nothing running and nothing queued means tesseract's 160-240 MB has no
+      // more work: hand it back. `ensurePool` rebuilds it lazily if a
+      // later probe needs it.
+      const ocrIdle = () => probeTimerRef.current == null && !probeInFlightRef.current;
+      if (msg.docId !== probeDocIdRef.current) {
+        // A SUPERSEDED probe finishing. Usually a replacement is already in
+        // flight or debounced — but not when the selection that superseded it
+        // fell below two pages, and then nothing else will ever release OCR.
+        if (ocrIdle()) void shutdownOcr();
+        return; // stale — superseded by a newer selection or load
+      }
+      probeInFlightRef.current = false;
+      // The worker answered — the budget watching this same request is moot.
+      clearProbeBudget();
+      // NEVER AN OFFER ON UNKNOWN EVIDENCE — the same rule the embed probe applies
+      // (`useEarnedAutoAlign`), because it is the same probe and the same promise.
+      // See `modalProbeGate`.
+      const outcome = modalProbeOutcome(msg, probeRecheckSpentRef.current);
+      if (outcome.kind === "recheck") {
+        // The one automatic re-run. The pool is NOT handed back — the re-run is about
+        // to read with it — and nothing user-visible is written, so the strip keeps
+        // saying "Checking alignment…" rather than flickering through an answer the
+        // hook is in the middle of refusing.
+        probeRecheckSpentRef.current = true;
+        const req = probeReqRef.current;
+        if (req) {
+          console.debug("[stitchProbe] unknown OCR reads — re-checking once", outcome.stats);
+          probeDocIdRef.current++;
+          postProbe({ ...req, docId: probeDocIdRef.current });
+          return;
+        }
+        // No request to re-issue (only reachable if one was never recorded): fall
+        // through to the honest answer rather than sit on "checking" forever.
+      }
+      // Nothing more will be read on this check, and nothing will re-issue it.
+      probeReqRef.current = null;
+      if (ocrIdle()) void shutdownOcr();
+      if (outcome.kind === "skipped") {
         // Superseded by a plain add / Skip check — treat as a skipped check, no toast.
         setProbe(null);
         setProbeState("skipped");
         return;
       }
-      if ("error" in msg) {
-        console.warn("[stitchProbe] failed:", msg.error);
+      if (outcome.kind === "error") {
+        console.warn("[stitchProbe] failed:", outcome.error);
         setProbe(null);
         setProbeState("error");
         return;
       }
-      console.debug("[stitchProbe] method", msg.method, "aligned", msg.alignedPageIndices.length, "/", msg.placements.length);
-      setProbe(msg);
+      if (outcome.kind !== "done") {
+        // Unknown reads twice over. Whatever this run decided rests on reads that
+        // never came back, so it is not offered — the pages still add, and the
+        // existing "took too long" copy says why (`addToProjectCopy`).
+        setProbe(null);
+        setProbeState("too_slow");
+        return;
+      }
+      const result = outcome.probe;
+      console.debug("[stitchProbe] method", result.method, "aligned", result.alignedPageIndices.length, "/", result.placements.length);
+      setProbe(result);
       setProbeState("done");
     };
     probeWorkerRef.current = w;
-    return () => { w.terminate(); probeWorkerRef.current = null; };
-  }, []);
+    return () => {
+      w.terminate();
+      probeWorkerRef.current = null;
+      probeReqRef.current = null;
+      // The budget outlives the worker otherwise: it is a bare `setTimeout`, and on
+      // expiry it posts an abort to a terminated worker and calls `setProbeState` on
+      // an unmounted component. Every other end of a request clears it; so does this
+      // one. (`clearProbeBudget` is a `useCallback([])`, so naming it in the deps
+      // keeps this a once-per-lifetime effect.)
+      clearProbeBudget();
+      void shutdownOcr();
+    };
+  }, [clearProbeBudget]);
+
+  /**
+   * The feasibility probe runs over the TICKED PAGES ONLY, debounced.
+   *
+   * `autoStitch` retains one `PageExtract` per page for the whole solve (~54 MB
+   * average, 115 MB worst on a dense 36x24 in civil sheet), so the page count it
+   * walks is the probe worker's memory. Probing a 22-page document to answer a
+   * question about the 5 sheets the user ticked was ~1.1 GB for ~267 MB of
+   * useful work, plus every unticked page's band OCR.
+   *
+   * Ticking is a rapid-fire interaction, so each change supersedes the last:
+   * the in-flight run is aborted, the pending one is re-timed, and only a
+   * selection that has settled for PROBE_DEBOUNCE_MS is actually probed. The
+   * strip says "checking" from the first tick, not from the post, so the debounce
+   * is invisible.
+   */
+  useEffect(() => {
+    if (!pdfBytes || !mupdfDoc || pageCount === 0) return;
+    stopProbe("supersede");
+    setProbe(null);
+    setProbeOcr(false);
+    if (selectedIndices.length < 2) {
+      setProbeState("idle");
+      return;
+    }
+    setProbeState("running");
+    const bytes = pdfBytes;
+    const pages = selectedIndices;
+    probeTimerRef.current = window.setTimeout(() => {
+      probeTimerRef.current = null;
+      // userScale is null: placements are scale-invariant for a uniform set, so
+      // the probe outcome is unaffected and the effect needs no scale dep.
+      // A request the SELECTION asked for earns a fresh entitlement to one automatic
+      // re-run; the re-run itself must not grant itself another (that is the loop).
+      probeRecheckSpentRef.current = false;
+      postProbe({
+        docId: probeDocIdRef.current,
+        pdfBytes: bytes,
+        pageIndices: pages,
+        userScale: null,
+      });
+    }, PROBE_DEBOUNCE_MS);
+    return () => {
+      if (probeTimerRef.current != null) {
+        window.clearTimeout(probeTimerRef.current);
+        probeTimerRef.current = null;
+      }
+    };
+  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, stopProbe, postProbe]);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -224,27 +443,18 @@ export function AddPdfModal({
         setMupdfDoc(doc);
         setPageCount(count);
         setSelectedPages(new Set());
-        // Kick off the background feasibility probe over the WHOLE document.
-        // userScale is null: placements are scale-invariant for a uniform set,
-        // so the probe outcome is unaffected and we avoid a stale-closure dep.
-        // Stop any probe still running for the previous doc (Change file / new load)
-        // so it can't keep the shared OCR worker busy behind this one.
-        abortProbe();
-        const probeDocId = ++probeDocIdRef.current;
+        setPageScaleText(new Map());
+        // NO probe here. The probe used to walk the WHOLE document the moment a
+        // PDF loaded, before the user had ticked anything — on a 22-page set that
+        // is ~1.1 GB of retained page geometry in the worker and minutes of band
+        // OCR nobody asked for. It now runs over the ticked pages only, from the
+        // selection effect below. Stop any probe still running for the previous
+        // document (Change file / new load) so it can't keep the shared OCR
+        // worker busy behind this one.
+        stopProbe("supersede");
         setProbe(null);
         setProbeOcr(false);
-        if (count >= 2) {
-          setProbeState("running");
-          const req: ProbeRequest = {
-            docId: probeDocId,
-            pdfBytes: data,
-            pageIndices: Array.from({ length: count }, (_, i) => i),
-            userScale: null,
-          };
-          probeWorkerRef.current?.postMessage(req);
-        } else {
-          setProbeState("idle");
-        }
+        setProbeState("idle");
         // Show the page grid right away (loading = false), then generate thumbs in background
         setLoading(false);
 
@@ -256,7 +466,9 @@ export function AddPdfModal({
           await yieldToMain();
           if (thumbGenRef.current !== gen) return;
           try {
-            const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE });
+            // noCache: each thumbnail is encoded to a data URL below and never
+            // re-requested; caching all 22 pages costs ~35 MB for nothing.
+            const rendered = await renderer.renderPage(doc, i, { scale: THUMB_SCALE, noCache: true });
             if (thumbGenRef.current !== gen) return;
             const id = rendered.imageData as ImageData;
             if (id?.data) {
@@ -274,7 +486,7 @@ export function AddPdfModal({
         setLoading(false);
       }
     },
-    [releaseDoc, abortProbe]
+    [releaseDoc, stopProbe]
   );
 
   const handleChooseFile = useCallback(async () => {
@@ -293,13 +505,14 @@ export function AddPdfModal({
       setMupdfDoc(null);
       setPageCount(0);
       setSelectedPages(new Set());
+      setPageScaleText(new Map());
       setThumbnails({});
       setThumbProgress(0);
       setProbe(null);
       setProbeState("idle");
       setProbeOcr(false);
-      abortProbe(); // stop a probe still running for the just-closed doc
-      probeDocIdRef.current++;
+      stopProbe("supersede"); // stop a probe still running for the just-closed doc
+      void shutdownOcr();     // and release tesseract's workers with it
       setCtoListening(false);
       setLoadError(null);
       // Reset the guard so the next open triggers the file picker
@@ -322,9 +535,9 @@ export function AddPdfModal({
     }
     // Don't auto-open file picker — let the user see the modal first
     // and click "Choose file" themselves for a clearer flow.
-  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed, releaseDoc]);
+  }, [open, ctoContext, fileSystem, loadPdfFromResult, initialPdf, onInitialConsumed, releaseDoc, stopProbe]);
 
-  // From Civiltakeoff: request document list from opener and listen for nanodoc-cto-documents
+  // From Pursuit: request document list from opener and listen for nanodoc-cto-documents
   useEffect(() => {
     if (!open || !ctoContext || sourceTab !== "cto") {
       setCtoDocuments([]);
@@ -337,20 +550,20 @@ export function AddPdfModal({
       setCtoDocumentsError("Project not set.");
       return;
     }
-    const opener = window.opener;
-    if (!opener) {
-      setCtoDocumentsError("Open stitch from Civiltakeoff to see project documents.");
+    const target = resolveCtoTarget({ parent: window.parent, opener: window.opener, self: window });
+    if (!target) {
+      setCtoDocumentsError("Open stitch from Pursuit to see project documents.");
       return;
     }
     setCtoDocumentsLoading(true);
     setCtoDocumentsError(null);
     setCtoDocuments([]);
     ctoDocumentsRespondedRef.current = false;
-    opener.postMessage({ type: "nanodoc-request-cto-documents", projectId }, ctoContext.api_origin);
+    target.postMessage({ type: "nanodoc-request-cto-documents", projectId }, ctoContext.api_origin);
 
     const timeoutId = window.setTimeout(() => {
       if (!ctoDocumentsRespondedRef.current) {
-        setCtoDocumentsError("Request timed out. Open stitch from Civiltakeoff project documents.");
+        setCtoDocumentsError("Request timed out. Open stitch from Pursuit project documents.");
         setCtoDocumentsLoading(false);
       }
     }, 12000);
@@ -409,7 +622,21 @@ export function AddPdfModal({
     [ctoContext, loadPdfFromResult]
   );
 
-  // From Civiltakeoff: postMessage listener for nanodoc-add-cto-doc (legacy: CTO pushes one doc)
+  /** Selecting an entry from the merged "From Pursuit" list: the synthetic
+   *  session-source entry loads its retained bytes directly (no network); any
+   *  other entry is a real CTO document fetched by token as before. */
+  const handleSelectCtoDoc = useCallback(
+    (doc: CtoDoc) => {
+      if (doc.type === SESSION_SOURCE_DOC_TYPE) {
+        if (sessionSourcePdf) loadPdfFromResult(sessionSourcePdf.pdfBytes, sessionSourcePdf.fileName);
+        return;
+      }
+      loadCtoDocument(doc);
+    },
+    [sessionSourcePdf, loadPdfFromResult, loadCtoDocument]
+  );
+
+  // From Pursuit: postMessage listener for nanodoc-add-cto-doc (legacy: CTO pushes one doc)
   useEffect(() => {
     if (!open || !ctoContext || sourceTab !== "cto") return;
     setCtoListening(true);
@@ -466,74 +693,19 @@ export function AddPdfModal({
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
-      const renderer = rendererRef.current;
-      type TileData = {
-        sourcePdfBytes: Uint8Array;
-        sourcePageIndex: number;
-        sourceFileName?: string;
-        width: number;
-        height: number;
-        imageDataUrl?: string;
-      };
-      const newTiles: Array<TileData & { x: number; y: number }> = [];
-      // Start below any existing content so a second add doesn't stack
-      // perfectly on top of the first batch.
-      const existingTiles = useStitchStore.getState().tiles;
-      let rowY = MARGIN;
-      for (const t of existingTiles) {
-        const aabb = getTileAABB(t);
-        rowY = Math.max(rowY, aabb.y + aabb.height + GAP);
-      }
-      const rowBuffer: Array<{ tile: TileData; w: number; h: number }> = [];
-
-      const flushRow = () => {
-        if (rowBuffer.length === 0) return;
-        let x = MARGIN;
-        const maxH = Math.max(...rowBuffer.map((b) => b.h));
-        for (const { tile, w } of rowBuffer) {
-          newTiles.push({ ...tile, x, y: rowY });
-          x += w + GAP;
-        }
-        rowY += maxH + GAP;
-        rowBuffer.length = 0;
-      };
-
-      for (let idx = 0; idx < selected.length; idx++) {
-        const pageIndex = selected[idx];
-        await yieldToMain();
-        const page = mupdfDoc.loadPage(pageIndex);
-        const bounds = page.getBounds();
-        page.destroy?.();
-        const widthPt = bounds[2] - bounds[0];
-        const heightPt = bounds[3] - bounds[1];
-        // Use original PDF page size in pt (e.g. 8.5"×11" = 612×792 pt) so scale is correct.
-        const tileW = widthPt;
-        const tileH = heightPt;
-        const rendered = await renderer.renderPage(mupdfDoc, pageIndex, {
-          scale: TILE_RENDER_SCALE,
-        });
-        const imageData = rendered.imageData as ImageData;
-        if (imageData && imageData.data && removeWhiteBackground)
-          makeWhiteTransparentInPlace(imageData);
-        const dataUrl = imageData && imageData.data ? imageDataToDataUrl(imageData) : undefined;
-        const tileData: TileData = {
-          sourcePdfBytes: pdfBytes,
-          sourcePageIndex: pageIndex,
-          sourceFileName: pdfFileName || undefined,
-          width: tileW,
-          height: tileH,
-          imageDataUrl: dataUrl,
-        };
-        rowBuffer.push({ tile: tileData, w: tileW, h: tileH });
-        if (rowBuffer.length === TILES_PER_ROW) flushRow();
-        setAddingProgress({ done: idx + 1, total: selected.length });
-      }
-      flushRow();
-      const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
-      if (Number.isFinite(scaleNum) && scaleNum > 0) {
-        setReferenceScaleFeetPerInch(scaleNum);
-      }
-      addTiles(newTiles);
+      await commitPlainAdd({
+        mupdf,
+        doc: mupdfDoc,
+        pdfBytes,
+        fileName: pdfFileName || undefined,
+        selected,
+        pageScales,
+        uniformScale,
+        removeWhiteBackground,
+        renderer: rendererRef.current,
+        onProgress: (done, total) => setAddingProgress({ done, total }),
+      });
+      onPagesAdded?.();
       onClose();
     } catch (e) {
       console.error(e);
@@ -541,7 +713,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, abortProbe]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, abortProbe, pageScales, uniformScale, onPagesAdded]);
 
   const handleAddAndAutoAlign = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
@@ -552,80 +724,52 @@ export function AddPdfModal({
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
-      const renderer = rendererRef.current;
-
-      // 1. Render rasters for the selected pages (same as the plain add).
-      const rasters = new Map<number, string>();
-      for (let i = 0; i < selected.length; i++) {
-        const pageIndex = selected[i];
-        await new Promise<void>((r) => setTimeout(r, 0));
-        const rendered = await renderer.renderPage(mupdfDoc, pageIndex, { scale: TILE_RENDER_SCALE });
-        const imageData = rendered.imageData as ImageData;
-        if (imageData?.data && removeWhiteBackground) makeWhiteTransparentInPlace(imageData);
-        if (imageData?.data) rasters.set(pageIndex, imageDataToDataUrl(imageData));
-        setAddingProgress({ done: i + 1, total: selected.length });
-      }
-
-      // 2. Placements: prefer the cached probe (skip the second stitch); else
-      //    fall back to running the aligner live (probe absent/errored/running).
-      let placements: TilePlacement[];
-      let rootFtPerIn: number;
-      let worstResidFt: number;
-      if (probe && probeState === "done") {
+      // Prefer the cached probe (skips the second stitch); else the helper falls back
+      // to running the aligner live (probe absent/errored/running).
+      // The probe always ran with a uniform (null) scale, so its cached poses are
+      // only valid when this selection turns out uniform too — a mixed selection
+      // always takes the live path, which is per-page-scale aware.
+      let cached: CachedProbePlacement | null = null;
+      if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
         const sel = new Set(selected);
         // Re-run the (cheap) layout over just the selected sheets so the committed
         // tiles normalize to THIS selection's top-left (MARGIN), not the whole
         // document's. The probe laid out all pages, so filtering alone would leave a
         // partial selection offset off-canvas; the expensive stitch stays cached (poses).
         const subset = probe.poses.filter((p) => sel.has(p.pageIndex));
-        placements = layoutPlacements(subset, probe.rootFtPerIn);
-        rootFtPerIn = probe.rootFtPerIn;
-        worstResidFt = probe.worstResidFt;
-      } else {
-        const userScaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
-        const result = await autoStitch(mupdf, mupdfDoc, selected, {
-          userScale: Number.isFinite(userScaleNum) && userScaleNum > 0 ? userScaleNum : null,
-          onProgress: (done, total) => setAddingProgress({ done, total }),
-          ocr: recognize,
-        });
-        placements = result.placements;
-        rootFtPerIn = result.rootFtPerIn;
-        worstResidFt = result.worstResidFt;
-      }
-
-      // 3. Build one tile per PLACEMENT (a two-strip page commits twice, each
-      //    masked to its own frame) and commit as one undo step.
-      const newTiles = placements.map((p) => {
-        const page = mupdfDoc.loadPage(p.pageIndex);
-        const bounds = page.getBounds();
-        page.destroy?.();
-        const pw = bounds[2] - bounds[0], ph = bounds[3] - bounds[1];
-        return {
-          sourcePdfBytes: pdfBytes,
-          sourcePageIndex: p.pageIndex,
-          sourceFileName: pdfFileName || undefined,
-          x: p.x, y: p.y,
-          width: p.width, height: p.height,
-          imageDataUrl: rasters.get(p.pageIndex),
-          hiddenRegions: p.sourceFrame ? frameMask(p.sourceFrame, pw, ph) : undefined,
+        cached = {
+          placements: layoutPlacements(subset, probe.rootFtPerIn),
+          rootFtPerIn: probe.rootFtPerIn,
+          worstResidFt: probe.worstResidFt,
+          // The honesty payload travels with the poses: without it the commit had no
+          // seam report and its demotion silently did nothing on this path.
+          method: probe.method,
+          seamReport: probe.seamReport,
+          alignmentVerdict: probe.alignmentVerdict,
+          alongAnchored: probe.alongAnchored,
+          worstAlongUncertaintyFt: probe.worstAlongUncertaintyFt,
+          refPageIndices: probe.refPageIndices,
         };
+      }
+      const result = await commitAutoAlign({
+        mupdf,
+        doc: mupdfDoc,
+        pdfBytes,
+        fileName: pdfFileName || undefined,
+        selected,
+        pageScales,
+        uniformScale,
+        removeWhiteBackground,
+        renderer: rendererRef.current,
+        onProgress: (done, total) => setAddingProgress({ done, total }),
+        ocr: recognize,
+        cached,
       });
-      addTiles(newTiles);
-      const scaleNum = scaleFeetPerInch.trim() ? parseFloat(scaleFeetPerInch.trim()) : NaN;
-      setReferenceScaleFeetPerInch(Number.isFinite(scaleNum) && scaleNum > 0 ? scaleNum : rootFtPerIn);
-
-      // 4. Leave unaligned tiles selected so the user can place them manually.
-      const added = useStitchStore.getState().tiles.slice(-newTiles.length);
-      const alignedSet = new Set(placements.filter((p) => p.aligned).map((p) => p.pageIndex));
-      const unalignedIds = added.filter((t) => !alignedSet.has(t.sourcePageIndex)).map((t) => t.id);
-      if (unalignedIds.length) setSelectedTileIds(unalignedIds);
-
-      // 5. Report.
-      const alignedCount = selected.length - unalignedIds.length;
-      const msg = unalignedIds.length > 0
-        ? `Aligned ${alignedCount} of ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft. ${unalignedIds.length} placed below for manual alignment.`
-        : `Aligned ${selected.length} pages · worst seam ${worstResidFt.toFixed(2)} ft.`;
-      useNotificationStore.getState().showNotification(msg, unalignedIds.length > 0 ? "info" : "success");
+      if (result.message)
+        useNotificationStore
+          .getState()
+          .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
+      onAutoAlignResult?.(result.unalignedIds.length);
       onClose();
     } catch (e) {
       console.error(e);
@@ -633,9 +777,8 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, addTiles, onClose, removeWhiteBackground, scaleFeetPerInch, setReferenceScaleFeetPerInch, setSelectedTileIds, probe, probeState]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScales, uniformScale, onAutoAlignResult]);
 
-  const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
   const feasibility = useMemo(
     () => (probe ? deriveFeasibility(probe, selectedIndices) : null),
     [probe, selectedIndices]
@@ -663,11 +806,12 @@ export function AddPdfModal({
                 setMupdfDoc(null);
                 setPageCount(0);
                 setSelectedPages(new Set());
+                setPageScaleText(new Map());
                 setThumbnails({});
                 setLoadError(null);
+                stopProbe("supersede");
                 setProbe(null);
                 setProbeState("idle");
-                probeDocIdRef.current++;
               }}
             >
               From device
@@ -684,14 +828,15 @@ export function AddPdfModal({
                 setMupdfDoc(null);
                 setPageCount(0);
                 setSelectedPages(new Set());
+                setPageScaleText(new Map());
                 setThumbnails({});
                 setLoadError(null);
+                stopProbe("supersede");
                 setProbe(null);
                 setProbeState("idle");
-                probeDocIdRef.current++;
               }}
             >
-              From Civiltakeoff
+              From Pursuit
             </Button>
           </div>
         )}
@@ -725,23 +870,16 @@ export function AddPdfModal({
           </div>
         ) : ctoContext && sourceTab === "cto" && !pdfBytes ? (
           <div className="py-8 flex flex-col items-stretch gap-4 text-muted-foreground">
-            {ctoDocumentsLoading ? (
-              <div className="flex items-center justify-center gap-2 py-8">
-                <Loader2 className="h-6 w-6 animate-spin" />
-                <span>Loading project documents…</span>
-              </div>
-            ) : ctoDocumentsError ? (
-              <p className="text-destructive text-center py-4">{ctoDocumentsError}</p>
-            ) : ctoDocuments.length > 0 ? (
+            {ctoDocumentsWithSession.length > 0 ? (
               <>
                 <p className="text-sm text-center">Choose a document to add pages from:</p>
                 <ul className="space-y-2 max-h-64 overflow-auto">
-                  {ctoDocuments.map((doc, idx) => (
+                  {ctoDocumentsWithSession.map((doc, idx) => (
                     <li key={idx}>
                       <Button
                         variant="outline"
                         className="w-full justify-start font-normal"
-                        onClick={() => loadCtoDocument(doc)}
+                        onClick={() => handleSelectCtoDoc(doc)}
                         disabled={loading}
                       >
                         {doc.displayName}
@@ -749,7 +887,20 @@ export function AddPdfModal({
                     </li>
                   ))}
                 </ul>
+                {ctoDocumentsLoading && (
+                  <p className="text-xs text-center">Loading more project documents…</p>
+                )}
+                {!ctoDocumentsLoading && ctoDocumentsError && (
+                  <p className="text-destructive text-xs text-center">{ctoDocumentsError}</p>
+                )}
               </>
+            ) : ctoDocumentsLoading ? (
+              <div className="flex items-center justify-center gap-2 py-8">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span>Loading project documents…</span>
+              </div>
+            ) : ctoDocumentsError ? (
+              <p className="text-destructive text-center py-4">{ctoDocumentsError}</p>
             ) : (
               <p className="text-center py-4">No project PDFs found.</p>
             )}
@@ -842,6 +993,29 @@ export function AddPdfModal({
                     </div>
                   )}
                   <span className="text-xs mt-1">Page {i + 1}</span>
+                  {selectedPages.has(i) && (
+                    <span className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground" onClick={(e) => e.preventDefault()}>
+                      1&quot;=
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        aria-label={`Scale for page ${i + 1}, feet per inch`}
+                        placeholder={String(uniformScale ?? DEFAULT_SCALE_FT_PER_IN)}
+                        value={pageScaleText.get(i) ?? ""}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setPageScaleText((prev) => {
+                            const next = new Map(prev);
+                            if (value.trim()) next.set(i, value); else next.delete(i);
+                            return next;
+                          });
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-10 rounded border border-input bg-background px-1 py-0.5 text-[10px]"
+                      />
+                      ft
+                    </span>
+                  )}
                 </label>
               ))}
             </div>
@@ -881,6 +1055,14 @@ export function AddPdfModal({
             {probeOcr && " reading outlined text — this can take a few minutes"}
           </p>
         )}
+        {/* Two runs, both with reads that never came back. The EXISTING sentence for
+            exactly that, shared with the embed strip — no second wording for one
+            condition. */}
+        {probeState === "too_slow" && (
+          <p className="text-xs text-amber-600 dark:text-amber-500 text-right px-1">
+            {autoAlignUnavailableNote("too_slow")}
+          </p>
+        )}
         {/* Skipping the check is honest, not an error: unverified verdict, reason
             "check skipped" — plain add stays available, auto-align isn't offered. */}
         {probeState === "skipped" && (
@@ -907,12 +1089,15 @@ export function AddPdfModal({
             // A skipped check leaves the set unverified — auto-align isn't offered
             // (same honesty as cannot-verify); the plain add button stays enabled.
             const skipped = probeState === "skipped";
+            // Unknown reads twice: the run finished, but on evidence with a hole in
+            // it. Same treatment as a skipped check — add and place by hand.
+            const tooSlow = probeState === "too_slow";
             const unstitchable = probeState === "done" && feasibility?.status === "unstitchable";
             // Reason-aware: a set that LOOKS tiled but whose seams can't be physically
             // verified gets the honest "can't verify" copy instead of the bare
             // "unavailable" (which reads as "these aren't tiles at all").
             const cannotVerify = unstitchable && !!feasibility?.reason;
-            const disabled = adding || tooFew || checking || unstitchable || skipped;
+            const disabled = adding || tooFew || checking || unstitchable || skipped || tooSlow;
             const label = adding
               ? "Aligning…"
               : checking
@@ -921,13 +1106,15 @@ export function AddPdfModal({
               ? "Alignment check skipped"
               : cannotVerify
               ? "Can't verify alignment"
-              : unstitchable
+              : unstitchable || tooSlow
               ? "Auto-align unavailable"
               : `Add & auto-align ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""}`;
             const title = tooFew
               ? "Select at least 2 pages to auto-align"
               : skipped
               ? "Alignment check skipped — add pages and align manually"
+              : tooSlow
+              ? autoAlignUnavailableNote("too_slow")
               : cannotVerify
               ? "Can't verify alignment for this set — add pages and align manually"
               : unstitchable

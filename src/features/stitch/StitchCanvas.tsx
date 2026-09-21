@@ -5,22 +5,29 @@
 
 import { memo, useRef, useEffect, useCallback, useState } from "react";
 import { createPortal } from "react-dom";
+import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom } from "@/shared/stores/stitchStore";
 import { StitchTile } from "./StitchTile";
 import { GroupSelectionOverlay } from "./GroupSelectionOverlay";
 import type { CanvasRect } from "./imageUtils";
 import { useStitchPanZoom } from "./useStitchPanZoom";
-import { MIN_ERASE_SIZE, MIN_ZOOM, PT_PER_INCH, STROKE_POINT_MIN_DIST } from "./stitchConstants";
+import { ABSOLUTE_MIN_ZOOM, MIN_ERASE_SIZE, PT_PER_INCH, RULER_SIZE, STROKE_POINT_MIN_DIST } from "./stitchConstants";
 
-const RULER_SIZE = 24;
 const PT_PER_HALF_INCH = PT_PER_INCH / 2;
+/** The inch grid is drawn ON the white page, not on the themed surround, so it is a fixed
+ *  neutral rather than a token — `--muted-foreground` goes pale under `.dark` and the grid
+ *  vanishes against the paper. */
+const INCH_GRID_STROKE = "#9a9a9a";
 
 function rulerLabel(inches: number): string {
   return inches % 1 === 0 ? String(inches) : inches.toFixed(1);
 }
 import { hitTestTileAtPoint, type CanvasPoint } from "./stitchGeometry";
 import { CleanupReview, type TileProposalUI } from "./cleanup/CleanupReview";
+import { AlignToNeighbourMode } from "./AlignToNeighbourMode";
+import { OVERLAY_ACCENT, OVERLAY_ACCENT_DARK, OVERLAY_PAPER } from "./canvasOverlayStyle";
+import type { AlignToNeighbour } from "./useAlignToNeighbour";
 
 /**
  * Rulers and inch grid only depend on the canvas dimensions — memoized so
@@ -117,8 +124,8 @@ const InchGrid = memo(function InchGrid({ canvasWidth, canvasHeight }: { canvasW
             y1={0}
             x2={x}
             y2={canvasHeight}
-            stroke="hsl(var(--muted-foreground))"
-            strokeOpacity={0.22}
+            stroke={INCH_GRID_STROKE}
+            strokeOpacity={0.5}
             strokeWidth={1}
           />
         );
@@ -132,8 +139,8 @@ const InchGrid = memo(function InchGrid({ canvasWidth, canvasHeight }: { canvasW
             y1={y}
             x2={canvasWidth}
             y2={y}
-            stroke="hsl(var(--muted-foreground))"
-            strokeOpacity={0.22}
+            stroke={INCH_GRID_STROKE}
+            strokeOpacity={0.5}
             strokeWidth={1}
           />
         );
@@ -190,6 +197,9 @@ export interface StitchCanvasProps {
   onRelocateCleanupRegion?: (tileId: string, index: number, move: { dx: number; dy: number } | null) => void;
   /** User drew a manual hide-box (canvas-space rect). */
   onCleanupManualBox?: (rect: CanvasRect) => void;
+  /** "Align to neighbour" mode. When active it renders its own viewport overlay
+   *  (dimming, markers, loupe) and owns every left click on the canvas. */
+  alignToNeighbour?: AlignToNeighbour;
 }
 
 export function StitchCanvas({
@@ -218,6 +228,7 @@ export function StitchCanvas({
   onDeleteCleanupRegion,
   onRelocateCleanupRegion,
   onCleanupManualBox,
+  alignToNeighbour,
 }: StitchCanvasProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const setContainerRef = useCallback(
@@ -238,12 +249,119 @@ export function StitchCanvas({
   const cropRect = useStitchStore((s) => s.cropRect);
   const setPanOffset = useStitchStore((s) => s.setPanOffset);
   const setSelectedTileIds = useStitchStore((s) => s.setSelectedTileIds);
+  const alignActive = alignToNeighbour?.active ?? false;
 
-  const { panOffsetRef, zoomLevelRef } = useStitchPanZoom(containerRef);
+  // Read fresh on each wheel event rather than captured: the floor moves as tiles are
+  // placed and as the viewport resizes.
+  const getMinZoom = useCallback(() => selectEffectiveMinZoom(useStitchStore.getState()), []);
+  const { panOffsetRef, zoomLevelRef } = useStitchPanZoom(containerRef, getMinZoom);
 
   const [isSpacePan, setIsSpacePan] = useState(false);
   const isSpacePanRef = useRef(false);
+  /** Middle-button drag pan (takeoff-v2 parity) — state only for the grabbing cursor. */
+  const [isMiddlePan, setIsMiddlePan] = useState(false);
+  const isMiddlePanRef = useRef(false);
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+
+  /** Detaches the window listeners a live middle-pan installed. */
+  const middlePanCleanupRef = useRef<(() => void) | null>(null);
+
+  const endMiddlePan = useCallback(() => {
+    middlePanCleanupRef.current?.();
+    middlePanCleanupRef.current = null;
+    if (!isMiddlePanRef.current) return;
+    isMiddlePanRef.current = false;
+    setIsMiddlePan(false);
+    panStartRef.current = null;
+  }, []);
+
+  // A pan still running when the canvas unmounts would leak its window listeners.
+  useEffect(() => () => endMiddlePan(), [endMiddlePan]);
+
+  /**
+   * Start a middle-button pan. Returns true when it took the event.
+   *
+   * Called from the canvas AND from each body-portaled mode overlay (content-delete,
+   * delete-element, point/scale-align) — those cover the viewport, so without this the
+   * middle button would be dead exactly where the user is doing precise work. Tracking runs
+   * on WINDOW listeners rather than pointer capture precisely because the same code then
+   * works from any of those surfaces, and it gives us a place to hang the blur release.
+   */
+  const startWindowPan = useCallback(
+    (e: React.PointerEvent): boolean => {
+      // preventDefault stops the browser's middle-click autoscroll; stopPropagation keeps
+      // the press off whatever tile or overlay sits underneath.
+      const button = e.button;
+      e.preventDefault();
+      e.stopPropagation();
+      if (isMiddlePanRef.current) return true;
+
+      panStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        panX: panOffsetRef.current.x,
+        panY: panOffsetRef.current.y,
+      };
+      isMiddlePanRef.current = true;
+      setIsMiddlePan(true);
+
+      const onMove = (ev: PointerEvent) => {
+        const start = panStartRef.current;
+        if (!start) return;
+        const newPan = {
+          x: start.panX + (ev.clientX - start.x),
+          y: start.panY + (ev.clientY - start.y),
+        };
+        panOffsetRef.current = newPan;
+        setPanOffset(newPan);
+      };
+      const onUp = (ev: PointerEvent) => {
+        if (ev.button === button) endMiddlePan();
+      };
+      const stop = () => endMiddlePan();
+      // Capture phase so an overlay that swallows pointer events can't strand the pan.
+      window.addEventListener("pointermove", onMove, true);
+      window.addEventListener("pointerup", onUp, true);
+      window.addEventListener("pointercancel", stop, true);
+      // Alt-tabbing away mid-drag must not leave the canvas stuck in grabbing.
+      window.addEventListener("blur", stop);
+      middlePanCleanupRef.current = () => {
+        window.removeEventListener("pointermove", onMove, true);
+        window.removeEventListener("pointerup", onUp, true);
+        window.removeEventListener("pointercancel", stop, true);
+        window.removeEventListener("blur", stop);
+      };
+      return true;
+    },
+    [endMiddlePan, setPanOffset]
+  );
+
+  /** The middle button, from the canvas and from every mode overlay. */
+  const beginMiddlePan = useCallback(
+    (e: React.PointerEvent): boolean => (e.button === 1 ? startWindowPan(e) : false),
+    [startWindowPan]
+  );
+
+  /**
+   * What a mode overlay hands its pointerdown to first: the middle button pans, and so
+   * does a left drag while Space is held. Without the second case a fullscreen overlay
+   * makes the space-bar pan dead — and precise point placement is exactly when the user
+   * needs to shove the canvas over without leaving the mode.
+   */
+  const beginOverlayPan = useCallback(
+    (e: React.PointerEvent): boolean => {
+      if (e.button === 1) return startWindowPan(e);
+      if (e.button === 0 && isSpacePanRef.current) return startWindowPan(e);
+      return false;
+    },
+    [startWindowPan]
+  );
+
+  /** Autoscroll is armed on `mousedown`, and preventing the pointerdown default does not
+   *  reliably suppress it — so every surface that can start a middle-pan blocks it here too. */
+  const preventMiddleAutoscroll = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1) e.preventDefault();
+  }, []);
 
   const [deleteSelection, setDeleteSelection] = useState<{
     start: { x: number; y: number };
@@ -269,7 +387,12 @@ export function StitchCanvas({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () => setContainerRect(el.getBoundingClientRect());
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      setContainerRect(rect);
+      // The zoom floor and zoom-to-fit are both derived from this — see selectEffectiveMinZoom.
+      useStitchStore.getState().setViewportSize(rect.width, rect.height);
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
@@ -279,7 +402,7 @@ export function StitchCanvas({
       ro.disconnect();
       win?.removeEventListener("scroll", update, true);
     };
-  }, [pointAlignMode, scaleAlignMode, contentDeleteMode, deleteElementMode]);
+  }, [pointAlignMode, scaleAlignMode, contentDeleteMode, deleteElementMode, alignActive]);
 
   useEffect(() => {
     const isTypingTarget = () => {
@@ -334,8 +457,12 @@ export function StitchCanvas({
 
   const handlePointerDownCapture = useCallback(
     (e: React.PointerEvent) => {
+      // Middle button pans regardless of the active tool (takeoff v2: `e.button === 1`),
+      // checked BEFORE the mode guards and the left-button filter so it works while an
+      // edit tool is armed.
+      if (beginMiddlePan(e)) return;
       if (e.button !== 0) return;
-      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode || alignActive) return;
       const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
@@ -349,13 +476,13 @@ export function StitchCanvas({
         e.stopPropagation();
       }
     },
-    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode]
+    [beginMiddlePan, contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, alignActive]
   );
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode) return;
+      if (contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || cleanupReviewMode || alignActive) return;
       const panActive = panMode || isSpacePanRef.current;
       if (panActive && containerRef.current) {
         panStartRef.current = {
@@ -372,11 +499,12 @@ export function StitchCanvas({
         }
       }
     },
-    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, setSelectedTileIds]
+    [contentDeleteMode, deleteElementMode, panMode, pointAlignMode, scaleAlignMode, cleanupReviewMode, alignActive, setSelectedTileIds]
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
+      if (isMiddlePanRef.current) return; // the window listener drives that one
       const start = panStartRef.current;
       if (start) {
         const dx = e.clientX - start.x;
@@ -390,15 +518,28 @@ export function StitchCanvas({
   );
 
   const handlePointerUp = useCallback(() => {
+    if (isMiddlePanRef.current) return; // released by the window pointerup listener
     panStartRef.current = null;
   }, []);
 
   return (
     <div
       ref={setContainerRef}
-      className="w-full h-full overflow-hidden bg-muted relative"
+      className={cn(
+        "w-full h-full overflow-hidden relative",
+        // With the canvas hidden there is no white paper under the tiles, and tiles are
+        // background-removed PNGs (black linework, transparent). On a dark themed surround
+        // that linework disappears, so the hidden-canvas ground stays a light neutral.
+        canvasVisible ? "bg-muted" : "bg-neutral-200"
+      )}
       style={{
-        cursor: contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode ? "crosshair" : panMode || isSpacePan ? "grab" : "default",
+        cursor: isMiddlePan
+          ? "grabbing"
+          : contentDeleteMode || deleteElementMode || pointAlignMode || scaleAlignMode || alignActive
+            ? "crosshair"
+            : panMode || isSpacePan
+              ? "grab"
+              : "default",
         // Pointer-event drags (tile move, pan, erase) on touchscreens get
         // pointercancel'd when the browser claims the gesture — opt out.
         touchAction: "none",
@@ -407,7 +548,15 @@ export function StitchCanvas({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onMouseDown={preventMiddleAutoscroll}
       onPointerLeave={() => {
+        // A middle-drag is tracked on the window, so leaving the box does not end it —
+        // only a genuinely element-bound pan (space / pan tool) stops here.
+        if (isMiddlePanRef.current) return;
+        panStartRef.current = null;
+      }}
+      onPointerCancel={() => {
+        if (isMiddlePanRef.current) return;
         panStartRef.current = null;
       }}
     >
@@ -437,19 +586,25 @@ export function StitchCanvas({
             >
         {canvasVisible && (
           <>
-            <div className="absolute inset-0 border border-border bg-background" />
+            {/* The page "paper" is literally paper — it stays white in dark mode. Tiles are
+                background-removed PNGs (transparent, black linework), so a dark sheet would
+                make the drawings invisible; only the surround follows the theme. */}
+            <div className="absolute inset-0 border border-border bg-white" />
             {/* Inch guidelines (1" = 72 pt) — true 1" boundaries; scale stamp and rulers align to these */}
             <InchGrid canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
           </>
         )}
         {cropRect && (
           <div
-            className="absolute border-2 border-dashed border-primary pointer-events-none"
+            // Fixed accent: the crop rect is drawn ON the paper, which is white in
+            // both themes (see canvasOverlayStyle).
+            className="absolute border-2 border-dashed pointer-events-none"
             style={{
               left: cropRect.x,
               top: cropRect.y,
               width: cropRect.w,
               height: cropRect.h,
+              borderColor: OVERLAY_ACCENT,
             }}
           />
         )}
@@ -543,7 +698,7 @@ export function StitchCanvas({
         createPortal(
           <div
             data-stitch-overlay
-            className="fixed z-[100] cursor-crosshair"
+            className={cn("fixed z-[100]", isMiddlePan ? "cursor-grabbing" : "cursor-crosshair")}
             style={{
               left: containerRect.left,
               top: containerRect.top,
@@ -552,7 +707,9 @@ export function StitchCanvas({
               pointerEvents: "auto",
               touchAction: "none",
             }}
+            onMouseDown={preventMiddleAutoscroll}
             onPointerDown={(e) => {
+              if (beginMiddlePan(e)) return;
               if (e.button === 0 && onContentDeleteRect) {
                 const coords = clientToCanvas(e.clientX, e.clientY);
                 if (coords) {
@@ -604,7 +761,7 @@ export function StitchCanvas({
         createPortal(
           <div
             data-stitch-overlay
-            className="fixed z-[100] cursor-crosshair"
+            className={cn("fixed z-[100]", isMiddlePan ? "cursor-grabbing" : "cursor-crosshair")}
             style={{
               left: containerRect.left,
               top: containerRect.top,
@@ -613,7 +770,9 @@ export function StitchCanvas({
               pointerEvents: "auto",
               touchAction: "none",
             }}
+            onMouseDown={preventMiddleAutoscroll}
             onPointerDown={(e) => {
+              if (beginMiddlePan(e)) return;
               e.preventDefault();
               e.stopPropagation();
               if (e.button !== 0 || !onDeleteElementAlongPath) return;
@@ -675,7 +834,7 @@ export function StitchCanvas({
         createPortal(
           <div
             data-stitch-overlay
-            className="fixed z-[100] cursor-crosshair"
+            className={cn("fixed z-[100]", isMiddlePan ? "cursor-grabbing" : "cursor-crosshair")}
             style={{
               left: containerRect.left,
               top: containerRect.top,
@@ -690,7 +849,9 @@ export function StitchCanvas({
               setPointAlignMouse(coords ?? null);
             }}
             onPointerLeave={() => setPointAlignMouse(null)}
+            onMouseDown={preventMiddleAutoscroll}
             onPointerDown={(e) => {
+              if (beginMiddlePan(e)) return;
               if (e.button !== 0) return;
               e.preventDefault();
               e.stopPropagation();
@@ -705,16 +866,20 @@ export function StitchCanvas({
           >
             {/* Markers and lines in overlay (screen) space so they stay visible outside the canvas clip */}
             {(pointAlignPoints.some((p) => p != null) || scaleAlignPoints.some((p) => p != null)) && (() => {
-              const zoom = Math.max(MIN_ZOOM, zoomLevel);
+              // Markers are positioned with the REAL zoom (clamping it would slide them off
+              // the tiles they mark once you are below MIN_ZOOM, which the dynamic floor now
+              // allows); only their drawn SIZE gets a floor so they stay clickable.
+              const zoom = zoomLevel;
+              const markerZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
               const toOverlay = (p: { x: number; y: number }) => ({
                 x: panOffset.x + (p.x + RULER_SIZE) * zoom,
                 y: panOffset.y + (p.y + RULER_SIZE) * zoom,
               });
               const pts = pointAlignMode ? pointAlignPoints : scaleAlignPoints;
               // Scale with zoom; use larger minimums so markers stay visible when zoomed out
-              const markerR = Math.max(10, 8 * zoom);
-              const markerStroke = Math.max(2, 2.5 * zoom);
-              const dashLen = Math.max(4, 5 * zoom);
+              const markerR = Math.max(10, 8 * markerZoom);
+              const markerStroke = Math.max(2, 2.5 * markerZoom);
+              const dashLen = Math.max(4, 5 * markerZoom);
               return (
                 <svg
                   className="absolute left-0 top-0 w-full h-full pointer-events-none"
@@ -733,8 +898,8 @@ export function StitchCanvas({
                               cx={o.x}
                               cy={o.y}
                               r={markerR}
-                              fill="hsl(var(--primary))"
-                              stroke="hsl(var(--background))"
+                              fill={OVERLAY_ACCENT_DARK}
+                              stroke={OVERLAY_PAPER}
                               strokeWidth={markerStroke}
                               opacity={0.9}
                             />
@@ -743,8 +908,8 @@ export function StitchCanvas({
                               y={o.y}
                               textAnchor="middle"
                               dominantBaseline="central"
-                              fill="hsl(var(--primary-foreground))"
-                              fontSize={Math.max(14, 12 * zoom)}
+                              fill={OVERLAY_PAPER}
+                              fontSize={Math.max(14, 12 * markerZoom)}
                               fontWeight="bold"
                             >
                               {i + 1}
@@ -757,35 +922,35 @@ export function StitchCanvas({
                     const a = toOverlay(pointAlignPoints[0]);
                     const b = toOverlay(pointAlignPoints[1]);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
                     );
                   })()}
                   {pointAlignMode && pointAlignStep === 1 && pointAlignPoints[0] && pointAlignMouse && (() => {
                     const a = toOverlay(pointAlignPoints[0]);
                     const b = toOverlay(pointAlignMouse);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
                     );
                   })()}
                   {pointAlignMode && pointAlignStep === 3 && pointAlignPoints[2] && pointAlignMouse && (() => {
                     const a = toOverlay(pointAlignPoints[2]);
                     const b = toOverlay(pointAlignMouse);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.7} />
                     );
                   })()}
                   {scaleAlignMode && scaleAlignPoints[0] && scaleAlignPoints[1] && (() => {
                     const a = toOverlay(scaleAlignPoints[0]);
                     const b = toOverlay(scaleAlignPoints[1]);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
                     );
                   })()}
                   {scaleAlignMode && scaleAlignPoints[2] && scaleAlignPoints[3] && (() => {
                     const a = toOverlay(scaleAlignPoints[2]);
                     const b = toOverlay(scaleAlignPoints[3]);
                     return (
-                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="hsl(var(--primary))" strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
+                      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={OVERLAY_ACCENT} strokeWidth={markerStroke} strokeDasharray={`${dashLen} ${dashLen}`} opacity={0.8} />
                     );
                   })()}
                 </svg>
@@ -794,6 +959,16 @@ export function StitchCanvas({
           </div>,
           document.body
         )}
+      {alignActive && alignToNeighbour && containerRect && (
+        <AlignToNeighbourMode
+          align={alignToNeighbour}
+          containerRect={containerRect}
+          clientToCanvas={clientToCanvas}
+          beginPan={beginOverlayPan}
+          preventMiddleAutoscroll={preventMiddleAutoscroll}
+          isMiddlePan={isMiddlePan}
+        />
+      )}
       {isDeletingAlongPath && (
         <div
           className="absolute inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-[2px]"

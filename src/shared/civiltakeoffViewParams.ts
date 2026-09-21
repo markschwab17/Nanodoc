@@ -3,6 +3,8 @@
  * Parsed from query string when Nanodoc is opened by Civiltakeoff (e.g. /view?project=...&doc=...&token=...).
  */
 
+import { parseUrlTheme, type UrlTheme } from "./urlTheme";
+
 const DEFAULT_API_ORIGIN = "https://app.vertigraph.com";
 
 export interface CiviltakeoffViewParams {
@@ -46,6 +48,10 @@ export interface CiviltakeoffViewParams {
   esign_recipients: string | null;
   /** Contract ID for contract_redline mode. */
   contract_id: string | null;
+  /** "1" = hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1). Restricts the stitch save dialog to "Add as project page" and swaps Back for a Cancel that messages the parent. */
+  embed: string | null;
+  /** Workspace theme the host wants the embed to render in. null = host said nothing; keep whatever is applied. */
+  theme: UrlTheme | null;
 }
 
 /**
@@ -77,6 +83,8 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
   const signer_name = params.get("signer_name") ?? null;
   const esign_recipients = params.get("esign_recipients") ?? null;
   const contract_id = params.get("contract_id") ?? null;
+  const embed = params.get("embed") ?? null;
+  const theme = parseUrlTheme(raw);
 
   let page: number | null = null;
   const pageStr = params.get("page");
@@ -116,6 +124,8 @@ export function parseCiviltakeoffViewParams(search?: string): CiviltakeoffViewPa
     signer_name,
     esign_recipients,
     contract_id,
+    embed,
+    theme,
   };
 }
 
@@ -128,4 +138,28 @@ export function hasCiviltakeoffToken(params: CiviltakeoffViewParams): boolean {
     (params.token && params.token.trim().length > 0) ||
     (params.mode === "esign_sign" && params.recipient_token && params.recipient_token.trim().length > 0)
   );
+}
+
+/** Append ".pdf" when the trimmed name doesn't already end with it (case-insensitive). */
+function withPdfExtension(name: string): string {
+  return name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+}
+
+/**
+ * Derive the display name for the PDF fetched via CiviltakeoffView.
+ * `doc=soils_report` / `doc=bid_docs` get fixed names; `document_file` and
+ * `site_sheet_source` (the site-sheet takeoff-panel source PDF) honour CTO's
+ * `file_name` so the stitch modal — and CTO's later tile-name matching — see
+ * the real file name instead of the generic fallback.
+ */
+export function displayNameFor(params: CiviltakeoffViewParams): string {
+  if (params.doc === "soils_report") return "soils_report.pdf";
+  if (params.doc === "bid_docs") return "bid_docs.pdf";
+  if (
+    (params.doc === "document_file" || params.doc === "site_sheet_source") &&
+    params.file_name?.trim()
+  ) {
+    return withPdfExtension(params.file_name.trim());
+  }
+  return "document.pdf";
 }

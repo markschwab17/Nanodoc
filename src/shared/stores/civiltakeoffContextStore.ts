@@ -4,6 +4,7 @@
  */
 
 import { create } from "zustand";
+import type { UrlTheme } from "@/shared/urlTheme";
 
 export interface CiviltakeoffContext {
   project: string;
@@ -12,6 +13,11 @@ export interface CiviltakeoffContext {
   api_origin: string;
   /** Optional project display name (for stitch save default filename). */
   project_name?: string | null;
+  /** True when Nanodoc is hosted in an iframe inside the CTO takeoff panel (site-sheet Phase 1, `embed=1`). */
+  embed: boolean;
+  /** Workspace theme the host asked for (`?theme=`). null = host said nothing. The class on <html> is
+   *  applied by `applyUrlTheme`; this is here so UI can read what the host wanted without re-parsing the URL. */
+  theme?: UrlTheme | null;
 }
 
 interface CiviltakeoffContextState {

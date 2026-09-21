@@ -7,6 +7,7 @@
  */
 import type { Label } from "./types";
 import type { OcrWord, RawImage } from "./ocrService";
+import { REF_NUMBER_SRC, REF_CODE_SRC, isMatchlineText } from "./tokens";
 
 export interface BandSpec { edge: "top" | "bottom" | "left" | "right"; clip: [number, number, number, number] }
 
@@ -19,16 +20,41 @@ export interface BandSpec { edge: "top" | "bottom" | "left" | "right"; clip: [nu
  * 15% of height, left/right 12% of width covers that inset frame while
  * staying inside `parseSheetRefs`'s 18% edge-classification gate, so
  * recovered refs still classify as edge refs.
+ *
+ * `frame` is the sheet's ruled DRAWING frame when one was detected
+ * (`detectDrawingFrame`). The four page bands are returned UNCHANGED, and an extra
+ * frame-relative band is appended for each side whose frame border falls OUTSIDE
+ * the page band — i.e. only where the page band cannot reach it. That is exactly
+ * failure D: a drawing whose right border sits at ~72 % of the page width, behind a
+ * notes column, never has its matchline callouts rasterised at all.
+ *
+ * Deliberately additive rather than a union or a replacement. OCR is sensitive to
+ * the raster it is given: growing a band changes tesseract's segmentation and can
+ * LOSE words it used to read (measured — widening Belcourt's bands cost two of its
+ * four alignments). Keeping the page bands byte-identical keeps every result they
+ * already produce, cache included, and adds coverage only where there was none.
  */
-export function pageEdgeBands(view: [number, number, number, number]): BandSpec[] {
+export function pageEdgeBands(
+  view: [number, number, number, number],
+  frame?: [number, number, number, number] | null,
+): BandSpec[] {
   const [x0, y0, x1, y1] = view;
   const W = x1 - x0, H = y1 - y0;
-  return [
+  const bands: BandSpec[] = [
     { edge: "top",    clip: [x0, y0, x1, y0 + 0.15 * H] },
     { edge: "bottom", clip: [x0, y1 - 0.15 * H, x1, y1] },
     { edge: "left",   clip: [x0, y0, x0 + 0.12 * W, y1] },
     { edge: "right",  clip: [x1 - 0.12 * W, y0, x1, y1] },
   ];
+  if (!frame) return bands;
+  const [fx0, fy0, fx1, fy1] = frame;
+  const FW = fx1 - fx0, FH = fy1 - fy0;
+  if (!(FW > 0 && FH > 0)) return bands;
+  if (fy0 > y0 + 0.15 * H) bands.push({ edge: "top",    clip: [fx0, fy0, fx1, fy0 + 0.15 * FH] });
+  if (fy1 < y1 - 0.15 * H) bands.push({ edge: "bottom", clip: [fx0, fy1 - 0.15 * FH, fx1, fy1] });
+  if (fx0 > x0 + 0.12 * W) bands.push({ edge: "left",   clip: [fx0, fy0, fx0 + 0.12 * FW, fy1] });
+  if (fx1 < x1 - 0.12 * W) bands.push({ edge: "right",  clip: [fx1 - 0.12 * FW, fy0, fx1, fy1] });
+  return bands;
 }
 
 /** Title-block sheet-number cell: bottom-right corner of the PAGE. */
@@ -69,8 +95,15 @@ export function wordsToLabels(
   // so a horizontal-baseline merge never joins them ("SEE" above "BELOW").
   const kept = words.filter((w) => w.confidence >= minConf && w.text.trim());
   const merged = mergeWords(kept);
+  // Phrase merging is a heuristic and it fails BOTH ways on real sheets: it can
+  // leave "SEE" and "SHEET 7" apart (a wide leader gap), or glue a callout into a
+  // 100-character run of grading text. Independently of it, scan short runs of
+  // consecutive words for a complete reference phrase and emit those as extra
+  // labels — a ref that either failure hid is then still recovered. Windows the
+  // merge already produced verbatim are dropped so refs are not double-counted.
+  const windows = refPhraseWindows(kept).filter((w) => !merged.some((m) => m.text.includes(w.text)));
   const mapped: Label[] = [];
-  for (const w of merged) {
+  for (const w of [...merged, ...windows]) {
     // corners in the OCR image
     const corners: [number, number][] = [
       [w.bbox.x0, w.bbox.y0], [w.bbox.x1, w.bbox.y0], [w.bbox.x0, w.bbox.y1], [w.bbox.x1, w.bbox.y1],
@@ -98,12 +131,16 @@ export function wordsToLabels(
  * > -0.5x that height). Text joins with single spaces; bbox is the union;
  * confidence is the min of the parts.
  */
-export function mergeWords(words: OcrWord[]): OcrWord[] {
-  const yc = (w: OcrWord) => (w.bbox.y0 + w.bbox.y1) / 2;
-  const hOf = (w: OcrWord) => w.bbox.y1 - w.bbox.y0;
-  // Cluster into lines FIRST (1-D scan over y-centers), then sort by (line, x0).
-  // A pairwise "same line" test inside a sort comparator is not a strict weak
-  // order (transitivity breaks when heights vary) and corrupts Array#sort.
+const yc = (w: OcrWord) => (w.bbox.y0 + w.bbox.y1) / 2;
+const hOf = (w: OcrWord) => w.bbox.y1 - w.bbox.y0;
+
+/**
+ * Cluster words into text LINES (1-D scan over y-centres) and return them sorted
+ * by (line, x0). A pairwise "same line" test inside a sort comparator is not a
+ * strict weak order (transitivity breaks when heights vary) and corrupts
+ * Array#sort, hence the explicit clustering pass.
+ */
+function clusterLines(words: OcrWord[]): { sorted: OcrWord[]; lineOf: Map<OcrWord, number> } {
   const byY = [...words].sort((a, b) => yc(a) - yc(b));
   const lineOf = new Map<OcrWord, number>();
   let line = 0;
@@ -116,6 +153,51 @@ export function mergeWords(words: OcrWord[]): OcrWord[] {
     lineOf.set(byY[i], line);
   }
   const sorted = [...words].sort((a, b) => (lineOf.get(a)! - lineOf.get(b)!) || (a.bbox.x0 - b.bbox.x0));
+  return { sorted, lineOf };
+}
+
+const bboxUnion = (ws: OcrWord[]) => ({
+  x0: Math.min(...ws.map((w) => w.bbox.x0)), y0: Math.min(...ws.map((w) => w.bbox.y0)),
+  x1: Math.max(...ws.map((w) => w.bbox.x1)), y1: Math.max(...ws.map((w) => w.bbox.y1)),
+});
+
+// A complete reference phrase — the callout vocabulary plus the sheet it names.
+const REF_PHRASE_RE = new RegExp(`(?:${REF_NUMBER_SRC})|(?:${REF_CODE_SRC})`, "i");
+
+/**
+ * Callout phrases found by sliding a short window over CONSECUTIVE same-line words,
+ * independently of `mergeWords`. `mergeWords` decides by geometry alone and gets it
+ * wrong in both directions on dense civil sheets; this pass decides by CONTENT — a
+ * run of ≤ `maxWords` words that READS as a callout is one, whatever the gaps looked
+ * like. The shortest match wins at each start and its words are consumed, so one
+ * callout yields one phrase.
+ *
+ * Two shapes qualify. A complete reference ("SEE SHEET 6", "SEE SHEET C-302") is the
+ * obvious one. A bare MATCHLINE is the other, and it matters as much: a matchline
+ * with no readable target is still the fact that this edge abuts something, which is
+ * what `matchlinePrior` pairs on and what `hasEdgeRefs` counts — and outlined CAD
+ * text routinely arrives as "MATCH" + "LINE" in two words, or with the MATCH clipped
+ * away entirely ("LINE S EE SHEET"). Pure; exported for tests.
+ */
+export function refPhraseWindows(words: OcrWord[], maxWords = 4): OcrWord[] {
+  const { sorted, lineOf } = clusterLines(words);
+  const out: OcrWord[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    for (let n = 2; n <= maxWords && i + n <= sorted.length; n++) {
+      const win = sorted.slice(i, i + n);
+      if (lineOf.get(win[n - 1]) !== lineOf.get(win[0])) break; // window left the line
+      const text = win.map((w) => w.text).join(" ");
+      if (!REF_PHRASE_RE.test(text) && !isMatchlineText(text)) continue;
+      out.push({ text, confidence: Math.min(...win.map((w) => w.confidence)), bbox: bboxUnion(win) });
+      i += n - 1; // consume the window
+      break;
+    }
+  }
+  return out;
+}
+
+export function mergeWords(words: OcrWord[]): OcrWord[] {
+  const { sorted, lineOf } = clusterLines(words);
   const out: OcrWord[] = [];
   let prevLine = -1; // line of out[out.length - 1] (out holds fresh objects, not map keys)
   for (const w of sorted) {
@@ -124,7 +206,13 @@ export function mergeWords(words: OcrWord[]): OcrWord[] {
     if (prev && prevLine === wLine) {
       const h = Math.max(hOf(prev), hOf(w));
       const gap = w.bbox.x0 - prev.bbox.x1;
-      if (gap < 1.5 * h && gap > -0.5 * h) {
+      // HEIGHT COMPATIBILITY: only merge text drawn at the same size. Without it a
+      // 111 px matchline callout absorbs the 20 px grading annotations around it
+      // (the gap test uses the TALLER box, so a big box swallows its neighbours)
+      // and the ref regex then fails on a 100-character run. Two runs of one
+      // phrase are drawn at one size, so 1.5x is generous.
+      const compatible = Math.min(hOf(prev), hOf(w)) * 1.5 >= Math.max(hOf(prev), hOf(w));
+      if (compatible && gap < 1.5 * h && gap > -0.5 * h) {
         prev.text = `${prev.text} ${w.text}`;
         prev.bbox = {
           x0: Math.min(prev.bbox.x0, w.bbox.x0), y0: Math.min(prev.bbox.y0, w.bbox.y0),
@@ -140,9 +228,47 @@ export function mergeWords(words: OcrWord[]): OcrWord[] {
   return out;
 }
 
-/** "SHEET 2 OF 22" / "2 OF 22" (words may arrive split) → 2, else null. */
+/**
+ * Single-character shapes tesseract returns for a large isolated DIGIT. The
+ * title-block sheet number is drawn alone, at 4-8x the surrounding text size, with
+ * no word context to constrain the classifier, so a systematic look-alike letter is
+ * the common failure ("5" -> "S" at confidence 5 on all four Belcourt sheets).
+ * Only unambiguous single-glyph shapes are mapped, and only for a lone token in the
+ * sheet-number cell; `resolvePrintedNos` still range-checks the result.
+ */
+const DIGIT_LOOKALIKE: Record<string, number> = {
+  O: 0, Q: 0, D: 0, I: 1, L: 1, "|": 1, Z: 2, A: 4, S: 5, G: 6, B: 8,
+};
+
+/**
+ * The printed sheet number from the title-block cell.
+ *
+ * First the plain reading, "SHEET 2 OF 22" / "2 OF 22" (words may arrive split).
+ * When that fails, fall back to the LAYOUT: on a great many title blocks the number
+ * lives in its own cell as one very large glyph while "OF 30 SHEETS" is set in the
+ * ordinary small type beside it. So if the cell says "OF n SHEETS" at all, take the
+ * tallest token in it — accepted when it is a bare number, or a single character
+ * whose shape is an unambiguous digit look-alike. Without this the Belcourt set read
+ * no number on any sheet, every "SEE SHEET n" resolved to nothing, and 0 of 4 sheets
+ * could align.
+ */
 export function parseSheetNumber(words: OcrWord[]): number | null {
   const joined = words.map((w) => w.text).join(" ").toUpperCase();
   const m = joined.match(/(?:SHEET\s+)?(\d{1,3})\s+OF\s+\d{1,3}/);
-  return m ? Number(m[1]) : null;
+  if (m) return Number(m[1]);
+  if (!/\bOF\s+\d{1,3}\s+SHEETS?\b/.test(joined)) return null;
+  const heights = words.map(hOf).filter((h) => h > 0).sort((a, b) => a - b);
+  if (!heights.length) return null;
+  const median = heights[Math.floor(heights.length / 2)];
+  const tall = words.filter((w) => hOf(w) >= 1.8 * median)
+    .sort((a, b) => (hOf(b) - hOf(a)) || (b.confidence - a.confidence) || (a.bbox.x0 - b.bbox.x0));
+  for (const w of tall) {
+    const t = w.text.trim();
+    if (/^\d{1,3}$/.test(t)) return Number(t);
+    if (t.length === 1) {
+      const d = DIGIT_LOOKALIKE[t.toUpperCase()];
+      if (d != null) return d;
+    }
+  }
+  return null;
 }

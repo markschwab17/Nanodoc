@@ -18,6 +18,20 @@ export interface RenderOptions {
   scale?: number;
   rotation?: number;
   backgroundColor?: string;
+  /**
+   * Render WITHOUT touching `renderCache` — neither read nor write.
+   *
+   * A cached `RenderedPage` retains its full `ImageData`: a 36x24 in sheet at
+   * 1.5x is 38 MB, and the cache holds 100+ entries before it evicts anything.
+   * One-shot consumers (the stitch commit loop, the page-selector thumbnails)
+   * copy the pixels into a PNG immediately and never ask for the same page
+   * twice, so caching them buys nothing and costs 38 MB per sheet for the rest
+   * of the session — 202 MB on a 5-sheet commit, 404 MB on 10.
+   *
+   * Interactive viewers, which DO re-request the same page as the user pans,
+   * leave this off and keep the cache.
+   */
+  noCache?: boolean;
 }
 
 export interface RenderedPage {
@@ -41,7 +55,7 @@ export class PDFRenderer {
   private nextRequestId = 0;
   private pendingRequests = new Map<
     number,
-    { resolve: (r: RenderedPage) => void; reject: (e: Error) => void; pageNumber: number; scale: number; timer: ReturnType<typeof setTimeout> }
+    { resolve: (r: RenderedPage) => void; reject: (e: Error) => void; pageNumber: number; scale: number; noCache: boolean; timer: ReturnType<typeof setTimeout> }
   >();
   private workerDocId: string | null = null;
   /**
@@ -130,7 +144,9 @@ export class PDFRenderer {
               height: msg.height,
               scale: pending.scale,
             };
-            this.cacheRender(this.getCacheKey(pending.pageNumber, pending.scale, 0), rendered);
+            if (!pending.noCache) {
+              this.cacheRender(this.getCacheKey(pending.pageNumber, pending.scale, 0), rendered);
+            }
             pending.resolve(rendered);
           }
           return;
@@ -233,6 +249,7 @@ export class PDFRenderer {
   ): Promise<RenderedPage> {
     const scale = options.scale ?? 1.0;
     const rotation = options.rotation ?? 0;
+    const noCache = options.noCache === true;
     const cacheKey = this.getCacheKey(pageNumber, scale, rotation);
 
     // A new byte snapshot (refreshPdfData after a structural edit) means
@@ -242,7 +259,7 @@ export class PDFRenderer {
     }
     if (pdfData) this.lastRenderBytes = pdfData;
 
-    if (this.renderCache.has(cacheKey)) {
+    if (!noCache && this.renderCache.has(cacheKey)) {
       const cached = this.renderCache.get(cacheKey)!;
       this.renderCache.delete(cacheKey);
       this.renderCache.set(cacheKey, cached);
@@ -253,12 +270,12 @@ export class PDFRenderer {
     if (pdfData && docId) {
       this.ensureWorker();
       if (this.worker && this.workerReady) {
-        return this.renderPageInWorker(docId, pdfData, pageNumber, scale, rotation);
+        return this.renderPageInWorker(docId, pdfData, pageNumber, scale, rotation, noCache);
       }
     }
 
     // Fallback: main-thread rendering
-    return this.renderPageMainThread(document, pageNumber, scale, rotation);
+    return this.renderPageMainThread(document, pageNumber, scale, rotation, noCache);
   }
 
   private renderPageInWorker(
@@ -266,7 +283,8 @@ export class PDFRenderer {
     pdfData: Uint8Array,
     pageNumber: number,
     scale: number,
-    rotation: number
+    rotation: number,
+    noCache: boolean
   ): Promise<RenderedPage> {
     return new Promise((resolve, reject) => {
       const id = this.nextRequestId++;
@@ -283,7 +301,7 @@ export class PDFRenderer {
         }
       }, WORKER_RENDER_TIMEOUT);
 
-      this.pendingRequests.set(id, { resolve, reject, pageNumber, scale, timer });
+      this.pendingRequests.set(id, { resolve, reject, pageNumber, scale, noCache, timer });
 
       const needsData =
         this.workerDocId !== docId || this.workerDocBytes !== pdfData;
@@ -308,7 +326,8 @@ export class PDFRenderer {
     document: any,
     pageNumber: number,
     scale: number,
-    rotation: number
+    rotation: number,
+    noCache = false
   ): Promise<RenderedPage> {
     try {
       const page = document.loadPage(pageNumber);
@@ -355,11 +374,72 @@ export class PDFRenderer {
       page.destroy?.();
 
       const rendered: RenderedPage = { pageNumber, imageData, width, height, scale };
-      this.cacheRender(this.getCacheKey(pageNumber, scale, rotation), rendered);
+      if (!noCache) this.cacheRender(this.getCacheKey(pageNumber, scale, rotation), rendered);
       return rendered;
     } catch (error) {
       console.error(`Error rendering page ${pageNumber}:`, error);
       throw new Error(`Failed to render page ${pageNumber}: ${error}`);
+    }
+  }
+
+  /**
+   * Render ONE RECTANGLE of a page at an arbitrary dpi — the align loupe's crop.
+   *
+   * `toPixmap` always rasterises the whole (transformed) page, which at 300 dpi on a
+   * 36x24 in sheet is a 10800x7200 pixmap — 311 MB for a 220 px magnifier. So this
+   * goes through a Pixmap sized to the crop plus a DrawDevice: mupdf clips to the
+   * pixmap's bbox, and the matrix (from `planCropRender`) both scales to the dpi and
+   * translates the crop's centre onto the pixmap's centre, so only the crop is drawn.
+   *
+   * NEVER cached: the loupe asks for a different crop every time the cursor moves, and
+   * a cache of 300 dpi crops is exactly what the memory budget forbids. The caller owns
+   * the returned ImageData — draw it and drop it.
+   */
+  async renderPageCrop(
+    document: any,
+    pageNumber: number,
+    plan: {
+      matrix: [number, number, number, number, number, number];
+      bbox: [number, number, number, number];
+    }
+  ): Promise<ImageData> {
+    let page: any = null;
+    let pixmap: any = null;
+    let device: any = null;
+    try {
+      page = document.loadPage(pageNumber);
+      pixmap = new this.mupdf.Pixmap(this.mupdf.ColorSpace.DeviceRGB, plan.bbox, false);
+      pixmap.clear(255);
+      device = new this.mupdf.DrawDevice(this.mupdf.Matrix.identity, pixmap);
+      page.run(device, plan.matrix);
+      device.close();
+
+      const width = pixmap.getWidth();
+      const height = pixmap.getHeight();
+      const pixels = pixmap.getPixels();
+      const components = pixmap.getNumberOfComponents();
+      const imageData = new ImageData(width, height);
+      const data = imageData.data;
+      const numPixels = width * height;
+      if (components === 4) {
+        data.set(pixels.subarray(0, numPixels * 4));
+      } else if (components === 3) {
+        for (let i = 0; i < numPixels; i++) {
+          const s = i * 3;
+          const d = i * 4;
+          data[d] = pixels[s];
+          data[d + 1] = pixels[s + 1];
+          data[d + 2] = pixels[s + 2];
+          data[d + 3] = 255;
+        }
+      } else {
+        throw new Error(`Unsupported color components: ${components}`);
+      }
+      return imageData;
+    } finally {
+      device?.destroy?.();
+      pixmap?.destroy?.();
+      page?.destroy?.();
     }
   }
 

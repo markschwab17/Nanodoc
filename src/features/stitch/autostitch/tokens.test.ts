@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseScaleNotes, parseDistanceTokens, parseStations, parseBearings, parseSheetRefs } from "./tokens";
+import { parseScaleNotes, parseDistanceTokens, parseStations, parseBearings, parseSheetRefs, mergeMatchlineRefLabels } from "./tokens";
 import type { Label } from "./types";
 
 const L = (text: string, x = 0, y = 0, endX = 0, endY = 0): Label =>
@@ -84,5 +84,150 @@ describe("strip refs", () => {
     expect(refs[0].strip).toBe("below");
     expect(refs[0].stripSide).toBeNull();
     expect(refs[0].matchline).toBe(true);
+  });
+});
+
+describe("split matchline callouts (CAD emits two runs)", () => {
+  const view: [number, number, number, number] = [0, 0, 2592, 1728];
+  // One run per text, positioned by its CENTRE, so co-location is explicit.
+  const run = (text: string, cx: number, cy: number, w = 60, h = 10, angle = 0): Label =>
+    ({ text, x: cx - w / 2, y: cy - h / 2, endX: cx + w / 2, endY: cy + h / 2, angle, h, font: null });
+
+  it("merges a co-located MATCH LINE run with its SEE SHEET run into ONE ref", () => {
+    const labels = [run("MATCH LINE", 100, 800), run("SEE SHEET C-302", 175, 800)];
+    const refs = parseSheetRefs(labels, view);
+    expect(refs).toHaveLength(1);                    // one callout, not two
+    expect(refs[0].matchline).toBe(true);            // the flag matchlineStrokePrior needs
+    expect(refs[0].sheetCode).toBe("C-302");         // and the reference, on the SAME ref
+    expect(refs[0].edge).toBe("left");
+  });
+
+  it("merges a numeric split callout too", () => {
+    const refs = parseSheetRefs([run("MATCH LINE", 100, 800), run("SEE SHEET 6", 170, 800)], view);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].matchline).toBe(true);
+    expect(refs[0].sheet).toBe(6);
+  });
+
+  it("does NOT merge runs that are far apart", () => {
+    // 900 pt apart, ~90x the text height: two unrelated callouts.
+    const refs = parseSheetRefs([run("MATCH LINE", 100, 800), run("SEE SHEET 6", 1000, 800)], view);
+    expect(refs).toHaveLength(2);
+    expect(refs.find((r) => r.matchline && r.sheet != null)).toBeUndefined();
+  });
+
+  it("does NOT merge runs drawn at different angles", () => {
+    const refs = parseSheetRefs([run("MATCH LINE", 100, 800, 60, 10, 0), run("SEE SHEET 6", 170, 800, 60, 10, 90)], view);
+    expect(refs).toHaveLength(2);
+  });
+
+  it("leaves an already-complete callout and unrelated labels untouched", () => {
+    const labels = [run("MATCH LINE SEE SHEET 6", 100, 800), run("TC 347.33", 120, 810)];
+    expect(mergeMatchlineRefLabels(labels)).toBe(labels); // same array, no copy
+  });
+
+  it("consumes each run at most once (two callouts, two refs)", () => {
+    const labels = [
+      run("MATCH LINE", 100, 200), run("SEE SHEET 6", 170, 200),
+      run("MATCH LINE", 100, 1500), run("SEE SHEET 8", 170, 1500),
+    ];
+    const refs = parseSheetRefs(labels, view);
+    expect(refs).toHaveLength(2);
+    expect(refs.map((r) => r.sheet).sort()).toEqual([6, 8]);
+    expect(refs.every((r) => r.matchline)).toBe(true);
+  });
+});
+
+describe("fuzzy OCR spellings of the callout vocabulary", () => {
+  const view: [number, number, number, number] = [0, 0, 2592, 1728];
+  const at = (text: string, x: number, y: number): Label =>
+    ({ text, x, y, endX: x + 200, endY: y + 12, angle: 0, h: 12, font: "ocr" });
+
+  // Every string below is verbatim tesseract output from the Belcourt set.
+  it("'MATCH LINE SEE SHEEET 6' (doubled E) parses as a matchline ref to 6", () => {
+    const r = parseSheetRefs([at("MATCH LINE SEE SHEEET 6 |", 50, 800)], view)[0];
+    expect(r.sheet).toBe(6);
+    expect(r.matchline).toBe(true);
+  });
+
+  it("'SE. SHEET 7' inside a run of grading text parses as a ref to 7", () => {
+    const r = parseSheetRefs([at("GFF 293. SE. SHEET 7 95", 50, 800)], view)[0];
+    expect(r.sheet).toBe(7);
+  });
+
+  it("'MA TCH LINE' (split MATCH) is still a matchline", () => {
+    const r = parseSheetRefs([at("MA TCH LINE", 1200, 20)], view)[0];
+    expect(r.matchline).toBe(true);
+  });
+
+  it("'MATCH LIME' (N read as M) is still a matchline", () => {
+    const r = parseSheetRefs([at("MATCH LIME SEE SHEET 8", 1200, 20)], view)[0];
+    expect(r.matchline).toBe(true);
+    expect(r.sheet).toBe(8);
+  });
+
+  it("does not fire on ordinary drawing text containing 'SE'", () => {
+    expect(parseSheetRefs([at("REUSE SHEET FLOW PER PLAN", 50, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("PHASE SHEETING DETAIL", 50, 800)], view)).toHaveLength(0);
+  });
+});
+
+describe("edge classification against the drawing frame", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const frame: [number, number, number, number] = [20, 20, 720, 780]; // right border at 72%
+  const at = (text: string, cx: number, cy: number): Label =>
+    ({ text, x: cx - 40, y: cy - 6, endX: cx + 40, endY: cy + 6, angle: 0, h: 12, font: null });
+
+  it("a callout on the drawing's inner right border is an EDGE ref, not interior", () => {
+    const l = [at("MATCH LINE SEE SHEET 5", 700, 400)];
+    expect(parseSheetRefs(l, view)[0].edge).toBe("interior");      // page-relative: 30% in
+    expect(parseSheetRefs(l, view, frame)[0].edge).toBe("right");  // 2.9% from the frame border
+  });
+
+  it("a callout in the notes column beyond the frame stays interior", () => {
+    const l = [at("SEE SHEET 5", 860, 400)]; // 20% past the frame border, 14% from the page edge
+    expect(parseSheetRefs(l, view, frame)[0].edge).toBe("right");  // still near the PAGE edge
+    const deep = [at("SEE SHEET 5", 500, 400)];                    // middle of nowhere
+    expect(parseSheetRefs(deep, view, frame)[0].edge).toBe("interior");
+  });
+
+  it("page-relative edge refs are unchanged by a frame", () => {
+    const l = [at("SEE SHEET 5", 40, 400)];
+    expect(parseSheetRefs(l, view)[0].edge).toBe("left");
+    expect(parseSheetRefs(l, view, frame)[0].edge).toBe("left");
+  });
+});
+
+describe("callout vocabulary — the Coast Guard misreads", () => {
+  const view: [number, number, number, number] = [0, 0, 2448, 1584];
+  const at = (text: string, cx: number, cy: number): Label =>
+    ({ text, x: cx - 100, y: cy - 6, endX: cx + 100, endY: cy + 6, angle: 0, h: 12, font: "ocr" });
+
+  // Every string below is verbatim tesseract output from the CD102/CD103 pair.
+  it("'SEE, SHEET CD101' (comma) still yields the code", () => {
+    const r = parseSheetRefs([at("MATCH LINE SEE, SHEET CD101", 1067, 1525)], view)[0];
+    expect(r.matchline).toBe(true);
+    expect(r.sheetCode).toBe("CD101");
+  });
+
+  it("'MATCH' and 'LINE' read as one label is a matchline", () => {
+    expect(parseSheetRefs([at("MATCH LINE", 207, 526)], view)[0].matchline).toBe(true);
+  });
+
+  it("'LINE S EE SHEET' — MATCH eaten, SEE split — is still a matchline", () => {
+    // The left-edge vertical callout of CD102: OCR loses the word MATCH into the
+    // neighbouring band and splits SEE in two. What is left is LINE against SEE
+    // SHEET, which is a matchline and nothing else.
+    const r = parseSheetRefs([at("LINE S EE SHEET", 47, 800)], view)[0];
+    expect(r).toBeDefined();
+    expect(r.matchline).toBe(true);
+    expect(r.edge).toBe("left");
+  });
+
+  it("does not call ordinary text a matchline", () => {
+    expect(parseSheetRefs([at("CLEAR & GRUB VEGETATION", 500, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("GRAPHIC SCALE IN FEET", 500, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("SAWCUT LINE PER PLAN", 500, 800)], view)).toHaveLength(0);
+    expect(parseSheetRefs([at("PHASE SHEETING DETAIL", 500, 800)], view)).toHaveLength(0);
   });
 });

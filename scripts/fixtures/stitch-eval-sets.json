@@ -1,0 +1,64 @@
+{
+  "$comment": [
+    "Regression expectations for scripts/stitch-eval.mjs. Every number here was MEASURED",
+    "on 2026-09-04 \u2014 they are the floor the engine must not fall below, not aspirations.",
+    "The PDFs are local (~ expands to $HOME) and are deliberately not in the repo, so this",
+    "suite is not part of `npm test`.",
+    "",
+    "minAligned    the fewest units the run may place (recall floor)",
+    "maxAligned    the most it may place \u2014 for a NEGATIVE set, where any placement is a",
+    "              false pair between sheets that do not share ground",
+    "verdictFloor  the weakest honesty verdict accepted: verified > partial > unverified",
+    "maxWorstResidFt  the worst CROSS-seam disagreement, in feet, between a seam's own",
+    "              measurement and the solved layout (see stitchCore's worstResidFt)",
+    "maxSuspectSeams  seams the post-solve verification positively believes are wrong",
+    "groundTruth   a hand-verified placement fixture; the runner reports per-unit error",
+    "              median/95p against it",
+    "maxTileErrorFt   the bar for a unit the solver CLAIMS (along-anchored, i.e. offered",
+    "              as aligned). A unit that is not along-anchored is demoted to unaligned",
+    "              by the commit, so its error is reported, never failed \u2014 but it must",
+    "              never be claimed. This is the 'offered means it works' invariant."
+  ],
+  "sets": [
+    {
+      "name": "PG_SITE 1A",
+      "pdf": "~/Downloads/PG_SITE 1A.pdf",
+      "pages": "0-21",
+      "scale": 20,
+      "minAligned": 11,
+      "verdictFloor": "partial",
+      "maxWorstResidFt": 3,
+      "maxSuspectSeams": 0,
+      "notes": "The reference set. 11 plan units (p2's two strips + p3-p11) are PLACED, but none is along-anchored: the only seams that fix the along axis form a component the solve root is not in, and the sibling-strip seam does not anchor. Measured ground-truth errors run 0-52 ft (p8 42, p11 52, strips 24/17), so claiming any of them would break 'offered means it works'. Ground truth: scripts/fixtures/pg-site-1a.groundtruth.json, which now DECLARES its origin convention (page origins, strips keyed 1s1/1s2) \u2014 the runner converts each pose's frame origin before comparing.",
+      "groundTruth": "scripts/fixtures/pg-site-1a.groundtruth.json",
+      "maxTileErrorFt": 3
+    },
+    {
+      "name": "Belcourt Grading Plans",
+      "pdf": "~/Downloads/Belcourt Grading Plans.pdf",
+      "pages": "0-3",
+      "scale": 20,
+      "minAligned": 3,
+      "maxWorstResidFt": 3,
+      "maxSuspectSeams": 0,
+      "notes": "Four tiled sheets printed 5-8, all text outlined, so identity and callouts are OCR-only. Aligned 0/4 before T0. Verdict is honestly `unverified` (the along-matchline axis is unproven on two of three seams), so no floor is set."
+    },
+    {
+      "name": "El Centro (negative set)",
+      "pdf": "~/Downloads/CA240435 - EL CENTRO_GRADING_REV 1 CHANGES PRIOR TO REV 2 (FOR BIDDING PURPOSES).pdf",
+      "pages": "0-11",
+      "scale": 20,
+      "maxAligned": 0,
+      "notes": "Notes, details and single plans that share no ground. NOTHING may be placed: any placement here is a false pair. Produced 3 before T0."
+    },
+    {
+      "name": "Coast Guard pair (CD102-CD103)",
+      "pdf": "~/Downloads/CoastGuard CD102-CD103.pdf",
+      "pages": "0-1",
+      "scale": 30,
+      "maxAligned": 0,
+      "notes": "Two 36x24 CAD sheets, 1\"=30', all callouts OUTLINED (0 text-channel matchline hits on either page) so identity and adjacency are OCR-only. It CANNOT be aligned from the signals present and must not be forced: CD103 never references CD102 (its callouts name CD101 and CD104), so the only link is one-directional CD102 -> CD103, and OCR returns that target as the truncated \"HEET CD1\". Both pages' matchlines land on the SAME (left) edge, so no facing pair exists either. What IS asserted: both pages carry a detected edge ref (so the app says \"these sheets don't share a matchline\", not \"no callouts were found\"), and no false pair is invented. If a future OCR change makes this pair align, verify the placement by eye and RAISE maxAligned.",
+      "minRefPages": 2
+    }
+  ]
+}

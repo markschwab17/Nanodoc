@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractPageLabel, disciplineOf } from "./pageLabels";
+import { extractPageLabel, disciplineOf, classifySheetRole } from "./pageLabels";
 import type { Label } from "./types";
 
 const L = (text: string, x: number, y: number, h = 20): Label =>
@@ -38,5 +38,33 @@ describe("extractPageLabel", () => {
     expect(disciplineOf("L-6")).toBe("L6");
     expect(disciplineOf("A2.01")).toBe("A2");
     expect(disciplineOf(null)).toBeNull();
+  });
+});
+
+describe("classifySheetRole", () => {
+  it("titles that mark a sheet as not-a-tile", () => {
+    expect(classifySheetRole("OVERALL SITE PLAN")).toBe("overall");
+    expect(classifySheetRole("KEY PLAN")).toBe("keyplan");
+    expect(classifySheetRole("SHEET INDEX")).toBe("index");
+    expect(classifySheetRole("GENERAL NOTES 1")).toBe("notes");
+    expect(classifySheetRole("LANDSCAPE DETAILS")).toBe("details");
+    expect(classifySheetRole("DETAIL")).toBe("details");
+  });
+
+  it("a plan sheet is a tile", () => {
+    expect(classifySheetRole("PRECISE GRADING PLAN")).toBe("tile");
+    expect(classifySheetRole("DRAINAGE PLAN")).toBe("tile");
+    expect(classifySheetRole(null)).toBe("tile"); // unknown ⇒ keep solving, as before
+  });
+
+  it("does not fire on a word that merely contains one of the terms", () => {
+    expect(classifySheetRole("KEYNOTES PLAN")).toBe("tile");
+  });
+
+  it("a sheet drawn at 4x the set's median scale is an overall plan whatever its title", () => {
+    // 1"=200' among 1"=20' tiles covers ten times the ground — it overlays them.
+    expect(classifySheetRole("SITE PLAN", { scaleFtPerIn: 200, medianScaleFtPerIn: 20 })).toBe("overall");
+    expect(classifySheetRole("SITE PLAN", { scaleFtPerIn: 40, medianScaleFtPerIn: 20 })).toBe("tile");
+    expect(classifySheetRole("SITE PLAN", { scaleFtPerIn: 200 })).toBe("tile"); // no median ⇒ no call
   });
 });

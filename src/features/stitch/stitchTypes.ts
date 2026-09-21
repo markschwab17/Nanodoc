@@ -15,12 +15,24 @@ export interface StitchTile {
   /** Rotation in degrees (0–360). */
   rotation?: number;
   imageDataUrl?: string;
+  /** Set when this sheet's raster could not be produced (PNG encode failed, or
+   *  the page was past the platform's canvas ceiling). The tile renders a
+   *  visible error card instead of nothing — an image-less tile used to be
+   *  invisible yet still selectable and draggable. */
+  rasterError?: string;
   /** When true, tile cannot be moved, resized, or rotated until unlocked. */
   locked?: boolean;
+  /** The GROUP this sheet belongs to, if any (see `features/stitch/groups.ts`).
+   *  Membership lives on the tile so it travels with every copy, snapshot and undo;
+   *  the group's own name and colour live in the store's `groups` record. Display and
+   *  interaction only — export and the manifest never read it. */
+  groupId?: string;
   /** True for generated scale bar stamps (no PDF source). */
   isScaleStamp?: boolean;
   /** Scale bar only: 1" = this many feet (e.g. 20). Used to render stamp at canonical size so bar is exactly 1". */
   scaleStampFeetPerInch?: number;
+  /** This sheet's own scale in feet per inch (mixed-scale sets). Undefined on legacy tiles. */
+  scaleFeetPerInch?: number;
   /** Set to true when content-delete has modified this tile's image. Export will use raster instead of vector source. */
   imageModified?: boolean;
   /** Non-destructive Clean-Composite regions to hide, stored as fractions (0..1) of the tile's width/height. Never bakes into the raster. */
@@ -51,4 +63,8 @@ export interface StitchUndoSnapshot {
   canvasWidth: number;
   canvasHeight: number;
   cropRect: CropRect | null;
+  /** Group identities at snapshot time. Membership rides on the tiles; this is the
+   *  names and colours, so an undone "Ungroup" gets its group back intact. Typed
+   *  loosely to keep `stitchTypes` free of a dependency on the groups module. */
+  groups?: Record<string, { id: string; name: string; color: string }>;
 }

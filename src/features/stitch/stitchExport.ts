@@ -11,12 +11,18 @@
  * around the drawing origin.
  */
 
-import { useStitchStore } from "@/shared/stores/stitchStore";
+import type { PDFDocument as PdfLibDocument, PDFEmbeddedPage } from "pdf-lib";
+import { useStitchStore, tileRasterUrl } from "@/shared/stores/stitchStore";
 import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
+import { tileRenderScale } from "./rasterEncode";
+import { disjointRects } from "./cleanup/clipRegions";
 
 /** Stored tile rasters are rendered at this scale (see AddPdfModal). */
-const STORED_RASTER_SCALE = 1.5;
+/** What scale the STORED tile raster was rendered at, for this page's size —
+ *  the commit caps the long edge, so it is 1.5x only on small pages. Used to
+ *  decide whether a print-DPI re-render is actually worth it. */
+const storedRasterScale = tileRenderScale;
 
 /**
  * Re-render an erased tile's source page at print DPI and replay the erase
@@ -27,11 +33,10 @@ async function renderModifiedTileHighRes(
   tile: {
     sourcePdfBytes: Uint8Array;
     sourcePageIndex: number;
-    imageDataUrl?: string;
   },
+  rasterUrl: string,
   mupdfDocCache: Map<Uint8Array, any>
 ): Promise<Uint8Array | null> {
-  if (!tile.imageDataUrl) return null;
   const mupdf = await import("mupdf").then((m) => m.default);
   let doc = mupdfDocCache.get(tile.sourcePdfBytes);
   if (!doc) {
@@ -45,7 +50,7 @@ async function renderModifiedTileHighRes(
     const heightPt = bounds[3] - bounds[1];
     const scale = pickRasterScale(widthPt, heightPt, { minScale: 1 });
     // No meaningful gain over the stored raster — skip the expensive render
-    if (scale <= STORED_RASTER_SCALE + 0.1) return null;
+    if (scale <= storedRasterScale(widthPt, heightPt) + 0.1) return null;
 
     const pixmap = page.toPixmap(
       mupdf.Matrix.scale(scale, scale),
@@ -76,7 +81,7 @@ async function renderModifiedTileHighRes(
     pixmap.destroy?.();
 
     // Replay the user's erases (and any white removal) from the stored raster
-    const mask = await decodeTileImage(tile.imageDataUrl);
+    const mask = await decodeTileImage(rasterUrl);
     applyAlphaMaskNearest(imageData, width, height, mask.imageData, mask.width, mask.height);
 
     const dataUrl = encodeTileImage(imageData);
@@ -91,6 +96,29 @@ function dataUrlToBytes(dataUrl: string): Uint8Array {
   const base64 = dataUrl.split(",")[1] || dataUrl;
   const binary = atob(base64);
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+/**
+ * Bytes + MIME for a tile raster, whichever form it is in: a `data:` URL (scale
+ * stamps, cleanup crops, erase results) or a `blob:` object URL (sheet rasters
+ * since the commit path stopped base64-encoding them). Returns null for a form
+ * pdf-lib cannot embed, so the caller skips the tile exactly as before.
+ */
+async function tileRasterBytes(url: string): Promise<{ bytes: Uint8Array; mime: "png" | "jpg" } | null> {
+  if (url.startsWith("data:image/png")) return { bytes: dataUrlToBytes(url), mime: "png" };
+  if (url.startsWith("data:image/jpeg") || url.startsWith("data:image/jpg")) {
+    return { bytes: dataUrlToBytes(url), mime: "jpg" };
+  }
+  if (url.startsWith("data:")) return null;
+  try {
+    const blob = await (await fetch(url)).blob();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (blob.type === "image/png") return { bytes, mime: "png" };
+    if (blob.type === "image/jpeg" || blob.type === "image/jpg") return { bytes, mime: "jpg" };
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -146,17 +174,36 @@ export function tileIntersectsCrop(
 }
 
 /**
- * Whether a tile's source page may use the lossless VECTOR embed path.
+ * Where to anchor pdf-lib's `drawPage` so an embedded source page that carries a
+ * `/Rotate` attribute lands UPRIGHT inside the w×h box whose lower-left is (x, y).
  *
- * pdf-lib's `drawPage` does NOT bake a source page's `/Rotate` into the embedded
- * form, but the tile's width/height and the preview raster use mupdf's
- * rotation-applied (displayed) dimensions. So for a rotated source page the
- * vector embed would export stretched and unrotated. Only unrotated pages are
- * safe for vector; rotated pages fall to the raster path (mupdf's render is
- * already correctly oriented). Exported for tests.
+ * pdf-lib embeds the UNROTATED media box and never bakes `/Rotate`, while the
+ * tile's width/height (and its preview raster) are mupdf's rotation-applied,
+ * displayed dimensions. The vector embed used to refuse rotated pages and fall
+ * to the raster path — which silently turned every landscape CAD plot saved with
+ * `/Rotate 270` (Belcourt, Rose Hill) into a capped 3072-px bitmap with NO vector
+ * linework, so the site sheet lost snapping. Displaying `/Rotate r` means
+ * rotating the content CLOCKWISE by r; `drawPage` rotates counter-clockwise
+ * about its anchor, so the rotation is −r and the anchor moves to whichever box
+ * corner the content's lower-left corner lands on. Only multiples of 90 exist in
+ * PDF; anything else is normalised to the nearest legal value by the caller's
+ * source (pdf-lib's `getRotation()` already returns a multiple of 90).
+ * Exported for tests.
  */
-export function canVectorEmbedRotation(srcRotationDeg: number): boolean {
-  return ((((srcRotationDeg % 360) + 360) % 360)) === 0;
+export function rotatedSourcePose(
+  srcRotationDeg: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): { x: number; y: number; width: number; height: number; rotateDeg: number } {
+  const r = (((srcRotationDeg % 360) + 360) % 360);
+  switch (r) {
+    case 90:  return { x, y: y + h, width: h, height: w, rotateDeg: -90 };
+    case 180: return { x: x + w, y: y + h, width: w, height: h, rotateDeg: 180 };
+    case 270: return { x: x + w, y, width: h, height: w, rotateDeg: 90 };
+    default:  return { x, y, width: w, height: h, rotateDeg: 0 };
+  }
 }
 
 /**
@@ -206,10 +253,13 @@ export function tileHoleRectsInPdf(
 ): { x: number; y: number; w: number; h: number }[] {
   // A relocated region's SOURCE is clipped out too (its content is drawn at the
   // destination by tileRelocationsInPdf).
-  const regions = [
+  // The PDF clip below is even-odd, exactly like the canvas `clip-path`, so
+  // overlapping holes would fill each other back in — make the set disjoint
+  // first (see disjointRects).
+  const regions = disjointRects([
     ...(tile.hiddenRegions ?? []),
     ...(tile.relocatedRegions ?? []).map((r) => r.rect),
-  ];
+  ]);
   if (!regions.length || (tile.rotation ?? 0) !== 0) return [];
   return regions.map((r) => {
     // fraction (0..1) → tile-local px
@@ -282,6 +332,49 @@ export function contentExportBounds(
   return { cropX: minX, cropY: minY, cropW: maxX - minX, cropH: maxY - minY };
 }
 
+/**
+ * Embed one source page as a vector XObject, forcing pdf-lib's DEFERRED embed
+ * to run right here.
+ *
+ * `embedPdf` only queues the work: the real embedding happens inside
+ * `PDFEmbeddedPage.embed()`, which pdf-lib does not call until `pdfDoc.save()`.
+ * So a page pdf-lib cannot embed — a blank page with no /Contents throws
+ * `MissingPageContentsEmbeddingError` — used to escape the caller's try/catch
+ * and abort the WHOLE export at save time, instead of demoting that one tile to
+ * the raster path.
+ *
+ * Awaiting `embed()` here moves that failure inside the catch. On failure the
+ * dead entry is dropped from the document's pending-embed list so `save()`
+ * doesn't retry (and re-throw) it, and null is returned so the caller falls
+ * through to the raster path without ever drawing the broken page.
+ *
+ * Exported for tests.
+ */
+export async function embedTileSource(
+  pdfDoc: PdfLibDocument,
+  sourceDoc: PdfLibDocument,
+  pageIndex: number
+): Promise<PDFEmbeddedPage | null> {
+  let embeddedPage: PDFEmbeddedPage | undefined;
+  try {
+    [embeddedPage] = await pdfDoc.embedPdf(sourceDoc, [pageIndex]);
+    if (!embeddedPage) return null;
+    // Force the deferred embed NOW so a failure lands in this catch, not in save().
+    await embeddedPage.embed();
+    return embeddedPage;
+  } catch (e) {
+    console.warn(`Vector embed failed for source page ${pageIndex}, falling back to raster:`, e);
+    // pdf-lib pushed this page onto its private pending list before embedding;
+    // leaving it there would make save() re-run the same failing embed.
+    if (embeddedPage) {
+      const pending = (pdfDoc as unknown as { embeddedPages?: PDFEmbeddedPage[] }).embeddedPages;
+      const idx = pending ? pending.indexOf(embeddedPage) : -1;
+      if (pending && idx >= 0) pending.splice(idx, 1);
+    }
+    return null;
+  }
+}
+
 export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
 
@@ -300,6 +393,8 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
   const {
     PDFDocument,
     degrees,
+    translate,
+    rotateDegrees,
     pushGraphicsState,
     popGraphicsState,
     setGraphicsState,
@@ -390,47 +485,59 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       !tile.imageModified;
 
     if (canUseVector) {
+      // Null once the embed is known to have failed — the page is drawn ONLY on
+      // a proven-good embed, so nothing dangling ever reaches the output.
+      let embeddedPage: PDFEmbeddedPage | null = null;
+      // The source page's own /Rotate, baked into the draw pose below (see
+      // rotatedSourcePose) — a rotated plot keeps its vector linework.
+      let srcRotation = 0;
       try {
         let sourceDoc = sourceDocCache.get(tile.sourcePdfBytes);
         if (!sourceDoc) {
           sourceDoc = await PDFDocument.load(tile.sourcePdfBytes, { ignoreEncryption: true });
           sourceDocCache.set(tile.sourcePdfBytes, sourceDoc);
         }
-        // A rotated source page (/Rotate != 0) can't use the vector embed: pdf-lib
-        // won't bake the rotation, so it would export stretched + unrotated. Fall
-        // through to the raster path (mupdf's stored render is already oriented).
-        const srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
-        if (!canVectorEmbedRotation(srcRotation)) throw new Error(`ROTATED_SOURCE:${srcRotation}`);
+        srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
 
-        const [embeddedPage] = await pdfDoc.embedPdf(sourceDoc, [tile.sourcePageIndex]);
-
-        const opts: {
-          x: number; y: number;
-          width: number; height: number;
-          rotate?: ReturnType<typeof degrees>;
-        } = {
-          x: drawX,
-          y: drawY,
-          width: tile.width,
-          height: tile.height,
-        };
-        if (rotation !== 0) opts.rotate = degrees(rotation);
-        openClipped();
-        page.drawPage(embeddedPage, opts);
-        page.pushOperators(popGraphicsState());
-        drawRelocations((x, y) => page.drawPage(embeddedPage, { x, y, width: tile.width, height: tile.height }));
-        continue;
+        // Embeds AND flushes: a page pdf-lib can't embed returns null here rather
+        // than exploding later inside save() (see embedTileSource).
+        embeddedPage = await embedTileSource(pdfDoc, sourceDoc, tile.sourcePageIndex);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // Rotated source pages fall to the raster path on purpose — not a failure.
-        if (!msg.startsWith("ROTATED_SOURCE:")) {
-          console.warn("Vector embed failed, falling back to raster:", e);
-        }
+        console.warn("Vector embed failed, falling back to raster:", e);
+      }
+
+      if (embeddedPage) {
+        const good = embeddedPage;
+        // Draw in a local frame whose origin is the tile's lower-left corner and
+        // whose axes carry the tile's own editor rotation. The source's /Rotate is
+        // then a second, inner rotation about the pose's anchor — composing the
+        // two through the CTM is what lets a rotated plot AND a rotated tile both
+        // land exactly where the editor shows them.
+        const pose = rotatedSourcePose(srcRotation, 0, 0, tile.width, tile.height);
+        const drawSource = (x: number, y: number) => {
+          page.pushOperators(pushGraphicsState(), translate(x, y));
+          if (rotation !== 0) page.pushOperators(rotateDegrees(rotation));
+          page.drawPage(good, {
+            x: pose.x,
+            y: pose.y,
+            width: pose.width,
+            height: pose.height,
+            ...(pose.rotateDeg !== 0 ? { rotate: degrees(pose.rotateDeg) } : {}),
+          });
+          page.pushOperators(popGraphicsState());
+        };
+        openClipped();
+        drawSource(drawX, drawY);
+        page.pushOperators(popGraphicsState());
+        drawRelocations((x, y) => drawSource(x, y));
+        continue;
       }
     }
 
     // ── Raster fallback (erased tiles, scale stamps, vector-fail) ─────
-    if (!tile.imageDataUrl) continue;
+    // The tile's own override if it has one, else its committed sheet raster.
+    const rasterUrl = tileRasterUrl(tile);
+    if (!rasterUrl) continue;
 
     // Erased tiles: the stored raster is only 1.5x — re-render the source
     // page at print DPI and replay the erase mask so one small erase doesn't
@@ -444,7 +551,7 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       tile.sourcePageIndex >= 0
     ) {
       try {
-        highResBytes = await renderModifiedTileHighRes(tile, mupdfDocCache);
+        highResBytes = await renderModifiedTileHighRes(tile, rasterUrl, mupdfDocCache);
       } catch (e) {
         console.warn("High-DPI re-render failed, using stored raster:", e);
       }
@@ -453,15 +560,12 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
     let pdfImage;
     if (highResBytes) {
       pdfImage = await pdfDoc.embedPng(highResBytes);
-    } else if (tile.imageDataUrl.startsWith("data:image/png")) {
-      pdfImage = await pdfDoc.embedPng(dataUrlToBytes(tile.imageDataUrl));
-    } else if (
-      tile.imageDataUrl.startsWith("data:image/jpeg") ||
-      tile.imageDataUrl.startsWith("data:image/jpg")
-    ) {
-      pdfImage = await pdfDoc.embedJpg(dataUrlToBytes(tile.imageDataUrl));
     } else {
-      continue;
+      const raster = await tileRasterBytes(rasterUrl);
+      if (!raster) continue;
+      pdfImage = raster.mime === "png"
+        ? await pdfDoc.embedPng(raster.bytes)
+        : await pdfDoc.embedJpg(raster.bytes);
     }
     const imgOpts: {
       x: number; y: number;

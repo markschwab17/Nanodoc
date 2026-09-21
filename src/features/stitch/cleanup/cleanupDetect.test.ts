@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { detectTitleBlocks, detectMatchMargins, type CleanupRegion } from "./cleanupDetect";
+import { makeGeom } from "@/features/stitch/autostitch/types";
 import type { PageExtract, Label, Geom } from "@/features/stitch/autostitch/types";
 
 const L = (text: string, x: number, y: number): Label =>
@@ -16,7 +17,7 @@ describe("detectTitleBlocks", () => {
     // furniture clustered on the right margin (x ~ 2100-2400), spanning the height
     const furn = [L("RICK ENGINEERING", 2120, 200), L("REV 3  06/01/26", 2120, 400), L("SHEET C5.01", 2120, 1600)];
     // a long vertical border stroke at x=2080 (the title-block frame line)
-    const border: Geom = { id: "b", pts: [[2080, 40], [2080, 1690]], closed: false };
+    const border: Geom = makeGeom([[2080, 40], [2080, 1690]]);
     const rs = detectTitleBlocks(base(furn, [border]), () => true);
     const r = rightStrip(rs);
     expect(rs.length).toBe(1);
@@ -38,8 +39,8 @@ describe("detectTitleBlocks", () => {
     // footer's TOP border is a full-width grid line 140pt higher (y = 1548).
     // The strip must reach the top border, not stop at the text or the frame.
     const furn = [L("PROJECT 194786001", 1100, 1690), L("04/28/2026", 1900, 1695), L("30850 DATE PALM DR", 900, 1700)];
-    const topBorder: Geom = { id: "t", pts: [[20, 1548], [2570, 1548]], closed: false }; // footer top
-    const frame: Geom = { id: "f", pts: [[20, 1691], [2570, 1691]], closed: false };      // outer sheet frame
+    const topBorder: Geom = makeGeom([[20, 1548], [2570, 1548]]); // footer top
+    const frame: Geom = makeGeom([[20, 1691], [2570, 1691]]);      // outer sheet frame
     const r = bottomStrip(detectTitleBlocks(base(furn, [topBorder, frame]), () => true));
     expect(r).toBeDefined();
     expect(r!.kind).toBe("title-block");
@@ -60,8 +61,8 @@ describe("detectTitleBlocks", () => {
       // bottom footer, left of the column
       L("PROJECT 194786001", 300, 1650), L("ARCHITECT: SMITH & CO", 800, 1650), L("30850 DATE PALM DR", 1300, 1650),
     ];
-    const rightBorder: Geom = { id: "rb", pts: [[2150, 40], [2150, 1690]], closed: false };
-    const footerTop: Geom = { id: "ft", pts: [[20, 1548], [2570, 1548]], closed: false };
+    const rightBorder: Geom = makeGeom([[2150, 40], [2150, 1690]]);
+    const footerTop: Geom = makeGeom([[20, 1548], [2570, 1548]]);
     const rs = detectTitleBlocks(base(furn, [rightBorder, footerTop]), () => true);
     expect(rs.length).toBe(2);
     const col = rightStrip(rs)!, foot = bottomStrip(rs)!;
@@ -86,7 +87,7 @@ describe("detectTitleBlocks", () => {
     // one tall vertical line — the only full-height vertical is the outer frame.
     // The walk would trap on the frame; it must fall back to the furniture edge.
     const furn = [L("RICK ENGINEERING", 1855, 300), L("VICINITY MAP", 2000, 800), L("SHEET C1.0", 2200, 1400)];
-    const frame: Geom = { id: "f", pts: [[2556, 40], [2556, 1690]], closed: false }; // outer frame only
+    const frame: Geom = makeGeom([[2556, 40], [2556, 1690]]); // outer frame only
     const r = rightStrip(detectTitleBlocks(base(furn, [frame]), () => true));
     expect(r).toBeDefined();
     // innermost furniture CENTER (label at x=1855, cx = 1855 + 60), NOT trapped at the 2556 frame
@@ -114,7 +115,7 @@ describe("detectMatchMargins", () => {
     // classifies it edge="bottom" — see cleanupDetect.ts's detectMatchMargins comment),
     // plus the actual long horizontal match-line stroke at y=260.
     const label = { text: "MATCHLINE (SEE SHEET C5.01)", x: 900, y: 250, endX: 1400, endY: 250, angle: 0, h: 10, font: null };
-    const line = { id: "m", pts: [[60, 260], [2500, 260]] as [number, number][], closed: false };
+    const line = makeGeom([[60, 260], [2500, 260]]);
     const regions = detectMatchMargins({ view: VIEW, shxLabels: [], labels: [label], words: [label], geometry: [line] });
     expect(regions.length).toBe(1);
     expect(regions[0].kind).toBe("match-margin");

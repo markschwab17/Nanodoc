@@ -1,7 +1,7 @@
 /**
  * Main-thread OCR service.
  *
- * Portability rule: the tesseract scheduler is created HERE, on the MAIN thread
+ * Portability rule: the tesseract workers are created HERE, on the MAIN thread
  * — nested workers (tesseract spawned from inside another worker) are not
  * portable to WKWebView (macOS) / WebKitGTK (Linux), the Tauri webviews this app
  * packages for, and their failure is silent. So tesseract stays on main.
@@ -9,9 +9,16 @@
  * To keep the main thread free (OCR must never starve the modal's own
  * page-render loop), the heavy raster→image conversion runs in ocr.worker.ts:
  * `recognize()` transfers the pixel buffer to that CONVERSION worker, gets a
- * cheap Blob back, and hands it to `scheduler.addJob("recognize", blob)` —
- * tesseract then posts the Blob to its own (main-owned, non-nested) worker. The
- * only main-thread cost is the postMessage/addJob calls.
+ * cheap Blob back, and hands it to the OCR pool — tesseract then posts the Blob
+ * to its own (main-owned, non-nested) worker. The only main-thread cost is the
+ * postMessage/queue calls.
+ *
+ * The pool itself is `ocrPool.ts`, shared verbatim with the Node eval harness:
+ * a FIFO queue over POOL_SIZE lazily-created workers, with each job's timeout
+ * measured from DISPATCH rather than from queueing, and a timeout retiring only
+ * the one worker that hung. It replaced tesseract's `createScheduler`, whose
+ * queue-time timeout and all-or-nothing recycle threw away every queued job
+ * whenever a single crop was slow.
  *
  * Fallback: if the conversion worker can't init (ancient webview without
  * OffscreenCanvas), conversion falls back to a main-thread `<canvas>` (the
@@ -24,6 +31,10 @@
 // (If a path 404s after a tesseract.js upgrade, check `ls node_modules/tesseract.js/dist`.)
 import workerUrl from "tesseract.js/dist/worker.min.js?url";
 import coreUrl from "tesseract.js-core/tesseract-core-simd.wasm.js?url";
+import {
+  createOcrPool, defaultOcrPoolSize, OCR_CONVERT_TIMEOUT_MS, OCR_JOB_TIMEOUT_MS, OCR_NO_RESULT,
+  type OcrPool,
+} from "./ocrPool";
 
 export interface RawImage { width: number; height: number; data: Uint8ClampedArray }
 export interface OcrWord {
@@ -32,72 +43,62 @@ export interface OcrWord {
   bbox: { x0: number; y0: number; x1: number; y1: number }; // px in the recognized image
 }
 
-const OCR_TIMEOUT_MS = 30_000;
+// Recognition-job timeout (ms) — bounds ONE job from the moment a pool worker
+// picks it up (separate from OCR_CONVERT_TIMEOUT_MS, which bounds the
+// conversion-worker RPC in front of it). Because it starts at dispatch, not at
+// queueing, a job that waited behind three others still gets its full budget;
+// 20s is comfortably above the
+// slowest real band-OCR we have measured and well below "the user gave up".
+// The constant itself lives in ocrPool.ts, with the mechanism that enforces it and
+// alongside the doubled budget one RE-READ gets (`RETRY_JOB_TIMEOUT_MS`, passed per
+// call by the aligner). Overridable only via __setOcrJobTimeoutMsForTest so
+// production always uses OCR_JOB_TIMEOUT_MS; kept as its own mutable binding (rather
+// than exporting the constant directly) because ESM named exports are read-only
+// bindings — a test importer cannot reassign them.
+let ocrJobTimeoutMs = OCR_JOB_TIMEOUT_MS;
 
-// Recognition-job timeout (ms) — bounds `scheduler.addJob("recognize", …)`
-// itself (separate from OCR_TIMEOUT_MS's use for the conversion-worker RPC).
-// Overridable only via __setOcrJobTimeoutMsForTest so production always uses
-// OCR_TIMEOUT_MS; kept as its own mutable binding (rather than exporting
-// OCR_TIMEOUT_MS directly) because ESM named exports are read-only bindings —
-// a test importer cannot reassign them.
-let ocrJobTimeoutMs = OCR_TIMEOUT_MS;
-
-/** Test-only: shorten the recognition-job timeout so hang tests don't wait the real 30s. */
+/** Test-only: shorten the recognition-job timeout so hang tests don't wait the real 20s. */
 export function __setOcrJobTimeoutMsForTest(ms: number): void {
   ocrJobTimeoutMs = ms;
 }
 
-// ── tesseract scheduler (MAIN thread) ──────────────────────────────────────
-// A scheduler holding two workers: the probe fires many band-OCR requests and
-// two workers let concurrent jobs genuinely overlap, roughly halving band-OCR
-// wall time on plan-dense sets.
-let schedulerPromise: Promise<any> | null = null;
-const WORKER_COUNT = 2;
+// ── tesseract worker pool (MAIN thread) ────────────────────────────────────
+// The probe fires many band-OCR requests; several workers let them genuinely
+// overlap instead of queueing behind one another.
+let pool: OcrPool<Blob, any> | null = null;
 
-// Deliberately NOT `async`: it must return the exact `schedulerPromise`
-// object (reference-equal), not a fresh wrapper promise, so callers can later
-// compare it by identity (`schedulerPromise === capturedPromise`) to guard a
-// timeout-triggered recycle against clobbering a newer scheduler. An `async`
-// function always wraps its return value in a new promise, which would break
-// that identity check even though it resolves to the same value.
-function ensureScheduler(): Promise<any> {
-  if (!schedulerPromise) {
-    schedulerPromise = (async () => {
-      const { createScheduler, createWorker, PSM } = await import("tesseract.js");
-      const scheduler = createScheduler();
-      const opts = {
-        workerPath: workerUrl,
-        corePath: coreUrl,
-        langPath: "/ocr",
-        gzip: true,
-      };
-      // Track every successfully created worker so a mid-init failure (a later
-      // createWorker / setParameters / addWorker throwing) can't leak the ones
-      // already spun up — each holds a live Web Worker + wasm instance. Created
-      // sequentially so `created` is exact: a rejection can't leave a sibling
-      // still resolving into the array after the catch runs (as Promise.all could).
-      const created: any[] = [];
-      try {
-        for (let n = 0; n < WORKER_COUNT; n++) {
-          const worker = await createWorker("eng", 1, opts);
-          created.push(worker);
-          await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-          scheduler.addWorker(worker);
-        }
-        return scheduler;
-      } catch (err) {
-        // Best-effort teardown of everything created, then re-throw so the
-        // singleton resets (see the .catch below) and a later call retries clean.
-        for (const worker of created) {
-          try { await worker.terminate(); } catch { /* ignore */ }
-        }
-        throw err;
-      }
-    })();
-    // A failed init must not poison every later call.
-    schedulerPromise.catch(() => { schedulerPromise = null; });
+/** Boot one configured tesseract worker (the pool's per-worker init). */
+async function createTesseractWorker(): Promise<{ recognize(input: Blob): Promise<any>; terminate(): unknown }> {
+  const { createWorker, PSM } = await import("tesseract.js");
+  const worker = await createWorker("eng", 1, {
+    workerPath: workerUrl,
+    corePath: coreUrl,
+    langPath: "/ocr",
+    gzip: true,
+  });
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+  } catch (err) {
+    // A worker that came up but couldn't be configured still holds a live Web
+    // Worker + wasm instance — don't leak it just because init failed.
+    try { await worker.terminate(); } catch { /* ignore */ }
+    throw err;
   }
-  return schedulerPromise;
+  return worker as unknown as { recognize(input: Blob): Promise<any>; terminate(): unknown };
+}
+
+function ensurePool(): OcrPool<Blob, any> {
+  if (!pool) {
+    pool = createOcrPool<Blob, any>({
+      size: defaultOcrPoolSize(),
+      createWorker: createTesseractWorker,
+      // Read per dispatch so __setOcrJobTimeoutMsForTest applies to jobs the
+      // already-built pool dispatches later.
+      timeoutMs: () => ocrJobTimeoutMs,
+      onTimeout: () => console.warn("[ocrService] recognize job timed out — retiring that worker"),
+    });
+  }
+  return pool;
 }
 
 // ── raster→Blob conversion (CONVERSION worker, off main; main-thread fallback) ─
@@ -137,7 +138,7 @@ function convertViaWorker(image: RawImage): Promise<Blob | null> {
     let worker: Worker;
     try { worker = ensureConvWorker(); } catch { resolve(null); return; }
     const id = ++convSeq;
-    const timer = setTimeout(() => { convPending.delete(id); resolve(null); }, OCR_TIMEOUT_MS);
+    const timer = setTimeout(() => { convPending.delete(id); resolve(null); }, OCR_CONVERT_TIMEOUT_MS);
     convPending.set(id, (blob) => { clearTimeout(timer); resolve(blob); });
     worker.postMessage({ ocrId: id, image }, [image.data.buffer]);
   });
@@ -181,54 +182,72 @@ async function imageToBlob(image: RawImage): Promise<Blob> {
  * OCR a raw RGBA raster. Returns [] on any failure (OCR is best-effort).
  *
  * Two independent timeouts guard this call:
- *  - OCR_TIMEOUT_MS bounds the conversion-worker RPC (raster → Blob).
- *  - ocrJobTimeoutMs (same 30s default, shortenable in tests) bounds the
- *    `scheduler.addJob("recognize", …)` call itself. Without this, a hung
- *    tesseract job never settles: the direct auto-align path would spin
- *    forever, and — worse — the hang permanently pins one of the scheduler's
- *    WORKER_COUNT slots, so repeated hangs quietly degrade OCR until every
- *    slot is stuck and OCR is silently dead.
+ *  - OCR_CONVERT_TIMEOUT_MS bounds the conversion-worker RPC (raster → Blob).
+ *  - ocrJobTimeoutMs bounds the recognition job itself, from the moment a pool
+ *    worker picks it up. Without it a hung tesseract job never settles: the
+ *    direct auto-align path would spin forever, and — worse — the hang would
+ *    permanently pin one of the pool's slots, so repeated hangs quietly degrade
+ *    OCR until every slot is stuck and OCR is silently dead. On timeout this
+ *    call resolves [] and the pool retires just that worker (see ocrPool.ts).
  *
- * On a recognition-job timeout we resolve [] for this call AND recycle: the
- * scheduler is terminated best-effort (fire-and-forget, errors swallowed) and
- * the lazy singleton is cleared so the next call reinitializes a clean
- * scheduler. The recycle is guarded by identity — it only runs if the
- * module's scheduler singleton still refers to the exact scheduler THIS call
- * timed out on, so a stale timeout firing after a newer scheduler has since
- * been created (e.g. an earlier hang already recycled and a later call built
- * a fresh one) can never terminate that newer, healthy scheduler.
+ * `signal`: aborting drops a still-queued job outright (it never runs) and
+ * makes an in-flight one's result be ignored; either way the call resolves [].
+ *
+ * `timeoutMs`: this read's own job budget, overriding the pool's. The aligner passes
+ * it for the ONE re-read a lost read earns, and only for that — see
+ * `RETRY_JOB_TIMEOUT_MS`. It bounds the recognition job only; the conversion-worker
+ * RPC keeps its own OCR_CONVERT_TIMEOUT_MS.
+ *
+ * `onNoResult`: fired when the pool answered OCR_NO_RESULT and the caller did NOT
+ * abort — i.e. this read is a NON-ANSWER (the job blew its 20 s budget, or the pool
+ * was torn down under it), not a crop that genuinely holds no text. The return type
+ * stays `OcrWord[]` and stays `[]`, so every existing caller is unaffected; the hook
+ * exists because `autoStitch` needs to tell the two apart to decide whether the same
+ * clip is worth re-reading, and `[]` cannot carry that.
+ *
+ * A CONVERSION OR TRANSPORT THROW IS A NON-ANSWER TOO, and it used not to be. The
+ * `catch` below swallows a conversion-worker RPC that blew its own 30 s budget, a
+ * conversion worker that crashed (`onerror` fails EVERY outstanding conversion at
+ * once), an OffscreenCanvas that could not allocate, and a pool job that rejected — and
+ * it used to answer all of them with a bare `[]`, which tells the aligner the crop holds
+ * no text. That read never happened: no non-answer, no re-read, nothing in `unknown`,
+ * nothing in any counter the honesty gate reads. Measured on Belcourt (`stitch-eval`,
+ * `STITCH_EVAL_FAULT_SILENT_CALLS` against `STITCH_EVAL_FAULT_CALLS` on the SAME three
+ * strip reads): flagged, they are re-read and every placement is identical; silent, the
+ * reciprocal anchor is lost, a sheet moves 141 pt (~39 ft at 1"=20') and `ocrStats`
+ * still reads `61/0/0/0/0`. That is the browser probe answering differently on two runs
+ * of the same sheets with nothing marked unknown. The old argument for staying quiet
+ * ("re-rastering it four times would not help") belonged to the sub-clip retry; a retry
+ * is now ONE same-input re-read, and a second failure lands in `unknown` — the honest
+ * answer to a broken pipe.
  */
-export async function recognize(image: RawImage): Promise<OcrWord[]> {
+export async function recognize(
+  image: RawImage,
+  opts?: { signal?: AbortSignal; onNoResult?: () => void; timeoutMs?: number },
+): Promise<OcrWord[]> {
   try {
-    // Convert (in the worker) and spin up tesseract concurrently. Promise.all
-    // attaches handlers to both up front, so if one rejects the other's later
-    // settlement can't become an unhandled rejection. Capture the scheduler
-    // PROMISE (not just the resolved scheduler) so a later timeout can check,
-    // by identity, whether the module singleton still points at it.
-    const schedPromise = ensureScheduler();
-    const [scheduler, blob] = await Promise.all([schedPromise, imageToBlob(image)]);
+    // Kick the first worker's boot off BEFORE converting, so the wasm+traineddata
+    // load overlaps the raster→Blob round-trip instead of following it.
+    const jobs = ensurePool();
+    jobs.prewarm();
+    const blob = await imageToBlob(image);
+    // Conversion is not free (a PNG encode per band), and the probe now issues a
+    // whole page of them at once — so re-check before queueing rather than letting
+    // the pool drop an already-converted job.
+    if (opts?.signal?.aborted) return [];
 
-    const TIMEOUT = Symbol("ocr-job-timeout");
-    let timer: ReturnType<typeof setTimeout>;
-    // Promise.race attaches a handler to the losing promise too, so if
-    // addJob rejects after the timeout already won, it's still "handled" —
-    // no unhandled-rejection warning.
-    const timeout = new Promise<typeof TIMEOUT>((resolve) => {
-      timer = setTimeout(() => resolve(TIMEOUT), ocrJobTimeoutMs);
-    });
-    const result = await Promise.race([scheduler.addJob("recognize", blob), timeout]);
-    clearTimeout(timer!);
-
-    if (result === TIMEOUT) {
-      console.warn("[ocrService] recognize job timed out — recycling scheduler");
-      // Identity guard: only recycle if no one has already replaced the
-      // singleton (see docstring above).
-      if (schedulerPromise === schedPromise) {
-        schedulerPromise = null;
-        try {
-          Promise.resolve(scheduler.terminate()).catch(() => { /* best-effort */ });
-        } catch { /* best-effort */ }
-      }
+    const result = await jobs.run(blob, { signal: opts?.signal, timeoutMs: opts?.timeoutMs });
+    if (result === OCR_NO_RESULT) {
+      // Timed out, aborted, or torn down. An ABORT is the caller's own doing and
+      // must not look like a failed read (it would have the aligner retry work it
+      // has just given up on), so only the other two are reported.
+      //
+      // GUARDED, because this one is INSIDE the try: a caller hook that throws would
+      // otherwise fall into the catch below and fire `onNoResult` a SECOND time for the
+      // same read — double-counting `nonAnswers` and, worse, a second `retries++` on a
+      // band the aligner has already decided about. The hook is bookkeeping; a broken
+      // one must not rewrite the read's own outcome.
+      if (!opts?.signal?.aborted) { try { opts?.onNoResult?.(); } catch { /* bookkeeping */ } }
       return [];
     }
 
@@ -241,7 +260,54 @@ export async function recognize(image: RawImage): Promise<OcrWord[]> {
     return words;
   } catch (err) {
     console.warn("[ocrService] recognize failed:", err);
+    // Aborts excepted, exactly as the OCR_NO_RESULT branch above: a run the caller
+    // stopped must not look like a read that failed.
+    //
+    // The abort test is re-made HERE and not inherited: the throw may BE the abort
+    // (`imageToBlob` losing its conversion when the run was torn down), and an abort
+    // that arrives mid-flight is exactly the case this branch must stay quiet on.
+    //
+    // Guarded like the branch above so a throwing hook cannot escape `recognize` — this
+    // is the last handler on the path, so an exception here would reject a call whose
+    // whole contract is "best-effort, resolves []".
+    if (!opts?.signal?.aborted) { try { opts?.onNoResult?.(); } catch { /* bookkeeping */ } }
     return [];
+  }
+}
+
+/**
+ * Release the OCR pool and the conversion worker.
+ *
+ * The pool holds up to POOL_SIZE real Web Workers, each with the tesseract SIMD
+ * WASM heap plus the `eng` traineddata — 80-120 MB apiece — and it used to be
+ * held for the rest of the session the moment any probe touched OCR, whether or
+ * not another sheet was ever read. Callers therefore shut it down when their OCR
+ * work is finished (the probe settles, the plan run ends, the modal closes);
+ * `ensurePool` builds a fresh one lazily on the next `recognize`, so shutting
+ * down is never destructive, only a cost the next caller pays once.
+ *
+ * Best-effort and idempotent: it never throws, and tearing down with jobs still
+ * queued or in flight simply makes those `recognize` calls resolve `[]`, which
+ * every caller already treats as "no words".
+ */
+export async function shutdownOcr(): Promise<void> {
+  // BOTH singletons are detached BEFORE the first await. Terminating the pool is
+  // asynchronous, and a `recognize()` that starts during that window must find
+  // the module state already empty and build itself a fresh pool and conversion
+  // worker — not adopt the ones being torn down and then have them terminated
+  // underneath it.
+  const dyingPool = pool;
+  const worker = convWorker;
+  pool = null;
+  convWorker = null;
+  if (worker) {
+    // Anything still waiting on a conversion will never be answered now.
+    for (const [, resolve] of convPending) resolve(null);
+    convPending.clear();
+    try { worker.terminate(); } catch { /* ignore */ }
+  }
+  if (dyingPool) {
+    try { await dyingPool.terminate(); } catch { /* already dead, or never initialised */ }
   }
 }
 
@@ -249,15 +315,52 @@ export async function recognize(image: RawImage): Promise<OcrWord[]> {
  * Answer `{kind:"ocr-req", ocrId, image}` messages from the stitch probe worker
  * with `{kind:"ocr-res", ocrId, words}`. Attach once per worker, right after
  * construction. Each request runs the full pipeline (conversion worker → blob →
- * main-thread scheduler) independently, so replies stay paired to their probe
+ * main-thread OCR pool) independently, so replies stay paired to their probe
  * ocrId even when they complete out of order. Failures answer with [] so the
  * probe worker never hangs.
+ *
+ * `{kind:"ocr-abort", ocrId}` cancels one outstanding request. The probe sends it
+ * when its run is aborted, and it has to reach the POOL rather than merely be
+ * ignored on arrival: the probe issues a whole page of band reads at once, so an
+ * abandoned run leaves dozens of jobs sitting in the pool's queue — and a queued
+ * job has no deadline of its own. Aborting drops the queued ones outright.
+ *
+ * A request may name its own `timeoutMs` — the doubled budget the aligner gives one
+ * re-read — which is passed straight through to `recognize`.
+ *
+ * The reply carries `noResult` when `recognize` reported a NON-ANSWER (see its
+ * `onNoResult`). It rides along on the existing message rather than as a second
+ * one so the reply stays a single settle per ocrId.
  */
 export function attachOcrRpc(probeWorker: Worker): void {
+  const outstanding = new Map<number, AbortController>();
   probeWorker.addEventListener("message", async (e: MessageEvent<any>) => {
     const d = e.data;
+    if (d && d.kind === "ocr-abort") {
+      const ctrl = outstanding.get(d.ocrId);
+      outstanding.delete(d.ocrId);
+      ctrl?.abort();
+      return;
+    }
     if (!d || d.kind !== "ocr-req") return;
-    const words = await recognize(d.image as RawImage);
-    probeWorker.postMessage({ kind: "ocr-res", ocrId: d.ocrId, words });
+    const ctrl = new AbortController();
+    outstanding.set(d.ocrId, ctrl);
+    let words: OcrWord[];
+    let noResult = false;
+    try {
+      words = await recognize(d.image as RawImage, {
+        signal: ctrl.signal,
+        onNoResult: () => { noResult = true; },
+        // The probe worker names the budget for a RE-READ (double). Undefined on
+        // every ordinary read, which leaves the pool's own.
+        timeoutMs: typeof d.timeoutMs === "number" ? d.timeoutMs : undefined,
+      });
+    } finally {
+      outstanding.delete(d.ocrId);
+    }
+    // The probe has already resolved this id with [] and stopped listening for it;
+    // a late reply would only be dropped there, so don't send one.
+    if (ctrl.signal.aborted) return;
+    probeWorker.postMessage({ kind: "ocr-res", ocrId: d.ocrId, words, noResult });
   });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords } from "./ocrBands";
+import { pageEdgeBands, sheetNoBand, rotateRaw, wordsToLabels, parseSheetNumber, mergeWords, refPhraseWindows } from "./ocrBands";
 import type { OcrWord } from "./ocrService";
 
 describe("pageEdgeBands", () => {
@@ -132,5 +132,140 @@ describe("mergeWords", () => {
     const m = mergeWords([W("SEE", 100, 50, 130, 60, 88), W("BELOW", 136, 50, 190, 60, 61)]);
     expect(m).toHaveLength(1);
     expect(m[0].confidence).toBe(61);
+  });
+});
+
+// ── T0 Task 3: the OCR failures the Belcourt set exposed ─────────────────────
+const B = (text: string, x0: number, y0: number, x1: number, y1: number, confidence = 90): OcrWord =>
+  ({ text, confidence, bbox: { x0, y0, x1, y1 } });
+
+describe("mergeWords height compatibility", () => {
+  test("a large callout does NOT swallow the small annotations beside it", () => {
+    // The real failure: a 111 px matchline callout and the 20 px grading text next
+    // to it merged into one 100-character run, and the ref regex then found nothing.
+    // The gap test uses the TALLER box, so without a height gate a big box absorbs
+    // every small neighbour on its line.
+    const m = mergeWords([
+      B("MATCH", 0, 0, 90, 111), B("LINE", 100, 0, 180, 111),
+      B("292.7", 200, 45, 240, 65), B("FG", 250, 45, 270, 65),
+    ]);
+    expect(m.map((x) => x.text)).toEqual(["MATCH LINE", "292.7 FG"]);
+  });
+  test("runs of one phrase (same size) still merge", () => {
+    const m = mergeWords([B("SEE", 0, 0, 40, 12), B("SHEET", 46, 0, 100, 12), B("7", 106, 0, 114, 12)]);
+    expect(m).toHaveLength(1);
+    expect(m[0].text).toBe("SEE SHEET 7");
+  });
+});
+
+describe("refPhraseWindows", () => {
+  test("recovers a reference the merge left split by a wide leader gap", () => {
+    // 300 px between "SEE" and "SHEET" — far past any gap rule, but the three words
+    // read as one callout, so the content-based scan finds it.
+    const w = refPhraseWindows([B("SEE", 0, 0, 40, 12), B("SHEET", 340, 0, 394, 12), B("7", 400, 0, 408, 12)]);
+    expect(w).toHaveLength(1);
+    expect(w[0].text).toBe("SEE SHEET 7");
+    expect(w[0].bbox).toEqual({ x0: 0, y0: 0, x1: 408, y1: 12 });
+  });
+  test("recovers a discipline-code reference", () => {
+    const w = refPhraseWindows([B("SEE", 0, 0, 40, 12), B("SHEET", 200, 0, 254, 12), B("C-302", 260, 0, 320, 12)]);
+    expect(w.map((x) => x.text)).toEqual(["SEE SHEET C-302"]);
+  });
+  test("does not cross a line boundary", () => {
+    const w = refPhraseWindows([B("SEE", 0, 0, 40, 12), B("SHEET", 0, 40, 54, 52), B("7", 60, 40, 68, 52)]);
+    expect(w).toHaveLength(0);
+  });
+  test("a bare phrase with no sheet named is not a reference", () => {
+    expect(refPhraseWindows([B("SEE", 0, 0, 40, 12), B("SHEET", 46, 0, 100, 12)])).toHaveLength(0);
+  });
+  test("each callout is emitted once (words are consumed)", () => {
+    const w = refPhraseWindows([
+      B("SEE", 0, 0, 40, 12), B("SHEET", 46, 0, 100, 12), B("7", 106, 0, 114, 12),
+      B("SEE", 200, 0, 240, 12), B("SHEET", 246, 0, 300, 12), B("8", 306, 0, 314, 12),
+    ]);
+    expect(w.map((x) => x.text)).toEqual(["SEE SHEET 7", "SEE SHEET 8"]);
+  });
+});
+
+describe("parseSheetNumber from the title-block layout", () => {
+  // The Belcourt title block: the sheet number is one very large glyph in its own
+  // cell, with "OF 30 SHEETS" in ordinary small type beside it. There is no
+  // "n OF m" string anywhere, so the plain reading finds nothing.
+  // Reading order puts the big glyph AFTER "OF 30 SHEETS" (as tesseract does on
+  // this cell), so there is no "n OF m" substring for the plain reading to find.
+  const cell = (bigText: string, bigH = 80) => [
+    B("Know", 0, 0, 40, 18), B("dig.", 50, 0, 90, 18),
+    B("OF", 300, 0, 320, 22), B("30", 326, 0, 350, 22), B("SHEETS", 356, 0, 420, 22),
+    B(bigText, 200, 0, 250, bigH, 96),
+  ];
+  test("a lone LARGE digit beside 'OF 30 SHEETS' is the sheet number", () => {
+    expect(parseSheetNumber(cell("6"))).toBe(6);
+  });
+  test("a look-alike letter for that lone digit is corrected ('S' -> 5)", () => {
+    expect(parseSheetNumber(cell("S"))).toBe(5);
+  });
+  test("no 'OF n SHEETS' context -> no guess", () => {
+    expect(parseSheetNumber([B("DATE", 0, 0, 40, 18), B("6", 200, 0, 250, 80)])).toBeNull();
+  });
+  test("an ordinary-sized token is not promoted", () => {
+    expect(parseSheetNumber(cell("S", 20))).toBeNull();
+    expect(parseSheetNumber(cell("6", 20))).toBeNull();
+  });
+  test("a large token that is neither a number nor a digit look-alike -> no guess", () => {
+    expect(parseSheetNumber(cell("ADKAN"))).toBeNull();
+  });
+  test("an explicit 'SHEET n OF m' still wins", () => {
+    expect(parseSheetNumber([...cell("S"), B("SHEET 4 OF 30", 0, 40, 120, 58)])).toBe(4);
+  });
+});
+
+describe("pageEdgeBands with a drawing frame", () => {
+  const view: [number, number, number, number] = [0, 0, 1000, 800];
+  const pageOnly = [
+    ["top", [0, 0, 1000, 120]], ["bottom", [0, 680, 1000, 800]],
+    ["left", [0, 0, 120, 800]], ["right", [880, 0, 1000, 800]],
+  ];
+  test("the four page bands are returned unchanged", () => {
+    const b = pageEdgeBands(view, [20, 20, 720, 780]);
+    expect(b.slice(0, 4).map((s) => [s.edge, s.clip])).toEqual(pageOnly);
+  });
+  test("a frame border the page band cannot reach gets its own band", () => {
+    // Right border at 72% of the width; the page's right band starts at 88%, so the
+    // drawing's own border — and any matchline callout on it — is never rasterised.
+    const b = pageEdgeBands(view, [20, 20, 720, 780]);
+    expect(b).toHaveLength(5);
+    expect(b[4].edge).toBe("right");
+    expect(b[4].clip).toEqual([720 - 0.12 * 700, 20, 720, 780]);
+  });
+  test("a frame that sits inside the page bands adds nothing", () => {
+    // Borders at 7.5% / 93% / 8% / 87% all fall within the page bands already.
+    expect(pageEdgeBands(view, [75, 64, 930, 696])).toHaveLength(4);
+  });
+  test("no frame -> page bands only", () => {
+    expect(pageEdgeBands(view).map((s) => [s.edge, s.clip])).toEqual(pageOnly);
+  });
+});
+
+describe("refPhraseWindows recovers a split MATCHLINE", () => {
+  const W = (text: string, x0: number, y0: number, x1: number, y1: number, confidence = 90): OcrWord =>
+    ({ text, confidence, bbox: { x0, y0, x1, y1 } });
+
+  test("'MATCH' + 'LINE' as two words is one matchline callout", () => {
+    // A matchline with no readable target is still the fact that this edge abuts
+    // something — which is what matchlinePrior pairs on and hasEdgeRefs counts.
+    const w = refPhraseWindows([W("MATCH", 0, 0, 60, 12), W("LINE", 200, 0, 240, 12)]);
+    expect(w.map((x) => x.text)).toEqual(["MATCH LINE"]);
+  });
+
+  test("'LINE' + 'S' + 'EE' + 'SHEET' is recovered too", () => {
+    const w = refPhraseWindows([
+      W("LINE", 0, 0, 40, 12), W("S", 50, 0, 58, 12), W("EE", 66, 0, 84, 12), W("SHEET", 92, 0, 140, 12),
+    ]);
+    expect(w).toHaveLength(1);
+    expect(w[0].text).toBe("LINE S EE SHEET");
+  });
+
+  test("ordinary words on a line are not a callout", () => {
+    expect(refPhraseWindows([W("GRAPHIC", 0, 0, 70, 12), W("SCALE", 80, 0, 130, 12), W("IN", 140, 0, 155, 12)])).toHaveLength(0);
   });
 });

@@ -8,7 +8,8 @@
  */
 
 import { describe, expect, test } from "vitest";
-import { pdfPoseForTile, tileIntersectsCrop, canVectorEmbedRotation, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds } from "./stitchExport";
+import { pdfPoseForTile, tileIntersectsCrop, rotatedSourcePose, tileHoleRectsInPdf, tileRelocationsInPdf, contentExportBounds, embedTileSource, exportStitchToPdf } from "./stitchExport";
+import { useStitchStore } from "@/shared/stores/stitchStore";
 import { tileLocalToCanvas } from "./stitchGeometry";
 import type { StitchTile } from "./stitchTypes";
 
@@ -147,6 +148,48 @@ describe("tileHoleRectsInPdf", () => {
     const holes = tileHoleRectsInPdf(tile, 0, 0, 200);
     expect(holes).toEqual([{ x: 40, y: 145, w: 20, h: 10 }]); // same as the hidden-region case
   });
+
+  // The export clips with `clipEvenOdd`, so an area covered by an EVEN number of
+  // holes is painted back in. Overlapping holes have to be made disjoint before
+  // they reach the clip, or they cancel — the same fault that made a
+  // double-added hide box mask nothing on the canvas.
+  test("two IDENTICAL hidden regions collapse to one hole (they used to cancel)", () => {
+    const r = { x: 0.1, y: 0.1, w: 0.2, h: 0.2 };
+    const tile = { x: 30, y: 40, width: 100, height: 50, rotation: 0,
+      hiddenRegions: [r, { ...r }] } as any;
+    expect(tileHoleRectsInPdf(tile, 0, 0, 200)).toEqual([{ x: 40, y: 145, w: 20, h: 10 }]);
+  });
+
+  test("frameMask's four overlapping bands become a disjoint set that still covers the corners", () => {
+    // frameMask emits full-width top/bottom bands AND full-height side bands,
+    // which overlap at all four page corners — under even-odd those corners were
+    // painted back in and the page margins leaked into the export.
+    const tile = { x: 0, y: 0, width: 100, height: 100, rotation: 0, hiddenRegions: [
+      { x: 0, y: 0, w: 1, h: 0.1 },    // top
+      { x: 0, y: 0.9, w: 1, h: 0.1 },  // bottom
+      { x: 0, y: 0, w: 0.1, h: 1 },    // left
+      { x: 0.9, y: 0, w: 0.1, h: 1 },  // right
+    ] } as any;
+    const holes = tileHoleRectsInPdf(tile, 0, 0, 100);
+
+    // No two holes overlap…
+    for (let i = 0; i < holes.length; i++)
+      for (let j = i + 1; j < holes.length; j++) {
+        const a = holes[i], b = holes[j];
+        const ov = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
+                   Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        expect(ov).toBe(0);
+      }
+    // …and their total area is the union: 10000 − the 80×80 interior = 3600.
+    expect(holes.reduce((s, h) => s + h.w * h.h, 0)).toBeCloseTo(3600, 6);
+
+    // Every corner is still inside some hole (this is what regressed), and the
+    // frame's interior is still outside every hole.
+    const covered = (x: number, y: number) =>
+      holes.some((h) => x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h);
+    for (const [x, y] of [[5, 5], [95, 5], [5, 95], [95, 95]]) expect(covered(x, y)).toBe(true);
+    expect(covered(50, 50)).toBe(false);
+  });
 });
 
 describe("tileRelocationsInPdf", () => {
@@ -182,16 +225,111 @@ describe("contentExportBounds", () => {
   });
 });
 
-describe("canVectorEmbedRotation", () => {
-  // Only an unrotated source page may use pdf-lib's vector embed — pdf-lib does
-  // not bake /Rotate, so a rotated page must use the (correctly oriented) raster.
-  test("allows vector embed only for an unrotated source page", () => {
-    expect(canVectorEmbedRotation(0)).toBe(true);
-    expect(canVectorEmbedRotation(360)).toBe(true);
-    expect(canVectorEmbedRotation(-360)).toBe(true);
-    expect(canVectorEmbedRotation(90)).toBe(false);
-    expect(canVectorEmbedRotation(180)).toBe(false);
-    expect(canVectorEmbedRotation(270)).toBe(false); // the Rose Hill case
-    expect(canVectorEmbedRotation(-90)).toBe(false);
+describe("rotatedSourcePose", () => {
+  /** The four corners of the drawn (unrotated-content) box after pdf-lib's
+   *  drawPage transform: translate to the anchor, rotate CCW by rotateDeg. */
+  const corners = (p: ReturnType<typeof rotatedSourcePose>) => {
+    const rad = (p.rotateDeg * Math.PI) / 180;
+    const c = Math.cos(rad), s = Math.sin(rad);
+    return [[0, 0], [p.width, 0], [p.width, p.height], [0, p.height]]
+      .map(([lx, ly]) => [Math.round(p.x + lx * c - ly * s), Math.round(p.y + lx * s + ly * c)])
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  };
+  const box = [[10, 20], [10, 50], [70, 20], [70, 50]]; // x 10..70, y 20..50
+
+  test("an unrotated source draws in place", () => {
+    expect(rotatedSourcePose(0, 10, 20, 60, 30)).toEqual({ x: 10, y: 20, width: 60, height: 30, rotateDeg: 0 });
+  });
+
+  test.each([90, 180, 270, -90, 450])("/Rotate %s lands exactly inside the tile box", (r) => {
+    const p = rotatedSourcePose(r, 10, 20, 60, 30);
+    expect(corners(p)).toEqual(box);
+  });
+
+  test("a quarter turn swaps the drawn width and height (the media box is portrait, the tile landscape)", () => {
+    // Belcourt / Rose Hill: 1728×2592 media box, /Rotate 270, displayed 2592×1728.
+    const p = rotatedSourcePose(270, 0, 0, 2592, 1728);
+    expect([p.width, p.height]).toEqual([1728, 2592]);
+    expect(p.rotateDeg).toBe(90);
+  });
+});
+
+
+/**
+ * A one-page PDF whose page has NO /Contents entry — the real-world "blank
+ * sheet" that made pdf-lib throw MissingPageContentsEmbeddingError from inside
+ * `save()`, long after the export's try/catch had returned. `create()` +
+ * `addPage()` alone is not enough (pdf-lib gives that page an empty content
+ * stream), so the entry is deleted outright.
+ */
+async function makeContentlessPdfBytes(): Promise<Uint8Array> {
+  const { PDFDocument, PDFName } = await import("pdf-lib");
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([200, 100]);
+  page.node.delete(PDFName.of("Contents"));
+  return doc.save();
+}
+
+/** A valid 1x1 PNG, so the raster fallback has something real to embed. */
+const ONE_PX_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+describe("embedTileSource", () => {
+  test("returns the embedded page for a normal source page", async () => {
+    const { PDFDocument } = await import("pdf-lib");
+    const src = await PDFDocument.create();
+    src.addPage([200, 100]).drawRectangle({ x: 10, y: 10, width: 50, height: 50 });
+    const sourceDoc = await PDFDocument.load(await src.save());
+
+    const out = await PDFDocument.create();
+    const embedded = await embedTileSource(out, sourceDoc, 0);
+    expect(embedded).not.toBeNull();
+    // Proves the embed really ran (and that save() therefore can't fail on it).
+    expect(embedded!.width).toBe(200);
+  });
+
+  test("returns null for a page with no /Contents, and leaves the doc saveable", async () => {
+    const { PDFDocument } = await import("pdf-lib");
+    const sourceDoc = await PDFDocument.load(await makeContentlessPdfBytes());
+
+    const out = await PDFDocument.create();
+    out.addPage([200, 100]);
+    const embedded = await embedTileSource(out, sourceDoc, 0);
+    expect(embedded).toBeNull();
+
+    // The regression: a failed embed left behind in pdf-lib's pending list makes
+    // save() re-run it and throw. It must not.
+    const bytes = await out.save();
+    expect(bytes.length).toBeGreaterThan(0);
+  });
+});
+
+describe("exportStitchToPdf with an un-embeddable source page", () => {
+  test("falls back to raster instead of aborting the whole export", async () => {
+    const { PDFDocument } = await import("pdf-lib");
+    const bad = await makeContentlessPdfBytes();
+
+    useStitchStore.setState({
+      canvasWidth: 200,
+      canvasHeight: 100,
+      cropRect: null,
+      tiles: [
+        {
+          id: "blank",
+          sourcePdfBytes: bad,
+          sourcePageIndex: 0,
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          imageDataUrl: ONE_PX_PNG,
+        },
+      ],
+    } as never);
+
+    const out = await exportStitchToPdf();
+    expect(out).not.toBeNull();
+    const reloaded = await PDFDocument.load(out!);
+    expect(reloaded.getPageCount()).toBe(1);
   });
 });

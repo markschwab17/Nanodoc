@@ -3,24 +3,50 @@
  * Toolbar + pan/zoom canvas with tiles; Add PDF modal and save/open.
  */
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStitchStore, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom, tileRasterUrl, type StitchTile, type CropRect } from "@/shared/stores/stitchStore";
 import { useCiviltakeoffContextStore } from "@/shared/stores/civiltakeoffContextStore";
 import { useCtoStitchInitialStore } from "@/shared/stores/ctoStitchInitialStore";
+import { postToCto } from "@/shared/ctoBridge";
+import { buildStitchSavedMessage } from "@/features/stitch/stitchSavedMessage";
 import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
+import { StitchContextMenu } from "@/features/stitch/StitchContextMenu";
 import { AddPdfModal } from "@/features/stitch/AddPdfModal";
-import { useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
+import { commitPlainAdd, type CommitResult } from "@/features/stitch/commitPages";
+import { parseStitchPlan } from "@/features/stitch/stitchPlan";
+import { autoAlignExplanation, TRIM_NO_BOXES_NOTE } from "@/features/stitch/addToProjectCopy";
+import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
+import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
+import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
+import { TrimCoachMark } from "@/features/stitch/TrimCoachMark";
+import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
+import { planEntriesForTiles } from "@/features/stitch/addToProjectCopy";
+import {
+  STITCH_SESSION_LOST,
+  ctoProbeUrl,
+  isStitchSessionLost,
+  stitchHandoffRecovery,
+} from "@/features/stitch/ctoSessionSource";
+import { shutdownOcr } from "@/features/stitch/autostitch/ocrService";
+import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
+import { AutoStitchAborted } from "@/features/stitch/autostitch/autoStitch";
+import { PDFRenderer } from "@/core/pdf/PDFRenderer";
+import { isTypingTarget, useStitchKeyboard } from "@/features/stitch/useStitchKeyboard";
 import { useStitchContentDelete } from "@/features/stitch/useStitchContentDelete";
 import { usePointAlignMode } from "@/features/stitch/usePointAlignMode";
 import { useScaleAlignMode } from "@/features/stitch/useScaleAlignMode";
+import { useAlignToNeighbour } from "@/features/stitch/useAlignToNeighbour";
 import { exportStitchToPdf } from "@/features/stitch/stitchExport";
+import { buildStitchManifest } from "@/features/stitch/stitchManifest";
 import { exportTrainingBundle } from "@/features/stitch/stitchTrainingExport";
 import { detectCleanupForTiles } from "@/features/stitch/cleanup/cleanupRun";
 import type { TileProposalUI } from "@/features/stitch/cleanup/CleanupReview";
-import { hitTestTileAtPoint, canvasToTileLocal } from "@/features/stitch/stitchGeometry";
+import { mergeDetected, seedProposals, trimReviewableTiles } from "@/features/stitch/cleanup/trimProposals";
+import { hitTestTileAtPoint, canvasToTileLocal, contentBounds, fitZoomFor } from "@/features/stitch/stitchGeometry";
+import { MAX_ZOOM, RULER_SIZE } from "@/features/stitch/stitchConstants";
 import type { CanvasRect } from "@/features/stitch/imageUtils";
 import { usePDF } from "@/shared/hooks/usePDF";
 import { useNotificationStore } from "@/shared/stores/notificationStore";
@@ -33,7 +59,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { FilePlus, Loader2 } from "lucide-react";
+import { AlertTriangle, FilePlus, Loader2, Sparkles, X } from "lucide-react";
 import { TourOverlay } from "@/features/tour/TourOverlay";
 import { useTourStore } from "@/shared/stores/tourStore";
 
@@ -51,9 +77,10 @@ function rectsEqual(
  *  (at the source image's resolution) — used to promote a relocated region into
  *  its own tile. Returns null if the tile has no image or the crop is empty. */
 async function cropRegionToDataUrl(tile: StitchTile, rect: CropRect): Promise<string | null> {
-  if (!tile.imageDataUrl) return null;
+  const src = tileRasterUrl(tile);
+  if (!src) return null;
   const img = new Image();
-  img.src = tile.imageDataUrl;
+  img.src = src;
   try {
     await img.decode();
   } catch {
@@ -72,6 +99,10 @@ async function cropRegionToDataUrl(tile: StitchTile, rect: CropRect): Promise<st
   return canvas.toDataURL("image/png");
 }
 
+/** Module scope on purpose: the recovery bounce below must happen at most once per page
+ *  load, and the component remounts across the navigation it performs. */
+let handoffRecoveryAttempted = false;
+
 export default function StitchView() {
   // Subscribe to the count only — tile content changes every drag frame and
   // would re-render the whole page (toolbars included) per frame.
@@ -82,48 +113,398 @@ export default function StitchView() {
   const prevTileCountRef = useRef(0);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * Zoom-to-fit: pick the zoom at which the whole composition (page rect UNION every tile,
+   * placed sheets outside the page included) fits the viewport, then centre it. It used to
+   * only centre at the CURRENT zoom, which on a plan set spilling off an 8.5×11 default left
+   * most of the sheets off screen with no obvious way back to them.
+   */
   const handleRecenter = useCallback(() => {
     const el = canvasContainerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const { canvasWidth, canvasHeight, zoomLevel, setPanOffset } = useStitchStore.getState();
-    setPanOffset({
-      x: (rect.width - canvasWidth * zoomLevel) / 2,
-      y: (rect.height - canvasHeight * zoomLevel) / 2,
+    if (!(rect.width > 0) || !(rect.height > 0)) return;
+    const state = useStitchStore.getState();
+    const bounds = contentBounds(state.tiles, state.canvasWidth, state.canvasHeight);
+    // Work in the scaled layer's own coordinates, where a canvas point sits at
+    // point + RULER_SIZE and screen = panOffset + inner * zoom. The rulers occupy
+    // inner [0, RULER_SIZE] above and left of the page, so they must be inside the fitted
+    // extent too — otherwise a fit that hugs the content clips them off the edge.
+    const innerMinX = Math.min(0, bounds.x + RULER_SIZE);
+    const innerMinY = Math.min(0, bounds.y + RULER_SIZE);
+    const innerBounds = {
+      x: innerMinX,
+      y: innerMinY,
+      width: bounds.x + bounds.width + RULER_SIZE - innerMinX,
+      height: bounds.y + bounds.height + RULER_SIZE - innerMinY,
+    };
+    const zoom = Math.min(
+      MAX_ZOOM,
+      Math.max(selectEffectiveMinZoom(state), fitZoomFor(innerBounds, rect.width, rect.height))
+    );
+    state.setZoomLevel(zoom);
+    state.setPanOffset({
+      x: rect.width / 2 - (innerBounds.x + innerBounds.width / 2) * zoom,
+      y: rect.height / 2 - (innerBounds.y + innerBounds.height / 2) * zoom,
     });
+  }, []);
+
+  /**
+   * Zoom-to-fit as soon as the viewport HAS a size.
+   *
+   * `handleRecenter` measures the container and gives up when it is 0x0, and twice in
+   * the browser the editor opened at 100% on a 4-sheet plan because that is exactly
+   * what happened: the two-frame wait after the commit fired while the CTO panel (an
+   * iframe that animates in) was still unmeasured, the fit bailed, and nothing tried
+   * again — leaving the zoom the empty-canvas fit had set on mount.
+   *
+   * So the fit RETRIES: up to `maxFrames` animation frames waiting for a measurable
+   * container, then a one-shot ResizeObserver for the case where the panel takes
+   * longer than that (a slow animation, a tab opened in the background). Returns a
+   * cancel function; calling it twice is safe.
+   */
+  const fitWhenMeasured = useCallback((maxFrames = 10) => {
+    let raf = 0;
+    let frames = 0;
+    let observer: ResizeObserver | null = null;
+    let cancelled = false;
+
+    const measured = () => {
+      const rect = canvasContainerRef.current?.getBoundingClientRect();
+      return !!rect && rect.width > 0 && rect.height > 0;
+    };
+    const stop = () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      observer?.disconnect();
+      observer = null;
+    };
+    const attempt = () => {
+      if (cancelled) return;
+      if (measured()) {
+        handleRecenter();
+        stop();
+        return;
+      }
+      if (++frames <= maxFrames) {
+        raf = requestAnimationFrame(attempt);
+        return;
+      }
+      // Out of frames and still unmeasured: wait for the size to arrive instead of
+      // spinning. One shot — the fit is a first-paint decision, not a live behaviour.
+      const el = canvasContainerRef.current;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      observer = new ResizeObserver(() => {
+        if (!measured()) return;
+        handleRecenter();
+        stop();
+      });
+      observer.observe(el);
+    };
+    raf = requestAnimationFrame(attempt);
+    return stop;
+  }, [handleRecenter]);
+
+  // Leaving stitch ends the session's worker budget: the PNG encode worker and
+  // tesseract's scheduler both survive individual commits on purpose (they are
+  // reused across them) and both rebuild lazily, so releasing them here costs
+  // the next session one spawn and frees 160-240 MB plus a worker realm now.
+  useEffect(() => () => {
+    disposeRasterEncoder();
+    void shutdownOcr();
   }, []);
 
   // Center the canvas in the viewport when first opening stitch mode
-  useEffect(() => {
-    let cancelled = false;
-    const id = requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (!cancelled) handleRecenter();
-      });
-    });
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(id);
-    };
-  }, [handleRecenter]);
+  useEffect(() => fitWhenMeasured(), [fitWhenMeasured]);
 
-  // CTO stitch preload: when opened from CTO with stitch=1, open Add PDF modal with the initial PDF
-  // so the user can choose which pages to add (instead of auto-adding all).
+  // CTO stitch preload: when opened from CTO with stitch=1, either commit the sheets
+  // straight onto the canvas (CTO sent a stitch plan) or open the Add PDF modal on the
+  // initial PDF so the user picks the pages themselves (no plan / the plan failed).
   const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
+  // Kept for the life of the stitch session (unlike ctoInitialPdf, which is consumed once the
+  // modal loads it) so "From Pursuit" can still offer the site-sheet source after the user
+  // switches tabs and loads a different project document.
+  const [sessionSourcePdf, setSessionSourcePdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
+  /** The RAW stitch plan CTO sent, kept for the whole session (the initial store
+   *  hands it over exactly once). The Add-to-project dialog reads each entry's
+   *  label and page number out of it to preview what the save will create —
+   *  see `planEntriesForTiles`. Unparsed here for the same reason the store
+   *  keeps it unparsed: only the commit path validates it against a document. */
+  const [stitchPlanRaw, setStitchPlanRaw] = useState<unknown>(null);
+  /** Sheets the last auto-align run could not place. Drives the step strip's
+   *  "· K need placing" and the coach mark; zeroed when the mark is dismissed. */
+  const [unplacedCount, setUnplacedCount] = useState(0);
+  const [alignExplanation, setAlignExplanation] = useState<string | null>(null);
+  const [coachDismissed, setCoachDismissed] = useState(false);
+  const [showAddToProject, setShowAddToProject] = useState(false);
+  /** Persistent "Add to project" failure. A toast alone left the user back on the
+   *  canvas with the dialog gone and no surviving explanation, so the reason also
+   *  stays pinned under the step strip until they retry or dismiss it. */
+  const [addToProjectError, setAddToProjectError] = useState<string | null>(null);
+  /** Non-null while a CTO stitch plan is being committed — drives the entry
+   *  overlay. `done/total` is the commit's own page progress. The plan path always
+   *  PLACES (a grid) now; aligning is the earned button's job and has its own
+   *  overlay, so there is no longer a mode to say. */
+  const [planRun, setPlanRun] = useState<{
+    done: number;
+    total: number;
+    cancelling: boolean;
+  } | null>(null);
+  /** Flipped by the overlay's Cancel button; the commit polls it between page
+   *  renders (and hands it to the solver) and throws AutoStitchAborted. */
+  const planAbortRef = useRef(false);
+  /** True when this embedded session has no handoff to work from — the iframe was
+   *  reloaded and the source PDF, which only ever lived in memory, is gone. */
+  const [sessionLost, setSessionLost] = useState(false);
+  /** Set the instant a handoff is taken, so StrictMode's second effect pass (which
+   *  finds the store already drained) does not read the first pass's work as a lost
+   *  session. */
+  const receivedInitialRef = useRef(false);
+
+  /**
+   * What an auto-align run — the earned button's, or the Add PDF modal's — leaves
+   * behind: the strip's "needs placing" count and the coach mark's explanation of WHY
+   * anything was held back. Shared so both paths describe the LAST run identically.
+   */
+  const handleAlignResult = useCallback(
+    (result: CommitResult) => {
+      setUnplacedCount(result.unalignedIds.length);
+      // Nothing to explain when the run was clean AND nothing was held back — the mark
+      // would then be pure noise on a successful align. Page numbers are 1-based.
+      const worthExplaining = result.reason && (result.reason !== "ok" || result.unalignedIds.length > 0);
+      setAlignExplanation(
+        autoAlignExplanation(
+          worthExplaining
+            ? {
+                reason: result.reason!,
+                pagesWithoutRefs: (result.pagesWithoutRefs ?? []).map((i) => i + 1),
+                skipped: (result.skipped ?? []).map((s) => ({ pageNumber: s.pageIndex + 1, role: s.role })),
+                worstAlongUncertaintyFt: result.worstAlongUncertaintyFt,
+                // Without the SOURCE the copy cannot tell a measured slide from the
+                // geometric bound, and would read "up to 720 ft" of an unknown.
+                worstAlongUncertaintySource: result.worstAlongUncertaintySource,
+                // From the commit, which knows which pages it actually PLACED —
+                // subtracting the anchored set from the whole plan named pages the run
+                // never touched as "meeting the matchline".
+                alongUnresolvedPages: result.alongUnresolvedPages?.map((i) => i + 1),
+              }
+            : null,
+        ),
+      );
+      setCoachDismissed(false);
+      if (result.message) {
+        useNotificationStore
+          .getState()
+          .showNotification(result.message, result.unalignedIds.length > 0 ? "info" : "success");
+      }
+      fitWhenMeasured();
+    },
+    [fitWhenMeasured],
+  );
+
+  /** The background feasibility check behind the step strip's Auto-align offer. */
+  const earned = useEarnedAutoAlign({
+    onAligned: handleAlignResult,
+    onError: (message) => useNotificationStore.getState().showNotification(message, "error"),
+  });
+  const earnedCheck = earned.check;
+
+  /** The revamped manual align. Owns its own overlay, loupe and keyboard. */
+  const alignNeighbour = useAlignToNeighbour();
+  const alignNeighbourExit = alignNeighbour.exit;
+  /** Read by the select-all listener, which is installed once. */
+  /** The navigate function, in a ref: the handoff effect runs once on mount and must
+   *  not re-run because a router hook re-rendered. */
+  const navigateRef = useRef<ReturnType<typeof useNavigate> | null>(null);
+  const alignNeighbourActiveRef = useRef(alignNeighbour.active);
+  alignNeighbourActiveRef.current = alignNeighbour.active;
+  const earnedReset = earned.reset;
   useEffect(() => {
     const ctx = useCiviltakeoffContextStore.getState().getContext();
     const initial = useCtoStitchInitialStore.getState().takeInitial();
-    if (ctx && initial) {
-      setCtoInitialPdf({ pdfBytes: initial.pdfBytes, fileName: initial.fileName });
-      setShowAddPdf(true);
+    if (!ctx || !initial) {
+      const tiles = useStitchStore.getState().tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+      const lost = isStitchSessionLost({
+        embed: !!ctx?.embed,
+        hasInitial: receivedInitialRef.current,
+        tileCount: tiles.length,
+        busy: false,
+      });
+      // Nothing was handed over — but the URL may still say WHICH document this was.
+      // The handoff only ever lived in memory, so a reload lost it; `/view` owns the
+      // fetch, so bounce back through it once and it will hand over and return here.
+      // Decided from the URL and the empty canvas ALONE: after a hard reload the CTO
+      // context is gone too (it is in-memory, written only by `/view`), so `lost` —
+      // which needs `embed` — is false exactly when the bounce is needed. `/view`
+      // rebuilds that context from the same query parameters.
+      // Once per page load, so a fetch that fails cannot become a redirect loop.
+      const recovery = stitchHandoffRecovery(window.location.search);
+      if (!receivedInitialRef.current && tiles.length === 0 && recovery && !handoffRecoveryAttempted) {
+        handoffRecoveryAttempted = true;
+        navigateRef.current?.({ pathname: "/view", search: recovery.search }, { replace: true });
+        return;
+      }
+      // Truly lost: no handoff, nothing on the canvas, and nothing on the URL to
+      // recover from. Say what happened rather than showing the standalone hero, which
+      // would invite a session CTO can never save back.
+      setSessionLost(lost);
+      return;
     }
-  }, []);
+    receivedInitialRef.current = true;
+    setSessionLost(false);
+    const source = { pdfBytes: initial.pdfBytes, fileName: initial.fileName };
+    setSessionSourcePdf(source);
+    // Retained even when the plan turns out to be unusable and the picker opens
+    // instead: `planEntriesForTiles` re-validates it and yields nothing for a
+    // plan it can't read, so the dialog degrades to its count-only copy.
+    setStitchPlanRaw(initial.plan ?? null);
+
+    // No plan — an older CTO build, or a source it can't describe. Unchanged
+    // behaviour: the page picker opens on the source PDF and the user chooses.
+    if (initial.plan == null) {
+      setCtoInitialPdf(source);
+      setShowAddPdf(true);
+      return;
+    }
+
+    // Re-entry guard. Browser Back inside the CTO iframe re-runs CiviltakeoffView
+    // with the same token, which re-seeds the store and remounts this view — but
+    // the stitch store outlives that, so committing again would duplicate every
+    // sheet on top of the ones already placed. Sheets on the canvas means this
+    // plan has already run: keep the canvas exactly as the user left it (the
+    // session source is set above, so "From Pursuit" still offers it).
+    const alreadyStitched = useStitchStore
+      .getState()
+      .tiles.some((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+    if (alreadyStitched) return;
+
+    /** Hand the source to the picker — exactly what a planless open does. Used
+     *  for an unusable plan, for a cancelled run, and for a commit that threw. */
+    const fallBackToPicker = () => {
+      setPlanRun(null);
+      setCtoInitialPdf(source);
+      setShowAddPdf(true);
+    };
+
+    // Deliberately NO cancellation token / cleanup: under StrictMode this effect
+    // mounts twice, and a cleanup that aborted the first run would abort the ONLY
+    // run — the second pass finds `takeInitial()` already drained and returns early
+    // (which is also what stops a double commit). A real unmount mid-run is safe
+    // instead: the tiles land in the global stitch store either way, the setState
+    // calls below are no-ops on an unmounted tree, and `handleRecenter` bails when
+    // its container ref is gone.
+
+    (async () => {
+      let doc: any = null;
+      let renderer: PDFRenderer | null = null;
+      try {
+        // Inside the try: a chunk-load failure here is as recoverable as any
+        // other — toast, then the picker.
+        const mupdf = await import("mupdf").then((m) => m.default);
+        // ONE document for the whole run: the plan is validated against this
+        // doc's real page count and the commit renders from the same handle.
+        doc = mupdf.Document.openDocument(source.pdfBytes, "application/pdf");
+        const parsed = parseStitchPlan(initial.plan, doc.countPages());
+        if (!parsed) {
+          fallBackToPicker();
+          return;
+        }
+        planAbortRef.current = false;
+        setPlanRun({ done: 0, total: parsed.pageIndices.length, cancelling: false });
+        renderer = new PDFRenderer(mupdf);
+        const input = {
+          mupdf,
+          doc,
+          pdfBytes: source.pdfBytes,
+          fileName: source.fileName || undefined,
+          selected: parsed.pageIndices,
+          pageScales: parsed.pageScales,
+          uniformScale: parsed.uniformScale,
+          // The Add PDF modal's own default, so a plan-driven open and a
+          // hand-picked one produce identical tiles.
+          removeWhiteBackground: true,
+          renderer,
+          // Monotonic: the callback is fed from more than one phase, so a raw
+          // assignment would visibly restart the counter halfway through.
+          onProgress: (done: number, total: number) =>
+            setPlanRun((p) => (p ? { ...p, done: Math.max(p.done, done), total } : p)),
+          shouldAbort: () => planAbortRef.current,
+        };
+        // ALWAYS the grid, whatever the plan says. Auto-align is EARNED: the sheets
+        // have to be on screen and draggable within a frame of the commit, and the
+        // probe that decides whether they CAN be aligned runs behind them. A legacy
+        // plan carrying `mode: 'auto'` takes this path too — a plan is not allowed to
+        // skip the gate, only the gate can.
+        const result = await commitPlainAdd(input);
+        setPlanRun(null);
+        // A grid placement holds nothing back and has nothing to explain; the coach
+        // mark speaks only for an ALIGN run (see handleAlignResult).
+        setUnplacedCount(0);
+        setAlignExplanation(null);
+        useNotificationStore
+          .getState()
+          .showNotification(`Placed ${result.added} sheet${result.added === 1 ? "" : "s"}.`, "success");
+        // A plan commit always re-fits the paper to the sheets it just placed — that is
+        // the whole point of the plan path, and it is what stops a plan set from landing
+        // mostly off an 8.5×11 default. (commitPages already does this when the user has
+        // not chosen a size; this call covers the case where they have. It is idempotent.)
+        useStitchStore.getState().fitCanvasToTiles();
+        // The first paint of a plan open MUST be zoom-to-fit. The tiles are already in
+        // the store (the fit reads them from there, not from the DOM), so the only
+        // thing to wait for is a measurable viewport — which in the CTO panel can be a
+        // few frames away. `fitWhenMeasured` waits for it instead of giving up.
+        fitWhenMeasured();
+        // Start the background check. It reads the sheets straight off the canvas and
+        // runs in the probe worker, so the canvas above stays interactive the whole
+        // time; the strip shows a chip and, if the check clears the gate, an Auto-align
+        // button. All the check needs from HERE is what the canvas cannot tell it:
+        // CTO's sheet identity for these pages. Only in the embedded takeoff flow — the
+        // step strip is the only surface the offer has, and a probe nobody can see is
+        // pure cost.
+        if (!ctx.embed) return;
+        earnedCheck({
+          pageCodes: parsed.pageCodes,
+          removeWhiteBackground: true,
+          // The verdict CTO's droplet already computed for this plan, if any, plus
+          // what binds it: the RAW plan (hashed, un-reserialised) and where to re-read
+          // a row that was still computing when this window opened. The check uses it
+          // only when engine build, plan hash and page set all match; otherwise it
+          // probes in the browser exactly as it always has.
+          serverProbe: initial.probe ?? null,
+          plan: initial.plan,
+          probeUrl: ctoProbeUrl(ctx),
+        });
+      } catch (e) {
+        // Cancelled by the user: the commit threw before writing anything, so
+        // the canvas is untouched. No error copy — just hand them the picker.
+        if (e instanceof AutoStitchAborted) {
+          fallBackToPicker();
+          return;
+        }
+        console.error(e);
+        useNotificationStore
+          .getState()
+          .showNotification("Could not place the sheets automatically — pick them below.", "error");
+        fallBackToPicker();
+      } finally {
+        renderer?.dispose();
+        // NO shutdownOcr here any more: the grid placement never OCRs, and the
+        // background check started just above is about to need the scheduler. The
+        // check hands tesseract back itself when it finishes or is superseded.
+        try {
+          doc?.destroy?.();
+        } catch {
+          // already freed
+        }
+      }
+    })();
+  }, [fitWhenMeasured, earnedCheck]);
 
   const navigate = useNavigate();
+  navigateRef.current = navigate;
   const { loadPDF } = usePDF();
   const { showNotification } = useNotificationStore();
-
-  useStitchKeyboard();
 
   const [showAddPdf, setShowAddPdf] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
@@ -141,6 +522,33 @@ export default function StitchView() {
   const [cleanupProposals, setCleanupProposals] = useState<TileProposalUI[]>([]);
   const [cleanupBusy, setCleanupBusy] = useState(false);
 
+  // While Align to neighbour is up the moving sheet is the selection, so Delete would
+  // delete the sheet being aligned and Ctrl+A would select all of them out from under
+  // the mode. Nudges stay — they are the mode's own fine adjustment.
+  // While clean-up review is open, Delete/Backspace belongs to the selected
+  // BOX (CleanupReview owns that key) — not to the canvas selection.
+  useStitchKeyboard({ selectionEditsDisabled: alignNeighbour.active || cleanupReviewMode });
+
+  // --- Step 3 "Trim title blocks" (takeoff step strip only) ---
+  // Coach mark: shown the first time cleanup is entered FROM THE STEP, once per
+  // session (not persisted) — trimStepEnteredRef marks intent at click time,
+  // trimCoachShownRef guards it firing more than once.
+  const trimStepEnteredRef = useRef(false);
+  const trimCoachShownRef = useRef(false);
+  const [showTrimCoach, setShowTrimCoach] = useState(false);
+  // "No title blocks found" fallback: a one-line note in the strip plus a ring
+  // on the toolbar's Delete content (eraser) button, both live for 6s.
+  const [trimNote, setTrimNote] = useState<string | null>(null);
+  const [highlightEraser, setHighlightEraser] = useState(false);
+  const trimNoteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (trimNoteTimeoutRef.current) clearTimeout(trimNoteTimeoutRef.current);
+  }, []);
+  /** Regions already hidden across every sheet — step 3's "done" count. */
+  const hiddenRegionCount = useStitchStore((s) =>
+    s.tiles.reduce((sum, t) => sum + (t.hiddenRegions?.length ?? 0), 0)
+  );
+
   /** Leave clean-up review (no-op re-render when not in review). */
   const exitCleanupReview = useCallback(() => {
     setCleanupReviewMode(false);
@@ -151,16 +559,18 @@ export default function StitchView() {
   const handleContentDeleteModeChange = useCallback(
     (v: boolean | ((prev: boolean) => boolean)) => {
       exitCleanupReview();
+      alignNeighbourExit();
       setContentDeleteMode(v);
     },
-    [exitCleanupReview]
+    [exitCleanupReview, alignNeighbourExit]
   );
   const handleDeleteElementModeChange = useCallback(
     (v: boolean | ((prev: boolean) => boolean)) => {
       exitCleanupReview();
+      alignNeighbourExit();
       setDeleteElementMode(v);
     },
-    [exitCleanupReview]
+    [exitCleanupReview, alignNeighbourExit]
   );
 
   const ctoContext = useCiviltakeoffContextStore((s) => s.context);
@@ -201,13 +611,44 @@ export default function StitchView() {
 
   const handleClearSession = useCallback(() => {
     useStitchStore.getState().reset();
+    disposeRasterEncoder();
     setContentDeleteMode(false);
     setDeleteElementMode(false);
     setPanMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    alignNeighbourExit();
     exitCleanupReview();
-  }, [pointAlign, scaleAlign, exitCleanupReview]);
+    // The canvas the offer described is gone.
+    earnedReset();
+  }, [pointAlign, scaleAlign, exitCleanupReview, alignNeighbourExit, earnedReset]);
+
+  /** Every auto-align run reports here, whether it came from the CTO plan or
+   *  from the Add PDF modal, so the strip and the coach mark always describe the
+   *  LAST run rather than only the one that opened the session. */
+  const handleAutoAlignResult = useCallback((unalignedCount: number) => {
+    setUnplacedCount(unalignedCount);
+    setCoachDismissed(false);
+    // The modal aligned these sheets itself, so whatever the strip was offering is
+    // spent — it described a canvas that no longer exists.
+    earnedReset();
+  }, [earnedReset]);
+
+  /**
+   * A PLAIN add from the Add PDF modal. The new sheets are on the canvas and nothing
+   * has decided whether they can be auto-aligned, so re-probe: the strip's offer, if
+   * any, was about the sheets that were there before. Only in takeoff mode — the
+   * strip is the only place the offer appears.
+   */
+  const handlePagesAdded = useCallback(() => {
+    if (!useCiviltakeoffContextStore.getState().context?.embed) return;
+    setUnplacedCount(0);
+    setAlignExplanation(null);
+    // Over the WHOLE canvas, plan sheets and new ones together. Probing only the
+    // pages just added would offer a button that lays a second composite at the
+    // origin, on top of the grid the plan left behind.
+    earnedCheck();
+  }, [earnedCheck]);
 
   const handlePointAlignModeChange = (active: boolean) => {
     if (active) {
@@ -215,9 +656,25 @@ export default function StitchView() {
       setDeleteElementMode(false);
       setPanMode(false);
       scaleAlign.setScaleAlignMode(false);
+      alignNeighbourExit();
       exitCleanupReview();
     }
     pointAlign.setPointAlignMode(active);
+  };
+
+  /** "Align to neighbour" is a mode like any other: entering it clears the rest. */
+  const handleAlignNeighbourModeChange = (active: boolean) => {
+    if (!active) {
+      alignNeighbourExit();
+      return;
+    }
+    setContentDeleteMode(false);
+    setDeleteElementMode(false);
+    setPanMode(false);
+    pointAlign.setPointAlignMode(false);
+    scaleAlign.setScaleAlignMode(false);
+    exitCleanupReview();
+    alignNeighbour.enter();
   };
 
   const handleScaleAlignModeChange = (active: boolean) => {
@@ -226,6 +683,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       setPanMode(false);
       pointAlign.setPointAlignMode(false);
+      alignNeighbourExit();
       exitCleanupReview();
     }
     scaleAlign.setScaleAlignMode(active);
@@ -237,6 +695,7 @@ export default function StitchView() {
       setDeleteElementMode(false);
       pointAlign.setPointAlignMode(false);
       scaleAlign.setScaleAlignMode(false);
+      alignNeighbourExit();
       exitCleanupReview();
     }
     setPanMode(active);
@@ -248,19 +707,18 @@ export default function StitchView() {
     setDeleteElementMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    alignNeighbourExit();
     exitCleanupReview();
     setSelectedTileIds(useStitchStore.getState().tiles.map((t) => t.id));
-  }, [setSelectedTileIds, exitCleanupReview]);
+  }, [setSelectedTileIds, exitCleanupReview, alignNeighbourExit]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
-        const target = document.activeElement as HTMLElement | null;
-        const inInput =
-          target?.tagName === "INPUT" ||
-          target?.tagName === "TEXTAREA" ||
-          target?.isContentEditable === true;
-        if (inInput) return;
+        if (isTypingTarget()) return;
+        // Select-all would drop the mode's own selection (the sheet being moved) and
+        // switch tools out from under it.
+        if (alignNeighbourActiveRef.current) return;
         e.preventDefault();
         e.stopPropagation();
         handleSelectToolActivate();
@@ -270,78 +728,126 @@ export default function StitchView() {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [handleSelectToolActivate]);
 
-  // --- Clean-Composite (hide title blocks / match margins) ---
-  const handleCleanup = useCallback(async () => {
-    // Toolbar button toggles: a second click while reviewing cancels.
-    if (cleanupReviewMode) {
-      exitCleanupReview();
-      return;
-    }
-    // Only sheets with a PDF source get analyzed — skip scale stamps, rotated
-    // tiles (v1), and promoted note tiles (no source, would fail to capture).
-    const reviewable = useStitchStore
-      .getState()
-      .tiles.filter((t) => !t.isScaleStamp && !(t.rotation ?? 0) && t.sourcePdfBytes.length > 0);
-    if (reviewable.length === 0) {
-      showNotification("Add at least one page to the canvas first.", "info");
-      return;
-    }
-    // Clean-up is its own mode — turn the other tools off.
+  // --- Trim (hide title blocks / match margins) ---
+  // Two parts, deliberately separate — Mark: "it is a 2-part tool, either AI or
+  // manual", and one sparkle button implied the whole thing was AI. Trim opens
+  // the review; Auto-detect is a second button that folds the detector's
+  // findings into whatever is already there.
+
+  /** Auto-detect found nothing: say so in the strip for a few seconds and ring
+   *  the manual eraser, rather than leaving an empty review with no next move. */
+  const showNoBoxesNote = useCallback(() => {
+    setTrimNote(TRIM_NO_BOXES_NOTE);
+    setHighlightEraser(true);
+    if (trimNoteTimeoutRef.current) clearTimeout(trimNoteTimeoutRef.current);
+    trimNoteTimeoutRef.current = setTimeout(() => {
+      setTrimNote(null);
+      setHighlightEraser(false);
+    }, 6000);
+  }, []);
+
+  /** Put the other tools away — Trim owns the canvas while it is up. */
+  const enterTrimMode = useCallback(() => {
     setContentDeleteMode(false);
     setDeleteElementMode(false);
     setPanMode(false);
     pointAlign.setPointAlignMode(false);
     scaleAlign.setScaleAlignMode(false);
+    alignNeighbourExit();
     setSelectedTileIds([]);
+  }, [pointAlign, scaleAlign, alignNeighbourExit, setSelectedTileIds]);
+
+  /** Open the review with no detection at all: the boxes already on the sheets,
+   *  and a canvas you can draw more on. Returns whether the review is open —
+   *  false only when there is nothing to trim. Callers guard the already-open
+   *  case (the toolbar disables Trim, the step pill no-ops), so re-opening is a
+   *  no-op here rather than a cancel: silently discarding a review's boxes is
+   *  not something a button that says "Trim" should ever do. */
+  const handleTrimOpen = useCallback((): boolean => {
+    if (cleanupReviewMode) return true;
+    const reviewable = trimReviewableTiles(useStitchStore.getState().tiles);
+    if (reviewable.length === 0) {
+      showNotification("Add at least one page to the canvas first.", "info");
+      return false;
+    }
+    enterTrimMode();
+    setCleanupProposals(seedProposals(reviewable));
+    setCleanupReviewMode(true);
+    return true;
+  }, [cleanupReviewMode, showNotification, enterTrimMode]);
+
+  // Returns the freshly-DETECTED region count (0 means the detector found
+  // nothing — the caller decides what to say about that), or null when the run
+  // never got that far (nothing reviewable, or it threw).
+  const handleAutoDetect = useCallback(async (): Promise<number | null> => {
+    const reviewable = trimReviewableTiles(useStitchStore.getState().tiles);
+    if (reviewable.length === 0) {
+      showNotification("Add at least one page to the canvas first.", "info");
+      return null;
+    }
+    // Auto-detect can be pressed from the toolbar with no review open, in which
+    // case it opens one — seeded first, so the sheets' existing boxes are not
+    // lost when the detections are merged in. The other tools are only put away
+    // once the detector has actually come back: a run that throws should leave
+    // the user's pan/selection exactly as it found them.
+    const wasOpen = cleanupReviewMode;
     setCleanupBusy(true);
     showNotification("Analyzing sheets for title blocks and match margins…", "info");
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
-      const proposals = await detectCleanupForTiles(mupdf, reviewable);
-      // Fresh detections default to enabled — the user confirms by Applying,
-      // toggling off any false positives. Merge in each tile's already-hidden
-      // regions so a re-run never drops prior work (a manual box, or regions
-      // applied from an earlier Clean-up pass), but skip any existing rect
-      // that a fresh detection already covers so re-running doesn't duplicate
-      // an already-applied region.
-      const currentTiles = useStitchStore.getState().tiles;
-      const ui: TileProposalUI[] = proposals.map((p) => {
-        const fresh = p.regions.map((r) => ({ ...r, enabled: true }));
-        const tile = currentTiles.find((t) => t.id === p.tileId);
-        const existing = (tile?.hiddenRegions ?? [])
-          .filter((rect) => !fresh.some((f) => rectsEqual([f.rect], [rect])))
-          .map((rect) => ({
-            rect: { ...rect },
-            kind: "manual" as const,
-            confidence: "high" as const,
-            enabled: true,
-          }));
-        // Carry forward already-relocated regions so a re-run + Apply doesn't wipe them.
-        const relocated = (tile?.relocatedRegions ?? []).map((r) => ({
-          rect: { ...r.rect },
-          kind: "manual" as const,
-          confidence: "high" as const,
-          enabled: true,
-          move: { dx: r.dx, dy: r.dy },
-        }));
-        return { tileId: p.tileId, regions: [...fresh, ...existing, ...relocated] };
-      });
-      const freshTotal = proposals.reduce((s, p) => s + p.regions.length, 0);
-      setCleanupProposals(ui);
+      const detected = await detectCleanupForTiles(mupdf, reviewable);
+      if (!wasOpen) enterTrimMode();
+      setCleanupProposals((prev) =>
+        mergeDetected(wasOpen ? prev : seedProposals(reviewable), detected)
+      );
       setCleanupReviewMode(true);
+      const freshTotal = detected.reduce((s, p) => s + p.regions.length, 0);
+      if (freshTotal === 0) showNoBoxesNote();
       showNotification(
         freshTotal > 0
-          ? `Found ${freshTotal} region${freshTotal === 1 ? "" : "s"} to clean up. Toggle any off, draw a box to add, then Apply.`
-          : "No title blocks or match margins detected. Draw a box to hide a region manually, then Apply.",
+          ? `Auto-detect added ${freshTotal} box${freshTotal === 1 ? "" : "es"}. Set any to Keep, draw more by hand, then Apply.`
+          : "No title blocks or match margins detected. Draw a box to hide an area, then Apply.",
         "info"
       );
+      return freshTotal;
     } catch (e) {
       console.error(e);
-      showNotification("Clean up couldn't analyze the sheets.", "error");
+      showNotification("Auto-detect couldn't analyze the sheets.", "error");
+      return null;
     } finally {
       setCleanupBusy(false);
     }
-  }, [cleanupReviewMode, exitCleanupReview, showNotification, pointAlign, scaleAlign, setSelectedTileIds]);
+  }, [cleanupReviewMode, showNotification, enterTrimMode, showNoBoxesNote]);
+
+  // Step 3's own entry point. The two toolbar buttons are deliberately separate,
+  // but the STEP stays one click: it opens Trim and runs Auto-detect for you,
+  // plus the coach mark (first entry from the step, this session).
+  const handleTrimStepClick = useCallback(() => {
+    // A click while already reviewing is a NO-OP — handleTrimOpen's own toggle
+    // would otherwise read it as "cancel review", which is not what clicking a
+    // step pill that reads "reviewing" should do. Bail before touching
+    // trimStepEnteredRef so a no-op click can't leave it armed for some later,
+    // unrelated toolbar-opened review to wrongly claim as "from the step".
+    if (cleanupReviewMode) return;
+    trimStepEnteredRef.current = true;
+    if (!handleTrimOpen()) return;
+    // handleAutoDetect raises the "no title blocks found" note itself.
+    void handleAutoDetect();
+  }, [cleanupReviewMode, handleTrimOpen, handleAutoDetect]);
+
+  // The coach mark fires once the review overlay actually opens as a result of
+  // that step click — not on every re-open, and not for a toolbar-triggered run.
+  // The "entered from step" flag is consumed on the very next open either way,
+  // so a step click that finds nothing reviewable doesn't misattribute some
+  // later, unrelated toolbar-triggered open.
+  useEffect(() => {
+    if (!cleanupReviewMode || !trimStepEnteredRef.current) return;
+    trimStepEnteredRef.current = false;
+    if (!trimCoachShownRef.current) {
+      trimCoachShownRef.current = true;
+      setShowTrimCoach(true);
+    }
+  }, [cleanupReviewMode]);
 
   const handleToggleCleanupRegion = useCallback((tileId: string, index: number) => {
     setCleanupProposals((prev) =>
@@ -481,7 +987,7 @@ export default function StitchView() {
     const parts: string[] = [];
     if (hiddenTotal) parts.push(`hid ${hiddenTotal}`);
     if (movedTotal) parts.push(`relocated ${movedTotal} as movable ${movedTotal === 1 ? "object" : "objects"}`);
-    showNotification(parts.length ? `Clean up: ${parts.join(" · ")}.` : "No changes applied.", "success");
+    showNotification(parts.length ? `Trim: ${parts.join(" · ")}.` : "No changes applied.", "success");
   }, [cleanupProposals, showNotification]);
 
   // Escape cancels clean-up review.
@@ -554,12 +1060,25 @@ export default function StitchView() {
     [loadPDF, navigate, showNotification]
   );
 
+  const handleCancel = useCallback(() => {
+    const ctx = useCiviltakeoffContextStore.getState().getContext();
+    postToCto({ type: "nanodoc-stitch-cancel" }, ctx?.api_origin);
+  }, []);
+
   const handleSaveToCto = useCallback(() => {
     if (tileCount === 0) {
       showNotification("Add at least one page to the canvas first.", "info");
       return;
     }
     const ctx = useCiviltakeoffContextStore.getState().getContext();
+    // Takeoff-v2 mode has exactly one destination — a new project page — so it
+    // skips the where-to-save dialog and confirms WHAT will be created instead.
+    if (ctx?.embed) {
+      // Re-entering the flow retires the previous failure notice.
+      setAddToProjectError(null);
+      setShowAddToProject(true);
+      return;
+    }
     const defaultName = ctx?.project_name?.trim()
       ? `${ctx.project_name.trim()} - Stitched`
       : "Stitched";
@@ -571,16 +1090,16 @@ export default function StitchView() {
     async (
       destination: "overwrite" | "new_file" | "project_page",
       displayName?: string
-    ) => {
+    ): Promise<{ ok: boolean; message?: string }> => {
       const ctx = useCiviltakeoffContextStore.getState().getContext();
-      if (!ctx) return;
+      if (!ctx) return { ok: false, message: "Not connected to Pursuit." };
       setShowSaveToCtoDialog(false);
       setIsSaving(true);
       try {
         const buffer = await exportStitchToPdf();
         if (!buffer) {
           showNotification("Export failed.", "error");
-          return;
+          return { ok: false, message: "Export failed." };
         }
         const copy = new Uint8Array(buffer.length);
         copy.set(buffer);
@@ -592,6 +1111,10 @@ export default function StitchView() {
         if (destination === "new_file" && displayName?.trim()) {
           formData.append("display_name", displayName.trim());
         }
+        const manifest = buildStitchManifest();
+        if (destination === "project_page") {
+          formData.append("stitch_manifest", JSON.stringify(manifest));
+        }
         const res = await fetch(`${ctx.api_origin}/api/nanodoc/save-pdf`, {
           method: "POST",
           body: formData,
@@ -600,23 +1123,22 @@ export default function StitchView() {
           const text = await res.text();
           throw new Error(text || `Save failed (${res.status})`);
         }
-        showNotification("Saved to Civiltakeoff.", "success");
-        if (typeof window !== "undefined" && window.opener) {
-          try {
-            window.opener.postMessage(
-              { type: "nanodoc-stitch-saved", success: true },
-              ctx.api_origin
-            );
-          } catch {
-            // ignore
-          }
-        }
+        const resultJson = await res.json().catch(() => null);
+        showNotification("Saved to Pursuit.", "success");
+        // Everything CTO is told about this save comes out of that response —
+        // `pageUuid` to refresh onto, and `documentFileId` when the server also filed
+        // the stitched PDF in the project's Documents. See `buildStitchSavedMessage`.
+        postToCto(
+          buildStitchSavedMessage({ destination, manifest, response: resultJson }),
+          ctx.api_origin
+        );
+        return { ok: true };
       } catch (e) {
         console.error(e);
-        showNotification(
-          e instanceof Error ? e.message : "Failed to save to Civiltakeoff.",
-          "error"
-        );
+        const message =
+          e instanceof Error && e.message ? e.message : "Failed to save to Pursuit.";
+        showNotification(message, "error");
+        return { ok: false, message };
       } finally {
         setIsSaving(false);
       }
@@ -650,9 +1172,106 @@ export default function StitchView() {
   };
 
   const cropRect = useStitchStore((s) => s.cropRect);
+  const referenceScaleFeetPerInch = useStitchStore((s) => s.referenceScaleFeetPerInch);
+  const compositionScaleFactor = useStitchStore((s) => s.compositionScaleFactor);
+
+  /** Takeoff-v2 mode: this view is the middle step of CTO's site-sheet builder
+   *  rather than a standalone stitch session. */
+  const takeoffMode = !!ctoContext?.embed;
+
+  /** SHEETS on the canvas — what the user counts, and what CTO's manifest counts
+   *  (`buildStitchManifest` uses this exact filter). Scale stamps and promoted
+   *  clean-up crops carry `sourcePageIndex === -1` and are not sheets, so the
+   *  raw tile count would over-report and would keep "Add to project" live on a
+   *  canvas holding nothing but a stamp. `tileCount` is the trigger: the
+   *  filtered count can only move when the tile array does. */
+  const sheetTileCount = useMemo(
+    () => useStitchStore.getState().tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp).length,
+    [tileCount]
+  );
+
+  /** The scale the composed sheet actually reads at. Tile poses are POST-
+   *  composition while `referenceScaleFeetPerInch` is the raw as-imported value,
+   *  so a composite squeezed to 0.5 shows 1"=20' as 1"=40' — quoting the raw
+   *  number here would contradict the sheet the user is about to create. Same
+   *  derivation and rounding as the toolbar's "Adjusted 1"=" field. */
+  const effectiveScaleFeetPerInch = useMemo(() => {
+    if (referenceScaleFeetPerInch == null) return null;
+    const factor =
+      Number.isFinite(compositionScaleFactor) && compositionScaleFactor > 0 ? compositionScaleFactor : 1;
+    const effective = Math.round(referenceScaleFeetPerInch / factor);
+    return Number.isFinite(effective) && effective > 0 ? effective : null;
+  }, [referenceScaleFeetPerInch, compositionScaleFactor]);
+
+  /** What the Add-to-project dialog previews. Read straight from the store (not
+   *  a subscription) and only while the dialog is open: the tiles change on
+   *  every drag frame, and none of this needs to follow them — it is a snapshot
+   *  of the moment the user asked to save. */
+  const addToProjectSummary = useMemo(() => {
+    const empty = { labels: [] as (string | null)[], hiddenPageNumbers: [] as number[] };
+    if (!showAddToProject) return empty;
+    const sheets = useStitchStore
+      .getState()
+      .tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+    // Only the plan's OWN sheets are described by the plan — a page the user
+    // added later from another PDF shares nothing but an index with entry i.
+    const entries = planEntriesForTiles(stitchPlanRaw, sheets, sessionSourcePdf?.fileName);
+    const takeoffEntries = entries.filter((e) => e.kind === "takeoff");
+    return {
+      labels: takeoffEntries.map((e) => e.label),
+      hiddenPageNumbers: takeoffEntries
+        .map((e) => e.pageNumber)
+        .filter((n): n is number => n != null),
+    };
+    // tileCount: a sheet added or removed while the dialog is open must change
+    // the preview.
+  }, [showAddToProject, stitchPlanRaw, sessionSourcePdf, tileCount]);
 
   return (
     <div className="flex flex-col h-screen bg-background">
+      {takeoffMode && (
+        <TakeoffModeStrip
+          sheetCount={sheetTileCount}
+          unplacedCount={unplacedCount}
+          canAdd={sheetTileCount > 0 && !isSaving}
+          onAddToProject={handleSaveToCto}
+          autoAlign={{
+            status: earned.status,
+            sheets: earned.sheets,
+            reason: earned.reason,
+            detail: earned.detail,
+            onRun: () => void earned.run(),
+            onRecheck: earned.recheck,
+          }}
+          trimState={{
+            tileCount: sheetTileCount,
+            hiddenCount: hiddenRegionCount,
+            cleanupActive: cleanupReviewMode,
+            cleanupBusy,
+          }}
+          onTrim={handleTrimStepClick}
+          trimNote={trimNote}
+        />
+      )}
+      {takeoffMode && addToProjectError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 shrink-0 px-4 py-2 border-b border-destructive/30 bg-destructive/10 text-destructive text-xs"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+          <span className="flex-1 leading-relaxed">
+            Couldn't add to project: {addToProjectError}. Fix the sheets and try again.
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            className="shrink-0 opacity-70 hover:opacity-100"
+            onClick={() => setAddToProjectError(null)}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
       <StitchToolbar
         onAddPdf={() => setShowAddPdf(true)}
         hasTiles={tileCount > 0}
@@ -669,6 +1288,8 @@ export default function StitchView() {
         showSaveToCto={!!ctoContext}
         onSaveToCto={handleSaveToCto}
         cropRect={cropRect}
+        alignNeighbourMode={alignNeighbour.active}
+        onAlignNeighbourModeChange={handleAlignNeighbourModeChange}
         pointAlignMode={pointAlign.pointAlignMode}
         canEnterPointAlign={pointAlign.canEnterPointAlign}
         onPointAlignModeChange={handlePointAlignModeChange}
@@ -683,31 +1304,66 @@ export default function StitchView() {
         onPanModeChange={handlePanModeChange}
         onSelectToolActivate={handleSelectToolActivate}
         onClearSession={handleClearSession}
-        onCleanup={handleCleanup}
+        onTrimOpen={handleTrimOpen}
+        onAutoDetect={() => { void handleAutoDetect(); }}
         cleanupActive={cleanupReviewMode}
         cleanupBusy={cleanupBusy}
+        highlightDeleteContent={highlightEraser}
+        embed={!!ctoContext?.embed}
+        onCancel={handleCancel}
+        takeoffMode={takeoffMode}
       />
       <main className="flex-1 min-h-0 overflow-hidden outline-none relative" tabIndex={0}>
-        {tileCount === 0 && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-muted/50">
-            <FilePlus className="h-16 w-16 text-muted-foreground mb-4" />
-            <h2 className="text-2xl font-bold mb-2 text-foreground">Stitch PDFs Together</h2>
-            <p className="text-sm text-muted-foreground mb-6 text-center max-w-md">
-              Arrange multiple PDF pages onto one canvas — remove white backgrounds,
-              resize, rotate, and export as a single PDF. Get started by selecting
-              a PDF and choosing the pages you want to stitch.
-            </p>
-            <Button
-              size="lg"
-              className="h-14 px-8 text-lg gap-3 shadow-lg"
-              onClick={() => setShowAddPdf(true)}
-              data-tour="stitch-add-pdf"
-            >
-              <FilePlus className="h-7 w-7" />
-              Add PDF
-            </Button>
+        {tileCount === 0 && sessionLost && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-muted/50 px-6">
+            <div className="max-w-md rounded-lg border bg-popover px-5 py-4 text-center text-popover-foreground shadow-lg">
+              <p className="text-sm font-medium">{STITCH_SESSION_LOST}</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={handleCancel}>
+                Cancel
+              </Button>
+            </div>
           </div>
         )}
+        {tileCount === 0 && !sessionLost && (
+          // The empty state sits on its own CARD. It used to be bare text on the
+          // canvas: in dark mode `text-muted-foreground` over the light paper was
+          // unreadable, and the rule for anything text-like on the canvas is that it
+          // brings its own opaque surface.
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-muted/50 px-6">
+            <div className="flex max-w-md flex-col items-center rounded-lg border bg-popover px-6 py-6 text-center text-popover-foreground shadow-lg">
+              <FilePlus className="mb-4 h-16 w-16 text-muted-foreground" />
+              <h2 className="mb-2 text-2xl font-bold">Stitch PDFs Together</h2>
+              <p className="mb-6 text-sm text-muted-foreground">
+                Arrange multiple PDF pages onto one canvas — remove white backgrounds,
+                resize, rotate, and export as a single PDF. Get started by selecting
+                a PDF and choosing the pages you want to stitch.
+              </p>
+              <Button
+                size="lg"
+                className="h-14 gap-3 px-8 text-lg shadow-lg"
+                onClick={() => setShowAddPdf(true)}
+                data-tour="stitch-add-pdf"
+              >
+                <FilePlus className="h-7 w-7" />
+                Add PDF
+              </Button>
+            </div>
+          </div>
+        )}
+        <StitchContextMenu
+          onAlignFromHere={() => handleAlignNeighbourModeChange(true)}
+          onRecenter={handleRecenter}
+          // A mode overlay covers the canvas and owns its own interaction; a menu
+          // opening behind it would act on a selection the user cannot see.
+          disabled={
+            alignNeighbour.active ||
+            cleanupReviewMode ||
+            contentDeleteMode ||
+            deleteElementMode ||
+            pointAlign.pointAlignMode ||
+            scaleAlign.scaleAlignMode
+          }
+        >
         <StitchCanvas
           contentDeleteMode={contentDeleteMode}
           onContentDeleteRect={handleContentDeleteRect}
@@ -715,6 +1371,7 @@ export default function StitchView() {
           onDeleteElementAlongPath={handleDeleteElementAlongPath}
           erasedRegionFeedback={erasedRegionFeedback}
           isDeletingAlongPath={isDeletingAlongPath}
+          alignToNeighbour={alignNeighbour}
           pointAlignMode={pointAlign.pointAlignMode}
           pointAlignReferenceId={pointAlign.referenceTileId}
           pointAlignTargetId={pointAlign.targetTileId}
@@ -738,6 +1395,21 @@ export default function StitchView() {
           onRelocateCleanupRegion={handleRelocateCleanupRegion}
           onCleanupManualBox={handleCleanupManualBox}
         />
+        </StitchContextMenu>
+        {takeoffMode && (unplacedCount > 0 || alignExplanation) && !coachDismissed && !showAddToProject && !cleanupReviewMode && (
+          <AlignCoachMark
+            count={unplacedCount}
+            explanation={alignExplanation}
+            onDismiss={() => {
+              setCoachDismissed(true);
+              setUnplacedCount(0);
+              setAlignExplanation(null);
+            }}
+          />
+        )}
+        {showTrimCoach && cleanupReviewMode && (
+          <TrimCoachMark onDismiss={() => setShowTrimCoach(false)} />
+        )}
         {cleanupBusy && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[2px]" aria-live="polite" aria-busy="true">
             <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-5 py-4 shadow-lg">
@@ -749,9 +1421,22 @@ export default function StitchView() {
         {cleanupReviewMode && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2.5 shadow-lg">
             <span className="text-sm font-medium text-popover-foreground">
-              Clean up: {cleanupHideCount} to hide{cleanupMoveCount ? ` · ${cleanupMoveCount} to relocate` : ""}
+              Trim: {cleanupHideCount} hidden{cleanupMoveCount ? ` · ${cleanupMoveCount} moved` : ""}
             </span>
-            <span className="hidden sm:inline text-xs text-muted-foreground">Drag a box to relocate · click hide/keep · handles resize · ✕ delete · drag empty to add</span>
+            <span className="hidden sm:inline text-xs text-muted-foreground">Draw a box to hide an area.</span>
+            {/* Auto-detect is repeated here so it can be run once the review is
+                already open — the toolbar is the other half of the same pair. */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5"
+              disabled={cleanupBusy}
+              title="Auto-detect title blocks and matchline margins"
+              onClick={() => { void handleAutoDetect(); }}
+            >
+              <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              Auto-detect
+            </Button>
             <Button variant="ghost" size="sm" className="h-7" onClick={exitCleanupReview}>
               Cancel
             </Button>
@@ -766,11 +1451,75 @@ export default function StitchView() {
         canvasVisible={canvasVisible}
         onCanvasVisibleChange={setCanvasVisible}
       />
+      {planRun && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-background/80 backdrop-blur-[2px]"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-8 py-6 shadow-lg">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <span className="text-sm font-medium text-foreground">
+              {`Placing ${planRun.total} sheet${planRun.total === 1 ? "" : "s"}…`}
+            </span>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {planRun.done} of {planRun.total} done
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-1 h-7"
+              disabled={planRun.cancelling}
+              onClick={() => {
+                // The commit only notices at its next checkpoint (after the page
+                // it is mid-render on), so say so rather than looking inert.
+                planAbortRef.current = true;
+                setPlanRun((p) => (p ? { ...p, cancelling: true } : p));
+              }}
+            >
+              {planRun.cancelling ? "Cancelling…" : "Cancel"}
+            </Button>
+          </div>
+        </div>
+      )}
+      {earned.status === "aligning" && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-background/80 backdrop-blur-[2px]"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div className="flex flex-col items-center gap-3 rounded-lg border bg-background px-8 py-6 shadow-lg">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <span className="text-sm font-medium text-foreground">
+              {`Aligning ${earned.sheets} sheet${earned.sheets === 1 ? "" : "s"}…`}
+            </span>
+            {earned.progress && (
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {earned.progress.done} of {earned.progress.total} done
+              </span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-1 h-7"
+              disabled={earned.cancelling}
+              onClick={earned.cancelRun}
+            >
+              {earned.cancelling ? "Cancelling…" : "Cancel"}
+            </Button>
+          </div>
+        </div>
+      )}
       <AddPdfModal
         open={showAddPdf}
         onClose={() => setShowAddPdf(false)}
         initialPdf={ctoInitialPdf}
         onInitialConsumed={() => setCtoInitialPdf(null)}
+        sessionSourcePdf={sessionSourcePdf}
+        onAutoAlignResult={handleAutoAlignResult}
+        onPagesAdded={handlePagesAdded}
       />
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
@@ -804,59 +1553,90 @@ export default function StitchView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={showSaveToCtoDialog} onOpenChange={setShowSaveToCtoDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Save to Civiltakeoff</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground pb-3">
-            Choose how to save the stitched PDF in your project.
-          </p>
-          <div className="grid gap-2">
-            <Button
-              variant="outline"
-              className="justify-start"
-              onClick={() => doSaveToCto("overwrite")}
-            >
-              Overwrite current file
-            </Button>
-            <div className="flex flex-col gap-2">
+      {/* The where-to-save dialog is the NON-takeoff CTO session's save. Takeoff-v2
+          mode has one destination and confirms with AddToProjectDialog instead. */}
+      {!takeoffMode && (
+        <Dialog open={showSaveToCtoDialog} onOpenChange={setShowSaveToCtoDialog}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Save to Pursuit</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground pb-3">
+              Choose how to save the stitched PDF in your project.
+            </p>
+            <div className="grid gap-2">
               <Button
                 variant="outline"
                 className="justify-start"
-                onClick={() => {
-                  const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
-                  const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
-                  doSaveToCto("new_file", finalName);
-                }}
+                onClick={() => doSaveToCto("overwrite")}
               >
-                Save as new document
+                Overwrite current file
               </Button>
-              <label className="text-xs text-muted-foreground pl-2">
-                File name (you can edit)
-              </label>
-              <Input
-                value={saveToCtoNewFileName}
-                onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
-                placeholder="Project name - Stitched"
-                className="font-mono text-sm"
-              />
+              <div className="flex flex-col gap-2">
+                <Button
+                  variant="outline"
+                  className="justify-start"
+                  onClick={() => {
+                    const name = saveToCtoNewFileName.trim() || "Stitched.pdf";
+                    const finalName = name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+                    doSaveToCto("new_file", finalName);
+                  }}
+                >
+                  Save as new document
+                </Button>
+                <label className="text-xs text-muted-foreground pl-2">
+                  File name (you can edit)
+                </label>
+                <Input
+                  value={saveToCtoNewFileName}
+                  onChange={(e) => setSaveToCtoNewFileName(e.target.value)}
+                  placeholder="Project name - Stitched"
+                  className="font-mono text-sm"
+                />
+              </div>
+              <Button
+                variant="outline"
+                className="justify-start"
+                onClick={() => doSaveToCto("project_page")}
+              >
+                Add as project page
+              </Button>
             </div>
-            <Button
-              variant="outline"
-              className="justify-start"
-              onClick={() => doSaveToCto("project_page")}
-            >
-              Add as project page
-            </Button>
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0 pt-2">
-            <Button variant="outline" onClick={() => setShowSaveToCtoDialog(false)}>
-              Cancel
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            <DialogFooter className="gap-2 sm:gap-0 pt-2">
+              <Button variant="outline" onClick={() => setShowSaveToCtoDialog(false)}>
+                Cancel
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+      {takeoffMode && (
+        <AddToProjectDialog
+          open={showAddToProject}
+          onOpenChange={setShowAddToProject}
+          projectName={ctoContext?.project_name}
+          labels={addToProjectSummary.labels}
+          sheetCount={sheetTileCount}
+          hiddenPageNumbers={addToProjectSummary.hiddenPageNumbers}
+          effectiveScaleFeetPerInch={effectiveScaleFeetPerInch}
+          busy={isSaving}
+          onConfirm={() => {
+            // Stays open, reading "Adding…", until the upload settles — closing
+            // first would drop the user back on the canvas with no sign that
+            // anything was happening. `doSaveToCto` never rejects; it reports
+            // through its result, which decides whether a failure bar stays up.
+            // Retrying retires the last failure notice before a new one can land.
+            setAddToProjectError(null);
+            void doSaveToCto("project_page")
+              .then((r) => {
+                // The dialog is gone by now, so an unexplained close is the one
+                // thing the user must not be left with: pin the reason instead.
+                if (!r.ok) setAddToProjectError(r.message ?? "Something went wrong");
+              })
+              .finally(() => setShowAddToProject(false));
+          }}
+        />
+      )}
       <TourOverlay tourId="stitch" />
     </div>
   );

@@ -1,0 +1,37 @@
+{
+  "plan": {
+    "version": 1,
+    "mode": "auto",
+    "entries": [
+      {
+        "kind": "takeoff",
+        "pageUuid": "9f1c0f4e-0000-4000-8000-000000000001",
+        "scaleFeetPerInch": 20,
+        "label": "C5.00 — GRADING PLAN",
+        "pageNumber": 6
+      },
+      {
+        "kind": "takeoff",
+        "pageUuid": "9f1c0f4e-0000-4000-8000-000000000002",
+        "scaleFeetPerInch": 20,
+        "label": "C-5.01 GRADING PLAN",
+        "pageNumber": 7
+      },
+      {
+        "kind": "document",
+        "documentId": "3a2b1c00-0000-4000-8000-0000000000aa",
+        "documentPage": 4,
+        "scaleFeetPerInch": 40,
+        "label": "C502 UTILITY PLAN"
+      },
+      {
+        "kind": "document",
+        "documentId": "3a2b1c00-0000-4000-8000-0000000000aa",
+        "documentPage": 5,
+        "scaleFeetPerInch": null,
+        "label": "GENERAL NOTES"
+      }
+    ]
+  },
+  "hash": "ba2c3c366206792b8c06a705432b0fea390a9f62bd5df696181a58d60091e0fb"
+}

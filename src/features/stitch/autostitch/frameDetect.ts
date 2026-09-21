@@ -46,10 +46,20 @@ export function sliceExtract(extract: PageExtract, frame: Frame, marginPt = 36):
   const keepL = (l: Label) => inside((l.x + l.endX) / 2, (l.y + l.endY) / 2);
   const geometry: typeof extract.geometry = [];
   for (const g of extract.geometry) {
+    const src = g.pts;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of g.pts) { if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0]; if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; }
+    for (let i = 0; i < src.length; i += 2) {
+      const x = src[i], y = src[i + 1];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
     if (maxX < gx0 || minX > gx1 || maxY < gy0 || minY > gy1) continue;
-    geometry.push({ ...g, pts: g.pts.map((p) => [p[0] - fx0, p[1] - fy0] as [number, number]) });
+    const shifted = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i += 2) {
+      shifted[i] = src[i] - fx0;
+      shifted[i + 1] = src[i + 1] - fy0;
+    }
+    geometry.push({ ...g, pts: shifted });
   }
   return {
     view: [0, 0, fx1 - fx0, fy1 - fy0],
@@ -58,4 +68,126 @@ export function sliceExtract(extract: PageExtract, frame: Frame, marginPt = 36):
     words: extract.words.filter(keepL).map(shift),
     geometry,
   };
+}
+
+/**
+ * The DRAWING FRAME rectangle, from geometry alone.
+ *
+ * A civil sheet is not drawn edge to edge: the plan lives inside a ruled frame, and
+ * on many sets a notes/title column takes the right quarter of the sheet, so the
+ * drawing's own right border sits at ~72 % of the page width. Every edge rule in the
+ * engine — the OCR band clips, and `parseSheetRefs`' 18 % edge-vs-interior test — is
+ * measured from the PAGE, so a matchline callout drawn on that inner border reads as
+ * `interior` and is ignored by `hasEdgeRefs`, `edgeRefsOf` and the matchline priors.
+ * That is the investigation's failure D (Belcourt sheet 6's east callout).
+ *
+ * The frame is found from full-span ruled lines: axis-aligned strokes whose summed
+ * length at one cross-coordinate reaches `spanFrac` of the perpendicular page
+ * dimension. Of those, the frame's left/top edge is the INNERMOST candidate in the
+ * outer quarter, and its right/bottom edge the INNERMOST candidate past `minExtent`
+ * of the page — i.e. the first ruled divider the drawing actually ends at, which is
+ * the notes-column line when there is one and the sheet border otherwise.
+ *
+ * Returns null (⇒ callers keep using the page) unless a frame was found that is
+ * meaningfully inset on some side and still covers most of the sheet, so a stray
+ * full-height property line cannot shrink the drawing area to nothing.
+ *
+ * Deliberately separate from `stripFrames`: that one splits a sheet into stacked
+ * strips from LABELS and documents why it avoids geometry borders. This is the
+ * different, simpler question of where the sheet's own ruled frame is.
+ */
+export function detectDrawingFrame(
+  geometry: { pts: Float32Array; closed?: boolean }[],
+  view: [number, number, number, number],
+  { spanFrac = 0.9, minExtent = 0.55, minArea = 0.5, minInsetFrac = 0.02, maxMassBeyond = 0.1 } = {},
+): [number, number, number, number] | null {
+  const [x0, y0, x1, y1] = view;
+  const W = x1 - x0, H = y1 - y0;
+  if (!(W > 0 && H > 0) || !geometry.length) return null;
+  const BIN = 2;
+  const vSpans = new Map<number, number>(); // x-bin -> summed vertical length
+  const hSpans = new Map<number, number>(); // y-bin -> summed horizontal length
+  // Drawing MASS by coordinate: total segment length whose midpoint sits in each
+  // 8 pt column / row, whatever its orientation. Used to reject a candidate "frame
+  // edge" that has plenty of drawing beyond it — see `highEdge`.
+  const MBIN = 8;
+  const xMass = new Map<number, number>(), yMass = new Map<number, number>();
+  let totalMass = 0;
+  for (const g of geometry) {
+    const pts = g.pts;
+    if (!pts || pts.length < 4) continue;
+    const np = pts.length / 2;
+    const n = np - 1 + (g.closed ? 1 : 0);
+    for (let i = 0; i < n; i++) {
+      const ai = i * 2, bi = ((i + 1) % np) * 2;
+      const ax = pts[ai], ay = pts[ai + 1], bx = pts[bi], by = pts[bi + 1];
+      const dx = bx - ax, dy = by - ay;
+      if (Math.abs(dx) <= 3 && Math.abs(dy) > 3) {
+        const k = Math.round(((ax + bx) / 2) / BIN);
+        vSpans.set(k, (vSpans.get(k) || 0) + Math.abs(dy));
+      } else if (Math.abs(dy) <= 3 && Math.abs(dx) > 3) {
+        const k = Math.round(((ay + by) / 2) / BIN);
+        hSpans.set(k, (hSpans.get(k) || 0) + Math.abs(dx));
+      }
+      const len = Math.hypot(dx, dy);
+      if (len <= 0) continue;
+      // Rulers are not DRAWING. A long axis-aligned run is a border, a frame line or
+      // a title-block rule; counting it as content would make the sheet border itself
+      // look like "drawing beyond the divider" and reject every real frame.
+      const axisAligned = Math.abs(dx) <= 3 || Math.abs(dy) <= 3;
+      if (axisAligned && len >= 0.5 * (Math.abs(dx) > Math.abs(dy) ? W : H)) continue;
+      totalMass += len;
+      const kx = Math.round(((ax + bx) / 2) / MBIN), ky = Math.round(((ay + by) / 2) / MBIN);
+      xMass.set(kx, (xMass.get(kx) || 0) + len);
+      yMass.set(ky, (yMass.get(ky) || 0) + len);
+    }
+  }
+  /** Fraction of the sheet's drawing that lies beyond `coord` on this axis. */
+  const massBeyond = (mass: Map<number, number>, coord: number): number => {
+    if (totalMass <= 0) return 0;
+    let sum = 0;
+    for (const [k, m] of mass) if (k * MBIN > coord) sum += m;
+    return sum / totalMass;
+  };
+  const rulers = (spans: Map<number, number>, dim: number): number[] =>
+    [...spans.entries()].filter(([, tot]) => tot >= spanFrac * dim).map(([k]) => k * BIN).sort((a, b) => a - b);
+  // low edge: the innermost ruler inside the outer quarter (of the PAGE — that is
+  // where a border can be). high edge: the FIRST ruler past minExtent — the drawing
+  // ends at the first full divider, the notes-column line when one exists and the
+  // sheet border otherwise.
+  const lowEdge = (rs: number[], lo: number, dim: number) => {
+    const c = rs.filter((v) => v <= lo + 0.25 * dim);
+    return c.length ? c[c.length - 1] : lo;
+  };
+  // A ruler is the drawing's far edge only when there is LITTLE DRAWING BEYOND IT.
+  // Without that test any full-height line past the halfway mark — a right-of-way
+  // line, a long wall, a section cut — becomes the "frame" and cuts the drawing in
+  // half, taking the real matchline callouts out of every band with it. A genuine
+  // notes/title column holds text, not linework, so the mass past its divider is
+  // small; the sheet border has nothing past it at all.
+  const highEdge = (rs: number[], lo: number, dim: number, fallback: number, mass?: Map<number, number>) => {
+    const c = rs.filter((v) => v >= lo + minExtent * dim);
+    if (!c.length) return fallback;
+    if (!mass) return c[0];
+    for (const v of c) if (massBeyond(mass, v) <= maxMassBeyond) return v;
+    return fallback;
+  };
+  // A frame's borders span the FRAME, not the page: on a sheet whose drawing stops
+  // at 72 % of the width, its top and bottom rules are 0.72 W long and a page-width
+  // span test rejects them outright. So solve once against the page to size the
+  // frame, then again requiring each ruler to span the frame it just found. One
+  // refinement is enough — the second pass only ever admits more rulers, and the
+  // outer-quarter / minExtent placement tests stay page-relative.
+  const solve = (reqW: number, reqH: number): [number, number, number, number] => {
+    const vs = rulers(vSpans, reqH), hs = rulers(hSpans, reqW);
+    return [lowEdge(vs, x0, W), lowEdge(hs, y0, H), highEdge(vs, x0, W, x1, xMass), highEdge(hs, y0, H, y1, yMass)];
+  };
+  const first = solve(W, H);
+  const [fx0, fy0, fx1, fy1] = solve(first[2] - first[0], first[3] - first[1]);
+  const fw = fx1 - fx0, fh = fy1 - fy0;
+  if (fw <= 0 || fh <= 0) return null;
+  if (fw * fh < minArea * W * H) return null;                       // implausibly small
+  const inset = Math.max(fx0 - x0, x1 - fx1, fy0 - y0, y1 - fy1);
+  if (inset < minInsetFrac * Math.min(W, H)) return null;           // no real frame — use the page
+  return [fx0, fy0, fx1, fy1];
 }

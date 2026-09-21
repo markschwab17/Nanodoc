@@ -15,9 +15,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Eye, EyeOff, Focus, Lock, Magnet, Unlock, ZoomIn, ZoomOut } from "lucide-react";
-import { useStitchStore, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
+import { useStitchStore, selectEffectiveMinZoom, CANVAS_PRESETS } from "@/shared/stores/stitchStore";
 import { useShallow } from "zustand/react/shallow";
 import { MIN_ZOOM, MAX_ZOOM, ZOOM_STEP } from "./stitchConstants";
+import { selectionSummary } from "./groups";
+
+/** Sentinel value for the canvas-size Select's fit-to-content entry (not a preset). */
+const FIT_TO_SHEETS_VALUE = "fit-to-sheets";
+/** Placeholder value for a page size that matches no preset (after a fit, or an undo).
+ *  The Select MUST always have a value it owns: left undefined it goes uncontrolled, keeps
+ *  "Fit to sheets" as its internal value, and then silently stops firing onValueChange. */
+const CUSTOM_SIZE_VALUE = "custom";
 
 export interface StitchBottomToolbarProps {
   onRecenter?: () => void;
@@ -106,6 +114,13 @@ function CoordInput({
   );
 }
 
+/** Zoom readout. Rounds to a whole percent, except deep zoom-outs where that would
+ *  read as "0%" — the dynamic floor goes as low as 2%, and 1 decimal keeps it honest. */
+function formatZoomPercent(zoom: number): string {
+  const pct = zoom * 100;
+  return `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+}
+
 /** Format a pt value: show up to 2 decimals, but trim trailing zeros. */
 function formatPt(v: number): string {
   // Round to 2 decimals to avoid floating-point noise
@@ -126,13 +141,15 @@ export function StitchBottomToolbar({
     canvasWidth,
     canvasHeight,
     setCanvasSize,
-    setZoomLevel,
+    fitCanvasToTiles,
+    zoomAboutViewportCenter,
     zoomLevel,
     snapToEdges,
     setSnapToEdges,
     resizeLocked,
     selectedTileIds,
     tiles,
+    groups,
     updateTile,
     updateTiles,
   } = useStitchStore(
@@ -140,19 +157,26 @@ export function StitchBottomToolbar({
       canvasWidth: s.canvasWidth,
       canvasHeight: s.canvasHeight,
       setCanvasSize: s.setCanvasSize,
-      setZoomLevel: s.setZoomLevel,
+      fitCanvasToTiles: s.fitCanvasToTiles,
+      zoomAboutViewportCenter: s.zoomAboutViewportCenter,
       zoomLevel: s.zoomLevel,
       snapToEdges: s.snapToEdges,
       setSnapToEdges: s.setSnapToEdges,
       resizeLocked: s.resizeLocked,
       selectedTileIds: s.selectedTileIds,
       tiles: s.tiles,
+      groups: s.groups,
       updateTile: s.updateTile,
       updateTiles: s.updateTiles,
     }))
   );
+  // Same floor the wheel handler and recenter use — see selectEffectiveMinZoom.
+  const effectiveMinZoom = useStitchStore(selectEffectiveMinZoom);
 
   const hasSelection = selectedTileIds.length > 0;
+  /** "3 sheets selected · Group 1" — the bar says in words what the rings say in
+   *  colour, because on a zoomed-out canvas the rings alone were not enough. */
+  const selectionText = selectionSummary(tiles, groups, selectedTileIds);
   const allSelectedLocked =
     hasSelection &&
     selectedTileIds.every((id) => tiles.find((t) => t.id === id)?.locked);
@@ -200,9 +224,16 @@ export function StitchBottomToolbar({
   const currentSizeKey =
     currentPresetIndex >= 0
       ? `${CANVAS_PRESETS[currentPresetIndex].width}x${CANVAS_PRESETS[currentPresetIndex].height}-${currentOrientation}`
-      : undefined;
+      : CUSTOM_SIZE_VALUE;
 
   const handleCanvasSizeChange = (value: string) => {
+    if (value === FIT_TO_SHEETS_VALUE) {
+      // Sizes the page for the user, so it deliberately does NOT count as the user
+      // choosing a size — a later commit is still free to re-fit.
+      fitCanvasToTiles();
+      onRecenter?.();
+      return;
+    }
     const [presetKey, orient] = value.split("-");
     const preset = CANVAS_PRESETS.find(
       (p) => `${p.width}x${p.height}` === presetKey
@@ -219,12 +250,31 @@ export function StitchBottomToolbar({
   return (
     <footer className="flex items-center justify-center gap-3 border-t shrink-0 px-3 py-2 bg-muted/30" data-tour="stitch-canvas-controls">
       <div className="flex items-center gap-2 flex-wrap justify-center text-xs">
-        <div className="flex items-center gap-1.5" role="group" aria-label="Canvas size">
+        <div className="flex items-center gap-1.5" role="group" aria-label="Page size">
+          {/* The control read as a bare "11 × 17"" or "Custom" with nothing saying what
+              it was FOR. The label is the fix; it also names the trigger for a screen
+              reader, which previously heard only the value. */}
+          <span id="stitch-page-size-label" className="text-xs text-muted-foreground shrink-0">
+            Page size
+          </span>
           <Select value={currentSizeKey} onValueChange={handleCanvasSizeChange}>
-            <SelectTrigger className="w-[100px] h-7 text-xs" title="Canvas size (e.g. 11×17, 17×22)">
+            <SelectTrigger
+              id="stitch-page-size"
+              aria-labelledby="stitch-page-size-label stitch-page-size"
+              className="w-[100px] h-7 text-xs"
+              title="Page size — the sheet the composition is laid out on (e.g. 11×17, 17×22), or Fit to sheets"
+            >
               <SelectValue placeholder="Size" />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={FIT_TO_SHEETS_VALUE} disabled={tiles.length === 0}>
+                Fit to sheets
+              </SelectItem>
+              {/* Never selectable — it exists so a non-preset size (after a fit, or an undo)
+                  still has a value the Select owns, which is what keeps it controlled. */}
+              <SelectItem value={CUSTOM_SIZE_VALUE} disabled>
+                Custom
+              </SelectItem>
               {CANVAS_PRESETS.flatMap((p) => [
                 <SelectItem key={`${p.width}x${p.height}-portrait`} value={`${p.width}x${p.height}-portrait`}>
                   {p.label} Portrait
@@ -236,6 +286,14 @@ export function StitchBottomToolbar({
             </SelectContent>
           </Select>
         </div>
+        {selectionText && (
+          <>
+            <div className="h-5 w-px bg-border" aria-hidden />
+            <span className="text-xs font-medium text-foreground" role="status" aria-live="polite">
+              {selectionText}
+            </span>
+          </>
+        )}
         <div className="h-5 w-px bg-border" aria-hidden />
         <div className="flex items-center gap-0.5 border rounded-md h-7 bg-background" role="group" aria-label="Zoom">
           <Button
@@ -243,19 +301,29 @@ export function StitchBottomToolbar({
             size="icon"
             className="h-6 w-6"
             title="Zoom out"
-            onClick={() => setZoomLevel(Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP))}
+            onClick={() => {
+              // Below MIN_ZOOM the linear 0.25 step would jump straight to the floor, so
+              // step multiplicatively down there instead. Both paths clamp to the dynamic
+              // floor, which is how you get out far enough to see every placed sheet.
+              const linear = zoomLevel - ZOOM_STEP;
+              const next = linear >= MIN_ZOOM ? linear : zoomLevel / 1.5;
+              zoomAboutViewportCenter(Math.max(effectiveMinZoom, next));
+            }}
           >
             <ZoomOut className="h-3 w-3" />
           </Button>
-          <span className="text-xs tabular-nums w-8 text-center" title="Zoom level">
-            {Math.round(zoomLevel * 100)}%
+          <span className="text-xs tabular-nums w-11 text-center" title="Zoom level">
+            {formatZoomPercent(zoomLevel)}
           </span>
           <Button
             variant="ghost"
             size="icon"
             className="h-6 w-6"
             title="Zoom in"
-            onClick={() => setZoomLevel(Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP))}
+            onClick={() => {
+              const next = zoomLevel < MIN_ZOOM ? zoomLevel * 1.5 : zoomLevel + ZOOM_STEP;
+              zoomAboutViewportCenter(Math.min(MAX_ZOOM, next));
+            }}
           >
             <ZoomIn className="h-3 w-3" />
           </Button>

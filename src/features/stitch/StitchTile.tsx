@@ -7,13 +7,22 @@
  * to the full tiles array (which changes on every drag frame).
  */
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { StitchTile as StitchTileType } from "@/shared/stores/stitchStore";
 import { useStitchStore } from "@/shared/stores/stitchStore";
 import { snapTilePosition } from "@/features/stitch/snapToEdges";
 import { computeResizedPose } from "@/features/stitch/stitchGeometry";
-import { HANDLE_SIZE, MIN_ZOOM, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
+import { expandSelectionToGroups, toggleGroupInSelection } from "@/features/stitch/groups";
+import {
+  OVERLAY_INK,
+  OVERLAY_PAPER,
+  groupMemberRingStyle,
+  hoverRingStyle,
+  screenPx,
+  selectionRingStyle,
+} from "@/features/stitch/canvasOverlayStyle";
+import { ABSOLUTE_MIN_ZOOM, HANDLE_SIZE, RESIZE_CURSORS } from "@/features/stitch/stitchConstants";
 import { cssClipPathWithHoles, cssClipToRect } from "./cleanup/clipRegions";
 import { Lock, RotateCw, Unlock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -35,9 +44,15 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
   // Granular selectors — only re-render when THIS tile's selection state changes
   const isSelected = useStitchStore(useCallback((s) => s.selectedTileIds.includes(tile.id), [tile.id]));
   const isSingleSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length === 1 && s.selectedTileIds[0] === tile.id, [tile.id]));
-  const isMultiSelected = useStitchStore(useCallback((s) => s.selectedTileIds.length > 1 && s.selectedTileIds.includes(tile.id), [tile.id]));
   const resizeLocked = useStitchStore((s) => s.resizeLocked);
+  // The committed sheet raster, from the side slice. Subscribed (not read via
+  // getState) so the tile paints as soon as the raster lands.
+  const committedRaster = useStitchStore(useCallback((s) => s.tileRasters[tile.id], [tile.id]));
   const zoomLevel = useStitchStore((s) => s.zoomLevel);
+  /** This sheet's group colour, if it is in a group. */
+  const groupColor = useStitchStore(
+    useCallback((s) => (tile.groupId ? s.groups[tile.groupId]?.color : undefined), [tile.groupId])
+  );
 
   const isLocked = Boolean(tile.locked);
   const dragStartRef = useRef<DragStart | null>(null);
@@ -52,6 +67,17 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     centerY: number;
   } | null>(null);
   const [rotationWhileDragging, setRotationWhileDragging] = useState<number | null>(null);
+  /**
+   * Whether this tile should be promoted to its own compositor layer.
+   *
+   * `willChange: transform` used to be set unconditionally, which gives EVERY
+   * tile a permanent GPU surface — at 3072x2048 that is roughly a full-size
+   * texture per sheet, and ten sheets is what makes an integrated-GPU laptop
+   * start swapping. The promotion only pays for itself while the tile is
+   * actually about to move, so it goes on when the pointer arrives (hover, the
+   * frame before a drag can start) and comes off when it leaves.
+   */
+  const [pointerOver, setPointerOver] = useState(false);
   const resizeStartRef = useRef<{
     dir: string;
     x: number;
@@ -66,28 +92,36 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      // The right button opens the context menu (StitchContextMenu wraps the canvas);
+      // it must not start a drag or change the selection out from under the menu.
+      if (e.button === 2) return;
       e.stopPropagation();
       e.preventDefault();
       const store = useStitchStore.getState();
       const currentIds = store.selectedTileIds;
+      const currentTiles = store.tiles;
 
       // Snapshot only once the pointer actually moves (see handlePointerMove)
       pendingUndoSnapshotRef.current = true;
 
-      if (e.shiftKey) {
-        const newIds = currentIds.includes(tile.id)
-          ? currentIds.filter((i) => i !== tile.id)
-          : [...currentIds, tile.id];
-        store.setSelectedTileIds(newIds);
-        if (newIds.includes(tile.id)) {
-          const currentTiles = store.tiles;
-          const unlockedIds = newIds.filter(
-            (id) => !currentTiles.find((x) => x.id === id)?.locked
-          );
-          const positions = unlockedIds.map((id) => {
+      /** The unlocked members of a selection, with their start positions. A drag moves
+       *  exactly these, which is how a GROUP keeps its internal spacing: the selection
+       *  was expanded to whole groups before we got here. */
+      const dragPositions = (ids: string[]) =>
+        ids
+          .filter((id) => !currentTiles.find((x) => x.id === id)?.locked)
+          .map((id) => {
             const t = currentTiles.find((x) => x.id === id)!;
             return { id, x: t.x, y: t.y };
           });
+
+      if (e.shiftKey) {
+        // Shift-click toggles the sheet AND its group: half a group in the selection
+        // would come apart on the next drag.
+        const newIds = toggleGroupInSelection(currentTiles, currentIds, tile.id);
+        store.setSelectedTileIds(newIds);
+        if (newIds.includes(tile.id)) {
+          const positions = dragPositions(newIds);
           dragStartRef.current =
             positions.length > 0
               ? { type: "group", x: e.clientX, y: e.clientY, positions }
@@ -96,34 +130,33 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
           dragStartRef.current = null;
         }
       } else {
-        const currentTiles = store.tiles;
         const currentTile = currentTiles.find((x) => x.id === tile.id);
         const locked = Boolean(currentTile?.locked);
-        if (currentIds.length >= 2 && currentIds.includes(tile.id) && !locked) {
-          const unlockedIds = currentIds.filter(
-            (id) => !currentTiles.find((x) => x.id === id)?.locked
-          );
-          const positions = unlockedIds.map((id) => {
-            const t = currentTiles.find((x) => x.id === id)!;
-            return { id, x: t.x, y: t.y };
-          });
+        // Clicking a grouped sheet selects its whole group — that IS the group.
+        const wanted = expandSelectionToGroups(currentTiles, [tile.id]);
+        const keepSelection =
+          currentIds.length >= 2 && currentIds.includes(tile.id) && !locked;
+        const ids = keepSelection ? currentIds : wanted;
+        if (!keepSelection) store.setSelectedTileIds(ids);
+
+        if (locked) {
+          dragStartRef.current = null;
+        } else if (ids.length >= 2) {
+          const positions = dragPositions(ids);
           dragStartRef.current =
             positions.length > 0
               ? { type: "group", x: e.clientX, y: e.clientY, positions }
               : null;
+        } else if (currentTile) {
+          dragStartRef.current = {
+            type: "single",
+            x: e.clientX,
+            y: e.clientY,
+            tileX: currentTile.x,
+            tileY: currentTile.y,
+          };
         } else {
-          store.setSelectedTileIds([tile.id]);
-          if (!locked && currentTile) {
-            dragStartRef.current = {
-              type: "single",
-              x: e.clientX,
-              y: e.clientY,
-              tileX: currentTile.x,
-              tileY: currentTile.y,
-            };
-          } else {
-            dragStartRef.current = null;
-          }
+          dragStartRef.current = null;
         }
       }
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -139,7 +172,10 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
       // Read all needed values from store to avoid stale closures and extra subscriptions
       const store = useStitchStore.getState();
-      const scale = Math.max(MIN_ZOOM, store.zoomLevel);
+      // The ACTUAL zoom, guarded only against a divide-by-zero: the zoom floor is now
+      // dynamic and legitimately goes below MIN_ZOOM, and clamping here would make a drag
+      // move the tile by the wrong distance down there.
+      const scale = Math.max(ABSOLUTE_MIN_ZOOM, store.zoomLevel);
 
       const dragOrResizeX = drag?.type === "single" ? drag.x : drag?.type === "group" ? drag.x : resize?.x ?? 0;
       const dragOrResizeY = drag?.type === "single" ? drag.y : drag?.type === "group" ? drag.y : resize?.y ?? 0;
@@ -238,8 +274,17 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
   }, []);
 
+  const handlePointerEnter = useCallback(() => setPointerOver(true), []);
+  const handlePointerLeave = useCallback((e: React.PointerEvent) => {
+    setPointerOver(false);
+    handlePointerUp(e);
+  }, [handlePointerUp]);
+
   const handleResizeStart = useCallback(
     (e: React.PointerEvent, dir: string) => {
+      // The right button belongs to the context menu: starting a resize here would push
+      // an undo snapshot and wipe the redo stack for a click that moves nothing.
+      if (e.button === 2) return;
       e.stopPropagation();
       const store = useStitchStore.getState();
       if (store.resizeLocked || tile.locked) return;
@@ -267,6 +312,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
 
   const handleRotatePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button === 2) return;
       e.stopPropagation();
       e.preventDefault();
       const store = useStitchStore.getState();
@@ -327,65 +373,112 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
     [tile.id, tile.locked]
   );
 
-  if (!tile.imageDataUrl) return null;
+  // hiddenRegions are stored as fractions (0..1) of the tile — scale to px for
+  // the clip helper, which also has to make the hole set disjoint (the clip is
+  // even-odd). Memoised: the polygon string only changes when the regions or the
+  // tile's size/rotation do, and it was being rebuilt on every drag frame.
+  // Rotated tiles are NOT clipped (v1): the export drops holes on rotated tiles
+  // too, so preview and export stay consistent.
+  // Above the early return below — a hook must never sit behind a conditional.
+  const isRotated = (tile.rotation ?? 0) !== 0;
+  const hiddenClip = useMemo(() => {
+    if (isRotated) return null;
+    // Hide hiddenRegions AND every relocated region's SOURCE (its content is
+    // redrawn at the offset further down).
+    const holesPx = [
+      ...(tile.hiddenRegions ?? []),
+      ...(tile.relocatedRegions ?? []).map((r) => r.rect),
+    ].map((r) => ({
+      x: r.x * tile.width,
+      y: r.y * tile.height,
+      w: r.w * tile.width,
+      h: r.h * tile.height,
+    }));
+    return cssClipPathWithHoles(tile.width, tile.height, holesPx);
+  }, [isRotated, tile.hiddenRegions, tile.relocatedRegions, tile.width, tile.height]);
+
+  // An image-less tile with no explanation is nothing to draw. One that FAILED
+  // to encode is drawn as a visible error card: the user has to be able to see
+  // and remove it, which an invisible-but-selectable tile made impossible.
+  // An override on the tile (erase result / scale stamp / cleanup crop / legacy
+  // tile) wins; otherwise the committed sheet raster.
+  const rasterSrc = tile.imageDataUrl ?? committedRaster;
+  if (!rasterSrc && !tile.rasterError) return null;
 
   // Display always honors tile.width/height — the export draws at tile size,
   // so the canvas must show the same thing (scale stamps included).
   const displayWidth = tile.width;
   const displayHeight = tile.height;
-  // hiddenRegions are stored as fractions (0..1) of the tile — scale to px for
-  // the clip helper. Rotated tiles are NOT clipped (v1): the export drops holes
-  // on rotated tiles too, so preview and export stay consistent.
-  const isRotated = (tile.rotation ?? 0) !== 0;
   const relocated = isRotated ? [] : tile.relocatedRegions ?? [];
-  // Hide hiddenRegions AND every relocated region's SOURCE (its content is
-  // redrawn at the offset below).
-  const holesPx = [
-    ...(tile.hiddenRegions ?? []),
-    ...relocated.map((r) => r.rect),
-  ].map((r) => ({
-    x: r.x * tile.width,
-    y: r.y * tile.height,
-    w: r.w * tile.width,
-    h: r.h * tile.height,
-  }));
-  const hiddenClip = isRotated ? null : cssClipPathWithHoles(tile.width, tile.height, holesPx);
+
+  // Selection chrome: FIXED colours, SCREEN-pixel widths (see canvasOverlayStyle — the
+  // sheets are white paper in both themes, and the layer this lives in is zoom-scaled).
+  // Hover wins over the group's dashed outline: the ring under the cursor should always
+  // be the one that says "this is what you are about to click".
+  const ringZoom = Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
+  const ring = isSelected
+    ? selectionRingStyle(ringZoom, groupColor)
+    : pointerOver
+      ? hoverRingStyle(ringZoom)
+      : groupColor
+        ? groupMemberRingStyle(ringZoom, groupColor)
+        : null;
 
   return (
     <div
       ref={tileContainerRef}
       data-stitch-tile
-      className="absolute hover:outline hover:outline-2 hover:outline-primary/50"
+      // The right-click menu finds its target by asking the DOM what is under the
+      // cursor, so the id has to be ON the element (see StitchContextMenu).
+      data-stitch-tile-id={tile.id}
+      className="absolute"
       style={{
         left: 0,
         top: 0,
         width: displayWidth,
         height: displayHeight,
-        outline: isSelected ? "2px solid hsl(var(--primary))" : undefined,
-        outlineOffset: isSelected ? "-2px" : undefined,
-        boxShadow: isMultiSelected ? "0 0 0 2px hsl(var(--primary) / 0.5)" : undefined,
+        // SCREEN-space widths. These used to be plain `2px` inside the zoom-scaled
+        // layer, so at a fit-the-set zoom of 0.3 the selection ring was 0.6 px — Mark:
+        // "it's also very difficult to tell when a pdf is selected". Dividing by the
+        // zoom keeps the ring the same weight however far out the canvas is.
+        outline: ring?.outline,
+        outlineOffset: ring?.outlineOffset,
+        // The white counter-stroke inside the ring, plus a halo outside it in the
+        // GROUP's colour when the sheet is in one, so a selected group reads as one
+        // object and not as n sheets that happen to be lit up.
+        boxShadow: ring && "boxShadow" in ring ? (ring.boxShadow as string) : undefined,
         transform: `translate(${tile.x}px, ${tile.y}px)${displayRotation ? ` rotate(${displayRotation}deg)` : ""}`,
         transformOrigin: "center center",
-        willChange: "transform",
+        // Promoted only while the tile is in play — see `pointerOver`. A
+        // rotation drag keeps the promotion even when the pointer wanders off
+        // the tile, because the rotate handle is what is being dragged.
+        willChange: pointerOver || rotationDragStart !== null ? "transform" : undefined,
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerLeave={handlePointerUp}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
-      <img
-        src={tile.imageDataUrl}
-        alt=""
-        className="w-full h-full pointer-events-none select-none object-fill"
-        draggable={false}
-        style={{
-          clipPath: hiddenClip ?? undefined,
-          WebkitClipPath: hiddenClip ?? undefined,
-        }}
-      />
+      {rasterSrc ? (
+        <img
+          src={rasterSrc}
+          alt=""
+          className="w-full h-full pointer-events-none select-none object-fill"
+          draggable={false}
+          style={{
+            clipPath: hiddenClip ?? undefined,
+            WebkitClipPath: hiddenClip ?? undefined,
+          }}
+        />
+      ) : (
+        <div className="w-full h-full pointer-events-none select-none flex items-center justify-center border-2 border-dashed border-destructive/60 bg-destructive/5 p-4 text-center">
+          <span className="text-destructive text-sm font-medium">{tile.rasterError}</span>
+        </div>
+      )}
       {/* Relocated pieces: a copy of the sheet clipped to the source region and
           translated by the offset, so the cut-out content shows at its new spot. */}
-      {relocated.map((r, i) => {
+      {rasterSrc && relocated.map((r, i) => {
         const clip = cssClipToRect(tile.width, tile.height, {
           x: r.rect.x * tile.width,
           y: r.rect.y * tile.height,
@@ -395,7 +488,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
         return (
           <img
             key={i}
-            src={tile.imageDataUrl}
+            src={rasterSrc}
             alt=""
             className="absolute inset-0 w-full h-full pointer-events-none select-none object-fill"
             draggable={false}
@@ -410,7 +503,7 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
       {isSingleSelected && (() => {
         // Controls live inside the zoom-scaled canvas — divide by zoom so they
         // stay a constant size on screen (like the lock button always did).
-        const invZoom = 1 / Math.max(MIN_ZOOM, zoomLevel);
+        const invZoom = 1 / Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel);
         const hs = HANDLE_SIZE * invZoom;
         const buttonPx = 32 * 0.9 * invZoom;
         const buttonTop = -48 * invZoom;
@@ -430,11 +523,16 @@ export const StitchTile = memo(function StitchTile({ tile }: { tile: StitchTileT
               (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => (
                 <div
                   key={dir}
-                  className="absolute bg-primary rounded-md border-white shadow-md z-10"
+                  // White fill, dark border: fixed colours, because a handle sits on
+                  // paper that is white in both themes and often on black linework.
+                  className="absolute rounded-md shadow-md z-10"
                   style={{
                     width: hs,
                     height: hs,
-                    borderWidth: 2 * invZoom,
+                    background: OVERLAY_PAPER,
+                    borderStyle: "solid",
+                    borderColor: OVERLAY_INK,
+                    borderWidth: screenPx(2, Math.max(ABSOLUTE_MIN_ZOOM, zoomLevel)),
                     cursor: RESIZE_CURSORS[dir] ?? "se-resize",
                     ...pos[dir],
                   }}

@@ -68,8 +68,9 @@ export function layoutPlacements(
 
 /**
  * Fractional hiddenRegions masking everything OUTSIDE `frame` on a page of
- * pageW x pageH pts. Full-height side bands + full-width top/bottom bands
- * (overlapping at corners — harmless for masks). Empty for a full-page frame.
+ * pageW x pageH pts. Full-height side bands + full-width top/bottom bands,
+ * overlapping at corners; disjointRects makes that safe under the even-odd clip.
+ * Empty for a full-page frame.
  */
 export function frameMask(
   frame: [number, number, number, number], pageW: number, pageH: number

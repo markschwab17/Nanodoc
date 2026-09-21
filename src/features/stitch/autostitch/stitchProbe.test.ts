@@ -11,7 +11,8 @@ describe("toProbeResult", () => {
         { pageIndex: 2, x: 0, y: 500, width: 100, height: 100, aligned: false },
       ],
       rootFtPerIn: 20, alignedCount: 2, unplacedCount: 1, worstResidFt: 0, method: "keymap", poses: [],
-      refPageIndices: [0, 1],
+      refPageIndices: [0, 1], skipped: [], scaleWarnings: [],
+      ocrStats: { calls: 0, nonAnswers: 0, retries: 0, unknown: 0, withheldVotes: 0 },
     };
     const probe = toProbeResult(res, 7);
     expect(probe.docId).toBe(7);
@@ -21,6 +22,30 @@ describe("toProbeResult", () => {
     expect(probe.worstResidFt).toBe(0);
     expect(probe.placements).toHaveLength(3);
     expect(probe.refPageIndices).toEqual([0, 1]);
+  });
+
+  it("carries the OCR tally out — it is what the hook refuses to answer on", () => {
+    // `unknown > 0` is the whole point of the field reaching `ProbeResult`: the aligner
+    // knows the run had a hole in its evidence, only the hook can decline to show a
+    // verdict, and a probe that drops the tally at this boundary silently restores the
+    // bug (a verdict that flips run to run on the same sheets).
+    const ocrStats = { calls: 41, nonAnswers: 3, retries: 2, unknown: 1, withheldVotes: 4 };
+    const probe = toProbeResult({
+      placements: [], rootFtPerIn: 20, alignedCount: 0, unplacedCount: 0, worstResidFt: 0,
+      method: "none", poses: [], refPageIndices: [], skipped: [], scaleWarnings: [], ocrStats,
+    }, 3);
+    expect(probe.ocrStats).toEqual(ocrStats);
+    // Kept for everything that read it before the tally existed.
+    expect(probe.ocrCalls).toBe(41);
+  });
+
+  it("a result with no tally reports none, rather than throwing on the way out", () => {
+    const probe = toProbeResult({
+      placements: [], rootFtPerIn: 20, alignedCount: 0, unplacedCount: 0, worstResidFt: 0,
+      method: "none", poses: [], refPageIndices: [], skipped: [], scaleWarnings: [],
+    } as unknown as AutoStitchResult, 3);
+    expect(probe.ocrStats).toBeUndefined();
+    expect(probe.ocrCalls).toBeUndefined();
   });
 
   it("alignedPageIndices dedupes two placed units of one page", () => {
