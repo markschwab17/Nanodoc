@@ -71,6 +71,8 @@ export interface PaintedPath {
   ctm: Mat;
   /** Line width (`w`) in user space at paint time. */
   lineWidth: number;
+  /** Fill colour as RGB 0..1 when it is a plain device colour, else null. */
+  fillRGB?: number[] | null;
 }
 
 /** `farKept`: inked samples the erase never reached (> FAR_PX from any erased
@@ -82,7 +84,8 @@ export type PathVerdict =
 
 export interface FilterHooks {
   decide(path: PaintedPath): PathVerdict;
-  /** A `Do` at this CTM. Return a replacement XObject name, or null to leave it. */
+  /** A `Do` at this CTM. Return a replacement XObject name, "" to drop the
+   *  draw, or null to leave it. */
   onDo?(name: string, ctm: Mat, lineWidth: number): string | null;
   /** Metrics of a font resource, or null when its glyphs cannot be laid out. */
   font?(name: string): FontMetrics | null;
@@ -301,7 +304,22 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
     if (!fontCache.has(name)) fontCache.set(name, hooks.font(name));
     return fontCache.get(name)!;
   };
-  const ctmStack: Array<{ ctm: Mat; lineWidth: number; ts: TextState }> = [];
+  // Non-stroking colour, as RGB when it is a plain device colour (null: a
+  // pattern, separation or ICC space we do not evaluate).
+  let fillRGB: number[] | null = [0, 0, 0];
+  let fillCS = "DeviceGray";
+  const ctmStack: Array<{ ctm: Mat; lineWidth: number; ts: TextState; fillRGB: number[] | null; fillCS: string }> = [];
+  const deviceRGB = (cs: string, v: number[]): number[] | null => {
+    if (cs === "DeviceGray" && v.length === 1) return [v[0], v[0], v[0]];
+    if (cs === "DeviceRGB" && v.length === 3) return v;
+    if (cs === "DeviceCMYK" && v.length === 4) return [0, 1, 2].map((k) => (1 - v[k]) * (1 - v[3]));
+    return null;
+  };
+  const operandNums = (): number[] | null => {
+    const out: number[] = [];
+    for (let k = 0; k < nOps; k++) { if (Number.isNaN(opNum[k])) return null; out.push(opNum[k]); }
+    return out;
+  };
   /** Lay out a show operation; on removals, replace [start, end) with `prefix [..] TJ`. */
   const show = (elems: TJElem[] | null, start: number, end: number, prefix: string) => {
     const f = fontOf(ts.font);
@@ -425,7 +443,7 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
       if (last) last.closed = true;
     }
     stats.painted++;
-    const verdict = hooks.decide({ subpaths, paint: op, clip, editable, ctm, lineWidth });
+    const verdict = hooks.decide({ subpaths, paint: op, clip, editable, ctm, lineWidth, fillRGB });
     if (verdict.kind === "erase") {
       edits.push({ start: tokStart, end: tokEnd, text: "n" });
       stats.erased++;
@@ -481,11 +499,21 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
       if (inPath) editable = false; // illegal mid-path operator: whole verdicts only
       switch (op) {
         case "q":
-          ctmStack.push({ ctm, lineWidth, ts: { ...ts } });
+          ctmStack.push({ ctm, lineWidth, ts: { ...ts }, fillRGB, fillCS });
           break;
         case "Q":
-          if (ctmStack.length) ({ ctm, lineWidth, ts } = ctmStack.pop()!);
+          if (ctmStack.length) ({ ctm, lineWidth, ts, fillRGB, fillCS } = ctmStack.pop()!);
           break;
+        case "g": { const v = operandNums(); fillCS = "DeviceGray"; fillRGB = v ? deviceRGB("DeviceGray", v) : null; break; }
+        case "rg": { const v = operandNums(); fillCS = "DeviceRGB"; fillRGB = v ? deviceRGB("DeviceRGB", v) : null; break; }
+        case "k": { const v = operandNums(); fillCS = "DeviceCMYK"; fillRGB = v ? deviceRGB("DeviceCMYK", v) : null; break; }
+        case "cs":
+          fillCS = nOps === 1 && opName[0] != null ? opName[0] : "";
+          // Each device space starts at black; anything else is not evaluated.
+          fillRGB = fillCS === "DeviceGray" || fillCS === "DeviceRGB" || fillCS === "DeviceCMYK" ? [0, 0, 0] : null;
+          break;
+        case "sc":
+        case "scn": { const v = operandNums(); fillRGB = v ? deviceRGB(fillCS, v) : null; break; }
         case "BT":
           tm = [1, 0, 0, 1, 0, 0]; tlm = [1, 0, 0, 1, 0, 0]; tmKnown = true;
           break;
@@ -544,7 +572,11 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
           if (nOps >= 1 && opName[nOps - 1] != null && hooks.onDo) {
             const k = nOps - 1;
             const repl = hooks.onDo(opName[k]!, ctm, lineWidth);
-            if (repl) {
+            if (repl === "") {
+              // Drop the draw altogether (an image the erase took whole).
+              edits.push({ start: opStart[k], end: i, text: "" });
+              stats.erased++;
+            } else if (repl) {
               edits.push({ start: opStart[k], end: opEnd[k], text: `/${repl}` });
               stats.formsReplaced++;
             }

@@ -106,6 +106,8 @@ const LOST_DIFF = 64;
 /** Stored ink allowed off the reference's ink before the grids count as misregistered. */
 export const MAX_UNREGISTERED = 0.01;
 const MAX_FORM_DEPTH = 12;
+/** An image whose inked area is at most this share kept counts as erased whole. */
+const IMAGE_KEPT_SHARE = 0.05;
 /** Glyph origins from the capture and the filter's layout agree to this (px). */
 const GLYPH_ORIGIN_TOL = 0.75;
 /** Image pixel redaction only on pages with at most this many XObject draws… */
@@ -553,6 +555,26 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
     };
     const eraseGlyph = cellsOf(glyphs.origins);
     const knownGlyph = cellsOf(glyphs.all);
+    /** An image drawn at this CTM whose visible ink the erase took (almost)
+     *  whole: the draw is dropped. Partly erased images are left to the
+     *  verification (pixel redaction, or the raster fallback). */
+    const imageErased = (ctm: Mat): boolean => {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [u, v] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+        const X = u * ctm[0] + v * ctm[2] + ctm[4], Y = u * ctm[1] + v * ctm[3] + ctm[5];
+        x0 = Math.min(x0, X); x1 = Math.max(x1, X); y0 = Math.min(y0, Y); y1 = Math.max(y1, Y);
+      }
+      const ix0 = Math.max(0, Math.floor(x0)), iy0 = Math.max(0, Math.floor(y0));
+      const ix1 = Math.min(mask.width - 1, Math.ceil(x1)), iy1 = Math.min(mask.height - 1, Math.ceil(y1));
+      if (ix1 < ix0 || iy1 < iy0 || !anyErasedIn(mask, ix0, iy0, ix1, iy1)) return false;
+      let e = 0, k = 0;
+      for (let y = iy0; y <= iy1; y++) for (let x = ix0; x <= ix1; x++) {
+        const st = mask.state[y * mask.width + x];
+        if (st === STATE_ERASED) e++;
+        else if (st === STATE_KEPT) k++;
+      }
+      return e > 0 && k <= IMAGE_KEPT_SHARE * (e + k);
+    };
     let formsCopied = 0;
     let painted = 0, erased = 0, cut = 0, farKeptRemoved = 0, glyphsRemoved = 0, doCount = 0;
     let nameSeq = 0;
@@ -593,6 +615,9 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
           const xo = xobjs.get(name);
           if (isNullish(xo) || !xo.isStream()) return null;
           const subtype = xo.get("Subtype");
+          if (!isNullish(subtype) && subtype.asName() === "Image") {
+            return apply && imageErased(ctm) ? "" : null;
+          }
           if (isNullish(subtype) || subtype.asName() !== "Form") return null;
           const formCtm = matMul(readMatrix(xo.get("Matrix")), ctm);
           // Cheap reject: the form's BBox nowhere near an erased pixel.

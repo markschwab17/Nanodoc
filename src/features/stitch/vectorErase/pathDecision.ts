@@ -7,8 +7,8 @@
  * contour line removes exactly the stretch inside the rectangle, and an
  * element erase that took one leg of a polyline removes that leg only. Two
  * smoothing rules stop raster noise from cutting good lines:
- *   - an erased run shorter than MIN_RUN_PX is kept (a crossing with an erased
- *     line only blanks a pixel or two of this one);
+ *   - an erased run shorter than MIN_RUN_PX with kept line on both sides is
+ *     kept (a crossing with an erased line only blanks a pixel or two);
  *   - a kept run shorter than MIN_RUN_PX next to erased ones is erased (the
  *     anti-aliased fringe the flood fill leaves at a line's end).
  * Samples over blank pixels (dash gaps, clipped-away parts, white) carry no
@@ -131,15 +131,19 @@ export function keptIntervals(states: ArrayLike<number>, minRun: number): Array<
     }
     return runs;
   };
-  const flipShort = (from: number, to: number) => {
+  const flipShort = (from: number, to: number, interiorOnly: boolean) => {
     const runs = toRuns();
     if (runs.length < 2) return;
-    for (const r of runs) {
+    runs.forEach((r, k) => {
+      if (interiorOnly && (k === 0 || k === runs.length - 1)) return;
       if (r.st === from && r.b - r.a < minRun) for (let i = r.a; i < r.b; i++) s[i] = to;
-    }
+    });
   };
-  flipShort(STATE_ERASED, STATE_KEPT);
-  flipShort(STATE_KEPT, STATE_ERASED);
+  // A short erased blip is a crossing only when kept line continues on BOTH
+  // sides; at a segment's end it is the start of the erase (a rectangle edge a
+  // pixel or two before the vertex) and goes.
+  flipShort(STATE_ERASED, STATE_KEPT, true);
+  flipShort(STATE_KEPT, STATE_ERASED, false);
   const out: Array<[number, number]> = [];
   for (const r of toRuns()) if (r.st === STATE_KEPT) out.push([r.a / n, r.b / n]);
   return out;
@@ -466,6 +470,10 @@ function invert(m: Mat): Mat | null {
 /** Erased areas thinner than twice this (pixels) are lines drawn OVER a fill
  *  (erasing them reveals the fill), not a cut out of it. */
 export const REGION_OPEN_PX = 2;
+/** Every RGB component at least this: a white fill. */
+const WHITE_COMPONENT = 0.95;
+/** A fill inked over less than this share of its area is treated as white. */
+const VISIBLE_FILL_SHARE = 0.3;
 
 /**
  * Morphological opening (erode then dilate, square of radius r) of a 0/1
@@ -592,14 +600,23 @@ function regionCut(subpaths: SubPath[], m: Mat, mask: EraseMask, evenOdd: boolea
   const inside = rasterizeRings(rings, ix0, iy0, w, h, evenOdd);
   // Inside the fill but showing no ink (white text or a wipeout drawn over it):
   // part of what the erase took when enclosed by it.
+  // Hidden parts count only for a fill that is itself visible (inked over a
+  // real share of its area).
   const hidden = new Uint8Array(w * h);
+  let insideN = 0, insideInk = 0;
   for (let y = 0; y < h; y++) {
     const row = (iy0 + y) * mask.width;
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
-      if (inside[i] && mask.state[row + ix0 + x] === STATE_NONE) hidden[i] = 1;
+      if (!inside[i]) continue;
+      insideN++;
+      if (mask.state[row + ix0 + x] === STATE_NONE) hidden[i] = 1;
+      else insideInk++;
     }
   }
+  // A white fill (a wipeout) is never cut: the ink over it is other paths, and
+  // holes in it would only reveal what it hides.
+  if (insideInk < VISIBLE_FILL_SHARE * insideN) return { kind: "none" };
   for (let i = 0; i < w * h; i++) if (!inside[i] || hidden[i]) bits[i] = 1;
   const region = openBitmap(bits, w, h, REGION_OPEN_PX);
   // Subtract erased (and enclosed hidden) pixels only: the outside helped the
@@ -629,6 +646,19 @@ function regionCut(subpaths: SubPath[], m: Mat, mask: EraseMask, evenOdd: boolea
     else if (!anyInside) anyInside = comp.some((i) => inside[i]);
   }
   if (!anyInside) return { kind: "none" };
+  // Grow the region by a pixel into anything that is not KEPT ink: the fill's
+  // anti-aliased rim is too faint to count as ink, and left outside the cut it
+  // would survive as a hairline sliver along the erase.
+  const grown = region.slice();
+  for (let y = 0; y < h; y++) {
+    const row = (iy0 + y) * mask.width;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (region[i] || mask.state[row + ix0 + x] === STATE_KEPT) continue;
+      if ((x > 0 && region[i - 1]) || (x + 1 < w && region[i + 1]) || (y > 0 && region[i - w]) || (y + 1 < h && region[i + w])) grown[i] = 1;
+    }
+  }
+  region.set(grown);
   const pieces: Pt[][] = [];
   for (const [x0, y0, x1, y1] of complementRects(region, w, h)) {
     // Rects touching the window edge extend past the fill so its edge is not cut.
@@ -765,6 +795,10 @@ export function decidePath(
     return { kind: "keep" };
   }
   let strokeOnly = path.paint === "S" || path.paint === "s";
+  // A white fill (a wipeout, a label's knockout) is never cut or removed: it
+  // shows nothing itself, and removing it would only reveal what it hides.
+  const whiteFill = !!path.fillRGB && path.fillRGB.every((c) => c >= WHITE_COMPONENT);
+  if (!strokeOnly && whiteFill && /^[fF]/.test(path.paint)) return { kind: "keep" };
   // A fill with no area to speak of (CAD paints plain lines with `b`, and some
   // exporters emit text strokes as zero-area `f` slivers) is linework: cut it
   // like a stroke. `b`/`B` are repainted with S; a sliver `f` keeps its operator.
@@ -778,7 +812,7 @@ export function decidePath(
     }
   }
   if (path.clip || !path.editable) return wholeVerdict(path, cx);
-  if (!strokeOnly && /^[bB]/.test(path.paint)) return fillAndStrokeVerdict(path, cx);
+  if (!strokeOnly && /^[bB]/.test(path.paint)) return fillAndStrokeVerdict(path, cx, whiteFill);
   if (!strokeOnly) return wholeVerdict(path, cx);
 
   const cut = cutStroke(path, cx);
@@ -834,10 +868,12 @@ function cutStroke(path: PaintedPath, cx: Ctx) {
  * to the stroke), per overlap group; the stroke is cut per segment. The result
  * is re-emitted as `<kept fill> f` followed by `<kept outline> S`.
  */
-function fillAndStrokeVerdict(path: PaintedPath, cx: Ctx): PathVerdict {
+function fillAndStrokeVerdict(path: PaintedPath, cx: Ctx, whiteFill: boolean): PathVerdict {
   const evenOdd = path.paint.endsWith("*");
   const fillOp = evenOdd ? "f*" : "f";
-  const fill = fillGroups(path, cx, path.subpaths.length > 1, false);
+  const fill = whiteFill
+    ? { construction: path.subpaths.map(emitWhole).join(" "), anyKept: true, farKept: 0, changed: false }
+    : fillGroups(path, cx, path.subpaths.length > 1, false);
   // The stroke of b/b* closes the last subpath (the filter already marked it).
   const stroke = cutStroke(path, cx);
   const farKept = fill.farKept + stroke.farKept;

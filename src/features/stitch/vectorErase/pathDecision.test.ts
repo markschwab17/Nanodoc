@@ -69,6 +69,9 @@ describe("keptIntervals", () => {
   it("cuts out an erased stretch", () => {
     expect(keptIntervals([1, 1, 1, 1, 2, 2, 2, 2], 2)).toEqual([[0, 0.5]]);
   });
+  it("cuts a short erased tail at a segment's END (a rectangle edge just before a vertex)", () => {
+    expect(keptIntervals([1, 1, 1, 1, 1, 1, 2, 2], 3)).toEqual([[0, 0.75]]);
+  });
   it("ignores a short erased blip (a crossing) but honours a long one", () => {
     expect(keptIntervals([1, 1, 1, 2, 1, 1, 1, 1], 3)).toEqual([[0, 1]]);
     expect(keptIntervals([1, 1, 1, 2, 2, 2, 1, 1, 1], 3)).toEqual([[0, 3 / 9], [6 / 9, 1]]);
@@ -303,5 +306,13 @@ describe("occlusion, fill+stroke split, rectangle cuts", () => {
     const v = decidePath(p, m) as { kind: string; paint?: string };
     expect(v.kind).toBe("rewrite");
     expect(v.paint).toBe("S");
+  });
+
+  it("never cuts or removes a white fill (it would only reveal what it hides)", () => {
+    const box = (x: number, y: number) => x >= 10 && x < 90 && y >= 10 && y < 90;
+    const m = makeMask(100, 100, box, (x) => x < 50);
+    const p: PaintedPath = { subpaths: [sq(10, 10, 90, 90)], paint: "f", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1, fillRGB: [1, 1, 1] };
+    expect(decidePath(p, m)).toEqual({ kind: "keep" });
+    expect(decidePath({ ...p, fillRGB: [0.5, 0.5, 0.5] }, m).kind).toBe("rewrite");
   });
 });

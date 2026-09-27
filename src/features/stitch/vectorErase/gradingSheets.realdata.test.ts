@@ -1,9 +1,9 @@
 // @vitest-environment node
 /**
- * Regression on the customer's real sheet: Grading_Sheets page 0 (36x24,
- * 1"=10', large grey paving/pad fills, hatching, text) with ONE rectangle
- * "Delete content" erase over the BLDG 4 block, using the tile raster exactly
- * as the browser stored it. The fixture is customer data and deliberately NOT
+ * Regression on the customer's real sheets: Grading_Sheets (36x24, 1"=10',
+ * large grey paving/pad fills, hatching, text) with ONE rectangle "Delete
+ * content" erase — page 0 over the BLDG 4 block, page 3 over the building block
+ * right of BLDG 9 — using each tile raster exactly as the browser stored it. The fixture is customer data and deliberately NOT
  * in the repo: the test runs only where the files exist (VECTOR_ERASE_FIXTURES,
  * default ~/Downloads/vector-erase-fixtures), like the Belcourt probe test.
  */
@@ -20,8 +20,10 @@ import { useStitchStore } from "@/shared/stores/stitchStore";
 
 const DIR = process.env.VECTOR_ERASE_FIXTURES ?? path.join(os.homedir(), "Downloads", "vector-erase-fixtures");
 const PDF = path.join(DIR, "Grading_Sheets.pdf");
-const RASTER = path.join(DIR, "grading_p0_erased_tile_raster.png");
-const have = fs.existsSync(PDF) && fs.existsSync(RASTER);
+const CASES = [
+  { page: 0, raster: path.join(DIR, "grading_p0_erased_tile_raster.png"), what: "rectangle erase over BLDG 4" },
+  { page: 3, raster: path.join(DIR, "grading_p3_erased_tile_raster.png"), what: "rectangle erase right of BLDG 9" },
+].filter((c) => fs.existsSync(PDF) && fs.existsSync(c.raster));
 
 /** Minimal PNG decoder (8-bit RGBA, non-interlaced) returning the STORED bytes,
  *  exactly as the browser's getImageData hands them to the export. */
@@ -59,14 +61,14 @@ function decodePng(buf: Buffer): { data: Uint8ClampedArray; width: number; heigh
   return { data: out, width, height };
 }
 
-describe.skipIf(!have)("real sheet: Grading_Sheets p0, rectangle erase over BLDG 4", () => {
+describe.skipIf(!CASES.length).each(CASES)("real sheet: Grading_Sheets p$page, $what", ({ page: pageIndex, raster }) => {
   let mupdf: any;
   let bytes: Uint8Array;
   let stored: { data: Uint8ClampedArray; width: number; height: number };
   beforeAll(async () => {
     mupdf = (await import("mupdf")).default;
     bytes = new Uint8Array(fs.readFileSync(PDF));
-    stored = decodePng(fs.readFileSync(RASTER));
+    stored = decodePng(fs.readFileSync(raster));
   });
 
   /** Render a page at the stored raster's scale (RGB, on white). */
@@ -79,7 +81,7 @@ describe.skipIf(!have)("real sheet: Grading_Sheets p0, rectangle erase over BLDG
 
   it("stays vector: the erased block is gone, everything outside it is unchanged", async () => {
     const t0 = Date.now();
-    const outcome = cleanErasedPage(mupdf, mupdf.Document.openDocument(bytes, "application/pdf"), 0, stored);
+    const outcome = cleanErasedPage(mupdf, mupdf.Document.openDocument(bytes, "application/pdf"), pageIndex, stored);
     const ms = Date.now() - t0;
     expect(outcome.kind).toBe("cleaned");
     if (outcome.kind !== "cleaned") return;
@@ -88,13 +90,13 @@ describe.skipIf(!have)("real sheet: Grading_Sheets p0, rectangle erase over BLDG
     // Export through the real pipeline, one tile the size of the sheet.
     useStitchStore.setState({
       canvasWidth: 2592, canvasHeight: 1728, cropRect: null,
-      tiles: [{ id: "p0", sourcePdfBytes: bytes, sourcePageIndex: 0, x: 0, y: 0, width: 2592, height: 1728, imageDataUrl: "test://p0", imageModified: true }],
+      tiles: [{ id: "t", sourcePdfBytes: bytes, sourcePageIndex: pageIndex, x: 0, y: 0, width: 2592, height: 1728, imageDataUrl: "test://erased", imageModified: true }],
     } as never);
     const out = await exportStitchToPdf({ decodeRaster: async () => stored });
     expect(out).not.toBeNull();
     // Baseline: the same sheet exported unerased (the plain vector path).
     useStitchStore.setState({
-      tiles: [{ id: "p0", sourcePdfBytes: bytes, sourcePageIndex: 0, x: 0, y: 0, width: 2592, height: 1728 }],
+      tiles: [{ id: "t", sourcePdfBytes: bytes, sourcePageIndex: pageIndex, x: 0, y: 0, width: 2592, height: 1728 }],
     } as never);
     const baseline = await exportStitchToPdf();
     expect(baseline).not.toBeNull();
@@ -109,14 +111,15 @@ describe.skipIf(!have)("real sheet: Grading_Sheets p0, rectangle erase over BLDG
     // The erase: the rectangle bounding every erased pixel.
     const before = render(baseline!, 0);
     const after = render(out!, 0);
-    const src = render(bytes, 0);
+    const src = render(bytes, pageIndex);
     const mask = buildEraseMask(stored.data, stored.width, stored.height, src.px, src.w, src.h, 3);
     const box = mask.erasedBox;
     expect(mask.erasedCount).toBeGreaterThan(10_000);
     const W = stored.width, H = stored.height;
+    // Visible ink (a faint anti-aliasing speck of 240+ is not content).
     const ink = (px: Uint8ClampedArray, w: number, x: number, y: number) => {
       const i = (y * w + x) * 3;
-      return px[i] < 248 || px[i + 1] < 248 || px[i + 2] < 248;
+      return px[i] < 240 || px[i + 1] < 240 || px[i + 2] < 240;
     };
     // Inside (inset past glyphs the rectangle edge cut through): no ink left.
     const INSET = 10;

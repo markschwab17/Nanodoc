@@ -147,3 +147,10 @@ describe("filterContentStream — inline image data", () => {
     expect(paths.map((p) => p.lineWidth)).toEqual([3, 1]);
   });
 });
+
+describe("filterContentStream — fill colour", () => {
+  it("tracks device fill colours through q/Q, and drops to unknown for patterns", () => {
+    const { paths } = collect("1 g q 1 0 0 rg 0 0 5 5 re f Q 0 0 5 5 re f 0 0 0 1 k 0 0 5 5 re f /P0 scn 0 0 5 5 re f");
+    expect(paths.map((p) => p.fillRGB)).toEqual([[1, 0, 0], [1, 1, 1], [0, 0, 0], null]);
+  });
+});
