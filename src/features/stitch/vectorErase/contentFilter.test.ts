@@ -116,3 +116,34 @@ describe("filterContentStream — applying verdicts", () => {
     expect(seen).toEqual(["Fm 0"]);
   });
 });
+
+describe("filterContentStream — inline image data", () => {
+  it("does not stop at an ' EI ' inside binary image data", () => {
+    const pre = enc("BI /W 4 /H 1 /BPC 8 /CS /G /F /Fl ID ");
+    const bin = new Uint8Array([0x78, 0x9c, 0x20, 0x45, 0x49, 0x20, 0x01, 0xff, 0x03, 0x02]); // contains " EI " then binary
+    const post = enc(" EI\n0 0 m 5 5 l S");
+    const b = new Uint8Array(pre.length + bin.length + post.length);
+    b.set(pre); b.set(bin, pre.length); b.set(post, pre.length + bin.length);
+    const paths: PaintedPath[] = [];
+    filterContentStream(b, IDENTITY, { decide: (p) => { paths.push(p); return { kind: "keep" }; } });
+    expect(paths).toHaveLength(1);
+    expect(paths[0].subpaths[0].segs[0].pts).toEqual([5, 5]);
+  });
+
+  it("uses a declared /L length to skip the data exactly", () => {
+    const pre = enc("BI /W 2 /H 1 /BPC 8 /CS /G /L 6 ID ");
+    const bin = enc("S EI f");
+    const post = enc(" EI 1 1 m 2 2 l S");
+    const b = new Uint8Array(pre.length + bin.length + post.length);
+    b.set(pre); b.set(bin, pre.length); b.set(post, pre.length + bin.length);
+    const paths: PaintedPath[] = [];
+    filterContentStream(b, IDENTITY, { decide: (p) => { paths.push(p); return { kind: "keep" }; } });
+    expect(paths).toHaveLength(1);
+    expect(paths[0].subpaths[0].x0).toBe(1);
+  });
+
+  it("tracks the line width through w and q/Q", () => {
+    const { paths } = collect("q 3 w 0 0 m 1 1 l S Q 0 0 m 1 1 l S");
+    expect(paths.map((p) => p.lineWidth)).toEqual([3, 1]);
+  });
+});

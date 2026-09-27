@@ -67,17 +67,21 @@ export interface PaintedPath {
   editable: boolean;
   /** User space → caller space (pixels). */
   ctm: Mat;
+  /** Line width (`w`) in user space at paint time. */
+  lineWidth: number;
 }
 
+/** `farKept`: inked samples the erase never reached (> FAR_PX from any erased
+ *  pixel) inside what the verdict removes — over-deletion evidence. */
 export type PathVerdict =
   | { kind: "keep" }
-  | { kind: "erase" }
-  | { kind: "rewrite"; construction: string };
+  | { kind: "erase"; farKept?: number }
+  | { kind: "rewrite"; construction: string; farKept?: number; paint?: string };
 
 export interface FilterHooks {
   decide(path: PaintedPath): PathVerdict;
   /** A `Do` at this CTM. Return a replacement XObject name, or null to leave it. */
-  onDo?(name: string, ctm: Mat): string | null;
+  onDo?(name: string, ctm: Mat, lineWidth: number): string | null;
 }
 
 export interface FilterStats {
@@ -177,12 +181,39 @@ function skipCompound(b: Uint8Array, i: number): number {
   return n;
 }
 
-/** Index just past an inline image's data, given `i` just after the `ID` keyword. */
-function skipInlineImageData(b: Uint8Array, i: number): number {
+/** True when the bytes after an `EI` candidate look like content again (ASCII
+ *  operators/operands), not more binary image data. */
+function looksLikeContentAfter(b: Uint8Array, i: number): boolean {
+  const end = Math.min(b.length, i + 48);
+  for (let k = i; k < end; k++) {
+    const c = b[k];
+    if (c === 9 || c === 10 || c === 13 || (c >= 32 && c <= 126)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Index just past an inline image's data, given `i` just after the `ID`
+ * keyword. With a declared length (/L or /Length, PDF 2.0) the data is skipped
+ * exactly; otherwise the first `EI` delimited by whitespace AND followed by
+ * text-like bytes ends it — a bare " EI " inside compressed data is not enough.
+ */
+function skipInlineImageData(b: Uint8Array, i: number, declaredLength: number | null): number {
   const n = b.length;
   if (i < n && WS[b[i]]) i++; // the single whitespace after ID
+  if (declaredLength != null && declaredLength >= 0 && i + declaredLength <= n) {
+    let k = i + declaredLength;
+    while (k < n && WS[b[k]]) k++;
+    if (b[k] === 69 && b[k + 1] === 73) return k + 2;
+  }
   for (; i + 1 < n; i++) {
-    if (b[i] === 69 && b[i + 1] === 73 && (i === 0 || WS[b[i - 1]]) && (i + 2 >= n || WS[b[i + 2]] || DELIM[b[i + 2]])) {
+    if (
+      b[i] === 69 && b[i + 1] === 73 &&
+      (i === 0 || WS[b[i - 1]]) &&
+      (i + 2 >= n || WS[b[i + 2]] || DELIM[b[i + 2]]) &&
+      looksLikeContentAfter(b, i + 2)
+    ) {
       return i + 2;
     }
   }
@@ -223,7 +254,7 @@ function applyEdits(b: Uint8Array, edits: Edit[]): Uint8Array {
  * the caller's space (for a page: page transform × raster scale; for a form:
  * form /Matrix × the CTM at its `Do`).
  */
-export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: FilterHooks): FilterResult {
+export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: FilterHooks, initialLineWidth = 1): FilterResult {
   const b = bytes;
   const n = b.length;
   const edits: Edit[] = [];
@@ -240,7 +271,8 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
   };
 
   let ctm: Mat = baseCtm.slice() as Mat;
-  const ctmStack: Mat[] = [];
+  let lineWidth = initialLineWidth;
+  const ctmStack: Array<{ ctm: Mat; lineWidth: number }> = [];
 
   // Current path under construction.
   let pathStart = -1;
@@ -348,13 +380,13 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
       if (last) last.closed = true;
     }
     stats.painted++;
-    const verdict = hooks.decide({ subpaths, paint: op, clip, editable, ctm });
+    const verdict = hooks.decide({ subpaths, paint: op, clip, editable, ctm, lineWidth });
     if (verdict.kind === "erase") {
       edits.push({ start: tokStart, end: tokEnd, text: "n" });
       stats.erased++;
     } else if (verdict.kind === "rewrite" && editable && !clip && pathStart >= 0) {
       // `s` closed the last subpath itself; the rewrite carries its own closes.
-      const paintOp = op === "s" ? "S" : op;
+      const paintOp = verdict.paint ?? (op === "s" ? "S" : op);
       edits.push({ start: pathStart, end: tokEnd, text: `${verdict.construction} ${paintOp}` });
       stats.rewritten++;
     }
@@ -404,20 +436,25 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
       if (inPath) editable = false; // illegal mid-path operator: whole verdicts only
       switch (op) {
         case "q":
-          ctmStack.push(ctm);
+          ctmStack.push({ ctm, lineWidth });
           break;
         case "Q":
-          if (ctmStack.length) ctm = ctmStack.pop()!;
+          if (ctmStack.length) ({ ctm, lineWidth } = ctmStack.pop()!);
           break;
         case "cm": {
           const m = nums(6);
           if (m) ctm = matMul(m, ctm);
           break;
         }
+        case "w": {
+          const lw = nums(1);
+          if (lw) lineWidth = lw[0];
+          break;
+        }
         case "Do": {
           if (nOps >= 1 && opName[nOps - 1] != null && hooks.onDo) {
             const k = nOps - 1;
-            const repl = hooks.onDo(opName[k]!, ctm);
+            const repl = hooks.onDo(opName[k]!, ctm, lineWidth);
             if (repl) {
               edits.push({ start: opStart[k], end: opEnd[k], text: `/${repl}` });
               stats.formsReplaced++;
@@ -426,17 +463,33 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
           break;
         }
         case "BI": {
-          // Inline image: skip its dictionary up to ID, then the raw data up to EI.
+          // Inline image: read its dictionary up to ID (noting a declared
+          // /L or /Length), then skip the raw data up to EI.
           nOps = 0;
+          let lastName: string | null = null;
+          let declared: number | null = null;
           while (i < n) {
             while (i < n && WS[b[i]]) i++;
             if (b[i] === 73 && b[i + 1] === 68 && (i + 2 >= n || WS[b[i + 2]] || DELIM[b[i + 2]])) {
-              i = skipInlineImageData(b, i + 2);
+              i = skipInlineImageData(b, i + 2, declared);
               break;
             }
-            if (b[i] === 40) i = skipLiteralString(b, i);
-            else if (b[i] === 60 || b[i] === 91) i = b[i] === 60 && b[i + 1] !== 60 ? skipHexString(b, i) : skipCompound(b, i);
-            else { i++; while (i < n && !WS[b[i]] && !DELIM[b[i]]) i++; }
+            if (b[i] === 40) { i = skipLiteralString(b, i); lastName = null; }
+            else if (b[i] === 60 || b[i] === 91) { i = b[i] === 60 && b[i + 1] !== 60 ? skipHexString(b, i) : skipCompound(b, i); lastName = null; }
+            else if (b[i] === 47) {
+              const s0 = ++i;
+              while (i < n && !WS[b[i]] && !DELIM[b[i]]) i++;
+              lastName = decodeName(b, s0, i);
+            } else {
+              const s0 = i;
+              i++;
+              while (i < n && !WS[b[i]] && !DELIM[b[i]]) i++;
+              if (lastName === "L" || lastName === "Length") {
+                const v = parseNumber(b, s0, i);
+                if (!Number.isNaN(v)) declared = v;
+              }
+              lastName = null;
+            }
           }
           break;
         }

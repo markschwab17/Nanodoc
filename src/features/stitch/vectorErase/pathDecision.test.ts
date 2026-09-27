@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { anyErasedIn, buildEraseMask, sampleState, STATE_ERASED, STATE_KEPT, STATE_NONE, type EraseMask } from "./eraseMask";
-import { decidePath, keptIntervals, subCubic } from "./pathDecision";
+import { decidePath, keptIntervals, ringsMinusRect, subCubic } from "./pathDecision";
 import { IDENTITY, type Mat, type PaintedPath } from "./contentFilter";
 
 /**
@@ -22,7 +22,7 @@ function makeMask(W: number, H: number, ink: (x: number, y: number) => boolean, 
 
 const line = (x0: number, y0: number, x1: number, y1: number, ctm: Mat = IDENTITY, paint = "S"): PaintedPath => ({
   subpaths: [{ x0, y0, segs: [{ kind: "l", pts: [x1, y1] }], closed: false }],
-  paint, clip: false, editable: true, ctm,
+  paint, clip: false, editable: true, ctm, lineWidth: 1,
 });
 
 describe("buildEraseMask", () => {
@@ -102,7 +102,7 @@ describe("decidePath", () => {
 
   it("erases a fully erased line (element erase)", () => {
     const m = makeMask(200, 100, onLine, (_x, y) => y === 60);
-    expect(decidePath(line(10, 60.5, 190, 60.5), m)).toEqual({ kind: "erase" });
+    expect(decidePath(line(10, 60.5, 190, 60.5), m)).toEqual({ kind: "erase", farKept: 0 });
     expect(decidePath(line(10, 20.5, 190, 20.5), m)).toEqual({ kind: "keep" });
   });
 
@@ -130,7 +130,7 @@ describe("decidePath", () => {
     // User space is y-up and rotated 90°: user (u, v) → pixel (v, u).
     const rot: Mat = [0, 1, 1, 0, 0, 0];
     const m = makeMask(200, 100, onLine, (_x, y) => y === 60);
-    expect(decidePath(line(60.5, 10, 60.5, 190, rot), m)).toEqual({ kind: "erase" });
+    expect(decidePath(line(60.5, 10, 60.5, 190, rot), m)).toEqual({ kind: "erase", farKept: 0 });
     expect(decidePath(line(20.5, 10, 20.5, 190, rot), m)).toEqual({ kind: "keep" });
   });
 
@@ -138,12 +138,32 @@ describe("decidePath", () => {
     const box = (x: number, y: number) => x >= 20 && x < 80 && y >= 20 && y < 80;
     const fill = (x0: number, y0: number, x1: number, y1: number): PaintedPath => ({
       subpaths: [{ x0, y0, closed: true, segs: [{ kind: "l", pts: [x1, y0] }, { kind: "l", pts: [x1, y1] }, { kind: "l", pts: [x0, y1] }] }],
-      paint: "f", clip: false, editable: true, ctm: IDENTITY,
+      paint: "f", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1,
     });
+    // A rectangle erase over part of the fill cuts the fill at the rectangle.
     const most = makeMask(100, 100, box, (x) => x < 65);
-    expect(decidePath(fill(20, 20, 80, 80), most)).toEqual({ kind: "erase" });
+    const v = decidePath(fill(20, 20, 80, 80), most) as { kind: string; construction: string };
+    expect(v.kind).toBe("rewrite");
+    const xs = v.construction.split(" ").filter((_t, i, a) => a[i + 2] === "m" || a[i + 2] === "l").map(Number);
+    expect(Math.min(...xs)).toBeGreaterThan(63);
+    expect(Math.min(...xs)).toBeLessThan(66);
+    expect(Math.max(...xs)).toBe(80);
+    // A partial erase that is NOT a rectangle cannot be cut: removed by majority
+    // but the kept ink it carries is reported, so the caller refuses the clean.
+    const diag = makeMask(100, 100, box, (x, y) => x + y < 125);
+    const d = decidePath(fill(20, 20, 80, 80), diag);
+    expect(d.kind).toBe("erase");
+    expect((d as { farKept: number }).farKept).toBeGreaterThan(0);
+    const all = makeMask(100, 100, box, () => true);
+    expect(decidePath(fill(20, 20, 80, 80), all)).toEqual({ kind: "erase", farKept: 0 });
     const little = makeMask(100, 100, box, (x) => x >= 70);
-    expect(decidePath(fill(20, 20, 80, 80), little)).toEqual({ kind: "keep" });
+    const l = decidePath(fill(20, 20, 80, 80), little) as { kind: string; construction: string };
+    expect(l.kind).toBe("rewrite");
+    expect(l.construction.startsWith("20 20 m")).toBe(true);
+    // A sliver of erase that is not a rectangle of the fill (a line's worth
+    // crossing its middle diagonally) leaves the fill whole.
+    const sliver = makeMask(100, 100, box, (x, y) => Math.abs(x - y) < 2);
+    expect(decidePath(fill(20, 20, 80, 80), sliver)).toEqual({ kind: "keep" });
   });
 
   it("never rewrites a clip path, only erases it whole", () => {
@@ -157,9 +177,88 @@ describe("decidePath", () => {
     const m = makeMask(200, 100, ink, (x, y) => x === 100 && y > 21);
     const poly: PaintedPath = {
       subpaths: [{ x0: 10, y0: 20.5, closed: false, segs: [{ kind: "l", pts: [100.5, 20.5] }, { kind: "l", pts: [100.5, 90] }] }],
-      paint: "S", clip: false, editable: true, ctm: IDENTITY,
+      paint: "S", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1,
     };
     const v = decidePath(poly, m);
-    expect(v).toEqual({ kind: "rewrite", construction: "10 20.5 m 100.5 20.5 l" });
+    expect(v).toEqual({ kind: "rewrite", construction: "10 20.5 m 100.5 20.5 l", farKept: 0 });
+  });
+
+  it("drops only the erased parts of a multi-part fill", () => {
+    const sq = (x: number) => ({ x0: x, y0: 20, closed: true, segs: [{ kind: "l" as const, pts: [x + 20, 20] }, { kind: "l" as const, pts: [x + 20, 40] }, { kind: "l" as const, pts: [x, 40] }] });
+    const ink = (x: number, y: number) => y >= 20 && y < 40 && ((x >= 10 && x < 30) || (x >= 50 && x < 70) || (x >= 90 && x < 110));
+    const m = makeMask(130, 60, ink, (x) => x < 80); // first two squares erased
+    const p: PaintedPath = { subpaths: [sq(10), sq(50), sq(90)], paint: "f", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1 };
+    expect(decidePath(p, m)).toEqual({ kind: "rewrite", construction: "90 20 m 110 20 l 110 40 l 90 40 l h", farKept: 0 });
+  });
+
+  it("keeps a hole with its outline (overlapping subpaths are one group), also through a cut", () => {
+    const ring = (a: number, b: number) => ({ x0: a, y0: a, closed: true, segs: [{ kind: "l" as const, pts: [b, a] }, { kind: "l" as const, pts: [b, b] }, { kind: "l" as const, pts: [a, b] }] });
+    const ink = (x: number, y: number) => x >= 10 && x < 50 && y >= 10 && y < 50 && !(x >= 20 && x < 40 && y >= 20 && y < 40);
+    // Untouched: kept as is.
+    const p: PaintedPath = { subpaths: [ring(10, 50), ring(20, 40)], paint: "f*", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1 };
+    expect(decidePath(p, makeMask(60, 60, ink, () => false))).toEqual({ kind: "keep" });
+    // Rectangle-erased across the hole: the cut keeps the hole (even-odd preserved).
+    const v = decidePath(p, makeMask(60, 60, ink, (x) => x >= 45)) as { kind: string; construction: string };
+    expect(v.kind).toBe("rewrite");
+    expect(v.construction).toContain("20 20 m"); // the hole ring survives intact on the kept side
+  });
+
+  it("re-joins a cut closed ring through its start point", () => {
+    // Square ring starting at (10,10); the erase takes the middle of the far side.
+    const ink = (x: number, y: number) => (x >= 10 && x <= 90 && (y === 10 || y === 90)) || (y >= 10 && y <= 90 && (x === 10 || x === 90));
+    const m = makeMask(100, 100, ink, (x, y) => x === 90 && y > 30 && y < 70);
+    const p: PaintedPath = {
+      subpaths: [{ x0: 10.5, y0: 10.5, closed: true, segs: [{ kind: "l", pts: [90.5, 10.5] }, { kind: "l", pts: [90.5, 90.5] }, { kind: "l", pts: [10.5, 90.5] }] }],
+      paint: "S", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1,
+    };
+    const v = decidePath(p, m) as { kind: string; construction: string };
+    expect(v.kind).toBe("rewrite");
+    // One run only (a single moveto): from the cut, round through (10.5,10.5), back to the cut.
+    expect(v.construction.match(/ m/g)).toHaveLength(1);
+    expect(v.construction).toContain("10.5 10.5 l");
+  });
+});
+
+describe("occlusion, fill+stroke split, rectangle cuts", () => {
+  const sq = (x0: number, y0: number, x1: number, y1: number) => ({
+    x0, y0, closed: true,
+    segs: [{ kind: "l" as const, pts: [x1, y0] }, { kind: "l" as const, pts: [x1, y1] }, { kind: "l" as const, pts: [x0, y1] }],
+  });
+
+  it("judges a fill only where it is not hidden by later paint", () => {
+    // Fill 10..90 × 10..50; a later fill covers all but its bottom strip (y 44..50),
+    // which is exactly what the user erased.
+    const ink = (x: number, y: number) => x >= 10 && x < 90 && y >= 10 && y < 50;
+    const m = makeMask(100, 60, ink, (_x, y) => y >= 44);
+    const p: PaintedPath = { subpaths: [sq(10, 10, 90, 50)], paint: "f", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1 };
+    const hidden = (_x: number, y: number) => y < 44;
+    // Without occlusion it is a majority-kept fill; with it, the visible strip is all erased.
+    expect(decidePath(p, m, hidden)).toEqual({ kind: "erase", farKept: 0 });
+  });
+
+  it("drops an erased outline from a fill+stroke path and keeps its fill", () => {
+    // 20..80 square; its outline ring (1 px) erased, interior kept.
+    const onEdge = (x: number, y: number) => (x === 20 || x === 79 || y === 20 || y === 79) && x >= 20 && x <= 79 && y >= 20 && y <= 79;
+    const ink = (x: number, y: number) => x >= 20 && x <= 79 && y >= 20 && y <= 79;
+    const m = makeMask(100, 100, ink, onEdge);
+    const p: PaintedPath = { subpaths: [sq(20.5, 20.5, 79.5, 79.5)], paint: "b", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1 };
+    expect(decidePath(p, m)).toEqual({ kind: "rewrite", construction: "20.5 20.5 m 79.5 20.5 l 79.5 79.5 l 20.5 79.5 l h", farKept: 0, paint: "f" });
+  });
+
+  it("ringsMinusRect cuts a rectangle out of a square", () => {
+    const pieces = ringsMinusRect([[[0, 0], [10, 0], [10, 10], [0, 10]]], [3, -5, 6, 15]);
+    const area = (r: number[][]) => Math.abs(r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
+    expect(pieces.reduce((a, r) => a + area(r), 0)).toBeCloseTo(70);
+  });
+
+  it("a line painted as a zero-area fill+stroke is cut like a stroke", () => {
+    const m = makeMask(200, 100, (_x, y) => y === 20, (x) => x >= 100);
+    const p: PaintedPath = {
+      subpaths: [{ x0: 10, y0: 20.5, closed: true, segs: [{ kind: "l", pts: [190, 20.5] }] }],
+      paint: "b", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1,
+    };
+    const v = decidePath(p, m) as { kind: string; paint?: string };
+    expect(v.kind).toBe("rewrite");
+    expect(v.paint).toBe("S");
   });
 });

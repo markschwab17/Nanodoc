@@ -9,7 +9,7 @@
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import { PDFDocument, PDFName, PDFDict, PDFRawStream, StandardFonts, degrees, rgb } from "pdf-lib";
-import { cleanErasedPage, type StoredRaster } from "./cleanErasedPage";
+import { cleanErasedPage, storedRasterScale, type StoredRaster } from "./cleanErasedPage";
 import { eraseCanvasRectInImage, floodFillErase, makeWhiteTransparentInPlace } from "../imageUtils";
 import { tileRenderScale } from "../rasterEncode";
 import { exportStitchToPdf } from "../stitchExport";
@@ -173,8 +173,9 @@ describe("cleanErasedPage", () => {
     const outcome = cleanErasedPage(mupdf, src, 0, stored);
     expect(outcome.kind).toBe("cleaned");
     if (outcome.kind !== "cleaned") return;
-    expect(outcome.stats.residue).toBeLessThan(0.1);
-    expect(outcome.stats.lost).toBeLessThan(0.01);
+    expect(outcome.stats.residue).toBeLessThan(0.03);
+    expect(outcome.stats.residueBlobs).toBe(0);
+    expect(outcome.stats.lostPx).toBeLessThanOrEqual(10);
     expect(outcome.stats.formsCopied).toBe(1);
     const page = mupdf.Document.openDocument(outcome.bytes, "application/pdf").loadPage(0);
     checkCleaned(page);
@@ -215,6 +216,89 @@ describe("cleanErasedPage", () => {
     const w = pix.getWidth(), h = pix.getHeight();
     eraseCanvasRectInImage({ data, width: w, height: h } as unknown as ImageData, w, h, { x: 0, y: 0, width: w, height: h }, { x: 200, y: 200, w: 100, h: 60 });
     expect(cleanErasedPage(mupdf, m, 0, { data, width: w, height: h }).kind).toBe("failed");
+  });
+});
+
+/** A large CAD-like sheet: a grid of hairlines over the whole page. */
+async function gridSheet(w: number, h: number, crop?: [number, number, number, number]): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const p = doc.addPage([w, h]);
+  if (crop) p.setCropBox(...crop);
+  for (let y = 12; y < h; y += 24) p.drawLine({ start: { x: 0, y }, end: { x: w, y }, thickness: 0.25 });
+  for (let x = 12; x < w; x += 24) p.drawLine({ start: { x, y: 0 }, end: { x, y: h }, thickness: 0.25 });
+  return doc.save();
+}
+
+/** The app's commit render (alpha, uniform tileRenderScale, white removed). */
+function appRaster(bytes: Uint8Array): { stored: StoredRaster; page: any } {
+  const doc = mupdf.Document.openDocument(bytes, "application/pdf");
+  const page = doc.loadPage(0);
+  const b = page.getBounds();
+  const s = tileRenderScale(b[2] - b[0], b[3] - b[1]);
+  const pix = page.toPixmap(mupdf.Matrix.scale(s, s), mupdf.ColorSpace.DeviceRGB, true, false);
+  const data = new Uint8ClampedArray(pix.getPixels());
+  makeWhiteTransparentInPlace({ data } as unknown as ImageData);
+  return { stored: { data, width: pix.getWidth(), height: pix.getHeight() }, page };
+}
+
+describe("cleanErasedPage — pixel-grid registration on real sheet sizes", () => {
+  // 22x34 and 30x42 sheets: the commit's uniform scale gives a non-integer
+  // height, which a per-axis scale (W/w, H/h) turned into a 1 px drift.
+  const sizes: Array<[string, number, number, [number, number, number, number]?]> = [
+    ["22x34", 2448, 1584],
+    ["30x42", 3024, 2160],
+    ["22x34 with a CropBox offset", 2448, 1584, [36, 18, 2376, 1548]],
+  ];
+  for (const [name, w, h, crop] of sizes) {
+    it(`${name}: no erase → unchanged`, async () => {
+      const { stored } = appRaster(await gridSheet(w, h, crop));
+      const src = mupdf.Document.openDocument(await gridSheet(w, h, crop), "application/pdf");
+      expect(cleanErasedPage(mupdf, src, 0, stored).kind).toBe("unchanged");
+    });
+
+    it(`${name}: a small corner erase touches only the lines through it`, async () => {
+      const bytes = await gridSheet(w, h, crop);
+      const { stored, page } = appRaster(bytes);
+      // Erase a 6x6 px box around the far corner's grid crossing.
+      const s = stored.width / (page.getBounds()[2] - page.getBounds()[0]);
+      const W = stored.width, H = stored.height;
+      eraseCanvasRectInImage({ data: stored.data, width: W, height: H } as unknown as ImageData, W, H,
+        { x: 0, y: 0, width: W, height: H }, { x: W - 60, y: H - 60, w: 50, h: 50 });
+      const out = cleanErasedPage(mupdf, mupdf.Document.openDocument(bytes, "application/pdf"), 0, stored);
+      expect(out.kind).toBe("cleaned");
+      if (out.kind !== "cleaned") return;
+      // At most the ~2 lines each way that cross a 50 px box are touched.
+      expect(out.stats.pathsErased + out.stats.pathsCut).toBeLessThanOrEqual(2 * Math.ceil(50 / (24 * s)) + 2);
+      const c = capture(mupdf.Document.openDocument(out.bytes, "application/pdf").loadPage(0));
+      // Every grid line is still whole away from the corner: probe each one mid-page.
+      const pg = mupdf.Document.openDocument(out.bytes, "application/pdf").loadPage(0);
+      const at = (x: number, y: number) => userToPixel(pg, 1, x, y);
+      const [cx0, cy0, cx1, cy1] = crop ? [crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]] : [0, 0, w, h];
+      for (let y = 12; y < h; y += 24) if (y > cy0 && y < cy1) expect(strokeThrough(c, at(cx0 + 30, y))).toBe(true);
+      for (let x = 12; x < w; x += 24) if (x > cx0 && x < cx1) expect(strokeThrough(c, at(x, cy1 - 30))).toBe(true);
+    });
+  }
+});
+
+describe("cleanErasedPage — text judged on the glyph's own ink", () => {
+  it("an erased line crossing a sparse glyph does not take the glyph", async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const p = doc.addPage([W, H]);
+    p.drawText("1.1.", { x: 100, y: 150, size: 14, font });
+    p.drawLine({ start: { x: 20, y: 160 }, end: { x: 380, y: 160 }, thickness: 1, color: rgb(1, 0, 0) });
+    const bytes = await doc.save();
+    const { stored, page } = appRaster(bytes);
+    const s = tileRenderScale(W, H);
+    const [sx, sy] = userToPixel(page, s, 50, 160);
+    const img = { data: stored.data, width: stored.width, height: stored.height } as unknown as ImageData;
+    expect(floodFillErase(img, stored.width, stored.height, { x: 0, y: 0, width: stored.width, height: stored.height, rotation: 0 }, sx, sy, DELETE_ELEMENT_COLOR_TOLERANCE, true, 248)).not.toBeNull();
+    const out = cleanErasedPage(mupdf, mupdf.Document.openDocument(bytes, "application/pdf"), 0, stored);
+    expect(out.kind).toBe("cleaned");
+    if (out.kind !== "cleaned") return;
+    const c = capture(mupdf.Document.openDocument(out.bytes, "application/pdf").loadPage(0));
+    expect(c.text).toBe("1.1.");
+    expect(c.strokes).toHaveLength(0);
   });
 });
 
@@ -279,5 +363,16 @@ describe("exportStitchToPdf with an erased sheet", () => {
     const out = await exportStitchToPdf({ decodeRaster: async () => ({ data, width: w, height: h }) });
     const page = mupdf.Document.openDocument(out!, "application/pdf").loadPage(0);
     expect(capture(page).images).toBe(1);
+  });
+});
+
+describe("storedRasterScale", () => {
+  it("recovers the commit's uniform scale from a raster rounded to whole pixels", () => {
+    expect(storedRasterScale(2448, 1584, 3072, 1988)).toBe(tileRenderScale(2448, 1584));
+    expect(storedRasterScale(3024, 2160, 3072, 2195)).toBe(tileRenderScale(3024, 2160));
+    expect(storedRasterScale(400, 300, 600, 450)).toBe(1.5);
+  });
+  it("refuses a raster that is not a render of the page", () => {
+    expect(storedRasterScale(2448, 1584, 3072, 3072)).toBeNull();
   });
 });
