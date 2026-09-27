@@ -397,3 +397,31 @@ export function ctoProbeUrl(ctx: { api_origin?: string | null; token?: string | 
   if (!origin || !token) return null;
   return `${origin}/api/nanodoc/probe?token=${encodeURIComponent(token)}`;
 }
+
+/**
+ * A CTO stitch plan that could not be committed directly (some sheets uncalibrated)
+ * goes through the Add PDF modal instead. What the plan path would have handed the
+ * earned check — CTO's sheet codes and the droplet's stored verdict — is parked here
+ * until the user's commit lands, so a plain add from the modal checks with it too.
+ */
+export interface PlanHandoff<C> {
+  /** The plan's source PDF, by identity: the context is only about ITS pages. */
+  source: Uint8Array;
+  ctx: C;
+}
+
+/**
+ * The parked plan context, if it describes the canvas as it now stands: every sheet on
+ * it comes from the plan's own PDF. Sheet codes are keyed by that PDF's page index, so
+ * handing them to a canvas built from another document would name the wrong sheets —
+ * that, or an empty canvas, gets `undefined` (a plain check).
+ */
+export function planHandoffContext<C>(
+  tiles: readonly { sourcePageIndex: number; isScaleStamp?: boolean; sourcePdfBytes?: Uint8Array | null }[],
+  handoff: PlanHandoff<C> | null | undefined,
+): C | undefined {
+  if (!handoff) return undefined;
+  const sheets = tiles.filter((t) => t.sourcePageIndex >= 0 && !t.isScaleStamp);
+  if (!sheets.length) return undefined;
+  return sheets.every((t) => t.sourcePdfBytes === handoff.source) ? handoff.ctx : undefined;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test, it } from "vitest";
-import { DEFAULT_SCALE_FT_PER_IN, MissingSheetScaleError, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference, newTileCanvasFactor, missingScalePages, typedCommitScales, missingScaleReason, assertEveryPageScaled } from "./pageScales";
+import { DEFAULT_SCALE_FT_PER_IN, MissingSheetScaleError, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference, newTileCanvasFactor, missingScalePages, typedCommitScales, missingScaleReason, assertEveryPageScaled, scaleSetFor, scaleSetKey } from "./pageScales";
 
 describe("parseScaleInput", () => {
   test("plain numbers and decimals", () => {
@@ -217,5 +217,24 @@ describe("assertEveryPageScaled", () => {
   test("passes when a set scale or per-page scales cover everything", () => {
     expect(() => assertEveryPageScaled([0, 1], new Map(), 10)).not.toThrow();
     expect(() => assertEveryPageScaled([0, 1], new Map([[0, 10], [1, 20]]), null)).not.toThrow();
+  });
+});
+
+describe("scaleSetFor / scaleSetKey — the scales a probe was asked at", () => {
+  test("uniform when every page shares one scale, like the canvas probe set", () => {
+    const set = scaleSetFor([2, 0], new Map([[0, 10], [2, 10], [5, 40]]));
+    expect(set.pageIndices).toEqual([0, 2]);
+    expect([...set.pageScales]).toEqual([[0, 10], [2, 10]]);
+    expect(set.uniformScale).toBe(10);
+  });
+  test("mixed sets have no uniform scale", () => {
+    expect(scaleSetFor([0, 1], new Map([[0, 10], [1, 40]])).uniformScale).toBeNull();
+  });
+  test("the key changes with any page's scale or the page set, and nothing else", () => {
+    const k = (sel: number[], m: [number, number][]) => scaleSetKey(scaleSetFor(sel, new Map(m)));
+    expect(k([0, 1], [[0, 10], [1, 10]])).toBe(k([1, 0], [[1, 10], [0, 10]]));
+    expect(k([0, 1], [[0, 10], [1, 10]])).not.toBe(k([0, 1], [[0, 20], [1, 20]]));
+    expect(k([0, 1], [[0, 10], [1, 10]])).not.toBe(k([0, 1], [[0, 10], [1, 40]]));
+    expect(k([0, 1], [[0, 10], [1, 10]])).not.toBe(k([0, 2], [[0, 10], [2, 10]]));
   });
 });

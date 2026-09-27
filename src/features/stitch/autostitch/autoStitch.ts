@@ -838,10 +838,10 @@ async function runAutoStitch(
   const units: Unit[] = [];
   // Scale inference is deferred; uniform scale (user-entered or default), with an
   // optional per-page override for mixed-scale sets. The DEFAULT is reached only by a
-  // feasibility probe run before the user has typed anything (the Add PDF modal's
-  // probe, `userScale: null`) — never by a commit: `commitAutoAlign` refuses a page
-  // with no scale before it gets here (`assertEveryPageScaled`), and the modal
-  // re-roots a reused probe at the typed scale (`cachedProbeAtScale`).
+  // caller that passes no scale at all (dev harness, a droplet probe of an
+  // uncalibrated plan) — never by a commit: `commitAutoAlign` refuses a page with no
+  // scale before it gets here (`assertEveryPageScaled`), and the Add PDF modal only
+  // probes once every page has a typed scale, and posts those scales.
   const uniformScale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
   const scaleOf = (pageIndex: number): number => {
     const own = opts.pageScales?.get(pageIndex);

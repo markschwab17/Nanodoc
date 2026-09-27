@@ -24,12 +24,12 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import { layoutPlacements } from "@/features/stitch/autostitch/layout";
-import { parseScaleInput, isUniform, resolvePageScale, missingScalePages, missingScaleReason, typedCommitScales } from "./pageScales";
-import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
+import { parseScaleInput, missingScalePages, missingScaleReason, typedCommitScales, scaleSetFor, scaleSetKey } from "./pageScales";
+import { SESSION_SOURCE_DOC_TYPE, withSessionSource, classifyServerProbe, planHashHex } from "./ctoSessionSource";
+import { ENGINE_VERSION } from "./autostitch/engineVersion";
 import { modalProbeOutcome } from "./modalProbeGate";
 import { autoAlignUnavailableNote } from "./addToProjectCopy";
-import { commitPlainAdd, commitAutoAlign, cachedProbeAtScale, imageDataToDataUrl, yieldToMain, type CachedProbePlacement } from "./commitPages";
+import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain, type CachedProbePlacement } from "./commitPages";
 
 const THUMB_SCALE = 0.3;
 
@@ -53,6 +53,21 @@ type SourceTab = "device" | "cto";
 export interface InitialPageSelection {
   pageIndices: number[];
   pageScales: ReadonlyMap<number, number>;
+  /** CTO's sheet codes for these pages (the plan's labels) — fed to the probe and to
+   *  "Add & auto-align" exactly as the plan path feeds them to the earned check. */
+  pageCodes?: ReadonlyMap<number, string>;
+  /** The droplet's stored verdict for the plan, and the RAW plan it must hash to. Used
+   *  in place of a browser probe only when it was computed at the scales the user
+   *  typed (`classifyServerProbe`); otherwise the modal probes as usual. */
+  serverProbe?: unknown;
+  plan?: unknown;
+}
+
+/** What a handed-over plan knows about the document currently loaded. */
+interface PlanKnowledge {
+  pageCodes: ReadonlyMap<number, string> | null;
+  serverProbe: unknown;
+  plan: unknown;
 }
 
 export function AddPdfModal({
@@ -123,6 +138,22 @@ export function AddPdfModal({
     [selectedIndices, pageScaleText, scaleFeetPerInch]
   );
   const missingScaleSet = useMemo(() => new Set(missingScale), [missingScale]);
+  /** The scales the probe is asked at: null until every ticked page has a typed scale.
+   *  NO probe runs before that — seam statuses, the feasibility gate and every feet
+   *  figure are decided at the probe's scale, so an answer at a guessed 1"=20' is not
+   *  an answer about 1"=10' sheets (and cannot be rescaled into one). */
+  const probeScales = useMemo(() => {
+    const typed = typedCommitScales(selectedIndices, pageScaleText, scaleFeetPerInch);
+    return typed ? scaleSetFor(selectedIndices, typed.pageScales) : null;
+  }, [selectedIndices, pageScaleText, scaleFeetPerInch]);
+  const probeScaleKey = probeScales ? scaleSetKey(probeScales) : null;
+  const probeScalesRef = useRef(probeScales);
+  probeScalesRef.current = probeScales;
+  /** What a CTO plan hand-off knows about the loaded document (null for any other
+   *  document), and the plan's hash (undefined while it is computed). */
+  const [planKnowledge, setPlanKnowledge] = useState<PlanKnowledge | null>(null);
+  const [planHash, setPlanHash] = useState<string | null | undefined>(undefined);
+  const planKnowledgeRef = useRef<PlanKnowledge | null>(null);
   const scaleReason = missingScaleReason(missingScale);
   const [_ctoListening, setCtoListening] = useState(false);
   /** User-visible error for failed loads/adds (corrupt file, password, etc). */
@@ -155,6 +186,11 @@ export function AddPdfModal({
   /** Monotonic id; a probe reply whose docId != current is stale and ignored. */
   const probeDocIdRef = useRef(0);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
+  /** `scaleSetKey` of the scales `probe` was computed at. A commit reuses the probe
+   *  only when this equals the key of the scales it is committing. */
+  const [probeKey, setProbeKey] = useState<string | null>(null);
+  /** The key of the request in flight (see `postProbe`). */
+  const probeKeyRef = useRef<string | null>(null);
   const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped" | "too_slow">("idle");
   /** True once the probe reports OCR is in play (outlined-text sheets) — used to
    *  explain the longer wait in the "Checking alignment…" copy. */
@@ -229,6 +265,7 @@ export function AddPdfModal({
   const postProbe = useCallback((req: ProbeRequest) => {
     clearProbeBudget();
     probeReqRef.current = req;
+    probeKeyRef.current = scaleSetKey(scaleSetFor(req.pageIndices, new Map(req.pageScales ?? [])));
     probeInFlightRef.current = true;
     probeWorkerRef.current?.postMessage(req);
     const requested = req.docId;
@@ -343,6 +380,7 @@ export function AddPdfModal({
       const result = outcome.probe;
       console.debug("[stitchProbe] method", result.method, "aligned", result.alignedPageIndices.length, "/", result.placements.length);
       setProbe(result);
+      setProbeKey(probeKeyRef.current);
       setProbeState("done");
     };
     probeWorkerRef.current = w;
@@ -379,18 +417,42 @@ export function AddPdfModal({
     if (!pdfBytes || !mupdfDoc || pageCount === 0) return;
     stopProbe("supersede");
     setProbe(null);
+    setProbeKey(null);
     setProbeOcr(false);
-    if (selectedIndices.length < 2) {
+    const scales = probeScalesRef.current;
+    // Nothing to check below two pages, and nothing HONEST to check until every page
+    // has the scale the user typed (see `probeScales`); the scale line says so.
+    if (selectedIndices.length < 2 || !scales) {
       setProbeState("idle");
       return;
     }
     setProbeState("running");
     const bytes = pdfBytes;
     const pages = selectedIndices;
+    const knowledge = planKnowledge;
+    const hash = planHash;
     probeTimerRef.current = window.setTimeout(() => {
       probeTimerRef.current = null;
-      // userScale is null: placements are scale-invariant for a uniform set, so
-      // the probe outcome is unaffected and the effect needs no scale dep.
+      // A CTO plan hand-off: the droplet may already have answered this question. Its
+      // verdict is taken only when it was asked at THESE scales, pages and sheet codes
+      // (and this build + plan) — the same gate the embed strip applies.
+      if (knowledge?.serverProbe != null && hash !== undefined) {
+        const verdict = classifyServerProbe({
+          probe: knowledge.serverProbe,
+          engineVersion: ENGINE_VERSION,
+          planHash: hash,
+          canvas: scales,
+          pageCodes: knowledge.pageCodes,
+          nowMs: Date.now(),
+        });
+        if (verdict === "use") {
+          const row = knowledge.serverProbe as { result: ProbeResult };
+          setProbe({ ...row.result, docId: probeDocIdRef.current });
+          setProbeKey(scaleSetKey(scales));
+          setProbeState("done");
+          return;
+        }
+      }
       // A request the SELECTION asked for earns a fresh entitlement to one automatic
       // re-run; the re-run itself must not grant itself another (that is the loop).
       probeRecheckSpentRef.current = false;
@@ -398,7 +460,10 @@ export function AddPdfModal({
         docId: probeDocIdRef.current,
         pdfBytes: bytes,
         pageIndices: pages,
-        userScale: null,
+        // The TYPED scales, not the solver's default: see `probeScales`.
+        userScale: scales.uniformScale,
+        pageScales: [...scales.pageScales],
+        pageCodes: knowledge?.pageCodes?.size ? [...knowledge.pageCodes] : undefined,
       });
     }, PROBE_DEBOUNCE_MS);
     return () => {
@@ -407,7 +472,9 @@ export function AddPdfModal({
         probeTimerRef.current = null;
       }
     };
-  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, stopProbe, postProbe]);
+    // `probeScaleKey`, not the scale text: re-probe when a page's SCALE changes, not
+    // on every keystroke that leaves it the same ("10" → "10.0").
+  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, probeScaleKey, planKnowledge, planHash, stopProbe, postProbe]);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -468,6 +535,19 @@ export function AddPdfModal({
           if (v != null && v > 0) presetText.set(i, String(v));
         }
         setPageScaleText(presetText);
+        const knowledge: PlanKnowledge | null =
+          preset && (preset.pageCodes?.size || preset.serverProbe != null)
+            ? { pageCodes: preset.pageCodes ?? null, serverProbe: preset.serverProbe ?? null, plan: preset.plan }
+            : null;
+        planKnowledgeRef.current = knowledge;
+        setPlanKnowledge(knowledge);
+        setPlanHash(knowledge?.serverProbe != null ? undefined : null);
+        if (knowledge?.serverProbe != null) {
+          void planHashHex(knowledge.plan).then((h) => {
+            // Still the same hand-off? A later load replaced `planKnowledge`.
+            if (planKnowledgeRef.current === knowledge) setPlanHash(h);
+          });
+        }
         // NO probe here. The probe used to walk the WHOLE document the moment a
         // PDF loaded, before the user had ticked anything — on a 22-page set that
         // is ~1.1 GB of retained page geometry in the worker and minutes of band
@@ -530,6 +610,8 @@ export function AddPdfModal({
       setPageCount(0);
       setSelectedPages(new Set());
       setPageScaleText(new Map());
+      planKnowledgeRef.current = null;
+      setPlanKnowledge(null);
       setThumbnails({});
       setThumbProgress(0);
       setProbe(null);
@@ -749,6 +831,7 @@ export function AddPdfModal({
     const typed = typedCommitScales(selected, pageScaleText, scaleFeetPerInch);
     if (!typed) return;
     const { pageScales, uniformScale } = typed;
+    const commitKey = scaleSetKey(scaleSetFor(selected, pageScales));
     setAdding(true);
     setLoadError(null);
     setAddingProgress({ done: 0, total: selected.length });
@@ -757,22 +840,15 @@ export function AddPdfModal({
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
       // Prefer the cached probe (skips the second stitch); else the helper falls back
       // to running the aligner live (probe absent/errored/running).
-      // The probe always ran with a uniform (null) scale, so its cached poses are
-      // only valid when this selection turns out uniform too — a mixed selection
-      // always takes the live path, which is per-page-scale aware.
-      // The probe ran before any scale was typed, so it is rooted at the solver's
-      // default: `cachedProbeAtScale` re-expresses it at the scale the user typed, or
-      // the commit would re-root it and draw every sheet at the wrong size.
+      // Reused ONLY when it was computed at exactly the scales being committed
+      // (`probeKey`): its seam statuses, gate and feet figures were decided at those
+      // scales. Anything else takes the live path, which solves at the typed scales.
       let cached: CachedProbePlacement | null = null;
-      if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
-        const sel = new Set(selected);
-        // Re-run the (cheap) layout over just the selected sheets so the committed
-        // tiles normalize to THIS selection's top-left (MARGIN), not the whole
-        // document's. The probe laid out all pages, so filtering alone would leave a
-        // partial selection offset off-canvas; the expensive stitch stays cached (poses).
-        const subset = probe.poses.filter((p) => sel.has(p.pageIndex));
-        cached = cachedProbeAtScale({
-          placements: layoutPlacements(subset, probe.rootFtPerIn),
+      if (probe && probeState === "done" && probeKey === commitKey) {
+        // Equal keys mean the probe ran over exactly these pages, so its own layout is
+        // this selection's layout (a stored server verdict need not carry poses).
+        cached = {
+          placements: probe.placements,
           rootFtPerIn: probe.rootFtPerIn,
           worstResidFt: probe.worstResidFt,
           // The honesty payload travels with the poses: without it the commit had no
@@ -783,7 +859,7 @@ export function AddPdfModal({
           alongAnchored: probe.alongAnchored,
           worstAlongUncertaintyFt: probe.worstAlongUncertaintyFt,
           refPageIndices: probe.refPageIndices,
-        }, resolvePageScale(selected[0], pageScales, uniformScale));
+        };
       }
       const result = await commitAutoAlign({
         mupdf,
@@ -798,6 +874,7 @@ export function AddPdfModal({
         onProgress: (done, total) => setAddingProgress({ done, total }),
         ocr: recognize,
         cached,
+        pageCodes: planKnowledge?.pageCodes ? new Map(planKnowledge.pageCodes) : undefined,
       });
       if (result.message)
         useNotificationStore
@@ -811,7 +888,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScaleText, scaleFeetPerInch, onAutoAlignResult]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeKey, probeState, pageScaleText, scaleFeetPerInch, planKnowledge, onAutoAlignResult]);
 
   const feasibility = useMemo(
     () => (probe ? deriveFeasibility(probe, selectedIndices) : null),
@@ -841,6 +918,8 @@ export function AddPdfModal({
                 setPageCount(0);
                 setSelectedPages(new Set());
                 setPageScaleText(new Map());
+                planKnowledgeRef.current = null;
+                setPlanKnowledge(null);
                 setThumbnails({});
                 setLoadError(null);
                 stopProbe("supersede");
@@ -863,6 +942,8 @@ export function AddPdfModal({
                 setPageCount(0);
                 setSelectedPages(new Set());
                 setPageScaleText(new Map());
+                planKnowledgeRef.current = null;
+                setPlanKnowledge(null);
                 setThumbnails({});
                 setLoadError(null);
                 stopProbe("supersede");

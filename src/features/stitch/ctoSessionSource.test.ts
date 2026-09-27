@@ -20,6 +20,7 @@ import {
   type CtoDocLike,
 } from "./ctoSessionSource";
 import { canvasProbeSet } from "./earnedAutoAlignSet";
+import { planHandoffContext } from "./ctoSessionSource";
 import { parseStitchPlan, unscaledPlanPages } from "./stitchPlan";
 import { resolvePageScale, assertEveryPageScaled, typedCommitScales, MissingSheetScaleError } from "./pageScales";
 import type { StitchTile } from "./stitchTypes";
@@ -436,5 +437,24 @@ describe("ctoProbeUrl", () => {
   test("is null when there is nothing to poll with", () => {
     expect(ctoProbeUrl({ api_origin: "https://cto.example", token: "" })).toBeNull();
     expect(ctoProbeUrl(null)).toBeNull();
+  });
+});
+
+describe("planHandoffContext", () => {
+  const plan = new Uint8Array([1]);
+  const other = new Uint8Array([1]);
+  const ctx = { pageCodes: new Map([[0, "C500"]]) };
+  const tile = (bytes: Uint8Array, i = 0) => ({ sourcePageIndex: i, sourcePdfBytes: bytes });
+
+  test("hands the plan's context to a canvas built from the plan's own PDF", () => {
+    expect(planHandoffContext([tile(plan, 0), tile(plan, 1)], { source: plan, ctx })).toBe(ctx);
+  });
+  test("not to a canvas with a sheet from another PDF — even an equal-looking one", () => {
+    expect(planHandoffContext([tile(plan), tile(other, 1)], { source: plan, ctx })).toBeUndefined();
+    expect(planHandoffContext([tile(other)], { source: plan, ctx })).toBeUndefined();
+  });
+  test("nothing parked, or nothing on the canvas → a plain check", () => {
+    expect(planHandoffContext([tile(plan)], null)).toBeUndefined();
+    expect(planHandoffContext([], { source: plan, ctx })).toBeUndefined();
   });
 });

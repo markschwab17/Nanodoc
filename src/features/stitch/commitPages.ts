@@ -101,40 +101,6 @@ export interface CachedProbePlacement {
   refPageIndices?: number[];
 }
 
-/**
- * A cached probe re-expressed at the scale the user typed for the set.
- *
- * The Add PDF modal probes BEFORE anything is typed (`userScale: null`), so its result
- * is rooted at the solver's default feet-per-inch. For a uniform set the placements
- * themselves are the same in canvas points whatever the scale — a sheet's points are
- * its points — but `rootFtPerIn` and every figure in FEET are not. Left at the default
- * root, the commit re-rooted the poses "from 1\"=20' onto the typed 1\"=10'" and drew
- * every sheet twice its size; the seam figures were likewise quoted in the wrong feet.
- * Only valid for a UNIFORM selection, which is the only time the modal reuses a probe.
- */
-export function cachedProbeAtScale<T extends CachedProbePlacement>(cached: T, ftPerIn: number): T {
-  const k = ftPerIn / cached.rootFtPerIn;
-  if (!Number.isFinite(k) || k <= 0 || k === 1) return cached;
-  const ft = (v: number | undefined) => (v == null ? v : v * k);
-  return {
-    ...cached,
-    rootFtPerIn: ftPerIn,
-    worstResidFt: cached.worstResidFt * k,
-    ...(cached.worstAlongUncertaintyFt != null ? { worstAlongUncertaintyFt: cached.worstAlongUncertaintyFt * k } : {}),
-    ...(cached.seamReport
-      ? {
-          seamReport: cached.seamReport.map((e) => {
-            const d = { ...e.detail };
-            if (d.residFt != null) d.residFt = ft(d.residFt);
-            if (d.perpDeltaFt != null) d.perpDeltaFt = ft(d.perpDeltaFt);
-            if (d.perpResidFt != null) d.perpResidFt = ft(d.perpResidFt);
-            return { ...e, detail: d };
-          }),
-        }
-      : {}),
-  };
-}
-
 export interface CommitResult {
   added: number;
   unalignedIds: string[];

@@ -20,7 +20,7 @@ import { parseStitchPlan, unscaledPlanPages } from "@/features/stitch/stitchPlan
 import { missingScaleReason } from "@/features/stitch/pageScales";
 import { autoAlignExplanation, TRIM_NO_BOXES_NOTE } from "@/features/stitch/addToProjectCopy";
 import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
-import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
+import { useEarnedAutoAlign, type EarnedAutoAlignContext } from "@/features/stitch/useEarnedAutoAlign";
 import { AlignCoachMark } from "@/features/stitch/AlignCoachMark";
 import { TrimCoachMark } from "@/features/stitch/TrimCoachMark";
 import { AddToProjectDialog } from "@/features/stitch/AddToProjectDialog";
@@ -29,7 +29,9 @@ import {
   STITCH_SESSION_LOST,
   ctoProbeUrl,
   isStitchSessionLost,
+  planHandoffContext,
   stitchHandoffRecovery,
+  type PlanHandoff,
 } from "@/features/stitch/ctoSessionSource";
 import { shutdownOcr } from "@/features/stitch/autostitch/ocrService";
 import { disposeRasterEncoder } from "@/features/stitch/rasterEncode";
@@ -262,6 +264,10 @@ export default function StitchView() {
    *  finds the store already drained) does not read the first pass's work as a lost
    *  session. */
   const receivedInitialRef = useRef(false);
+  /** A CTO plan that went through the Add PDF modal (uncalibrated sheets): what the
+   *  plan path would have handed the earned check, parked until the user's plain add
+   *  lands — see `handlePagesAdded`. Consumed once, like the plan path's own check. */
+  const planHandoffRef = useRef<PlanHandoff<EarnedAutoAlignContext> | null>(null);
 
   /**
    * What an auto-align run — the earned button's, or the Add PDF modal's — leaves
@@ -417,9 +423,33 @@ export default function StitchView() {
         const unscaled = unscaledPlanPages(parsed);
         if (unscaled.length) {
           setPlanRun(null);
+          // Everything the plan path's earned check would have had travels with the
+          // pages: CTO's sheet codes and the droplet's stored verdict. The modal uses
+          // both for its own probe / "Add & auto-align" (the verdict only if it was
+          // computed at the scales the user types); a plain add hands them to the
+          // earned check via `planHandoffRef`. Embed only, as on the plan path.
+          const serverProbe = ctx.embed ? initial.probe ?? null : null;
+          planHandoffRef.current = ctx.embed
+            ? {
+                source: source.pdfBytes,
+                ctx: {
+                  pageCodes: parsed.pageCodes,
+                  removeWhiteBackground: true,
+                  serverProbe,
+                  plan: initial.plan,
+                  probeUrl: ctoProbeUrl(ctx),
+                },
+              }
+            : null;
           setCtoInitialPdf({
             ...source,
-            selection: { pageIndices: parsed.pageIndices, pageScales: parsed.pageScales },
+            selection: {
+              pageIndices: parsed.pageIndices,
+              pageScales: parsed.pageScales,
+              pageCodes: parsed.pageCodes,
+              serverProbe,
+              plan: initial.plan,
+            },
           });
           setShowAddPdf(true);
           useNotificationStore
@@ -646,6 +676,8 @@ export default function StitchView() {
   const handleAutoAlignResult = useCallback((unalignedCount: number) => {
     setUnplacedCount(unalignedCount);
     setCoachDismissed(false);
+    // The modal's own run consumed the plan hand-off (it had the codes and verdict).
+    planHandoffRef.current = null;
     // The modal aligned these sheets itself, so whatever the strip was offering is
     // spent — it described a canvas that no longer exists.
     earnedReset();
@@ -664,7 +696,13 @@ export default function StitchView() {
     // Over the WHOLE canvas, plan sheets and new ones together. Probing only the
     // pages just added would offer a button that lays a second composite at the
     // origin, on top of the grid the plan left behind.
-    earnedCheck();
+    // A plan that came through the modal (uncalibrated sheets) checks with what the
+    // plan path would have supplied — sheet codes and the droplet's verdict, which the
+    // hook takes only if it was computed at the scales now on the canvas — provided
+    // the canvas is still built from that plan's PDF alone.
+    const handoff = planHandoffRef.current;
+    planHandoffRef.current = null;
+    earnedCheck(planHandoffContext(useStitchStore.getState().tiles, handoff));
   }, [earnedCheck]);
 
   const handlePointAlignModeChange = (active: boolean) => {

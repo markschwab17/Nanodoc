@@ -39,6 +39,8 @@ vi.mock("mupdf", () => ({
 
 import { AddPdfModal } from "./AddPdfModal";
 import { useStitchStore } from "@/shared/stores/stitchStore";
+import { planHashHex, SERVER_PROBE_VERSION } from "./ctoSessionSource";
+import { ENGINE_VERSION } from "./autostitch/engineVersion";
 import { autoAlignUnavailableNote } from "./addToProjectCopy";
 
 // ── the stubbed probe worker ─────────────────────────────────────────────────
@@ -102,8 +104,9 @@ const setScaleInput = () =>
 const pageScaleInput = (page: number) =>
   document.querySelector<HTMLInputElement>(`input[aria-label="Scale for page ${page}, feet per inch"]`)!;
 
-/** Mount with a PDF already in hand, tick every page, and let the debounce fire. */
-async function openWithSelection() {
+/** Mount with a PDF already in hand, tick every page, type the set scale (the probe
+ *  waits for it — null leaves it blank), and let the debounce fire. */
+async function openWithSelection(scale: string | null = "10") {
   await act(async () => {
     root.render(
       <AddPdfModal open onClose={() => {}} initialPdf={{ pdfBytes: new Uint8Array([1, 2, 3]), fileName: "sheets.pdf" }} />,
@@ -111,6 +114,7 @@ async function openWithSelection() {
   });
   vi.useFakeTimers();
   act(() => { button("Select all")!.click(); });
+  if (scale != null) typeInto(setScaleInput(), scale);
   act(() => { vi.advanceTimersByTime(400); });   // PROBE_DEBOUNCE_MS
 }
 
@@ -231,8 +235,7 @@ describe("AddPdfModal — the probe's wall clock", () => {
 
 describe("AddPdfModal — a typed scale is required (no 1\"=20' default)", () => {
   it("both commit buttons stay disabled, with the pages named, until every page has a scale", async () => {
-    await openWithSelection();
-    worker!.reply(result(requests()[0].docId, CLEAN));
+    await openWithSelection(null);
     expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(true);
     expect(button("Add & auto-align")!.hasAttribute("disabled")).toBe(true);
     expect(body()).toContain("Enter the scale for pages 1, 2, 3");
@@ -251,6 +254,10 @@ describe("AddPdfModal — a typed scale is required (no 1\"=20' default)", () =>
     expect(body()).not.toContain("Enter the scale for");
     expect(pageScaleInput(2).placeholder).toBe("10");
     expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(false);
+    // Only now does the alignment check run — at the typed scales.
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(requests()).toHaveLength(1);
+    worker!.reply(result(requests()[0].docId, CLEAN));
     expect(button("Add & auto-align")!.hasAttribute("disabled")).toBe(false);
 
     // Junk in a page's own box is not quietly replaced by the set scale.
@@ -289,5 +296,103 @@ describe("AddPdfModal — a typed scale is required (no 1\"=20' default)", () =>
     expect(pageScaleInput(3).value).toBe("10");
     expect(body()).toContain("Enter the scale for page 2");
     expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(true);
+  });
+});
+
+describe("AddPdfModal — the probe is asked at the TYPED scale", () => {
+  it("no probe runs until every page has a scale; then it posts those scales", async () => {
+    await openWithSelection(null);
+    // Nothing is checked at a guessed 1"=20' — and nothing claims a verdict.
+    expect(requests()).toHaveLength(0);
+    expect(body()).not.toContain("Checking alignment");
+    expect(body()).not.toContain("will auto-align");
+    typeInto(setScaleInput(), "40");
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(requests()).toHaveLength(1);
+    const req = requests()[0] as Posted & { userScale?: number | null; pageScales?: [number, number][] };
+    expect(req.userScale).toBe(40);
+    expect(req.pageScales).toEqual([[0, 40], [1, 40], [2, 40]]);
+  });
+
+  it("a verdict reached at 1\"=10' is withdrawn when the scale becomes 1\"=40', and re-checked at 40", async () => {
+    // Seam statuses and the gate are decided in FEET: a 2 ft seam at 10 is not the
+    // seam it is at 40 — the answer must be re-computed, not carried over.
+    await openWithSelection("10");
+    worker!.reply(result(requests()[0].docId, CLEAN));
+    expect(body()).toContain("will auto-align");
+    typeInto(setScaleInput(), "40");
+    expect(body()).not.toContain("will auto-align");
+    expect(button("Checking alignment…")!.hasAttribute("disabled")).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(requests()).toHaveLength(2);
+    expect((requests()[1] as { userScale?: number }).userScale).toBe(40);
+  });
+
+  it("re-typing the same scale differently does not restart the check", async () => {
+    await openWithSelection("10");
+    typeInto(setScaleInput(), "10.0");
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(requests()).toHaveLength(1);
+  });
+});
+
+describe("AddPdfModal — a CTO plan hand-off keeps what the plan path knew", () => {
+  const PLAN = { version: 1, mode: "manual", entries: [{ scaleFeetPerInch: null }, { scaleFeetPerInch: 10 }, { scaleFeetPerInch: 10 }] };
+  const codes = new Map([[0, "C500"], [1, "C501"]]);
+  const row = async (scale: number) => ({
+    v: SERVER_PROBE_VERSION,
+    engine: ENGINE_VERSION,
+    status: "ok",
+    planHash: await planHashHex(PLAN),
+    request: {
+      pageIndices: [0, 1, 2],
+      userScale: scale,
+      pageScales: [[0, scale], [1, scale], [2, scale]],
+      pageCodes: [...codes],
+    },
+    result: result(0, CLEAN),
+    ocrStats: CLEAN,
+  });
+  const open = async (serverProbe: unknown) => {
+    await act(async () => {
+      root.render(
+        <AddPdfModal
+          open
+          onClose={() => {}}
+          initialPdf={{
+            pdfBytes: new Uint8Array([1, 2, 3]),
+            fileName: "plan.pdf",
+            selection: {
+              pageIndices: [0, 1, 2],
+              pageScales: new Map([[1, 10], [2, 10]]),
+              pageCodes: codes,
+              serverProbe,
+              plan: PLAN,
+            },
+          }}
+        />,
+      );
+    });
+    // The user types the one missing scale.
+    typeInto(pageScaleInput(1), "10");
+  };
+
+  it("the browser probe carries CTO's sheet codes", async () => {
+    await open(null);
+    await vi.waitFor(() => expect(requests()).toHaveLength(1));
+    expect((requests()[0] as { pageCodes?: unknown }).pageCodes).toEqual([...codes]);
+  });
+
+  it("the droplet's verdict is used when it was computed at the typed scales — no browser probe", async () => {
+    await open(await row(10));
+    await vi.waitFor(() => expect(body()).toContain("will auto-align"));
+    expect(requests()).toHaveLength(0);
+  });
+
+  it("a verdict computed at another scale (the droplet's 1\"=20' fill) is not used — the browser probes", async () => {
+    await open(await row(20));
+    await vi.waitFor(() => expect(requests()).toHaveLength(1));
+    expect((requests()[0] as { userScale?: number }).userScale).toBe(10);
+    expect(body()).not.toContain("will auto-align");
   });
 });

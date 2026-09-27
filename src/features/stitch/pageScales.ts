@@ -202,3 +202,36 @@ export function newTileCanvasFactor(opts: {
       : 1;
   return comp * ref;
 }
+
+/** The scales a probe is ASKED at, in the shape the canvas probe set and the server
+ *  verdict gate use (`canvasProbeSet`, `serverProbeRequestMatches`): ascending pages,
+ *  a scale for each, and the one shared scale when every page has the same one. */
+export interface ScaleSet {
+  pageIndices: number[];
+  pageScales: Map<number, number>;
+  uniformScale: number | null;
+}
+
+/** `pageScales` must hold every page in `selection` (e.g. `typedCommitScales`). */
+export function scaleSetFor(selection: readonly number[], pageScales: ReadonlyMap<number, number>): ScaleSet {
+  const pageIndices = [...selection].sort((a, b) => a - b);
+  const scales = new Map<number, number>();
+  for (const i of pageIndices) {
+    const v = pageScales.get(i);
+    if (v != null && v > 0) scales.set(i, v);
+  }
+  let uniformScale: number | null = null;
+  if (pageIndices.length && scales.size === pageIndices.length) {
+    const first = scales.get(pageIndices[0])!;
+    if (pageIndices.every((i) => scales.get(i) === first)) uniformScale = first;
+  }
+  return { pageIndices, pageScales: scales, uniformScale };
+}
+
+/** Identity of a scale set. A probe result may be reused by a commit only when the
+ *  keys agree: seam statuses, the feasibility gate and every feet figure were decided
+ *  at the probe's scales (a 2 ft token residual at 1"=20' is 4 ft at 1"=40'), so a
+ *  probe asked at other scales is re-run, never rescaled. */
+export function scaleSetKey(set: ScaleSet): string {
+  return set.pageIndices.map((i) => `${i}:${set.pageScales.get(i) ?? "-"}`).join(",");
+}

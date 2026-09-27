@@ -1,6 +1,7 @@
 import { describe, it, test, expect, vi } from "vitest";
 import { tokenVote, stitchSheets, effectiveSheetCode, buildCodeToNo, refineOffset, solveGlobal, buildGeomFurnitureFilter, matchlineStrokePrior, matchlinePrior, bandSeamPrior, seamCrossings, crossingConsensus, oneSidedStrokeAnchor, FT, type SheetInput, type SegFeat } from "./stitchCore";
 import { makeGeom } from "./types";
+import { deriveFeasibility } from "./feasibility";
 import type { Label, PageExtract, Geom } from "./types";
 
 const tok = (text: string, x: number, y: number) => ({ text, x, y });
@@ -1293,5 +1294,56 @@ describe("sheet codes reaching the driver", () => {
     );
     expect(map.has("C5.00")).toBe(true);
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("seam verification is decided at the sheets' REAL scale", () => {
+  // Three sheets bonded pairwise by shared tokens, with the A->C tokens 21.6 pt out of
+  // closure. The solve spreads that as a residual of 21.6/3 pt on every seam: 2 ft at
+  // 1"=20', 4 ft at 1"=40'. The token-verified bar is 2 ft, so the SAME sheets verify
+  // at 20 and must not at 40. This is why the Add PDF modal probes at the typed scale
+  // instead of rescaling a probe it ran at the 1"=20' default.
+  const lbl = (text: string, x: number, y: number): Label =>
+    ({ text, x, y, endX: x + 30, endY: y, angle: 0, h: 8, font: null });
+  const codes = (base: number) => ["TC", "TC", "FL", "TC", "FL", "TC"].map((p, i) => `${p}${base + i}.${10 + i * 7}`);
+  const at = (ts: string[], dx: number, y0: number) => ts.map((t, i) => lbl(t, 400 + i * 120 + dx, y0 + (i % 2) * 60));
+  const tAB = codes(347), tBC = codes(447), tAC = codes(547);
+  const run = (scale: number) => {
+    const A = [...at(tAB, 0, 800), ...at(tAC, 0, 1200)];
+    const B = [...at(tAB, -1080, 800), ...at(tBC, 0, 400)];
+    const C = [...at(tBC, -1080, 400), ...at(tAC, -2160 - 21.6, 1200)];
+    const mk = (no: number, labels: Label[]): SheetInput => ({
+      id: String(no), no, pageIndex: no - 1, scale, view: [0, 0, 2592, 1728],
+      extract: { view: [0, 0, 2592, 1728], shxLabels: labels, labels, words: labels, geometry: [] } as PageExtract,
+    });
+    return stitchSheets([mk(1, A), mk(2, B), mk(3, C)]);
+  };
+
+  it("at 1\"=20' the 2 ft seams verify", () => {
+    const res = run(20);
+    expect(res.worstResidFt).toBeCloseTo(2, 1);
+    expect(res.seamReport!.every((s) => s.status === "verified")).toBe(true);
+    expect(res.alignmentVerdict).toBe("verified");
+  });
+
+  it("at 1\"=40' the same sheets have 4 ft seams, and a 4 ft seam is NOT verified", () => {
+    const res = run(40);
+    expect(res.worstResidFt).toBeCloseTo(4, 1);
+    expect(res.seamReport!.some((s) => s.status === "verified")).toBe(false);
+    expect(res.alignmentVerdict).toBe("unverified");
+  });
+
+  it("…so the feasibility gate offers the 20 run and refuses the 40 run", () => {
+    const asProbe = (scale: number) => {
+      const r = run(scale);
+      const placed = [...r.placements.keys()].map((no) => no - 1);
+      return {
+        docId: 1, placements: placed.map((pageIndex) => ({ pageIndex, x: 0, y: 0, width: 1, height: 1, aligned: true })),
+        method: r.method, alignedPageIndices: placed, worstResidFt: r.worstResidFt, rootFtPerIn: scale,
+        poses: [], refPageIndices: [0, 1, 2], seamReport: r.seamReport, alignmentVerdict: r.alignmentVerdict,
+      } as any;
+    };
+    expect(deriveFeasibility(asProbe(20), [0, 1, 2]).status).not.toBe("unstitchable");
+    expect(deriveFeasibility(asProbe(40), [0, 1, 2]).status).toBe("unstitchable");
   });
 });

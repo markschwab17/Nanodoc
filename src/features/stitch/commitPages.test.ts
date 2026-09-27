@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { gridLayout, finalReferenceScale, MARGIN, GAP, TILES_PER_ROW, commitPlainAdd, commitAutoAlign, cachedProbeAtScale } from "./commitPages";
+import { gridLayout, finalReferenceScale, MARGIN, GAP, TILES_PER_ROW, commitPlainAdd, commitAutoAlign } from "./commitPages";
 import { MissingSheetScaleError, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
 
 // commitAutoAlign's honesty gate is a pure function of what the solver reported, so
@@ -542,51 +542,5 @@ describe("a commit never sizes a sheet at a guessed scale", () => {
     expect(s.tiles.every((t) => t.scaleFeetPerInch !== DEFAULT_SCALE_FT_PER_IN)).toBe(true);
     // Same-scale sheets keep native size: 1 canvas pt = 1 sheet pt at 1"=10'.
     expect(s.tiles[0].width).toBeCloseTo(612);
-  });
-});
-
-describe("cachedProbeAtScale", () => {
-  // The modal's probe runs with no scale, so its result is rooted at the 1"=20'
-  // default. Reused for a set the user typed as 1"=10', the root must become 10 —
-  // otherwise the commit re-roots poses "from 20 onto 10" and draws every sheet twice
-  // its size.
-  const probe = {
-    placements: [{ pageIndex: 0, x: 0, y: 0, width: 612, height: 792, aligned: true }],
-    rootFtPerIn: 20,
-    worstResidFt: 2,
-    worstAlongUncertaintyFt: 8,
-    seamReport: [
-      { i: 1, j: 2, pageIndexes: [0, 1] as [number, number], status: "verified" as const,
-        detail: { channel: "anchor", residFt: 1, perpDeltaFt: 0.5, perpResidFt: 0.4, marginRatio: 3 } },
-    ],
-  };
-
-  it("re-roots to the typed scale and converts every feet figure, leaving positions alone", () => {
-    const r = cachedProbeAtScale(probe, 10);
-    expect(r.rootFtPerIn).toBe(10);
-    expect(r.placements).toBe(probe.placements);
-    expect(r.worstResidFt).toBe(1);
-    expect(r.worstAlongUncertaintyFt).toBe(4);
-    expect(r.seamReport![0].detail).toEqual({ channel: "anchor", residFt: 0.5, perpDeltaFt: 0.25, perpResidFt: 0.2, marginRatio: 3 });
-  });
-
-  it("is the identity when the typed scale matches the probe root", () => {
-    expect(cachedProbeAtScale(probe, 20)).toEqual(probe);
-  });
-
-  it("commits a 1\"=10' set from a 20-rooted probe at native size, not doubled", async () => {
-    useStitchStore.getState().reset();
-    const fakeDoc = { loadPage: () => ({ getBounds: () => [0, 0, 612, 792], destroy() {} }) };
-    const fakeRenderer = { renderPage: async () => ({ imageData: null }), dispose() {} } as any;
-    await commitAutoAlign({
-      mupdf: {}, doc: fakeDoc, pdfBytes: new Uint8Array([1]), fileName: "plan.pdf",
-      selected: [0], pageScales: new Map([[0, 10]]), uniformScale: 10,
-      removeWhiteBackground: false, renderer: fakeRenderer,
-      cached: cachedProbeAtScale({ ...probe, seamReport: undefined }, 10),
-    });
-    const [t] = useStitchStore.getState().tiles;
-    expect(t.width).toBeCloseTo(612);
-    expect(t.scaleFeetPerInch).toBe(10);
-    expect(useStitchStore.getState().referenceScaleFeetPerInch).toBe(10);
   });
 });
