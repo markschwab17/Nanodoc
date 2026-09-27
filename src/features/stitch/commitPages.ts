@@ -22,7 +22,7 @@ import { frameMask, type TilePlacement } from "@/features/stitch/autostitch/layo
 import type { AlignmentVerdict, SeamStatus, SeamReportEntry } from "@/features/stitch/autostitch/stitchCore";
 import { AUTO_ALIGN_UNAVAILABLE_REASONS, type AutoAlignReason } from "./addToProjectCopy";
 import type { recognize } from "./autostitch/ocrService";
-import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, newTileCanvasFactor } from "./pageScales";
+import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, newTileCanvasFactor, assertEveryPageScaled } from "./pageScales";
 import { tileRenderScale, encodeTileRasterPng, TILE_RENDER_SCALE } from "./rasterEncode";
 
 export { TILE_RENDER_SCALE };
@@ -59,7 +59,10 @@ export interface CommitInput {
   selected: number[];
   /** Per-page feet-per-inch overrides. */
   pageScales: Map<number, number>;
-  /** The typed set scale, or null when the user left the field empty. */
+  /** The typed set scale, or null when the user left the field empty. Between them,
+   *  `pageScales` and `uniformScale` MUST give every selected page a scale: a commit
+   *  throws `MissingSheetScaleError` before rendering anything rather than size a
+   *  sheet at a guessed 1"=20' (see `assertEveryPageScaled`). */
   uniformScale: number | null;
   /** Sheet identity the caller already knows, per page (CTO's plan labels). Fed
    *  straight to `autoStitch`; ignored by a plain add. */
@@ -96,6 +99,40 @@ export interface CachedProbePlacement {
   worstAlongUncertaintyFt?: number;
   worstAlongUncertaintySource?: "sweep" | "vote" | "bound";
   refPageIndices?: number[];
+}
+
+/**
+ * A cached probe re-expressed at the scale the user typed for the set.
+ *
+ * The Add PDF modal probes BEFORE anything is typed (`userScale: null`), so its result
+ * is rooted at the solver's default feet-per-inch. For a uniform set the placements
+ * themselves are the same in canvas points whatever the scale — a sheet's points are
+ * its points — but `rootFtPerIn` and every figure in FEET are not. Left at the default
+ * root, the commit re-rooted the poses "from 1\"=20' onto the typed 1\"=10'" and drew
+ * every sheet twice its size; the seam figures were likewise quoted in the wrong feet.
+ * Only valid for a UNIFORM selection, which is the only time the modal reuses a probe.
+ */
+export function cachedProbeAtScale<T extends CachedProbePlacement>(cached: T, ftPerIn: number): T {
+  const k = ftPerIn / cached.rootFtPerIn;
+  if (!Number.isFinite(k) || k <= 0 || k === 1) return cached;
+  const ft = (v: number | undefined) => (v == null ? v : v * k);
+  return {
+    ...cached,
+    rootFtPerIn: ftPerIn,
+    worstResidFt: cached.worstResidFt * k,
+    ...(cached.worstAlongUncertaintyFt != null ? { worstAlongUncertaintyFt: cached.worstAlongUncertaintyFt * k } : {}),
+    ...(cached.seamReport
+      ? {
+          seamReport: cached.seamReport.map((e) => {
+            const d = { ...e.detail };
+            if (d.residFt != null) d.residFt = ft(d.residFt);
+            if (d.perpDeltaFt != null) d.perpDeltaFt = ft(d.perpDeltaFt);
+            if (d.perpResidFt != null) d.perpResidFt = ft(d.perpResidFt);
+            return { ...e, detail: d };
+          }),
+        }
+      : {}),
+  };
 }
 
 export interface CommitResult {
@@ -212,6 +249,8 @@ function fitCanvasIfUntouched(): void {
 export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> {
   const { doc, pdfBytes, fileName, selected, pageScales, uniformScale, removeWhiteBackground, renderer, onProgress, shouldAbort } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
+  // No sheet is ever sized at a guessed scale: fail before any work if one has none.
+  assertEveryPageScaled(selected, pageScales, uniformScale);
 
   const newTiles: Array<TileData & { x: number; y: number }> = [];
   // ONE reference scale for the whole commit: the typed set scale wins; else a
@@ -327,6 +366,9 @@ export async function commitAutoAlign(
     removeWhiteBackground, renderer, onProgress, ocr, cached, shouldAbort, replaceTileIds,
   } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
+  // No sheet is ever sized at a guessed scale — and the live solver below would
+  // otherwise fill a gap with its own 1"=20' default. Fail before any work.
+  assertEveryPageScaled(selected, pageScales, uniformScale);
 
   // 1. Render rasters for the selected pages (same as the plain add).
   // Keyed by page index and holding the BLOB: a two-strip page commits twice,

@@ -26,11 +26,19 @@ vi.mock("@/core/pdf/PDFRenderer", () => ({
 }));
 vi.mock("mupdf", () => ({
   default: {
-    Document: { openDocument: () => ({ countPages: () => 3, needsPassword: () => false, destroy() {} }) },
+    Document: {
+      openDocument: () => ({
+        countPages: () => 3,
+        needsPassword: () => false,
+        destroy() {},
+        loadPage: () => ({ getBounds: () => [0, 0, 612, 792], destroy() {} }),
+      }),
+    },
   },
 }));
 
 import { AddPdfModal } from "./AddPdfModal";
+import { useStitchStore } from "@/shared/stores/stitchStore";
 import { autoAlignUnavailableNote } from "./addToProjectCopy";
 
 // ── the stubbed probe worker ─────────────────────────────────────────────────
@@ -81,6 +89,19 @@ const body = () => document.body.textContent ?? "";
 let container: HTMLDivElement;
 let root: Root;
 
+/** Type into a controlled input the way React sees a user do it. */
+function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  act(() => {
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+const setScaleInput = () =>
+  document.querySelector<HTMLInputElement>('input[aria-label="Scale for all selected pages, feet per inch"]')!;
+const pageScaleInput = (page: number) =>
+  document.querySelector<HTMLInputElement>(`input[aria-label="Scale for page ${page}, feet per inch"]`)!;
+
 /** Mount with a PDF already in hand, tick every page, and let the debounce fire. */
 async function openWithSelection() {
   await act(async () => {
@@ -116,6 +137,7 @@ describe("AddPdfModal — the probe's wall clock", () => {
 
     worker!.reply(result(requests()[0].docId, CLEAN));
     expect(body()).toContain("will auto-align");
+    typeInto(setScaleInput(), "10");
     expect(button("Add & auto-align")!.hasAttribute("disabled")).toBe(false);
   });
 
@@ -131,6 +153,7 @@ describe("AddPdfModal — the probe's wall clock", () => {
     expect(body()).toContain(autoAlignUnavailableNote("too_slow"));
     expect(button("Auto-align unavailable")!.hasAttribute("disabled")).toBe(true);
     // The pages can still be added and placed by hand — that is the whole point.
+    typeInto(setScaleInput(), "10");
     expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(false);
     // Nothing else will hand tesseract back: the worker's eventual reply is stale.
     expect(mocks.shutdownOcr).toHaveBeenCalled();
@@ -203,5 +226,68 @@ describe("AddPdfModal — the probe's wall clock", () => {
     act(() => { vi.advanceTimersByTime(120_000); });
     expect(aborts()).toHaveLength(abortsAfterSupersede);   // the retired budget never fired
     expect(body()).not.toContain(autoAlignUnavailableNote("too_slow"));
+  });
+});
+
+describe("AddPdfModal — a typed scale is required (no 1\"=20' default)", () => {
+  it("both commit buttons stay disabled, with the pages named, until every page has a scale", async () => {
+    await openWithSelection();
+    worker!.reply(result(requests()[0].docId, CLEAN));
+    expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(true);
+    expect(button("Add & auto-align")!.hasAttribute("disabled")).toBe(true);
+    expect(body()).toContain("Enter the scale for pages 1, 2, 3");
+    // Neither box reads as pre-filled with a number.
+    expect(setScaleInput().placeholder).not.toMatch(/\d/);
+    expect(pageScaleInput(1).placeholder).toBe("");
+
+    // Per-page scales cover only their own page.
+    typeInto(pageScaleInput(1), "10");
+    typeInto(pageScaleInput(3), "10");
+    expect(body()).toContain("Enter the scale for page 2");
+    expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(true);
+
+    // The set-wide scale fills the rest; the page inherits it visibly.
+    typeInto(setScaleInput(), "10");
+    expect(body()).not.toContain("Enter the scale for");
+    expect(pageScaleInput(2).placeholder).toBe("10");
+    expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(false);
+    expect(button("Add & auto-align")!.hasAttribute("disabled")).toBe(false);
+
+    // Junk in a page's own box is not quietly replaced by the set scale.
+    typeInto(pageScaleInput(2), "ten");
+    expect(body()).toContain("Enter the scale for page 2");
+    expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("the plain add commits the typed scale — 1\"=10' sheets land at 10, not 20", async () => {
+    useStitchStore.getState().reset();
+    await openWithSelection();
+    typeInto(setScaleInput(), "10");
+    vi.useRealTimers();
+    await act(async () => { button("Add 3 pages to canvas")!.click(); });
+    await vi.waitFor(() => expect(useStitchStore.getState().tiles).toHaveLength(3));
+    expect(useStitchStore.getState().tiles.map((t) => t.scaleFeetPerInch)).toEqual([10, 10, 10]);
+    expect(useStitchStore.getState().referenceScaleFeetPerInch).toBe(10);
+  });
+
+  it("a handed-over selection opens ticked, with known scales filled and the rest demanded", async () => {
+    await act(async () => {
+      root.render(
+        <AddPdfModal
+          open
+          onClose={() => {}}
+          initialPdf={{
+            pdfBytes: new Uint8Array([1, 2, 3]),
+            fileName: "plan.pdf",
+            selection: { pageIndices: [0, 1, 2], pageScales: new Map([[0, 10], [2, 10]]) },
+          }}
+        />,
+      );
+    });
+    expect(pageScaleInput(1).value).toBe("10");
+    expect(pageScaleInput(2).value).toBe("");
+    expect(pageScaleInput(3).value).toBe("10");
+    expect(body()).toContain("Enter the scale for page 2");
+    expect(button("Add 3 pages to canvas")!.hasAttribute("disabled")).toBe(true);
   });
 });

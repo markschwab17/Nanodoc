@@ -1,5 +1,5 @@
 import { describe, expect, test, it } from "vitest";
-import { DEFAULT_SCALE_FT_PER_IN, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference, newTileCanvasFactor } from "./pageScales";
+import { DEFAULT_SCALE_FT_PER_IN, MissingSheetScaleError, compositionFeetPerInch, isUniform, parseScaleInput, referenceBaseline, referenceScaleFor, resolvePageScale, tileSizeAtReference, newTileCanvasFactor, missingScalePages, typedCommitScales, missingScaleReason, assertEveryPageScaled } from "./pageScales";
 
 describe("parseScaleInput", () => {
   test("plain numbers and decimals", () => {
@@ -23,9 +23,17 @@ describe("resolvePageScale", () => {
   test("page scale wins over the uniform scale", () => {
     expect(resolvePageScale(2, scales, 20)).toBe(40);
   });
-  test("falls back to the uniform scale, then the default", () => {
-    expect(resolvePageScale(0, scales, 20)).toBe(20);
-    expect(resolvePageScale(0, scales, null)).toBe(DEFAULT_SCALE_FT_PER_IN);
+  test("falls back to the uniform scale", () => {
+    expect(resolvePageScale(0, scales, 10)).toBe(10);
+  });
+  test("NEVER falls back to a default: a page with no scale throws instead of becoming 1\"=20'", () => {
+    // The customer bug: four 1"=10' sheets left blank were silently sized as 1"=20'.
+    expect(() => resolvePageScale(0, scales, null)).toThrow(MissingSheetScaleError);
+    try {
+      resolvePageScale(3, scales, null);
+    } catch (e) {
+      expect((e as MissingSheetScaleError).pages).toEqual([3]);
+    }
   });
 });
 
@@ -54,7 +62,7 @@ describe("referenceScaleFor", () => {
   });
   test("with no set scale, falls back to the first selected page's own scale", () => {
     expect(referenceScaleFor([1, 0], new Map([[1, 40]]), null)).toBe(40);
-    expect(referenceScaleFor([0, 1], new Map([[1, 40]]), null)).toBe(DEFAULT_SCALE_FT_PER_IN);
+    expect(() => referenceScaleFor([0, 1], new Map([[1, 40]]), null)).toThrow(MissingSheetScaleError);
   });
 });
 
@@ -73,9 +81,9 @@ describe("referenceBaseline", () => {
     expect(
       referenceBaseline({ typed: null, existing: null, hasTiles: false, selection: [1, 0], pageScales: new Map([[1, 40]]) })
     ).toBe(40);
-    expect(
+    expect(() =>
       referenceBaseline({ typed: null, existing: 40, hasTiles: false, selection: [0], pageScales: new Map() })
-    ).toBe(DEFAULT_SCALE_FT_PER_IN);
+    ).toThrow(MissingSheetScaleError);
   });
 });
 
@@ -129,5 +137,85 @@ describe("newTileCanvasFactor", () => {
   it("combines both, and ignores a broken factor or reference", () => {
     expect(newTileCanvasFactor({ compositionScaleFactor: 0.5, batchRef: 40, canvasRef: 20 })).toBe(1);
     expect(newTileCanvasFactor({ compositionScaleFactor: NaN, batchRef: 0, canvasRef: 20 })).toBe(1);
+  });
+});
+
+describe("missingScalePages", () => {
+  const text = (entries: [number, string][]) => new Map<number, string>(entries);
+  test("every selected page is missing when nothing was typed", () => {
+    expect(missingScalePages([0, 2, 4], text([]), "")).toEqual([0, 2, 4]);
+  });
+  test("a set-wide scale covers every page left blank", () => {
+    expect(missingScalePages([0, 2, 4], text([]), "10")).toEqual([]);
+    expect(missingScalePages([0, 2, 4], text([]), '1"=10\'')).toEqual([]);
+  });
+  test("per-page scales cover only their own page", () => {
+    expect(missingScalePages([0, 2, 4], text([[0, "10"], [4, "20"]]), "")).toEqual([2]);
+  });
+  test("unreadable text counts as missing, per page and set-wide", () => {
+    expect(missingScalePages([0, 1], text([]), "abc")).toEqual([0, 1]);
+    // A page whose own box holds junk is NOT quietly handed the set scale.
+    expect(missingScalePages([0, 1], text([[1, "ten"]]), "10")).toEqual([1]);
+    expect(missingScalePages([0], text([[0, "0"]]), "")).toEqual([0]);
+  });
+  test("whitespace-only is blank, not junk", () => {
+    expect(missingScalePages([0], text([[0, "  "]]), "10")).toEqual([]);
+  });
+  test("pages that are not selected do not matter", () => {
+    expect(missingScalePages([1], text([[0, "junk"]]), "10")).toEqual([]);
+  });
+});
+
+describe("typedCommitScales", () => {
+  test("null until every selected page has a scale the user typed", () => {
+    expect(typedCommitScales([0, 1], new Map(), "")).toBeNull();
+    expect(typedCommitScales([0, 1], new Map([[0, "10"]]), "")).toBeNull();
+  });
+  test("every selected page is in the map — nothing is left for a default to fill", () => {
+    const r = typedCommitScales([0, 1, 2], new Map([[1, "40"]]), "10")!;
+    expect([...r.pageScales]).toEqual([[0, 10], [1, 40], [2, 10]]);
+    expect(r.uniformScale).toBe(10);
+    for (const i of [0, 1, 2]) expect(resolvePageScale(i, r.pageScales, r.uniformScale)).not.toBe(DEFAULT_SCALE_FT_PER_IN);
+  });
+  test("the customer set: four 1\"=10' sheets resolve to 10, not the old 20 default", () => {
+    const r = typedCommitScales([0, 1, 2, 3], new Map(), "10")!;
+    for (const i of [0, 1, 2, 3]) expect(resolvePageScale(i, r.pageScales, r.uniformScale)).toBe(10);
+    expect(referenceScaleFor([0, 1, 2, 3], r.pageScales, r.uniformScale)).toBe(10);
+  });
+  test("per-page only (no set scale) keeps uniformScale null", () => {
+    const r = typedCommitScales([0, 1], new Map([[0, "10"], [1, "10"]]), "")!;
+    expect(r.uniformScale).toBeNull();
+    expect(isUniform([0, 1], r.pageScales, r.uniformScale)).toBe(true);
+  });
+  test("an empty selection has nothing to commit", () => {
+    expect(typedCommitScales([], new Map(), "10")).toBeNull();
+  });
+});
+
+describe("missingScaleReason", () => {
+  test("null when nothing is missing", () => {
+    expect(missingScaleReason([])).toBeNull();
+  });
+  test("names pages 1-based", () => {
+    expect(missingScaleReason([2])).toBe("Enter the scale for page 3");
+    expect(missingScaleReason([2, 4])).toBe("Enter the scale for pages 3, 5");
+  });
+  test("a long list is shortened", () => {
+    expect(missingScaleReason([0, 1, 2, 3, 4, 5, 6])).toBe("Enter the scale for pages 1, 2, 3, 4, 5 and 2 more");
+  });
+});
+
+describe("assertEveryPageScaled", () => {
+  test("throws naming every page with no scale", () => {
+    expect(() => assertEveryPageScaled([0, 1, 2], new Map([[1, 10]]), null)).toThrow(MissingSheetScaleError);
+    try {
+      assertEveryPageScaled([0, 1, 2], new Map([[1, 10]]), null);
+    } catch (e) {
+      expect((e as MissingSheetScaleError).pages).toEqual([0, 2]);
+    }
+  });
+  test("passes when a set scale or per-page scales cover everything", () => {
+    expect(() => assertEveryPageScaled([0, 1], new Map(), 10)).not.toThrow();
+    expect(() => assertEveryPageScaled([0, 1], new Map([[0, 10], [1, 20]]), null)).not.toThrow();
   });
 });

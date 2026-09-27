@@ -14,9 +14,10 @@ import { StitchCanvas } from "@/features/stitch/StitchCanvas";
 import { StitchToolbar } from "@/features/stitch/StitchToolbar";
 import { StitchBottomToolbar } from "@/features/stitch/StitchBottomToolbar";
 import { StitchContextMenu } from "@/features/stitch/StitchContextMenu";
-import { AddPdfModal } from "@/features/stitch/AddPdfModal";
+import { AddPdfModal, type InitialPageSelection } from "@/features/stitch/AddPdfModal";
 import { commitPlainAdd, type CommitResult } from "@/features/stitch/commitPages";
-import { parseStitchPlan } from "@/features/stitch/stitchPlan";
+import { parseStitchPlan, unscaledPlanPages } from "@/features/stitch/stitchPlan";
+import { missingScaleReason } from "@/features/stitch/pageScales";
 import { autoAlignExplanation, TRIM_NO_BOXES_NOTE } from "@/features/stitch/addToProjectCopy";
 import { TakeoffModeStrip } from "@/features/stitch/TakeoffModeStrip";
 import { useEarnedAutoAlign } from "@/features/stitch/useEarnedAutoAlign";
@@ -221,7 +222,7 @@ export default function StitchView() {
   // CTO stitch preload: when opened from CTO with stitch=1, either commit the sheets
   // straight onto the canvas (CTO sent a stitch plan) or open the Add PDF modal on the
   // initial PDF so the user picks the pages themselves (no plan / the plan failed).
-  const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string } | null>(null);
+  const [ctoInitialPdf, setCtoInitialPdf] = useState<{ pdfBytes: Uint8Array; fileName: string; selection?: InitialPageSelection } | null>(null);
   // Kept for the life of the stitch session (unlike ctoInitialPdf, which is consumed once the
   // modal loads it) so "From Pursuit" can still offer the site-sheet source after the user
   // switches tabs and loads a different project document.
@@ -408,6 +409,22 @@ export default function StitchView() {
         const parsed = parseStitchPlan(initial.plan, doc.countPages());
         if (!parsed) {
           fallBackToPicker();
+          return;
+        }
+        // No sheet lands at a guessed scale. A plan with any uncalibrated sheet opens
+        // the picker instead, with the plan's pages ticked and the scales CTO DID send
+        // filled in; the modal will not commit until the rest are typed.
+        const unscaled = unscaledPlanPages(parsed);
+        if (unscaled.length) {
+          setPlanRun(null);
+          setCtoInitialPdf({
+            ...source,
+            selection: { pageIndices: parsed.pageIndices, pageScales: parsed.pageScales },
+          });
+          setShowAddPdf(true);
+          useNotificationStore
+            .getState()
+            .showNotification(`${missingScaleReason(unscaled)} to place these sheets.`, "info");
           return;
         }
         planAbortRef.current = false;

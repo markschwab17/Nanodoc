@@ -1,4 +1,11 @@
-/** Per-sheet scale for mixed-scale plan sets (Site Sheet spec, decision 5). Feet per inch. */
+/** Per-sheet scale for mixed-scale plan sets (Site Sheet spec, decision 5). Feet per inch.
+ *
+ *  NOT an import default any more. Sizing a sheet at a guessed 1"=20' is how four
+ *  1"=10' grading sheets were stitched at twice their true size and every takeoff
+ *  measurement came out 2x long, so an import now requires a scale the user typed
+ *  (`typedCommitScales`) and `resolvePageScale` throws rather than guess. What is left
+ *  of this constant is the display fallback in `compositionFeetPerInch` and the
+ *  feasibility probe's scale-free run (`autoStitch` with no `userScale`). */
 export const DEFAULT_SCALE_FT_PER_IN = 20;
 
 /** "20", "12.5", 1"=40', 1in=50ft → feet per inch; null when unusable. */
@@ -11,11 +18,89 @@ export function parseScaleInput(text: string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/** A commit was asked to size a sheet nobody gave a scale. Thrown instead of guessing
+ *  1"=20' — a guessed scale is silently wrong in every measurement taken off it.
+ *  `pages` are 0-based page indices. */
+export class MissingSheetScaleError extends Error {
+  readonly pages: number[];
+  constructor(pages: number[]) {
+    super(`No scale for page${pages.length === 1 ? "" : "s"} ${pages.map((p) => p + 1).join(", ")}`);
+    this.name = "MissingSheetScaleError";
+    this.pages = pages;
+  }
+}
+
+/** The page's own scale, else the set scale. Throws `MissingSheetScaleError` when
+ *  neither exists — there is deliberately no default. */
 export function resolvePageScale(pageIndex: number, pageScales: ReadonlyMap<number, number>, uniform: number | null): number {
   const own = pageScales.get(pageIndex);
   if (own != null && own > 0) return own;
   if (uniform != null && uniform > 0) return uniform;
-  return DEFAULT_SCALE_FT_PER_IN;
+  throw new MissingSheetScaleError([pageIndex]);
+}
+
+/** Commit-side guard: every page in `selection` resolves to a scale, or this throws
+ *  naming all the pages that do not. Run before any rendering so a commit fails
+ *  before it has done (or written) anything. */
+export function assertEveryPageScaled(selection: readonly number[], pageScales: ReadonlyMap<number, number>, uniform: number | null): void {
+  const hasUniform = uniform != null && uniform > 0;
+  const missing = selection.filter((i) => {
+    const own = pageScales.get(i);
+    return !(own != null && own > 0) && !hasUniform;
+  });
+  if (missing.length) throw new MissingSheetScaleError(missing);
+}
+
+/**
+ * The selected pages that have no scale the user typed, ascending as given.
+ *
+ * A page is covered by its OWN box when that holds a readable scale, or — when its
+ * own box is blank — by a readable set-wide scale. A page whose own box holds text
+ * that is not a scale ("ten", "0") is missing even when a set scale exists: the user
+ * meant something for that sheet, and quietly handing it the set scale instead would
+ * be the same silent guess this rule exists to stop.
+ */
+export function missingScalePages(
+  selection: readonly number[],
+  pageScaleText: ReadonlyMap<number, string>,
+  uniformText: string,
+): number[] {
+  const uniform = parseScaleInput(uniformText);
+  return selection.filter((i) => {
+    const own = (pageScaleText.get(i) ?? "").trim();
+    if (own) return parseScaleInput(own) == null;
+    return uniform == null;
+  });
+}
+
+/**
+ * The scales a modal commit uses, or null while any selected page still lacks one
+ * (see `missingScalePages`). The map holds EVERY selected page — per-page value or
+ * the set value — so nothing downstream is ever left to fall back on a default.
+ */
+export function typedCommitScales(
+  selection: readonly number[],
+  pageScaleText: ReadonlyMap<number, string>,
+  uniformText: string,
+): { pageScales: Map<number, number>; uniformScale: number | null } | null {
+  if (selection.length === 0) return null;
+  if (missingScalePages(selection, pageScaleText, uniformText).length) return null;
+  const uniformScale = parseScaleInput(uniformText);
+  const pageScales = new Map<number, number>();
+  for (const i of selection) {
+    const own = parseScaleInput(pageScaleText.get(i) ?? "");
+    pageScales.set(i, own ?? (uniformScale as number));
+  }
+  return { pageScales, uniformScale };
+}
+
+/** Short visible reason for a disabled commit, naming pages 1-based; null when none. */
+export function missingScaleReason(missing: readonly number[]): string | null {
+  if (!missing.length) return null;
+  const MAX = 5;
+  const shown = missing.slice(0, MAX).map((p) => p + 1).join(", ");
+  const more = missing.length > MAX ? ` and ${missing.length - MAX} more` : "";
+  return `Enter the scale for page${missing.length === 1 ? "" : "s"} ${shown}${more}`;
 }
 
 export function isUniform(pageIndices: number[], pageScales: ReadonlyMap<number, number>, uniform: number | null): boolean {
@@ -66,7 +151,10 @@ export function referenceBaseline(opts: {
  * sheet — that reference, divided by the composition shrink factor (the same
  * adjustment the manifest and training export make). Falls back to the moving sheet's
  * own scale, then to the 1"=20' default, so a canvas with no reference set still
- * reports a sane figure instead of nothing.
+ * reports a sane figure instead of nothing. DISPLAY ONLY (the align-to-neighbour
+ * seam note): it sizes nothing, and every sheet committed through `commitPages`
+ * carries a typed scale, so the default is reachable only on a canvas with no sheet
+ * scale at all.
  */
 export function compositionFeetPerInch(opts: {
   referenceScaleFeetPerInch: number | null;

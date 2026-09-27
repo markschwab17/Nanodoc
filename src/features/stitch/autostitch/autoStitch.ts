@@ -837,7 +837,11 @@ async function runAutoStitch(
   const total = pageIndices.length;
   const units: Unit[] = [];
   // Scale inference is deferred; uniform scale (user-entered or default), with an
-  // optional per-page override for mixed-scale sets.
+  // optional per-page override for mixed-scale sets. The DEFAULT is reached only by a
+  // feasibility probe run before the user has typed anything (the Add PDF modal's
+  // probe, `userScale: null`) — never by a commit: `commitAutoAlign` refuses a page
+  // with no scale before it gets here (`assertEveryPageScaled`), and the modal
+  // re-roots a reused probe at the typed scale (`cachedProbeAtScale`).
   const uniformScale = opts.userScale && opts.userScale > 0 ? opts.userScale : DEFAULT_SCALE;
   const scaleOf = (pageIndex: number): number => {
     const own = opts.pageScales?.get(pageIndex);
