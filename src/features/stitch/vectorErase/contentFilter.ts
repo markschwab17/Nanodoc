@@ -26,6 +26,8 @@
  * Pure: no mupdf, no DOM. Exported for tests.
  */
 
+import { decodeString, parseTJArray, showText, type FontMetrics, type TextState, type TJElem } from "./textShow";
+
 /** Affine matrix [a b c d e f], PDF row-vector convention: p' = p · M. */
 export type Mat = [number, number, number, number, number, number];
 
@@ -82,9 +84,18 @@ export interface FilterHooks {
   decide(path: PaintedPath): PathVerdict;
   /** A `Do` at this CTM. Return a replacement XObject name, or null to leave it. */
   onDo?(name: string, ctm: Mat, lineWidth: number): string | null;
+  /** Metrics of a font resource, or null when its glyphs cannot be laid out. */
+  font?(name: string): FontMetrics | null;
+  /** Was the glyph whose origin is at (x, y) in caller space erased? Text is
+   *  only laid out when this is given. */
+  eraseGlyph?(x: number, y: number): boolean;
+  /** Is a glyph really drawn with its origin at (x, y)? Guards the layout. */
+  knownGlyph?(x: number, y: number): boolean;
 }
 
 export interface FilterStats {
+  /** Glyphs removed from text-showing operators. */
+  glyphsRemoved: number;
   painted: number;
   erased: number;
   rewritten: number;
@@ -258,7 +269,7 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
   const b = bytes;
   const n = b.length;
   const edits: Edit[] = [];
-  const stats: FilterStats = { painted: 0, erased: 0, rewritten: 0, formsReplaced: 0 };
+  const stats: FilterStats = { glyphsRemoved: 0, painted: 0, erased: 0, rewritten: 0, formsReplaced: 0 };
 
   // Operand stack for the operator being read.
   const opStart: number[] = [];
@@ -271,8 +282,42 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
   };
 
   let ctm: Mat = baseCtm.slice() as Mat;
+  const strElems = (k: number): TJElem[] | null => {
+    const bytes = decodeString(b, opStart[k], opEnd[k]);
+    return bytes ? [{ kind: "str", bytes }] : null;
+  };
   let lineWidth = initialLineWidth;
-  const ctmStack: Array<{ ctm: Mat; lineWidth: number }> = [];
+  // Text state lives in the graphics state (saved by q/Q); the text matrices
+  // do not. `tmKnown` drops when a show could not be laid out (unknown font),
+  // until the next operator that sets Tm from Tlm.
+  let ts: TextState = { Tc: 0, Tw: 0, Th: 1, TL: 0, Ts: 0, font: null, Tfs: 0 };
+  let tm: Mat = [1, 0, 0, 1, 0, 0];
+  let tlm: Mat = [1, 0, 0, 1, 0, 0];
+  let tmKnown = true;
+  const textOn = !!hooks.eraseGlyph;
+  const fontCache = new Map<string, FontMetrics | null>();
+  const fontOf = (name: string | null): FontMetrics | null => {
+    if (!name || !hooks.font) return null;
+    if (!fontCache.has(name)) fontCache.set(name, hooks.font(name));
+    return fontCache.get(name)!;
+  };
+  const ctmStack: Array<{ ctm: Mat; lineWidth: number; ts: TextState }> = [];
+  /** Lay out a show operation; on removals, replace [start, end) with `prefix [..] TJ`. */
+  const show = (elems: TJElem[] | null, start: number, end: number, prefix: string) => {
+    const f = fontOf(ts.font);
+    if (!elems || !f || !tmKnown) { tmKnown = false; return; }
+    const r = showText(elems, ts, tm, ctm, f, hooks.eraseGlyph!, hooks.knownGlyph);
+    tm = r.tm;
+    if (r.replacement) {
+      edits.push({ start, end, text: `${prefix}${r.replacement} TJ` });
+      stats.glyphsRemoved += r.removed;
+    }
+  };
+  const nextLine = (tx: number, ty: number) => {
+    tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tx * tlm[0] + ty * tlm[2] + tlm[4], tx * tlm[1] + ty * tlm[3] + tlm[5]];
+    tm = tlm.slice() as Mat;
+    tmKnown = true;
+  };
 
   // Current path under construction.
   let pathStart = -1;
@@ -436,10 +481,54 @@ export function filterContentStream(bytes: Uint8Array, baseCtm: Mat, hooks: Filt
       if (inPath) editable = false; // illegal mid-path operator: whole verdicts only
       switch (op) {
         case "q":
-          ctmStack.push({ ctm, lineWidth });
+          ctmStack.push({ ctm, lineWidth, ts: { ...ts } });
           break;
         case "Q":
-          if (ctmStack.length) ({ ctm, lineWidth } = ctmStack.pop()!);
+          if (ctmStack.length) ({ ctm, lineWidth, ts } = ctmStack.pop()!);
+          break;
+        case "BT":
+          tm = [1, 0, 0, 1, 0, 0]; tlm = [1, 0, 0, 1, 0, 0]; tmKnown = true;
+          break;
+        case "Tf":
+          if (nOps >= 2 && opName[nOps - 2] != null && !Number.isNaN(opNum[nOps - 1])) { ts.font = opName[nOps - 2]; ts.Tfs = opNum[nOps - 1]; }
+          break;
+        case "Tc": { const a = nums(1); if (a) ts.Tc = a[0]; break; }
+        case "Tw": { const a = nums(1); if (a) ts.Tw = a[0]; break; }
+        case "Tz": { const a = nums(1); if (a) ts.Th = a[0] / 100; break; }
+        case "TL": { const a = nums(1); if (a) ts.TL = a[0]; break; }
+        case "Ts": { const a = nums(1); if (a) ts.Ts = a[0]; break; }
+        case "Td": { const a = nums(2); if (a) nextLine(a[0], a[1]); break; }
+        case "TD": { const a = nums(2); if (a) { ts.TL = -a[1]; nextLine(a[0], a[1]); } break; }
+        case "T*": nextLine(0, -ts.TL); break;
+        case "Tm": {
+          const a = nums(6);
+          if (a) { tlm = a as Mat; tm = a.slice() as Mat; tmKnown = true; }
+          break;
+        }
+        case "Tj":
+          if (textOn && nOps === 1) show(strElems(0), opStart[0], i, "");
+          else tmKnown = false;
+          break;
+        case "'":
+          nextLine(0, -ts.TL);
+          if (textOn && nOps === 1) show(strElems(0), opStart[0], i, "T* ");
+          else tmKnown = false;
+          break;
+        case "\"": {
+          if (nOps === 3 && !Number.isNaN(opNum[0]) && !Number.isNaN(opNum[1])) {
+            ts.Tw = opNum[0]; ts.Tc = opNum[1];
+            nextLine(0, -ts.TL);
+            if (textOn) {
+              const aw = String.fromCharCode(...b.subarray(opStart[0], opEnd[0]));
+              const ac = String.fromCharCode(...b.subarray(opStart[1], opEnd[1]));
+              show(strElems(2), opStart[0], i, `${aw} Tw ${ac} Tc T* `);
+            }
+          } else tmKnown = false;
+          break;
+        }
+        case "TJ":
+          if (textOn && nOps === 1 && b[opStart[0]] === 91) show(parseTJArray(b, opStart[0], opEnd[0]), opStart[0], i, "");
+          else tmKnown = false;
           break;
         case "cm": {
           const m = nums(6);

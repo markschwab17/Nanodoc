@@ -47,6 +47,7 @@ import {
   type EraseMask,
 } from "./eraseMask";
 import { tileRenderScale, TILE_RENDER_SCALE } from "../rasterEncode";
+import type { FontMetrics } from "./textShow";
 
 /** RGBA raster exactly as stored on the tile (erased pixels have alpha 0). */
 export interface StoredRaster {
@@ -90,6 +91,8 @@ export const MAX_RESIDUE = 0.03;
 export const BLOB_MIN_PX = 8;
 /** …and each must be at least this much gone. */
 export const BLOB_MAX_RESIDUE = 0.5;
+/** A residue blob this much of which touches kept ink is a fringe, not residue. */
+const FRINGE_SHARE = 0.8;
 /** Kept ink allowed to vanish away from the erase (anti-aliasing rounding only). */
 export const MAX_LOST_PX = 60;
 export const MAX_LOST_BLOB_PX = 8;
@@ -103,6 +106,12 @@ const LOST_DIFF = 64;
 /** Stored ink allowed off the reference's ink before the grids count as misregistered. */
 export const MAX_UNREGISTERED = 0.01;
 const MAX_FORM_DEPTH = 12;
+/** Glyph origins from the capture and the filter's layout agree to this (px). */
+const GLYPH_ORIGIN_TOL = 0.75;
+/** Image pixel redaction only on pages with at most this many XObject draws… */
+const MAX_DO_FOR_REDACTION = 2000;
+/** …and with at most this many pixel runs to redact. */
+const MAX_IMAGE_REDACTIONS = 4000;
 /** A glyph pixel counts as its ink from this coverage (0..255). */
 const GLYPH_INK_ALPHA = 96;
 
@@ -205,7 +214,9 @@ export function verifyAgainstMask(
   ref: ArrayLike<number>,
   refW: number,
   refH: number,
-  refComps: number
+  refComps: number,
+  /** Pixels exempt from both checks (glyphs the erase only partly covered). */
+  tolerated?: Uint8Array
 ): { residue: number; residueBlobs: number; lostPx: number; lostMaxBlob: number; failingBlobs: number[][] } {
   const { width: W, height: H, state } = mask;
   /** Largest channel difference between cleaned and reference at mask pixel p. */
@@ -249,6 +260,7 @@ export function verifyAgainstMask(
   const cls = new Uint8Array(W * H);
   let coreCount = 0;
   for (let p = 0; p < W * H; p++) {
+    if (tolerated && tolerated[p]) continue;
     if (state[p] === STATE_ERASED) { if (mask.ink[p] >= RESIDUE_MIN_INK && keptNeighbours(p) <= 2) { cls[p] = 1; coreCount++; } }
     else if (state[p] === STATE_KEPT && !near(p, FAR_PX, STATE_ERASED)) cls[p] = 2;
   }
@@ -258,7 +270,15 @@ export function verifyAgainstMask(
     let inked = 0;
     for (const p of comp) if (stillThere(p)) inked++;
     residuePx += inked;
-    if (comp.length >= BLOB_MIN_PX && inked > BLOB_MAX_RESIDUE * comp.length) { residueBlobs++; failingBlobs.push(comp); }
+    if (comp.length < BLOB_MIN_PX || inked <= BLOB_MAX_RESIDUE * comp.length) return;
+    // A blob that is a one-pixel fringe hugging kept ink all along (the flood
+    // fill took one anti-aliased side of a stroke that is still there) is the
+    // raster's own ambiguity, not erased content the vectors failed to remove.
+    let hugging = 0;
+    for (const p of comp) if (keptNeighbours(p) > 0) hugging++;
+    if (hugging >= FRINGE_SHARE * comp.length) return;
+    residueBlobs++;
+    failingBlobs.push(comp);
   });
   let lostPx = 0, lostMaxBlob = 0;
   components(W, H, (p) => cls[p] === 2 && diff(p) > LOST_DIFF, (comp) => {
@@ -325,8 +345,15 @@ function imageResidueRects(mupdf: Mupdf, page: any, mask: EraseMask, blobs: numb
  * candidate glyph is rendered alone on the mask's grid; only ITS inked pixels
  * vote, so neither blank glyph-box area nor a line crossing it counts.
  */
-function erasedGlyphRects(mupdf: Mupdf, page: any, mask: EraseMask, s: number, ox: number, oy: number): number[][] {
-  const rects: number[][] = [];
+function erasedGlyphs(mupdf: Mupdf, page: any, mask: EraseMask, s: number, ox: number, oy: number): { origins: number[][]; all: number[][]; straddling: number[] } {
+  /** Origins of every glyph in text objects near the erase (layout check). */
+  const all: number[][] = [];
+  /** Origins (mask pixel space) of glyphs whose own ink is mostly erased. */
+  const origins: number[][] = [];
+  // Pixels of glyphs the erase only partly covered (a rectangle edge through a
+  // line of text): a glyph cannot be cut, so the verdict goes by majority and
+  // verification must not count the other part of such a glyph against it.
+  const straddling: number[] = [];
   const toDev: Mat = [s, 0, 0, s, 0, 0];
   const touches = (b: number[]) =>
     anyErasedIn(mask, Math.floor(b[0] - ox), Math.floor(b[1] - oy), Math.ceil(b[2] - ox), Math.ceil(b[3] - oy));
@@ -335,6 +362,10 @@ function erasedGlyphRects(mupdf: Mupdf, page: any, mask: EraseMask, s: number, o
     if (!touches(text.getBounds(null, devCtm))) return;
     text.walk({
       showGlyph(font: any, trm: Mat, gid: number, uni: number, wmode: number) {
+        all.push([
+          trm[4] * devCtm[0] + trm[5] * devCtm[2] + devCtm[4] - ox,
+          trm[4] * devCtm[1] + trm[5] * devCtm[3] + devCtm[5] - oy,
+        ]);
         const g = new mupdf.Text();
         g.showGlyph(font, trm, gid, uni, wmode);
         try {
@@ -348,13 +379,16 @@ function erasedGlyphRects(mupdf: Mupdf, page: any, mask: EraseMask, s: number, o
           const px = pix.getPixels();
           const pw = pix.getWidth(), ph = pix.getHeight(), px0 = pix.getX(), py0 = pix.getY();
           let kept = 0, erased = 0, sx = 0, sy = 0, inkN = 0;
+          const touched: number[] = [];
           for (let iy = 0; iy < ph; iy++) {
             const my = py0 + iy - oy;
             if (my < 0 || my >= mask.height) continue;
             for (let ix = 0; ix < pw; ix++) {
-              if (px[(iy * pw + ix) * 2 + 1] < GLYPH_INK_ALPHA) continue;
+              const a = px[(iy * pw + ix) * 2 + 1];
               const mx = px0 + ix - ox;
               if (mx < 0 || mx >= mask.width) continue;
+              if (a >= 16) touched.push(my * mask.width + mx);
+              if (a < GLYPH_INK_ALPHA) continue;
               const st = mask.state[my * mask.width + mx];
               if (st === STATE_KEPT) kept++;
               else if (st === STATE_ERASED) erased++;
@@ -362,11 +396,13 @@ function erasedGlyphRects(mupdf: Mupdf, page: any, mask: EraseMask, s: number, o
             }
           }
           pix.destroy?.();
+          if (erased > 0 && kept > 0) for (const q of touched) straddling.push(q);
           if (erased > 0 && erased >= 0.5 * (erased + kept) && inkN > 0) {
-            // A small box on the glyph's own ink (page space): never reaches a neighbour.
-            const cx = sx / inkN / s, cy = sy / inkN / s;
-            const half = Math.max(0.1, (Math.min(b[2] - b[0], b[3] - b[1]) / s) * 0.12);
-            rects.push([cx - half, cy - half, cx + half, cy + half]);
+            // The glyph's origin, as the content filter will compute it.
+            origins.push([
+              trm[4] * devCtm[0] + trm[5] * devCtm[2] + devCtm[4] - ox,
+              trm[4] * devCtm[1] + trm[5] * devCtm[3] + devCtm[5] - oy,
+            ]);
           }
         } finally {
           g.destroy?.();
@@ -380,7 +416,72 @@ function erasedGlyphRects(mupdf: Mupdf, page: any, mask: EraseMask, s: number, o
   });
   page.runPageContents(dev, mupdf.Matrix.identity);
   dev.close?.();
-  return rects;
+  return { origins, all, straddling };
+}
+
+/**
+ * Advance-width metrics of a font resource for the content filter's text
+ * layout, or null when its glyphs cannot be laid out reliably (Type 3, a
+ * non-Identity CMap, a simple font without /Widths) — such glyphs are then
+ * never removed and verification decides.
+ */
+const STANDARD_14 = new Set([
+  "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+  "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
+  "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic", "Symbol", "ZapfDingbats",
+]);
+
+export function fontMetrics(font: any, mupdf?: Mupdf): FontMetrics | null {
+  if (isNullish(font)) return null;
+  const subtype = font.get("Subtype");
+  const st = isNullish(subtype) ? "" : subtype.asName();
+  if (st === "Type0") {
+    const enc = font.get("Encoding");
+    if (isNullish(enc) || !enc.isName() || enc.asName() !== "Identity-H") return null;
+    const desc = font.get("DescendantFonts");
+    if (isNullish(desc) || !desc.isArray() || desc.length < 1) return null;
+    const cid = desc.get(0);
+    const dwObj = cid.get("DW");
+    const dw = isNullish(dwObj) ? 1000 : dwObj.asNumber();
+    const widths = new Map<number, number>();
+    const w = cid.get("W");
+    if (!isNullish(w) && w.isArray()) {
+      for (let i = 0; i < w.length; ) {
+        const first = w.get(i).asNumber();
+        const next = w.get(i + 1);
+        if (!isNullish(next) && next.isArray()) {
+          for (let k = 0; k < next.length; k++) widths.set(first + k, next.get(k).asNumber());
+          i += 2;
+        } else {
+          const last = next.asNumber(), v = w.get(i + 2).asNumber();
+          for (let c = first; c <= last; c++) widths.set(c, v);
+          i += 3;
+        }
+      }
+    }
+    return { bytesPerCode: 2, width: (c) => widths.get(c) ?? dw };
+  }
+  if (st === "Type1" || st === "TrueType" || st === "MMType1") {
+    const ws = font.get("Widths");
+    if (isNullish(ws) || !ws.isArray()) {
+      // A standard-14 font may omit /Widths: take them from mupdf's built-in
+      // copy (codes read as Latin-1, exact for the ASCII range CAD text uses).
+      const bf = font.get("BaseFont");
+      const base = isNullish(bf) ? "" : bf.asName().replace(/^[A-Z]{6}\+/, "");
+      if (!mupdf || !STANDARD_14.has(base)) return null;
+      const builtin = new mupdf.Font(base);
+      return { bytesPerCode: 1, width: (c) => builtin.advanceGlyph(builtin.encodeCharacter(c)) * 1000 };
+    }
+    const fcObj = font.get("FirstChar");
+    const first = isNullish(fcObj) ? 0 : fcObj.asNumber();
+    const table: number[] = [];
+    for (let k = 0; k < ws.length; k++) table.push(ws.get(k).asNumber());
+    const fd = font.get("FontDescriptor");
+    const mwObj = isNullish(fd) ? null : fd.get("MissingWidth");
+    const missing = isNullish(mwObj) ? 0 : mwObj.asNumber();
+    return { bytesPerCode: 1, width: (c) => table[c - first] ?? missing };
+  }
+  return null;
 }
 
 /**
@@ -416,12 +517,44 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
     // User space → mask pixel: page transform, the uniform scale, then the
     // render's own integer origin (covers CropBox offsets).
     const toPixel: Mat = matMul(page.getTransform(), [s, 0, 0, s, -ref.x, -ref.y]);
+    // Pixels exempt from verification: erased pixels a kept stroke owns half of,
+    // and glyphs an erase only partly covered (both can only go whole or stay).
+    const tolerated = new Uint8Array(mask.width * mask.height);
+    const tolerate = (x: number, y: number) => {
+      const px = Math.floor(x), py = Math.floor(y);
+      for (let yy = Math.max(0, py - 1); yy <= Math.min(mask.height - 1, py + 1); yy++) {
+        for (let xx = Math.max(0, px - 1); xx <= Math.min(mask.width - 1, px + 1); xx++) {
+          if (mask.state[yy * mask.width + xx] === STATE_ERASED) tolerated[yy * mask.width + xx] = 1;
+        }
+      }
+    };
 
     // 2. Paths: filter the page stream, recursing into touched forms. Two walks
     // over identical traversals: the first indexes the fills near the erase in
     // paint order (what hides what), the second decides and edits.
+    // Glyphs whose own ink was erased (rendered one by one on the ORIGINAL page),
+    // indexed by origin for the content filter's text layout to match.
+    const glyphs = erasedGlyphs(mupdf, page, mask, s, ref.x, ref.y);
+    for (const q of glyphs.straddling) tolerated[q] = 1;
+    const cellsOf = (pts: number[][]) => {
+      const cells = new Map<number, number[][]>();
+      for (const o of pts) {
+        const k = Math.floor(o[1]) * 100003 + Math.floor(o[0]);
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k)!.push(o);
+      }
+      return (x: number, y: number): boolean => {
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const list = cells.get((Math.floor(y) + dy) * 100003 + Math.floor(x) + dx);
+          if (list && list.some((o) => Math.abs(o[0] - x) < GLYPH_ORIGIN_TOL && Math.abs(o[1] - y) < GLYPH_ORIGIN_TOL)) return true;
+        }
+        return false;
+      };
+    };
+    const eraseGlyph = cellsOf(glyphs.origins);
+    const knownGlyph = cellsOf(glyphs.all);
     let formsCopied = 0;
-    let painted = 0, erased = 0, cut = 0, farKeptRemoved = 0;
+    let painted = 0, erased = 0, cut = 0, farKeptRemoved = 0, glyphsRemoved = 0, doCount = 0;
     let nameSeq = 0;
     let order = 0;
     const occluders = new OccluderIndex();
@@ -443,11 +576,17 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
             }
             return { kind: "keep" };
           }
-          const v = decidePath(p, mask, (x, y) => occluders.coveredAfter(my, x, y));
+          const v = decidePath(p, mask, (x, y) => occluders.coveredAfter(my, x, y), tolerate);
           if (v.kind !== "keep") farKeptRemoved += v.farKept ?? 0;
           return v;
         },
+        font: (name) => {
+          const fonts = isNullish(resources) ? null : resources.get("Font");
+          return isNullish(fonts) ? null : fontMetrics(fonts.get(name), mupdf);
+        },
+        ...(apply && glyphs.origins.length ? { eraseGlyph, knownGlyph } : {}),
         onDo: (name, ctm, lw) => {
+          if (!apply) doCount++;
           if (depth >= MAX_FORM_DEPTH || isNullish(resources)) return null;
           const xobjs = resources.get("XObject");
           if (isNullish(xobjs)) return null;
@@ -489,6 +628,7 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
         painted += res.stats.painted;
         erased += res.stats.erased;
         cut += res.stats.rewritten;
+        glyphsRemoved += res.stats.glyphsRemoved;
       }
       return res.changed ? res.bytes : null;
     };
@@ -525,14 +665,6 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
       page = out.loadPage(0);
     }
 
-    // 3. Text: redact the glyphs whose own ink was erased.
-    const redactRects = erasedGlyphRects(mupdf, page, mask, s, ref.x, ref.y);
-    if (redactRects.length) {
-      for (const r of redactRects) page.createAnnotation("Redact").setRect(r);
-      // black boxes off; images, line art untouched; text removed.
-      page.applyRedactions(false, 0, 0, 0);
-    }
-
     const save = (): Uint8Array => {
       const buf = out.saveToBuffer("compress,garbage");
       const b = new Uint8Array(buf.asUint8Array());
@@ -547,7 +679,7 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
         const cpage = check.loadPage(0);
         const r = renderRGB(mupdf, cpage, s);
         cpage.destroy?.();
-        return verifyAgainstMask(mask, r.pixels, r.width, r.height, r.comps, ref.pixels, ref.width, ref.height, ref.comps);
+        return verifyAgainstMask(mask, r.pixels, r.width, r.height, r.comps, ref.pixels, ref.width, ref.height, ref.comps, tolerated);
       } finally {
         check.destroy?.();
       }
@@ -558,8 +690,11 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
     if (verdict.failingBlobs.length) {
       // Erased blobs still drawn: if they sit on embedded images, take the
       // erased pixels out of the image data, then verify again.
-      const rects = imageResidueRects(mupdf, page, mask, verdict.failingBlobs, s, ref.x, ref.y);
-      if (rects.length) {
+      // mupdf's redaction re-filters the whole page and clones a Form XObject
+      // per use: on block-heavy CAD sheets that runs for minutes. Only on pages
+      // it can handle; otherwise the residue stands and the tile goes raster.
+      const rects = doCount <= MAX_DO_FOR_REDACTION ? imageResidueRects(mupdf, page, mask, verdict.failingBlobs, s, ref.x, ref.y) : [];
+      if (rects.length && rects.length <= MAX_IMAGE_REDACTIONS) {
         for (const r of rects) page.createAnnotation("Redact").setRect(r);
         // black boxes off; image PIXELS redacted; line art and text untouched.
         page.applyRedactions(false, 2, 0, 1);
@@ -571,7 +706,7 @@ export function cleanErasedPage(mupdf: Mupdf, srcDoc: any, pageIndex: number, st
     const stats: CleanStats = {
       ...partial,
       formsCopied,
-      glyphsErased: redactRects.length,
+      glyphsErased: glyphsRemoved,
       imageRedactions: imageRects,
       unregisteredPx: reg.unmatched,
       residue: verdict.residue,

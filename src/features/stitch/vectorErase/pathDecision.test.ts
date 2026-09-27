@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { anyErasedIn, buildEraseMask, sampleState, STATE_ERASED, STATE_KEPT, STATE_NONE, type EraseMask } from "./eraseMask";
-import { decidePath, keptIntervals, ringsMinusRect, subCubic } from "./pathDecision";
+import { complementRects, decidePath, keptIntervals, openBitmap, subCubic } from "./pathDecision";
 import { IDENTITY, type Mat, type PaintedPath } from "./contentFilter";
 
 /**
@@ -148,12 +148,9 @@ describe("decidePath", () => {
     expect(Math.min(...xs)).toBeGreaterThan(63);
     expect(Math.min(...xs)).toBeLessThan(66);
     expect(Math.max(...xs)).toBe(80);
-    // A partial erase that is NOT a rectangle cannot be cut: removed by majority
-    // but the kept ink it carries is reported, so the caller refuses the clean.
+    // A partial erase of any other shape is subtracted too (here a triangle).
     const diag = makeMask(100, 100, box, (x, y) => x + y < 125);
-    const d = decidePath(fill(20, 20, 80, 80), diag);
-    expect(d.kind).toBe("erase");
-    expect((d as { farKept: number }).farKept).toBeGreaterThan(0);
+    expect(decidePath(fill(20, 20, 80, 80), diag).kind).toBe("rewrite");
     const all = makeMask(100, 100, box, () => true);
     expect(decidePath(fill(20, 20, 80, 80), all)).toEqual({ kind: "erase", farKept: 0 });
     const little = makeMask(100, 100, box, (x) => x >= 70);
@@ -162,7 +159,7 @@ describe("decidePath", () => {
     expect(l.construction.startsWith("20 20 m")).toBe(true);
     // A sliver of erase that is not a rectangle of the fill (a line's worth
     // crossing its middle diagonally) leaves the fill whole.
-    const sliver = makeMask(100, 100, box, (x, y) => Math.abs(x - y) < 2);
+    const sliver = makeMask(100, 100, box, (x, y) => Math.abs(x - y) < 2 && x > 35 && x < 65);
     expect(decidePath(fill(20, 20, 80, 80), sliver)).toEqual({ kind: "keep" });
   });
 
@@ -200,7 +197,26 @@ describe("decidePath", () => {
     // Rectangle-erased across the hole: the cut keeps the hole (even-odd preserved).
     const v = decidePath(p, makeMask(60, 60, ink, (x) => x >= 45)) as { kind: string; construction: string };
     expect(v.kind).toBe("rewrite");
-    expect(v.construction).toContain("20 20 m"); // the hole ring survives intact on the kept side
+    // Nothing drawn past the cut, and the hole is still a hole: rasterise the result.
+    const nums = v.construction.split(" ").filter((t) => /^-?[0-9.]+$/.test(t)).map(Number);
+    expect(Math.max(...nums.filter((_n, i) => i % 2 === 0))).toBeLessThanOrEqual(45.01);
+    const rings: number[][][] = [];
+    const toks = v.construction.split(" ");
+    for (let i = 0; i < toks.length; i++) {
+      if (toks[i] === "m") rings.push([[+toks[i - 2], +toks[i - 1]]]);
+      else if (toks[i] === "l") rings[rings.length - 1].push([+toks[i - 2], +toks[i - 1]]);
+    }
+    const inside = (x: number, y: number) => {
+      let c = 0;
+      for (const r of rings) for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+        const [xi, yi] = r[i], [xj, yj] = r[j];
+        if ((yj <= y) !== (yi <= y) && xj + ((y - yj) * (xi - xj)) / (yi - yj) > x) c++;
+      }
+      return (c & 1) === 1;
+    };
+    expect(inside(15, 30)).toBe(true); // ring
+    expect(inside(30, 30)).toBe(false); // hole
+    expect(inside(47, 30)).toBe(false); // cut away
   });
 
   it("re-joins a cut closed ring through its start point", () => {
@@ -245,10 +261,37 @@ describe("occlusion, fill+stroke split, rectangle cuts", () => {
     expect(decidePath(p, m)).toEqual({ kind: "rewrite", construction: "20.5 20.5 m 79.5 20.5 l 79.5 79.5 l 20.5 79.5 l h", farKept: 0, paint: "f" });
   });
 
-  it("ringsMinusRect cuts a rectangle out of a square", () => {
-    const pieces = ringsMinusRect([[[0, 0], [10, 0], [10, 10], [0, 10]]], [3, -5, 6, 15]);
-    const area = (r: number[][]) => Math.abs(r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
-    expect(pieces.reduce((a, r) => a + area(r), 0)).toBeCloseTo(70);
+  it("openBitmap drops thin erased lines and keeps erased areas", () => {
+    const w = 20, h = 20;
+    const bits = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) bits[y * w + 3] = 1; // a 1-px line
+    for (let y = 8; y < 16; y++) for (let x = 8; x < 16; x++) bits[y * w + x] = 1; // an 8x8 area
+    const o = openBitmap(bits, w, h, 2);
+    expect(o[5 * w + 3]).toBe(0);
+    expect(o[12 * w + 12]).toBe(1);
+    expect(o.reduce((a, v) => a + v, 0)).toBe(64);
+  });
+
+  it("complementRects tiles exactly the unset cells", () => {
+    const w = 6, h = 4;
+    const bits = new Uint8Array(w * h);
+    bits[1 * w + 2] = bits[1 * w + 3] = bits[2 * w + 2] = 1;
+    const rects = complementRects(bits, w, h);
+    const cover = new Uint8Array(w * h);
+    for (const [x0, y0, x1, y1] of rects) for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) cover[y * w + x]++;
+    for (let i = 0; i < w * h; i++) expect(cover[i]).toBe(bits[i] ? 0 : 1);
+  });
+
+  it("subtracts an irregular erased area from a fill, and ignores a thin line erased over it", () => {
+    const box = (x: number, y: number) => x >= 10 && x < 90 && y >= 10 && y < 90;
+    const p: PaintedPath = { subpaths: [sq(10, 10, 90, 90)], paint: "f", clip: false, editable: true, ctm: IDENTITY, lineWidth: 1 };
+    // A disc erased out of the middle (a flood fill, not a rectangle).
+    const disc = makeMask(100, 100, box, (x, y) => (x - 50) ** 2 + (y - 50) ** 2 < 15 ** 2);
+    const v = decidePath(p, disc) as { kind: string; construction: string };
+    expect(v.kind).toBe("rewrite");
+    // A 1-px erased line across it (a line drawn over the fill) leaves the fill whole.
+    const line = makeMask(100, 100, box, (_x, y) => y === 50);
+    expect(decidePath(p, line)).toEqual({ kind: "keep" });
   });
 
   it("a line painted as a zero-area fill+stroke is cut like a stroke", () => {

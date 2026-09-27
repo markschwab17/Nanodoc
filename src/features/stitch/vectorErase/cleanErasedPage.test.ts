@@ -376,3 +376,34 @@ describe("storedRasterScale", () => {
     expect(storedRasterScale(2448, 1584, 3072, 3072)).toBeNull();
   });
 });
+
+describe("exportStitchToPdf under overlap and stalls", () => {
+  it("serialises overlapping exports; both settle", async () => {
+    const bytes = await buildSheet();
+    const stored = eraseSheet(bytes, 0);
+    useStitchStore.setState({
+      canvasWidth: W, canvasHeight: H, cropRect: null,
+      tiles: [{ id: "e", sourcePdfBytes: bytes, sourcePageIndex: 0, x: 0, y: 0, width: W, height: H, imageDataUrl: "test://e", imageModified: true }],
+    } as never);
+    const [a, b] = await Promise.all([
+      exportStitchToPdf({ decodeRaster: async () => stored }),
+      exportStitchToPdf({ decodeRaster: async () => stored }),
+    ]);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+  });
+
+  it("a raster decode that never settles times out instead of hanging the export (and the next one)", async () => {
+    const bytes = await buildSheet();
+    const png = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, 4, 4], true).asPNG();
+    useStitchStore.setState({
+      canvasWidth: W, canvasHeight: H, cropRect: null,
+      tiles: [{ id: "h", sourcePdfBytes: bytes, sourcePageIndex: 0, x: 0, y: 0, width: W, height: H,
+        imageDataUrl: `data:image/png;base64,${Buffer.from(png).toString("base64")}`, imageModified: true }],
+    } as never);
+    const hung = exportStitchToPdf({ decodeRaster: () => new Promise(() => {}), decodeTimeoutMs: 50 });
+    const next = exportStitchToPdf({ decodeRaster: () => new Promise(() => {}), decodeTimeoutMs: 50 });
+    expect(await hung).not.toBeNull();
+    expect(await next).not.toBeNull();
+  });
+});

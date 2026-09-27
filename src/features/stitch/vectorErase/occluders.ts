@@ -70,9 +70,10 @@ export class OccluderIndex {
   }
 
   /**
-   * Is (x, y) covered by an occluder painted after `order`? The point counts as
-   * covered when it or a point a quarter pixel away is inside, so a line lying
-   * exactly on a later fill's edge counts as hidden there.
+   * Is (x, y) covered by an occluder painted after `order`? Exact point test: a
+   * line lying along a later fill's edge is judged by its looks to either side
+   * (see pathDecision), so no dilation here — dilating hid thin kept lines
+   * running just outside a later fill.
    */
   coveredAfter(order: number, x: number, y: number): boolean {
     if (!this.count) return false;
@@ -83,15 +84,7 @@ export class OccluderIndex {
       if (o.order <= order) continue;
       const b = o.box;
       if (x < b[0] - 0.5 || x > b[2] + 0.5 || y < b[1] - 0.5 || y > b[3] + 0.5) continue;
-      if (
-        insideRings(o.rings, x, y, o.evenOdd) ||
-        insideRings(o.rings, x + 0.25, y, o.evenOdd) ||
-        insideRings(o.rings, x - 0.25, y, o.evenOdd) ||
-        insideRings(o.rings, x, y + 0.25, o.evenOdd) ||
-        insideRings(o.rings, x, y - 0.25, o.evenOdd)
-      ) {
-        return true;
-      }
+      if (insideRings(o.rings, x, y, o.evenOdd)) return true;
     }
     return false;
   }

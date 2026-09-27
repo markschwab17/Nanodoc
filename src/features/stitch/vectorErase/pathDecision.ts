@@ -22,7 +22,7 @@
  * Pure. Exported for tests.
  */
 import type { Mat, PaintedPath, PathVerdict, SubPath } from "./contentFilter";
-import { anyErasedIn, inkWeight, sampleState, STATE_ERASED, STATE_KEPT, type EraseMask } from "./eraseMask";
+import { anyErasedIn, inkWeight, sampleState, STATE_ERASED, STATE_KEPT, STATE_NONE, type EraseMask } from "./eraseMask";
 
 /** Spacing of samples along a segment, in pixels. */
 export const STEP_PX = 0.75;
@@ -180,16 +180,32 @@ function segmentStates(seg: Seg, m: Mat, cx: Ctx, halfWidth: number): { states: 
     let k = 0, e = 0;
     // The centre may borrow its neighbours' vote (a hairline between pixel
     // centres); the side looks count only the pixel they land on.
-    const looks: Array<[number, number, number]> = [
+    let looks: Array<[number, number, number]> = [
       [px, py, cx.sample(px, py)],
       [px + nx, py + ny, cx.raw(px + nx, py + ny)],
       [px - nx, py - ny, cx.raw(px - nx, py - ny)],
     ];
+    // Hidden on every look: the occlusion index knows nothing of clipping or
+    // transparency, so a later fill it believes covers the stroke may not.
+    // Judge such a sample on what the page shows there instead.
+    if (cx.occluded && looks.every(([lx, ly]) => cx.occluded!(lx, ly))) {
+      looks = [
+        [px, py, sampleState(cx.mask, px, py)],
+        [px + nx, py + ny, rawState(cx.mask, px + nx, py + ny)],
+        [px - nx, py - ny, rawState(cx.mask, px - nx, py - ny)],
+      ];
+    }
     for (const [sx, sy, st] of looks) {
       if (st === STATE_KEPT) k += inkWeight(cx.mask, sx, sy);
       else if (st === STATE_ERASED) e += inkWeight(cx.mask, sx, sy);
     }
     states[i] = e > k ? STATE_ERASED : k > 0 ? STATE_KEPT : 0;
+    // Half of the stroke's own width erased, half kept (the flood fill took one
+    // anti-aliased side): the stroke stays, and those erased pixels are its own
+    // ambiguity, not residue for the verification to hold against the clean.
+    if (e > 0 && states[i] === STATE_KEPT && cx.tolerate) {
+      for (const [sx, sy, st] of looks) if (st === STATE_ERASED) cx.tolerate(sx, sy);
+    }
   }
   return { states, step: len / count };
 }
@@ -343,8 +359,8 @@ function tallyUnit(subpaths: SubPath[], isFill: boolean, evenOdd: boolean, m: Ma
         if (insideRings(rings, x, y, evenOdd)) tally(x, y);
       }
     }
-    // Too thin for an interior sample: fall back to its edges.
-    if (!edges && t.kept + t.erased === 0) return tallyUnit(subpaths, isFill, evenOdd, m, cx, true);
+    // No visible interior at all (a white or covered fill): nothing votes, and
+    // for a fill+stroke the edges belong to the outline — the fill stays.
   }
   return t;
 }
@@ -441,54 +457,115 @@ function clipRingToBox(ring: Pt[], x0: number, y0: number, x1: number, y1: numbe
   return pts;
 }
 
-/**
- * The rings with an axis-aligned rectangle cut out: each ring clipped to the
- * four disjoint strips around the rectangle. Clipping every ring to the same
- * convex strip keeps each point's winding number, so nonzero and even-odd
- * fills (holes included) come out exactly as the original minus the rectangle.
- * Pure; exported for tests.
- */
-export function ringsMinusRect(rings: Pt[][], r: [number, number, number, number]): Pt[][] {
-  let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
-  for (const ring of rings) for (const [x, y] of ring) {
-    if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
-  }
-  const strips: Array<[number, number, number, number]> = [
-    [bx0 - 1, by0 - 1, r[0], by1 + 1],
-    [r[2], by0 - 1, bx1 + 1, by1 + 1],
-    [r[0], by0 - 1, r[2], r[1]],
-    [r[0], r[3], r[2], by1 + 1],
-  ];
-  const out: Pt[][] = [];
-  for (const [x0, y0, x1, y1] of strips) {
-    if (!(x1 > x0 && y1 > y0)) continue;
-    for (const ring of rings) {
-      const c = clipRingToBox(ring, x0, y0, x1, y1);
-      let a = 0;
-      for (let i = 0, j = c.length - 1; i < c.length; j = i++) a += (c[j][0] + c[i][0]) * (c[j][1] - c[i][1]);
-      if (c.length >= 3 && Math.abs(a) > 1e-6) out.push(c);
-    }
-  }
-  return out;
-}
-
 function invert(m: Mat): Mat | null {
   const det = m[0] * m[3] - m[1] * m[2];
   if (!det) return null;
   return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det, (m[2] * m[5] - m[3] * m[4]) / det, (m[1] * m[4] - m[0] * m[5]) / det];
 }
 
-/** Fraction of an erase's voting samples that must agree for a rectangle cut. */
-const RECT_CUT_AGREEMENT = 0.95;
-const MAX_RECT_SAMPLES = 4000;
+/** Erased areas thinner than twice this (pixels) are lines drawn OVER a fill
+ *  (erasing them reveals the fill), not a cut out of it. */
+export const REGION_OPEN_PX = 2;
 
 /**
- * A fill only PART of which was erased, where the erased part is an
- * axis-aligned rectangle of it (the rectangle content-delete on an unrotated
- * sheet): return its construction with that rectangle cut out, or null when
- * the erased part is not such a rectangle. Curves are flattened in the cut.
+ * Morphological opening (erode then dilate, square of radius r) of a 0/1
+ * bitmap: removes everything thinner than 2r+1 and keeps areas intact.
+ * Separable min/max passes. Pure; exported for tests.
  */
-function rectCut(subpaths: SubPath[], m: Mat, cx: Ctx, evenOdd: boolean): string | null {
+export function openBitmap(bits: Uint8Array, w: number, h: number, r: number): Uint8Array {
+  const pass = (src: Uint8Array, horizontal: boolean, keepIfAll: boolean): Uint8Array => {
+    const out = new Uint8Array(w * h);
+    const n = horizontal ? w : h, lines = horizontal ? h : w;
+    for (let l = 0; l < lines; l++) {
+      for (let i = 0; i < n; i++) {
+        let v = keepIfAll ? 1 : 0;
+        for (let k = i - r; k <= i + r; k++) {
+          const b = k < 0 || k >= n ? 0 : src[horizontal ? l * w + k : k * w + l];
+          if (keepIfAll && !b) { v = 0; break; }
+          if (!keepIfAll && b) { v = 1; break; }
+        }
+        out[horizontal ? l * w + i : i * w + l] = v;
+      }
+    }
+    return out;
+  };
+  const eroded = pass(pass(bits, true, true), false, true);
+  return pass(pass(eroded, true, false), false, false);
+}
+
+/**
+ * The 0-cells of a bitmap as disjoint rectangles [x0, y0, x1, y1) — row runs,
+ * merged downwards while a run repeats exactly. Pure; exported for tests.
+ */
+export function complementRects(bits: Uint8Array, w: number, h: number): Array<[number, number, number, number]> {
+  const out: Array<[number, number, number, number]> = [];
+  let active = new Map<string, number>(); // "x0,x1" → start row
+  for (let y = 0; y <= h; y++) {
+    const runs = new Map<string, number>();
+    if (y < h) {
+      for (let x = 0; x < w; ) {
+        if (bits[y * w + x]) { x++; continue; }
+        let e = x;
+        while (e < w && !bits[y * w + e]) e++;
+        const key = `${x},${e}`;
+        runs.set(key, active.has(key) ? active.get(key)! : y);
+        x = e;
+      }
+    }
+    for (const [key, y0] of active) {
+      if (!runs.has(key)) {
+        const [x0, x1] = key.split(",").map(Number);
+        out.push([x0, y0, x1, y]);
+      }
+    }
+    active = runs;
+  }
+  return out;
+}
+
+/**
+ * A fill only PART of which was erased: subtract the erased AREA (the mask's
+ * erased pixels, opened so thin erased lines lying over the fill don't count)
+ * exactly. The fill is clipped to each rectangle of what remains; clipping all
+ * rings to the same convex box preserves every point's winding number, so
+ * nonzero and even-odd fills (holes included) come out exactly as the original
+ * minus the erased area, all in ONE path (no seams between the pieces). The cut
+ * follows pixel edges; curves in a cut fill are flattened.
+ *   none — no erased area in the fill (only thin lines over it): keep it whole
+ *   all  — the erased area covers it: remove it
+ *   cut  — the remaining construction
+ */
+/**
+ * Scanline rasterisation of rings (pixel space) into a w×h window at (ix0, iy0):
+ * 1 where the pixel centre is inside under the fill rule. Pure; exported for tests.
+ */
+export function rasterizeRings(rings: Pt[][], ix0: number, iy0: number, w: number, h: number, evenOdd: boolean): Uint8Array {
+  const out = new Uint8Array(w * h);
+  const xs: Array<[number, number]> = [];
+  for (let y = 0; y < h; y++) {
+    const cy = iy0 + y + 0.5;
+    xs.length = 0;
+    for (const ring of rings) {
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i], [xj, yj] = ring[j];
+        if ((yj <= cy) !== (yi <= cy)) xs.push([xj + ((cy - yj) * (xi - xj)) / (yi - yj), yi > yj ? 1 : -1]);
+      }
+    }
+    if (!xs.length) continue;
+    xs.sort((a, b) => a[0] - b[0]);
+    let wind = 0;
+    for (let k = 0; k < xs.length - 1; k++) {
+      wind += evenOdd ? 1 : xs[k][1];
+      const inside = evenOdd ? (wind & 1) === 1 : wind !== 0;
+      if (!inside) continue;
+      const a = Math.max(0, Math.ceil(xs[k][0] - ix0 - 0.5)), b = Math.min(w - 1, Math.floor(xs[k + 1][0] - ix0 - 0.5));
+      for (let x = a; x <= b; x++) out[y * w + x] = 1;
+    }
+  }
+  return out;
+}
+
+function regionCut(subpaths: SubPath[], m: Mat, mask: EraseMask, evenOdd: boolean): { kind: "none" | "all" } | { kind: "cut"; text: string } | null {
   const inv = invert(m);
   if (!inv) return null;
   const rings = subpaths.map((sp) => flattenRing(sp, m));
@@ -496,48 +573,86 @@ function rectCut(subpaths: SubPath[], m: Mat, cx: Ctx, evenOdd: boolean): string
   for (const ring of rings) for (const [x, y] of ring) {
     if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
   }
-  const gs = Math.max(0.75, Math.sqrt(Math.max(1, (bx1 - bx0) * (by1 - by0)) / MAX_RECT_SAMPLES));
-  const samples: Array<[number, number, number]> = [];
-  let ex0 = Infinity, ey0 = Infinity, ex1 = -Infinity, ey1 = -Infinity;
-  for (let y = by0 + gs / 2; y < by1; y += gs) {
-    for (let x = bx0 + gs / 2; x < bx1; x += gs) {
-      if (!insideRings(rings, x, y, evenOdd)) continue;
-      const st = cx.sample(x, y);
-      if (st !== STATE_KEPT && st !== STATE_ERASED) continue;
-      samples.push([x, y, st]);
-      if (st === STATE_ERASED) {
-        if (x < ex0) ex0 = x; if (x > ex1) ex1 = x; if (y < ey0) ey0 = y; if (y > ey1) ey1 = y;
-      }
+  const pad = REGION_OPEN_PX + 1;
+  const ix0 = Math.max(0, Math.floor(bx0) - pad), iy0 = Math.max(0, Math.floor(by0) - pad);
+  const ix1 = Math.min(mask.width, Math.ceil(bx1) + pad), iy1 = Math.min(mask.height, Math.ceil(by1) + pad);
+  const w = ix1 - ix0, h = iy1 - iy0;
+  if (w <= 0 || h <= 0) return { kind: "none" };
+  const bits = new Uint8Array(w * h);
+  let any = false;
+  for (let y = 0; y < h; y++) {
+    const row = (iy0 + y) * mask.width;
+    for (let x = 0; x < w; x++) if (mask.state[row + ix0 + x] === STATE_ERASED) { bits[y * w + x] = 1; any = true; }
+  }
+  if (!any) return { kind: "none" };
+  // Outside the fill counts as "erased" for the opening, so an erased stretch
+  // of a THIN fill (a wide line drawn as a polygon) survives it, while a thin
+  // erased line lying across the fill's interior is still opened away.
+  const erasedBits = bits.slice();
+  const inside = rasterizeRings(rings, ix0, iy0, w, h, evenOdd);
+  // Inside the fill but showing no ink (white text or a wipeout drawn over it):
+  // part of what the erase took when enclosed by it.
+  const hidden = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = (iy0 + y) * mask.width;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (inside[i] && mask.state[row + ix0 + x] === STATE_NONE) hidden[i] = 1;
     }
   }
-  if (ex0 === Infinity) return null;
-  // The erased rectangle, snapped out past the fill's edge where it reaches to
-  // within a sample step of it (the grid never samples the edge itself).
-  const r: [number, number, number, number] = [
-    ex0 - gs < bx0 ? bx0 - 1 : ex0 - gs / 2,
-    ey0 - gs < by0 ? by0 - 1 : ey0 - gs / 2,
-    ex1 + gs > bx1 ? bx1 + 1 : ex1 + gs / 2,
-    ey1 + gs > by1 ? by1 + 1 : ey1 + gs / 2,
-  ];
-  let eIn = 0, kIn = 0, eOut = 0, kOut = 0;
-  for (const [x, y, st] of samples) {
-    const inR = x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
-    if (inR) { if (st === STATE_ERASED) eIn++; else kIn++; }
-    else if (st === STATE_ERASED) eOut++;
-    else kOut++;
+  for (let i = 0; i < w * h; i++) if (!inside[i] || hidden[i]) bits[i] = 1;
+  const region = openBitmap(bits, w, h, REGION_OPEN_PX);
+  // Subtract erased (and enclosed hidden) pixels only: the outside helped the
+  // opening, but its pixel squares straddle the fill's edge and would shave it.
+  for (let i = 0; i < w * h; i++) region[i] &= erasedBits[i] | hidden[i];
+  // Hidden areas count only where they join the erase (a wipeout elsewhere on
+  // a partly erased fill is not part of it).
+  const seen = new Uint8Array(w * h);
+  const stack: number[] = [];
+  let anyInside = false;
+  for (let i0 = 0; i0 < w * h; i0++) {
+    if (!region[i0] || seen[i0]) continue;
+    const comp: number[] = [];
+    let touchesErase = false;
+    stack.push(i0); seen[i0] = 1;
+    while (stack.length) {
+      const i = stack.pop()!;
+      comp.push(i);
+      if (erasedBits[i]) touchesErase = true;
+      const x = i % w, y = (i - x) / w;
+      if (x > 0 && region[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+      if (x + 1 < w && region[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+      if (y > 0 && region[i - w] && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w); }
+      if (y + 1 < h && region[i + w] && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w); }
+    }
+    if (!touchesErase) for (const i of comp) region[i] = 0;
+    else if (!anyInside) anyInside = comp.some((i) => inside[i]);
   }
-  if (kOut === 0 || eIn < RECT_CUT_AGREEMENT * (eIn + kIn) || eOut > (1 - RECT_CUT_AGREEMENT) * (eOut + kOut)) return null;
-  const pieces = ringsMinusRect(rings, r);
-  if (!pieces.length) return null;
-  return pieces
-    .map((ring) => ring.map((p, i) => `${P(tx(inv, p[0], p[1]))} ${i ? "l" : "m"}`).join(" ") + " h")
-    .join(" ");
+  if (!anyInside) return { kind: "none" };
+  const pieces: Pt[][] = [];
+  for (const [x0, y0, x1, y1] of complementRects(region, w, h)) {
+    // Rects touching the window edge extend past the fill so its edge is not cut.
+    const X0 = x0 === 0 ? bx0 - 1 : ix0 + x0, X1 = x1 === w ? bx1 + 1 : ix0 + x1;
+    const Y0 = y0 === 0 ? by0 - 1 : iy0 + y0, Y1 = y1 === h ? by1 + 1 : iy0 + y1;
+    for (const ring of rings) {
+      const c = clipRingToBox(ring, X0, Y0, X1, Y1);
+      let a = 0;
+      for (let i = 0, j = c.length - 1; i < c.length; j = i++) a += (c[j][0] + c[i][0]) * (c[j][1] - c[i][1]);
+      if (c.length >= 3 && Math.abs(a) > 1e-6) pieces.push(c);
+    }
+  }
+  if (!pieces.length) return { kind: "all" };
+  return {
+    kind: "cut",
+    text: pieces.map((ring) => ring.map((p, i) => `${P(tx(inv, p[0], p[1]))} ${i ? "l" : "m"}`).join(" ") + " h").join(" "),
+  };
 }
 
 /**
  * Fill verdicts per overlap group: untouched groups stay, fully erased groups
- * go, a group erased by an axis-aligned rectangle is cut by it; anything else
- * partly erased goes or stays by majority, reporting any kept ink it removes.
+ * go, a partly erased group has the erased area subtracted (regionCut); a
+ * group that cannot be rewritten (clip, irregular) goes or stays by majority,
+ * reporting any kept ink it removes.
  */
 function fillGroups(path: PaintedPath, cx: Ctx, splittable: boolean, edges: boolean) {
   const m = path.ctm;
@@ -549,12 +664,21 @@ function fillGroups(path: PaintedPath, cx: Ctx, splittable: boolean, edges: bool
   let changed = false;
   for (const g of groups) {
     const sps = g.map((i) => path.subpaths[i]);
-    const t = tallyUnit(sps, isFill, evenOdd, m, cx, edges);
+    let t = tallyUnit(sps, isFill, evenOdd, m, cx, edges);
+    // Every sample hidden by later paint (often an identical copy drawn on
+    // top): judge on what the page shows, as for strokes.
+    if (t.kept + t.erased === 0 && cx.occluded) t = tallyUnit(sps, isFill, evenOdd, m, { ...cx, occluded: undefined, sample: (x, y) => sampleState(cx.mask, x, y), raw: (x, y) => rawState(cx.mask, x, y) }, edges);
     if (t.erased === 0) { parts.push({ first: g[0], text: sps.map(emitWhole).join(" ") }); continue; }
+    // Fully erased: gone. Anything with kept ink left is cut by the erased
+    // area where the path can be rewritten; majority only as a last resort.
+    // (Kept ink only as a fringe within FAR_PX of the erase — the flood fill's
+    // anti-aliased rim — counts as fully erased: cutting would leave a sliver.)
+    if (t.kept === 0 || (t.farKept === 0 && erasedByMajority(t))) { changed = true; continue; }
     const far = farKeptOf(t);
-    if (erasedByMajority(t) && far === 0) { changed = true; continue; }
-    const cut = path.editable && !path.clip ? rectCut(sps, m, cx, evenOdd) : null;
-    if (cut != null) { changed = true; parts.push({ first: g[0], text: cut }); continue; }
+    const cut = path.editable && !path.clip ? regionCut(sps, m, cx.mask, evenOdd) : null;
+    if (cut?.kind === "cut") { changed = true; parts.push({ first: g[0], text: cut.text }); continue; }
+    if (cut?.kind === "all") { changed = true; continue; }
+    if (cut?.kind === "none") { parts.push({ first: g[0], text: sps.map(emitWhole).join(" ") }); continue; }
     if (erasedByMajority(t)) { changed = true; farKept += far; continue; }
     parts.push({ first: g[0], text: sps.map(emitWhole).join(" ") });
   }
@@ -597,6 +721,14 @@ interface Ctx {
   sample: (x: number, y: number) => number;
   /** As `sample`, without borrowing neighbours' votes for a blank pixel. */
   raw: (x: number, y: number) => number;
+  tolerate?: (x: number, y: number) => void;
+  occluded?: Occluded;
+}
+
+function rawState(mask: EraseMask, x: number, y: number): number {
+  const px = Math.floor(x), py = Math.floor(y);
+  if (px < 0 || py < 0 || px >= mask.width || py >= mask.height) return 0;
+  return mask.state[py * mask.width + px];
 }
 
 /**
@@ -605,9 +737,17 @@ interface Ctx {
  * judged only where it could be seen — a fill mostly covered by a later fill,
  * whose visible strip the user erased, is judged on that strip.
  */
-export function decidePath(path: PaintedPath, mask: EraseMask, occluded?: Occluded): PathVerdict {
+export function decidePath(
+  path: PaintedPath,
+  mask: EraseMask,
+  occluded?: Occluded,
+  /** Told about erased pixels a KEPT stroke owns half of (see segmentStates). */
+  tolerate?: (x: number, y: number) => void
+): PathVerdict {
   const cx: Ctx = {
     mask,
+    tolerate,
+    occluded,
     sample: occluded
       ? (x, y) => (occluded(x, y) ? 0 : sampleState(mask, x, y))
       : (x, y) => sampleState(mask, x, y),
@@ -652,13 +792,12 @@ export function decidePath(path: PaintedPath, mask: EraseMask, occluded?: Occlud
 /** Per-segment cut of stroked subpaths (see the module comment). */
 function cutStroke(path: PaintedPath, cx: Ctx) {
   const { subpaths, ctm: m } = path;
-  const mask = cx.mask;
   // Half the stroke's width in pixels (a hairline draws one pixel).
   const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2]));
   const halfWidth = Math.max(0.5, (path.lineWidth ?? 1) * scale / 2 - 0.25);
   let anyKept = false;
   let allFull = true;
-  let farKept = 0;
+  const farKept = 0;
   const out: string[] = [];
   for (const sp of subpaths) {
     const segs = segsOf(sp);
@@ -672,17 +811,10 @@ function cutStroke(path: PaintedPath, cx: Ctx) {
     }
     const pieces = segs.map((seg) => {
       const { states, step } = segmentStates(seg, m, cx, halfWidth);
+      // Kept samples swept into a removed stretch are only the short (< MIN_RUN_PX)
+      // runs the smoothing flips next to erased ones; the page verification's
+      // lost-ink check covers them at pixel level, so no farKept is reported here.
       const kept = keptIntervals(states, Math.max(1, Math.round(MIN_RUN_PX / Math.max(step, 1e-6))));
-      // Kept ink the smoothing swept into a removed stretch must lie by the erase.
-      const n = states.length;
-      for (let i = 0; i < n; i++) {
-        if (states[i] !== STATE_KEPT) continue;
-        const t = (i + 0.5) / n;
-        if (kept.some(([a, b]) => t >= a && t <= b)) continue;
-        const p = pointAt(seg, t);
-        const q = tx(m, p[0], p[1]);
-        if (farFromErased(mask, q[0], q[1])) farKept++;
-      }
       return kept;
     });
     const full = pieces.every((p) => p.length === 1 && p[0][0] === 0 && p[0][1] === 1);
