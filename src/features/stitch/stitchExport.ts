@@ -1,10 +1,14 @@
 /**
  * Export stitch canvas to a single flattened PDF using pdf-lib.
  *
- * Tiles that still have their original source PDF and have NOT been
- * content-erased (imageModified !== true) are embedded as vector PDF
- * pages — lossless, pixel-perfect.  Erased / modified tiles fall back
- * to the rasterised PNG.
+ * Tiles that still have their original source PDF are embedded as vector
+ * PDF pages — lossless, pixel-perfect. A sheet the user cleaned up with the
+ * erase tools (imageModified) is embedded as vectors too: its source page is
+ * first rebuilt with the erased linework REMOVED from the vector content
+ * (vectorErase/cleanErasedPage), so takeoff tools reading the export (AGTEK)
+ * get clean vectors rather than a flat image. The rasterised PNG is only the
+ * fallback: scale stamps, sourceless crops, and pages whose embed or clean
+ * genuinely failed.
  *
  * Rotation fix: CSS rotates around center-center, so we replicate
  * that by computing an adjusted (x, y) for pdf-lib, which rotates
@@ -17,6 +21,7 @@ import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
 import { tileRenderScale } from "./rasterEncode";
 import { disjointRects } from "./cleanup/clipRegions";
+import { cleanErasedPage, type CleanOutcome, type StoredRaster } from "./vectorErase/cleanErasedPage";
 
 /** Stored tile rasters are rendered at this scale (see AddPdfModal). */
 /** What scale the STORED tile raster was rendered at, for this page's size —
@@ -375,7 +380,49 @@ export async function embedTileSource(
   }
 }
 
-export async function exportStitchToPdf(): Promise<Uint8Array | null> {
+/** Decode a tile raster URL into RGBA pixels (the erase mask's source). */
+async function decodeStoredRaster(url: string): Promise<StoredRaster> {
+  const { imageData, width, height } = await decodeTileImage(url);
+  return { data: imageData.data, width, height };
+}
+
+export interface StitchExportOptions {
+  /** Raster decoder for erased tiles. Defaults to the canvas decoder; tests
+   *  running in Node inject their own. */
+  decodeRaster?: (url: string) => Promise<StoredRaster>;
+}
+
+/**
+ * The vector source to embed for an ERASED tile: its source page rebuilt with
+ * the erased linework removed. Null means "no trustworthy vector result" and
+ * the caller falls back to the raster path. Exported for tests.
+ */
+export async function erasedTileVectorSource(
+  tile: { sourcePdfBytes: Uint8Array; sourcePageIndex: number },
+  rasterUrl: string,
+  mupdfDocCache: Map<Uint8Array, any>,
+  decodeRaster: (url: string) => Promise<StoredRaster>
+): Promise<{ bytes: Uint8Array; pageIndex: number } | null> {
+  const stored = await decodeRaster(rasterUrl);
+  const mupdf = await import("mupdf").then((m) => m.default);
+  let doc = mupdfDocCache.get(tile.sourcePdfBytes);
+  if (!doc) {
+    doc = mupdf.Document.openDocument(tile.sourcePdfBytes, "application/pdf");
+    mupdfDocCache.set(tile.sourcePdfBytes, doc);
+  }
+  const pdf = doc.asPDF?.() ?? doc;
+  const outcome: CleanOutcome = cleanErasedPage(mupdf, pdf, tile.sourcePageIndex, stored);
+  if (outcome.kind === "unchanged") return { bytes: tile.sourcePdfBytes, pageIndex: tile.sourcePageIndex };
+  if (outcome.kind === "cleaned") {
+    console.info(`[stitch export] erased sheet kept as vectors (page ${tile.sourcePageIndex})`, outcome.stats);
+    return { bytes: outcome.bytes, pageIndex: outcome.pageIndex };
+  }
+  console.warn(`[stitch export] erased sheet falls back to raster (page ${tile.sourcePageIndex}): ${outcome.reason}`, outcome.stats);
+  return null;
+}
+
+export async function exportStitchToPdf(options: StitchExportOptions = {}): Promise<Uint8Array | null> {
+  const decodeRaster = options.decodeRaster ?? decodeStoredRaster;
   const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
 
   // No explicit crop: the page is the canvas, EXPANDED to include any tiles the
@@ -416,8 +463,11 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
 
   // Cache loaded source PDFs so we don't re-parse the same bytes multiple times
   const sourceDocCache = new Map<Uint8Array, Awaited<ReturnType<typeof PDFDocument.load>>>();
-  // mupdf docs for high-DPI re-render of erased tiles (destroyed at the end)
+  // mupdf docs for erased-tile cleaning / high-DPI re-render (destroyed at the end)
   const mupdfDocCache = new Map<Uint8Array, any>();
+  // Cleaned vector sources for erased tiles, per source bytes → "page|raster".
+  // Tiles sharing a source page AND the same erase result are cleaned once.
+  const cleanCache = new Map<Uint8Array, Map<string, Promise<{ bytes: Uint8Array; pageIndex: number } | null>>>();
 
   for (const tile of tilesToDraw) {
     // Draw pose in PDF coord system (origin bottom-left, Y up, CCW rotation)
@@ -475,16 +525,42 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       }
     };
 
-    // ── Vector embed path (unmodified tiles only) ──────────────────────
+    // ── Vector embed path (every tile with a PDF source) ───────────────
+    // Sourceless tiles (cleanup crops: empty bytes, page -1) and scale stamps
+    // never qualify, so they keep the raster path whatever imageModified says.
     const canUseVector =
       tile.sourcePdfBytes &&
       tile.sourcePdfBytes.length > 0 &&
       tile.sourcePageIndex != null &&
       tile.sourcePageIndex >= 0 &&
-      !tile.isScaleStamp &&
-      !tile.imageModified;
+      !tile.isScaleStamp;
 
-    if (canUseVector) {
+    // Erased sheet: embed its source page with the erased linework removed.
+    let vectorSource: { bytes: Uint8Array; pageIndex: number } | null = canUseVector
+      ? { bytes: tile.sourcePdfBytes, pageIndex: tile.sourcePageIndex }
+      : null;
+    if (canUseVector && tile.imageModified) {
+      const erasedRaster = tileRasterUrl(tile);
+      if (!erasedRaster) {
+        vectorSource = null;
+      } else {
+        let perSource = cleanCache.get(tile.sourcePdfBytes);
+        if (!perSource) { perSource = new Map(); cleanCache.set(tile.sourcePdfBytes, perSource); }
+        const key = `${tile.sourcePageIndex}|${erasedRaster}`;
+        let pending = perSource.get(key);
+        if (!pending) {
+          pending = erasedTileVectorSource(tile, erasedRaster, mupdfDocCache, decodeRaster).catch((e) => {
+            console.warn("[stitch export] erased-sheet vector clean failed, using raster:", e);
+            return null;
+          });
+          perSource.set(key, pending);
+        }
+        vectorSource = await pending;
+      }
+    }
+
+    if (vectorSource) {
+      const src = vectorSource;
       // Null once the embed is known to have failed — the page is drawn ONLY on
       // a proven-good embed, so nothing dangling ever reaches the output.
       let embeddedPage: PDFEmbeddedPage | null = null;
@@ -492,16 +568,16 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       // rotatedSourcePose) — a rotated plot keeps its vector linework.
       let srcRotation = 0;
       try {
-        let sourceDoc = sourceDocCache.get(tile.sourcePdfBytes);
+        let sourceDoc = sourceDocCache.get(src.bytes);
         if (!sourceDoc) {
-          sourceDoc = await PDFDocument.load(tile.sourcePdfBytes, { ignoreEncryption: true });
-          sourceDocCache.set(tile.sourcePdfBytes, sourceDoc);
+          sourceDoc = await PDFDocument.load(src.bytes, { ignoreEncryption: true });
+          sourceDocCache.set(src.bytes, sourceDoc);
         }
-        srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
+        srcRotation = sourceDoc.getPage(src.pageIndex).getRotation().angle;
 
         // Embeds AND flushes: a page pdf-lib can't embed returns null here rather
         // than exploding later inside save() (see embedTileSource).
-        embeddedPage = await embedTileSource(pdfDoc, sourceDoc, tile.sourcePageIndex);
+        embeddedPage = await embedTileSource(pdfDoc, sourceDoc, src.pageIndex);
       } catch (e) {
         console.warn("Vector embed failed, falling back to raster:", e);
       }
@@ -534,14 +610,14 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
       }
     }
 
-    // ── Raster fallback (erased tiles, scale stamps, vector-fail) ─────
+    // ── Raster fallback (scale stamps, sourceless crops, vector-fail) ──
     // The tile's own override if it has one, else its committed sheet raster.
     const rasterUrl = tileRasterUrl(tile);
     if (!rasterUrl) continue;
 
-    // Erased tiles: the stored raster is only 1.5x — re-render the source
-    // page at print DPI and replay the erase mask so one small erase doesn't
-    // demote a whole sheet to a soft raster.
+    // Erased tiles whose vector clean failed: the stored raster is only 1.5x —
+    // re-render the source page at print DPI and replay the erase mask so the
+    // fallback is at least print-sharp.
     let highResBytes: Uint8Array | null = null;
     if (
       tile.imageModified &&
