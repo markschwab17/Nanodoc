@@ -33,7 +33,11 @@ export interface StitchTile {
   scaleStampFeetPerInch?: number;
   /** This sheet's own scale in feet per inch (mixed-scale sets). Undefined on legacy tiles. */
   scaleFeetPerInch?: number;
-  /** Set to true when content-delete has modified this tile's image. Export will use raster instead of vector source. */
+  /** Set to true when content-delete has modified this tile's image. Export still embeds the
+   *  sheet as VECTORS: the erased linework is recovered from this raster's alpha and removed
+   *  from a copy of the source page (vectorErase/cleanErasedPage); the raster is used only if
+   *  that clean fails. Sourceless tiles (cleanup crops, page -1) set it too, but having no PDF
+   *  source they always take the raster path. */
   imageModified?: boolean;
   /** Non-destructive Clean-Composite regions to hide, stored as fractions (0..1) of the tile's width/height. Never bakes into the raster. */
   hiddenRegions?: CropRect[];

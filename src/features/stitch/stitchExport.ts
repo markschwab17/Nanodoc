@@ -1,10 +1,14 @@
 /**
  * Export stitch canvas to a single flattened PDF using pdf-lib.
  *
- * Tiles that still have their original source PDF and have NOT been
- * content-erased (imageModified !== true) are embedded as vector PDF
- * pages — lossless, pixel-perfect.  Erased / modified tiles fall back
- * to the rasterised PNG.
+ * Tiles that still have their original source PDF are embedded as vector
+ * PDF pages — lossless, pixel-perfect. A sheet the user cleaned up with the
+ * erase tools (imageModified) is embedded as vectors too: its source page is
+ * first rebuilt with the erased linework REMOVED from the vector content
+ * (vectorErase/cleanErasedPage), so takeoff tools reading the export (AGTEK)
+ * get clean vectors rather than a flat image. The rasterised PNG is only the
+ * fallback: scale stamps, sourceless crops, and pages whose embed or clean
+ * genuinely failed.
  *
  * Rotation fix: CSS rotates around center-center, so we replicate
  * that by computing an adjusted (x, y) for pdf-lib, which rotates
@@ -17,6 +21,7 @@ import { getTileAABB, type TilePose } from "./stitchGeometry";
 import { applyAlphaMaskNearest, decodeTileImage, encodeTileImage, pickRasterScale } from "./imageUtils";
 import { tileRenderScale } from "./rasterEncode";
 import { disjointRects } from "./cleanup/clipRegions";
+import { cleanErasedPage, type CleanOutcome, type StoredRaster } from "./vectorErase/cleanErasedPage";
 
 /** Stored tile rasters are rendered at this scale (see AddPdfModal). */
 /** What scale the STORED tile raster was rendered at, for this page's size —
@@ -375,7 +380,81 @@ export async function embedTileSource(
   }
 }
 
-export async function exportStitchToPdf(): Promise<Uint8Array | null> {
+/** Decode a tile raster URL into RGBA pixels (the erase mask's source). */
+async function decodeStoredRaster(url: string): Promise<StoredRaster> {
+  const { imageData, width, height } = await decodeTileImage(url);
+  return { data: imageData.data, width, height };
+}
+
+export interface StitchExportOptions {
+  /** Raster decoder for erased tiles. Defaults to the canvas decoder; tests
+   *  running in Node inject their own. */
+  decodeRaster?: (url: string) => Promise<StoredRaster>;
+  /** Override DECODE_TIMEOUT_MS (tests). */
+  decodeTimeoutMs?: number;
+}
+
+/**
+ * The vector source to embed for an ERASED tile: its source page rebuilt with
+ * the erased linework removed. Null means "no trustworthy vector result" and
+ * the caller falls back to the raster path. Exported for tests.
+ */
+export async function erasedTileVectorSource(
+  tile: { sourcePdfBytes: Uint8Array; sourcePageIndex: number },
+  rasterUrl: string,
+  mupdfDocCache: Map<Uint8Array, any>,
+  decodeRaster: (url: string) => Promise<StoredRaster>
+): Promise<{ bytes: Uint8Array; pageIndex: number } | null> {
+  const stored = await decodeRaster(rasterUrl);
+  const mupdf = await import("mupdf").then((m) => m.default);
+  let doc = mupdfDocCache.get(tile.sourcePdfBytes);
+  if (!doc) {
+    doc = mupdf.Document.openDocument(tile.sourcePdfBytes, "application/pdf");
+    mupdfDocCache.set(tile.sourcePdfBytes, doc);
+  }
+  const pdf = doc.asPDF?.() ?? doc;
+  const outcome: CleanOutcome = cleanErasedPage(mupdf, pdf, tile.sourcePageIndex, stored);
+  if (outcome.kind === "unchanged") return { bytes: tile.sourcePdfBytes, pageIndex: tile.sourcePageIndex };
+  if (outcome.kind === "cleaned") {
+    console.info(`[stitch export] erased sheet kept as vectors (page ${tile.sourcePageIndex})`, outcome.stats);
+    return { bytes: outcome.bytes, pageIndex: outcome.pageIndex };
+  }
+  console.warn(`[stitch export] erased sheet falls back to raster (page ${tile.sourcePageIndex}): ${outcome.reason}`, outcome.stats);
+  return null;
+}
+
+/** Longest an erased tile's raster decode may take before it counts as failed. */
+const DECODE_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+/** The export in flight, if any: exports run one at a time. */
+let exportQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Export the stitch canvas to a one-page PDF. Calls are SERIALISED — a second
+ * export started while one runs waits for it and then runs on the store as it
+ * is then — so two exports never share mupdf's heap mid-flight, and a failed or
+ * slow first one cannot leave the second hanging (the chain continues on both
+ * outcomes).
+ */
+export function exportStitchToPdf(options: StitchExportOptions = {}): Promise<Uint8Array | null> {
+  const run = exportQueue.then(() => runExport(options), () => runExport(options));
+  exportQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function runExport(options: StitchExportOptions): Promise<Uint8Array | null> {
+  const decodeRaster = (url: string) =>
+    withTimeout((options.decodeRaster ?? decodeStoredRaster)(url), options.decodeTimeoutMs ?? DECODE_TIMEOUT_MS, "erased tile raster decode");
   const { canvasWidth, canvasHeight, tiles, cropRect } = useStitchStore.getState();
 
   // No explicit crop: the page is the canvas, EXPANDED to include any tiles the
@@ -416,181 +495,214 @@ export async function exportStitchToPdf(): Promise<Uint8Array | null> {
 
   // Cache loaded source PDFs so we don't re-parse the same bytes multiple times
   const sourceDocCache = new Map<Uint8Array, Awaited<ReturnType<typeof PDFDocument.load>>>();
-  // mupdf docs for high-DPI re-render of erased tiles (destroyed at the end)
+  // mupdf docs for erased-tile cleaning / high-DPI re-render (destroyed at the end)
   const mupdfDocCache = new Map<Uint8Array, any>();
+  try {
+    // Cleaned vector sources for erased tiles, per source bytes → "page|raster".
+    // Tiles sharing a source page AND the same erase result are cleaned once.
+    const cleanCache = new Map<Uint8Array, Map<string, Promise<{ bytes: Uint8Array; pageIndex: number } | null>>>();
 
-  for (const tile of tilesToDraw) {
-    // Draw pose in PDF coord system (origin bottom-left, Y up, CCW rotation)
-    const { x: drawX, y: drawY, rotationDeg: rotation } = pdfPoseForTile(tile, cropX, cropY, cropH);
+    for (const tile of tilesToDraw) {
+      // Draw pose in PDF coord system (origin bottom-left, Y up, CCW rotation)
+      const { x: drawX, y: drawY, rotationDeg: rotation } = pdfPoseForTile(tile, cropX, cropY, cropH);
 
-    // Clean-Composite: tile-local hidden regions (incl. relocated sources) mapped
-    // into PDF page space. Non-empty only for unrotated tiles (v1 scope).
-    const holes = tileHoleRectsInPdf(tile, cropX, cropY, cropH);
-    // Relocated regions: content drawn a second time, clipped-to-dest + translated.
-    const relocations = tileRelocationsInPdf(tile, cropX, cropY, cropH);
-    // Open a Multiply graphics state, optionally clipped (even-odd) to exclude
-    // the tile's hidden regions so the export matches the editor's clean view.
-    const openClipped = () => {
-      page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
-      if (holes.length) {
-        const ops = [
-          // Outer rect = full crop so the tile draws everywhere except holes.
-          moveTo(0, 0),
-          lineTo(cropW, 0),
-          lineTo(cropW, cropH),
-          lineTo(0, cropH),
-          closePath(),
-        ];
-        for (const h of holes) {
-          ops.push(
-            moveTo(h.x, h.y),
-            lineTo(h.x + h.w, h.y),
-            lineTo(h.x + h.w, h.y + h.h),
-            lineTo(h.x, h.y + h.h),
-            closePath()
-          );
-        }
-        ops.push(clipEvenOdd(), endPath());
-        page.pushOperators(...ops);
-      }
-    };
-
-    // Draw each relocated region's content: clip to its destination rect, then
-    // draw the whole page/image shifted by the offset so only that piece shows
-    // at its new spot. `drawOne(x, y)` places the page/image at (x, y).
-    const drawRelocations = (drawOne: (x: number, y: number) => void) => {
-      for (const rel of relocations) {
+      // Clean-Composite: tile-local hidden regions (incl. relocated sources) mapped
+      // into PDF page space. Non-empty only for unrotated tiles (v1 scope).
+      const holes = tileHoleRectsInPdf(tile, cropX, cropY, cropH);
+      // Relocated regions: content drawn a second time, clipped-to-dest + translated.
+      const relocations = tileRelocationsInPdf(tile, cropX, cropY, cropH);
+      // Open a Multiply graphics state, optionally clipped (even-odd) to exclude
+      // the tile's hidden regions so the export matches the editor's clean view.
+      const openClipped = () => {
         page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
-        page.pushOperators(
-          moveTo(rel.dest.x, rel.dest.y),
-          lineTo(rel.dest.x + rel.dest.w, rel.dest.y),
-          lineTo(rel.dest.x + rel.dest.w, rel.dest.y + rel.dest.h),
-          lineTo(rel.dest.x, rel.dest.y + rel.dest.h),
-          closePath(),
-          clipEvenOdd(),
-          endPath()
-        );
-        drawOne(drawX + rel.offX, drawY + rel.offY);
-        page.pushOperators(popGraphicsState());
-      }
-    };
-
-    // ── Vector embed path (unmodified tiles only) ──────────────────────
-    const canUseVector =
-      tile.sourcePdfBytes &&
-      tile.sourcePdfBytes.length > 0 &&
-      tile.sourcePageIndex != null &&
-      tile.sourcePageIndex >= 0 &&
-      !tile.isScaleStamp &&
-      !tile.imageModified;
-
-    if (canUseVector) {
-      // Null once the embed is known to have failed — the page is drawn ONLY on
-      // a proven-good embed, so nothing dangling ever reaches the output.
-      let embeddedPage: PDFEmbeddedPage | null = null;
-      // The source page's own /Rotate, baked into the draw pose below (see
-      // rotatedSourcePose) — a rotated plot keeps its vector linework.
-      let srcRotation = 0;
-      try {
-        let sourceDoc = sourceDocCache.get(tile.sourcePdfBytes);
-        if (!sourceDoc) {
-          sourceDoc = await PDFDocument.load(tile.sourcePdfBytes, { ignoreEncryption: true });
-          sourceDocCache.set(tile.sourcePdfBytes, sourceDoc);
+        if (holes.length) {
+          const ops = [
+            // Outer rect = full crop so the tile draws everywhere except holes.
+            moveTo(0, 0),
+            lineTo(cropW, 0),
+            lineTo(cropW, cropH),
+            lineTo(0, cropH),
+            closePath(),
+          ];
+          for (const h of holes) {
+            ops.push(
+              moveTo(h.x, h.y),
+              lineTo(h.x + h.w, h.y),
+              lineTo(h.x + h.w, h.y + h.h),
+              lineTo(h.x, h.y + h.h),
+              closePath()
+            );
+          }
+          ops.push(clipEvenOdd(), endPath());
+          page.pushOperators(...ops);
         }
-        srcRotation = sourceDoc.getPage(tile.sourcePageIndex).getRotation().angle;
+      };
 
-        // Embeds AND flushes: a page pdf-lib can't embed returns null here rather
-        // than exploding later inside save() (see embedTileSource).
-        embeddedPage = await embedTileSource(pdfDoc, sourceDoc, tile.sourcePageIndex);
-      } catch (e) {
-        console.warn("Vector embed failed, falling back to raster:", e);
-      }
-
-      if (embeddedPage) {
-        const good = embeddedPage;
-        // Draw in a local frame whose origin is the tile's lower-left corner and
-        // whose axes carry the tile's own editor rotation. The source's /Rotate is
-        // then a second, inner rotation about the pose's anchor — composing the
-        // two through the CTM is what lets a rotated plot AND a rotated tile both
-        // land exactly where the editor shows them.
-        const pose = rotatedSourcePose(srcRotation, 0, 0, tile.width, tile.height);
-        const drawSource = (x: number, y: number) => {
-          page.pushOperators(pushGraphicsState(), translate(x, y));
-          if (rotation !== 0) page.pushOperators(rotateDegrees(rotation));
-          page.drawPage(good, {
-            x: pose.x,
-            y: pose.y,
-            width: pose.width,
-            height: pose.height,
-            ...(pose.rotateDeg !== 0 ? { rotate: degrees(pose.rotateDeg) } : {}),
-          });
+      // Draw each relocated region's content: clip to its destination rect, then
+      // draw the whole page/image shifted by the offset so only that piece shows
+      // at its new spot. `drawOne(x, y)` places the page/image at (x, y).
+      const drawRelocations = (drawOne: (x: number, y: number) => void) => {
+        for (const rel of relocations) {
+          page.pushOperators(pushGraphicsState(), setGraphicsState(multiplyGsName));
+          page.pushOperators(
+            moveTo(rel.dest.x, rel.dest.y),
+            lineTo(rel.dest.x + rel.dest.w, rel.dest.y),
+            lineTo(rel.dest.x + rel.dest.w, rel.dest.y + rel.dest.h),
+            lineTo(rel.dest.x, rel.dest.y + rel.dest.h),
+            closePath(),
+            clipEvenOdd(),
+            endPath()
+          );
+          drawOne(drawX + rel.offX, drawY + rel.offY);
           page.pushOperators(popGraphicsState());
-        };
-        openClipped();
-        drawSource(drawX, drawY);
-        page.pushOperators(popGraphicsState());
-        drawRelocations((x, y) => drawSource(x, y));
-        continue;
+        }
+      };
+
+      // ── Vector embed path (every tile with a PDF source) ───────────────
+      // Sourceless tiles (cleanup crops: empty bytes, page -1) and scale stamps
+      // never qualify, so they keep the raster path whatever imageModified says.
+      const canUseVector =
+        tile.sourcePdfBytes &&
+        tile.sourcePdfBytes.length > 0 &&
+        tile.sourcePageIndex != null &&
+        tile.sourcePageIndex >= 0 &&
+        !tile.isScaleStamp;
+
+      // Erased sheet: embed its source page with the erased linework removed.
+      let vectorSource: { bytes: Uint8Array; pageIndex: number } | null = canUseVector
+        ? { bytes: tile.sourcePdfBytes, pageIndex: tile.sourcePageIndex }
+        : null;
+      if (canUseVector && tile.imageModified) {
+        const erasedRaster = tileRasterUrl(tile);
+        if (!erasedRaster) {
+          vectorSource = null;
+        } else {
+          let perSource = cleanCache.get(tile.sourcePdfBytes);
+          if (!perSource) { perSource = new Map(); cleanCache.set(tile.sourcePdfBytes, perSource); }
+          const key = `${tile.sourcePageIndex}|${erasedRaster}`;
+          let pending = perSource.get(key);
+          if (!pending) {
+            pending = erasedTileVectorSource(tile, erasedRaster, mupdfDocCache, decodeRaster).catch((e) => {
+              console.warn("[stitch export] erased-sheet vector clean failed, using raster:", e);
+              return null;
+            });
+            perSource.set(key, pending);
+          }
+          vectorSource = await pending;
+        }
       }
+
+      if (vectorSource) {
+        const src = vectorSource;
+        // Null once the embed is known to have failed — the page is drawn ONLY on
+        // a proven-good embed, so nothing dangling ever reaches the output.
+        let embeddedPage: PDFEmbeddedPage | null = null;
+        // The source page's own /Rotate, baked into the draw pose below (see
+        // rotatedSourcePose) — a rotated plot keeps its vector linework.
+        let srcRotation = 0;
+        try {
+          let sourceDoc = sourceDocCache.get(src.bytes);
+          if (!sourceDoc) {
+            sourceDoc = await PDFDocument.load(src.bytes, { ignoreEncryption: true });
+            sourceDocCache.set(src.bytes, sourceDoc);
+          }
+          srcRotation = sourceDoc.getPage(src.pageIndex).getRotation().angle;
+
+          // Embeds AND flushes: a page pdf-lib can't embed returns null here rather
+          // than exploding later inside save() (see embedTileSource).
+          embeddedPage = await embedTileSource(pdfDoc, sourceDoc, src.pageIndex);
+        } catch (e) {
+          console.warn("Vector embed failed, falling back to raster:", e);
+        }
+
+        if (embeddedPage) {
+          const good = embeddedPage;
+          // Draw in a local frame whose origin is the tile's lower-left corner and
+          // whose axes carry the tile's own editor rotation. The source's /Rotate is
+          // then a second, inner rotation about the pose's anchor — composing the
+          // two through the CTM is what lets a rotated plot AND a rotated tile both
+          // land exactly where the editor shows them.
+          const pose = rotatedSourcePose(srcRotation, 0, 0, tile.width, tile.height);
+          const drawSource = (x: number, y: number) => {
+            page.pushOperators(pushGraphicsState(), translate(x, y));
+            if (rotation !== 0) page.pushOperators(rotateDegrees(rotation));
+            page.drawPage(good, {
+              x: pose.x,
+              y: pose.y,
+              width: pose.width,
+              height: pose.height,
+              ...(pose.rotateDeg !== 0 ? { rotate: degrees(pose.rotateDeg) } : {}),
+            });
+            page.pushOperators(popGraphicsState());
+          };
+          openClipped();
+          drawSource(drawX, drawY);
+          page.pushOperators(popGraphicsState());
+          drawRelocations((x, y) => drawSource(x, y));
+          continue;
+        }
+      }
+
+      // ── Raster fallback (scale stamps, sourceless crops, vector-fail) ──
+      // The tile's own override if it has one, else its committed sheet raster.
+      const rasterUrl = tileRasterUrl(tile);
+      if (!rasterUrl) continue;
+
+      // Erased tiles whose vector clean failed: the stored raster is only 1.5x —
+      // re-render the source page at print DPI and replay the erase mask so the
+      // fallback is at least print-sharp.
+      let highResBytes: Uint8Array | null = null;
+      if (
+        tile.imageModified &&
+        !tile.isScaleStamp &&
+        tile.sourcePdfBytes &&
+        tile.sourcePdfBytes.length > 0 &&
+        tile.sourcePageIndex >= 0
+      ) {
+        try {
+          highResBytes = await renderModifiedTileHighRes(tile, rasterUrl, mupdfDocCache);
+        } catch (e) {
+          console.warn("High-DPI re-render failed, using stored raster:", e);
+        }
+      }
+
+      let pdfImage;
+      if (highResBytes) {
+        pdfImage = await pdfDoc.embedPng(highResBytes);
+      } else {
+        const raster = await tileRasterBytes(rasterUrl);
+        if (!raster) continue;
+        pdfImage = raster.mime === "png"
+          ? await pdfDoc.embedPng(raster.bytes)
+          : await pdfDoc.embedJpg(raster.bytes);
+      }
+      const imgOpts: {
+        x: number; y: number;
+        width: number; height: number;
+        rotate?: ReturnType<typeof degrees>;
+      } = {
+        x: drawX,
+        y: drawY,
+        width: tile.width,
+        height: tile.height,
+      };
+      if (rotation !== 0) imgOpts.rotate = degrees(rotation);
+      openClipped();
+      page.drawImage(pdfImage, imgOpts);
+      page.pushOperators(popGraphicsState());
+      drawRelocations((x, y) => page.drawImage(pdfImage, { x, y, width: tile.width, height: tile.height }));
     }
 
-    // ── Raster fallback (erased tiles, scale stamps, vector-fail) ─────
-    // The tile's own override if it has one, else its committed sheet raster.
-    const rasterUrl = tileRasterUrl(tile);
-    if (!rasterUrl) continue;
-
-    // Erased tiles: the stored raster is only 1.5x — re-render the source
-    // page at print DPI and replay the erase mask so one small erase doesn't
-    // demote a whole sheet to a soft raster.
-    let highResBytes: Uint8Array | null = null;
-    if (
-      tile.imageModified &&
-      !tile.isScaleStamp &&
-      tile.sourcePdfBytes &&
-      tile.sourcePdfBytes.length > 0 &&
-      tile.sourcePageIndex >= 0
-    ) {
+    return await pdfDoc.save({ useObjectStreams: false });
+  } finally {
+    // Always free mupdf's copies of the sources, even when the export throws:
+    // the wasm heap never shrinks, and repeated failed exports would exhaust it.
+    for (const doc of mupdfDocCache.values()) {
       try {
-        highResBytes = await renderModifiedTileHighRes(tile, rasterUrl, mupdfDocCache);
-      } catch (e) {
-        console.warn("High-DPI re-render failed, using stored raster:", e);
+        doc.destroy?.();
+      } catch {
+        // already freed
       }
     }
-
-    let pdfImage;
-    if (highResBytes) {
-      pdfImage = await pdfDoc.embedPng(highResBytes);
-    } else {
-      const raster = await tileRasterBytes(rasterUrl);
-      if (!raster) continue;
-      pdfImage = raster.mime === "png"
-        ? await pdfDoc.embedPng(raster.bytes)
-        : await pdfDoc.embedJpg(raster.bytes);
-    }
-    const imgOpts: {
-      x: number; y: number;
-      width: number; height: number;
-      rotate?: ReturnType<typeof degrees>;
-    } = {
-      x: drawX,
-      y: drawY,
-      width: tile.width,
-      height: tile.height,
-    };
-    if (rotation !== 0) imgOpts.rotate = degrees(rotation);
-    openClipped();
-    page.drawImage(pdfImage, imgOpts);
-    page.pushOperators(popGraphicsState());
-    drawRelocations((x, y) => page.drawImage(pdfImage, { x, y, width: tile.width, height: tile.height }));
   }
-
-  for (const doc of mupdfDocCache.values()) {
-    try {
-      doc.destroy?.();
-    } catch {
-      // already freed
-    }
-  }
-
-  return pdfDoc.save({ useObjectStreams: false });
 }
