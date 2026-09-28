@@ -185,65 +185,25 @@ export function writeAIMetadata(mupdfDoc: any, payload: PDFAIMetadataPayload): v
 }
 
 /**
- * Read AI metadata from an embedded file inside the PDF (/.nanodoc-ai.json).
- * Uses pdf-lib to parse /Names/EmbeddedFiles and decode the stream.
- * Returns null if the attachment is missing or invalid.
+ * Read AI metadata from the .nanodoc-ai.json embedded file, using the mupdf
+ * document the viewer already has open.
+ *
+ * This used to re-parse the whole file with pdf-lib just to look for the
+ * attachment, which on dense CAD sheets (tens of thousands of paths per page)
+ * ran for minutes and froze the viewer on open. mupdf resolves the
+ * EmbeddedFiles name tree (including nested /Kids) without touching page
+ * content. Never throws; returns null when absent or malformed.
  */
-export async function readAIMetadataFromEmbeddedFile(
-  pdfBytes: Uint8Array
-): Promise<PDFAIMetadataPayload | null> {
+export function readAIMetadataFromMupdfDocument(mupdfDoc: any): PDFAIMetadataPayload | null {
   try {
-    const {
-      PDFDocument,
-      PDFName,
-      PDFDict,
-      PDFArray,
-      PDFHexString,
-      decodePDFRawStream,
-    } = await import("pdf-lib");
-
-    const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-    const catalog = doc.catalog as any;
-    const context = doc.context as any;
-
-    if (!catalog.has(PDFName.of("Names"))) return null;
-    const Names = catalog.lookup(PDFName.of("Names"), PDFDict);
-    if (!Names.has(PDFName.of("EmbeddedFiles"))) return null;
-    const EmbeddedFiles = Names.lookup(PDFName.of("EmbeddedFiles"), PDFDict);
-    if (!EmbeddedFiles.has(PDFName.of("Names"))) return null;
-    const EFNames = EmbeddedFiles.lookup(PDFName.of("Names"), PDFArray);
-    const size = EFNames.size();
-    for (let i = 0; i < size; i += 2) {
-      const nameObj = EFNames.lookup(i);
-      let nameStr: string;
-      if (nameObj instanceof PDFHexString) {
-        nameStr = (nameObj as any).decodeText();
-      } else if (nameObj && typeof (nameObj as any).decodeText === "function") {
-        nameStr = (nameObj as any).decodeText();
-      } else {
-        continue;
-      }
-      if (nameStr !== AI_EMBEDDED_FILE_NAME) continue;
-      const fileSpecRef = EFNames.get(i + 1);
-      if (!fileSpecRef) continue;
-      const fileSpec = context.lookup(fileSpecRef, PDFDict);
-      if (!fileSpec || !fileSpec.has(PDFName.of("EF"))) continue;
-      const EF = fileSpec.lookup(PDFName.of("EF"), PDFDict);
-      const streamRef = EF.get(PDFName.of("F")) || EF.get(PDFName.of("UF"));
-      if (!streamRef) continue;
-      const streamObj = context.lookup(streamRef);
-      const contents =
-        typeof (streamObj as any)?.getContents === "function"
-          ? (streamObj as any).getContents()
-          : (streamObj as any)?.contents;
-      if (!streamObj?.dict || !(contents instanceof Uint8Array)) continue;
-      const decoded = decodePDFRawStream({ dict: (streamObj as any).dict, contents } as any).decode();
-      const json = new TextDecoder().decode(decoded);
-      const payload = JSON.parse(json) as PDFAIMetadataPayload;
-      if (payload != null && typeof payload.version === "number") return payload;
-      return null;
-    }
-    return null;
+    const pdf = mupdfDoc?.asPDF?.() ?? null;
+    if (!pdf || typeof pdf.getEmbeddedFiles !== "function") return null;
+    const spec = pdf.getEmbeddedFiles()?.[AI_EMBEDDED_FILE_NAME];
+    if (!spec) return null;
+    const contents = pdf.getEmbeddedFileContents(spec);
+    if (!contents) return null;
+    const payload = JSON.parse(new TextDecoder().decode(contents.asUint8Array())) as PDFAIMetadataPayload;
+    return payload != null && typeof payload.version === "number" ? payload : null;
   } catch {
     return null;
   }
