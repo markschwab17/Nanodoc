@@ -16,7 +16,7 @@ import { useFileSystem } from "@/shared/hooks/useFileSystem";
 import { PDFDocument, PasswordRequiredError } from "@/core/pdf/PDFDocument";
 import { PDFEditor } from "@/core/pdf/PDFEditor";
 import { usePasswordPromptStore } from "@/shared/stores/passwordPromptStore";
-import { readAIMetadata, readAIMetadataFromEmbeddedFile, type PDFAIMetadataPayload } from "@/core/pdf/PDFAIMetadata";
+import { readAIMetadata, readAIMetadataFromMupdfDocument, type PDFAIMetadataPayload } from "@/core/pdf/PDFAIMetadata";
 import {
   isBrowserAiStorageAvailable,
   hashPdfBytes,
@@ -125,7 +125,7 @@ export function usePDF() {
         }
         if (!aiPayload) {
           try {
-            aiPayload = await readAIMetadataFromEmbeddedFile(data);
+            aiPayload = readAIMetadataFromMupdfDocument(document.getMupdfDocument());
           } catch {
             // non-fatal
           }
