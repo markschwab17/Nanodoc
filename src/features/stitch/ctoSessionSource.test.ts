@@ -20,8 +20,9 @@ import {
   type CtoDocLike,
 } from "./ctoSessionSource";
 import { canvasProbeSet } from "./earnedAutoAlignSet";
-import { parseStitchPlan } from "./stitchPlan";
-import { resolvePageScale } from "./pageScales";
+import { planHandoffContext } from "./ctoSessionSource";
+import { parseStitchPlan, unscaledPlanPages } from "./stitchPlan";
+import { resolvePageScale, assertEveryPageScaled, typedCommitScales, MissingSheetScaleError } from "./pageScales";
 import type { StitchTile } from "./stitchTypes";
 
 const realDoc: CtoDocLike = { type: "pdf", displayName: "Grading Plan.pdf", token: "tok-1" };
@@ -106,8 +107,12 @@ describe("stitchHandoffRecovery", () => {
  * other side of the same claim — that a canvas built from the plan really does read
  * back that way — and it is what makes `serverProbeRequestMatches` more than a
  * comparison of two things nobody checked. The interesting case is the blank scale:
- * the plan leaves a page uncalibrated, the commit stamps `DEFAULT_SCALE_FT_PER_IN` on
- * its tile, and the canvas is therefore UNIFORM where the plan was not.
+ * the plan leaves a page uncalibrated. The commit NO LONGER fills it with a default —
+ * a plan like that opens the Add PDF modal (`unscaledPlanPages`) and nothing lands until
+ * the user types the missing scale. CTO/the droplet still precompute such a request as
+ * if the blank were `defaultScaleFtPerIn`, so its stored verdict matches the canvas only
+ * when the user actually types that value (modelled below); any other typed scale makes
+ * the request differ, the gate refuses the row, and the browser probes instead.
  */
 describe("the probe request a canvas implies (cross fixture with CTO)", () => {
   // `fileURLToPath` + `path.join`, not `new URL("…", import.meta.url)`: Vite rewrites
@@ -118,6 +123,7 @@ describe("the probe request a canvas implies (cross fixture with CTO)", () => {
     "../../../scripts/fixtures/probe-request.json",
   );
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+    defaultScaleFtPerIn: number;
     cases: Array<{
       name: string;
       plan: unknown;
@@ -130,11 +136,27 @@ describe("the probe request a canvas implies (cross fixture with CTO)", () => {
     }>;
   };
 
-  /** The tiles `commitPlainAdd` puts on the canvas for a plan: one per entry, each
-   *  stamped with `resolvePageScale` — which is the step that fills every blank. */
-  function tilesFor(plan: unknown): StitchTile[] {
+  /** The tiles on the canvas for a plan: one per entry, each stamped with
+   *  `resolvePageScale`. A plan with uncalibrated pages only reaches the canvas via the
+   *  modal, after the user types a scale for them — modelled as typing the fixture's
+   *  `defaultScaleFtPerIn`, the only value for which CTO's precomputed request holds. */
+  function tilesFor(plan: unknown, typedForBlank: number): StitchTile[] {
     const parsed = parseStitchPlan(plan, 99);
     if (!parsed) throw new Error("fixture plan did not parse");
+    const unscaled = unscaledPlanPages(parsed);
+    if (unscaled.length) {
+      // The plan path must refuse to commit these pages at a guessed scale.
+      expect(() => assertEveryPageScaled(parsed.pageIndices, parsed.pageScales, parsed.uniformScale)).toThrow(
+        MissingSheetScaleError,
+      );
+      // The modal opens with CTO's scales pre-filled and the blanks empty; the user
+      // types the blanks.
+      const text = new Map<number, string>([...parsed.pageScales].map(([i, v]) => [i, String(v)]));
+      for (const i of unscaled) text.set(i, String(typedForBlank));
+      const typed = typedCommitScales(parsed.pageIndices, text, "");
+      if (!typed) throw new Error("typed scales did not resolve");
+      parsed.pageScales = typed.pageScales;
+    }
     const bytes = new Uint8Array([1, 2, 3]);
     return parsed.pageIndices.map((i) => ({
       id: `t${i}`,
@@ -150,7 +172,7 @@ describe("the probe request a canvas implies (cross fixture with CTO)", () => {
 
   for (const c of fixture.cases) {
     test(c.name, () => {
-      const set = canvasProbeSet(tilesFor(c.plan));
+      const set = canvasProbeSet(tilesFor(c.plan, fixture.defaultScaleFtPerIn));
       expect(set).not.toBeNull();
       expect(set!.pageIndices).toEqual(c.request.pageIndices);
       expect(set!.uniformScale).toBe(c.request.userScale);
@@ -415,5 +437,24 @@ describe("ctoProbeUrl", () => {
   test("is null when there is nothing to poll with", () => {
     expect(ctoProbeUrl({ api_origin: "https://cto.example", token: "" })).toBeNull();
     expect(ctoProbeUrl(null)).toBeNull();
+  });
+});
+
+describe("planHandoffContext", () => {
+  const plan = new Uint8Array([1]);
+  const other = new Uint8Array([1]);
+  const ctx = { pageCodes: new Map([[0, "C500"]]) };
+  const tile = (bytes: Uint8Array, i = 0) => ({ sourcePageIndex: i, sourcePdfBytes: bytes });
+
+  test("hands the plan's context to a canvas built from the plan's own PDF", () => {
+    expect(planHandoffContext([tile(plan, 0), tile(plan, 1)], { source: plan, ctx })).toBe(ctx);
+  });
+  test("not to a canvas with a sheet from another PDF — even an equal-looking one", () => {
+    expect(planHandoffContext([tile(plan), tile(other, 1)], { source: plan, ctx })).toBeUndefined();
+    expect(planHandoffContext([tile(other)], { source: plan, ctx })).toBeUndefined();
+  });
+  test("nothing parked, or nothing on the canvas → a plain check", () => {
+    expect(planHandoffContext([tile(plan)], null)).toBeUndefined();
+    expect(planHandoffContext([], { source: plan, ctx })).toBeUndefined();
   });
 });

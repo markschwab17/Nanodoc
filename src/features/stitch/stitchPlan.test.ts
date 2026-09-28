@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseStitchPlan } from "./stitchPlan";
+import { parseStitchPlan, unscaledPlanPages } from "./stitchPlan";
 
 const takeoff = (scaleFeetPerInch: number | null, label = "C-1") => ({
   kind: "takeoff",
@@ -142,5 +142,19 @@ describe("parseStitchPlan — sheet codes from the labels", () => {
   it("upper-cases so it compares with a title-block code", () => {
     const p = parseStitchPlan(plan(["c5.00 grading plan"]), 1)!;
     expect(p.pageCodes.get(0)).toBe("C5.00");
+  });
+});
+
+describe("unscaledPlanPages", () => {
+  const plan = (scales: (number | null)[]) => ({
+    version: 1,
+    mode: "manual",
+    entries: scales.map((scaleFeetPerInch, i) => ({ pageUuid: `p${i}`, scaleFeetPerInch })),
+  });
+  it("is empty when CTO calibrated every sheet", () => {
+    expect(unscaledPlanPages(parseStitchPlan(plan([10, 10, 40]), 3)!)).toEqual([]);
+  });
+  it("names every sheet CTO sent without a usable scale — those must not land at 1\"=20'", () => {
+    expect(unscaledPlanPages(parseStitchPlan(plan([10, null, 0, 10]), 4)!)).toEqual([1, 2]);
   });
 });

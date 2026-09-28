@@ -31,7 +31,9 @@ export interface ParsedStitchPlan {
   /** Ascending combined-PDF page indices to commit. */
   pageIndices: number[];
   /** Feet-per-inch for every page that carries a usable scale; pages CTO left
-   *  blank are simply absent (so `resolvePageScale` falls back as usual). */
+   *  blank are simply absent. There is NO default for them: a plan with any such
+   *  page is not committed directly (see `unscaledPlanPages`) — the user types the
+   *  missing scales in the Add PDF modal first. */
   pageScales: Map<number, number>;
   /** The single scale shared by every page in `pageIndices`, else null — so a
    *  mixed set takes `autoStitch`'s per-page-scale-aware path. */
@@ -118,4 +120,17 @@ export function parseStitchPlan(raw: unknown, pageCount: number): ParsedStitchPl
   }
 
   return { mode, pageIndices, pageScales, uniformScale, pageCodes };
+}
+
+/** Plan pages with no usable scale (ascending). Non-empty means the plan must NOT be
+ *  committed as-is: a sheet with no scale would otherwise be sized at a guessed
+ *  1"=20' — the bug that stitched 1"=10' grading sheets at twice their true size.
+ *  The caller hands these to the Add PDF modal, which will not commit until the user
+ *  types them. */
+export function unscaledPlanPages(plan: Pick<ParsedStitchPlan, "pageIndices" | "pageScales" | "uniformScale">): number[] {
+  if (plan.uniformScale != null && plan.uniformScale > 0) return [];
+  return plan.pageIndices.filter((i) => {
+    const v = plan.pageScales.get(i);
+    return !(v != null && v > 0);
+  });
 }

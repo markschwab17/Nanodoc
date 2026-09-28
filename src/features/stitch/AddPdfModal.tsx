@@ -24,9 +24,9 @@ import { useNotificationStore } from "@/shared/stores/notificationStore";
 import { resolveCtoTarget } from "@/shared/ctoBridge";
 import type { ProbeResult, ProbeMessage, ProbeRequest } from "@/features/stitch/autostitch/stitchProbe";
 import { deriveFeasibility } from "@/features/stitch/autostitch/feasibility";
-import { layoutPlacements } from "@/features/stitch/autostitch/layout";
-import { parseScaleInput, isUniform, DEFAULT_SCALE_FT_PER_IN } from "./pageScales";
-import { SESSION_SOURCE_DOC_TYPE, withSessionSource } from "./ctoSessionSource";
+import { parseScaleInput, missingScalePages, missingScaleReason, typedCommitScales, scaleSetFor, scaleSetKey } from "./pageScales";
+import { SESSION_SOURCE_DOC_TYPE, withSessionSource, classifyServerProbe, planHashHex } from "./ctoSessionSource";
+import { ENGINE_VERSION } from "./autostitch/engineVersion";
 import { modalProbeOutcome } from "./modalProbeGate";
 import { autoAlignUnavailableNote } from "./addToProjectCopy";
 import { commitPlainAdd, commitAutoAlign, imageDataToDataUrl, yieldToMain, type CachedProbePlacement } from "./commitPages";
@@ -48,6 +48,28 @@ const PROBE_BUDGET_MS = 60_000;
 
 type SourceTab = "device" | "cto";
 
+/** Pages to pre-tick when the modal opens on `initialPdf`, with the per-page scales
+ *  already known (feet per inch). Pages absent from `pageScales` open blank. */
+export interface InitialPageSelection {
+  pageIndices: number[];
+  pageScales: ReadonlyMap<number, number>;
+  /** CTO's sheet codes for these pages (the plan's labels) — fed to the probe and to
+   *  "Add & auto-align" exactly as the plan path feeds them to the earned check. */
+  pageCodes?: ReadonlyMap<number, string>;
+  /** The droplet's stored verdict for the plan, and the RAW plan it must hash to. Used
+   *  in place of a browser probe only when it was computed at the scales the user
+   *  typed (`classifyServerProbe`); otherwise the modal probes as usual. */
+  serverProbe?: unknown;
+  plan?: unknown;
+}
+
+/** What a handed-over plan knows about the document currently loaded. */
+interface PlanKnowledge {
+  pageCodes: ReadonlyMap<number, string> | null;
+  serverProbe: unknown;
+  plan: unknown;
+}
+
 export function AddPdfModal({
   open,
   onClose,
@@ -59,7 +81,10 @@ export function AddPdfModal({
 }: {
   open: boolean;
   onClose: () => void;
-  initialPdf?: { pdfBytes: Uint8Array; fileName: string } | null;
+  /** `selection`: pages to tick on load, with the scales already known for them
+   *  (a CTO stitch plan whose sheets are not all calibrated lands here so the user
+   *  can type the missing scales instead of the sheets arriving at a guessed one). */
+  initialPdf?: { pdfBytes: Uint8Array; fileName: string; selection?: InitialPageSelection } | null;
   onInitialConsumed?: () => void;
   /** How many sheets the auto-align run could not place, reported after every
    *  "Add and auto-align" from this modal. In takeoff-v2 mode that number is the
@@ -94,21 +119,42 @@ export function AddPdfModal({
   /** Progress while adding pages to canvas. */
   const [addingProgress, setAddingProgress] = useState({ done: 0, total: 0 });
   const [removeWhiteBackground, setRemoveWhiteBackground] = useState(true);
-  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'). A typed value always wins
-   *  as the commit's reference scale. Empty = don't override: a canvas that already
-   *  has sheets keeps its own reference scale, and only an empty canvas falls back to
-   *  the selection's own resolved scale (see `referenceBaseline`). */
+  /** Scale when adding: feet per inch (e.g. 20 for 1"=20'), applied to every selected
+   *  page whose own box is blank. REQUIRED unless every selected page has its own:
+   *  nothing commits until each page has a scale the user typed (`missingScalePages`)
+   *  — there is no 1"=20' default. A typed value always wins as the commit's reference
+   *  scale; left empty (all pages typed individually), a canvas that already has
+   *  sheets keeps its own reference scale (see `referenceBaseline`). */
   const [scaleFeetPerInch, setScaleFeetPerInch] = useState<string>("");
   /** Per-page scale text, keyed by page index; empty/absent = use the set scale above. */
   const [pageScaleText, setPageScaleText] = useState<Map<number, string>>(new Map());
-  const pageScales = useMemo(() => {
-    const m = new Map<number, number>();
-    for (const [i, t] of pageScaleText) { const n = parseScaleInput(t); if (n != null) m.set(i, n); }
-    return m;
-  }, [pageScaleText]);
   const uniformScale = useMemo(() => parseScaleInput(scaleFeetPerInch), [scaleFeetPerInch]);
   /** The ticked pages, ascending. Drives the commit AND the feasibility probe. */
   const selectedIndices = useMemo(() => Array.from(selectedPages).sort((a, b) => a - b), [selectedPages]);
+  /** Ticked pages with no scale the user typed. Every commit button stays disabled,
+   *  with `scaleReason` on screen, until this is empty. */
+  const missingScale = useMemo(
+    () => missingScalePages(selectedIndices, pageScaleText, scaleFeetPerInch),
+    [selectedIndices, pageScaleText, scaleFeetPerInch]
+  );
+  const missingScaleSet = useMemo(() => new Set(missingScale), [missingScale]);
+  /** The scales the probe is asked at: null until every ticked page has a typed scale.
+   *  NO probe runs before that — seam statuses, the feasibility gate and every feet
+   *  figure are decided at the probe's scale, so an answer at a guessed 1"=20' is not
+   *  an answer about 1"=10' sheets (and cannot be rescaled into one). */
+  const probeScales = useMemo(() => {
+    const typed = typedCommitScales(selectedIndices, pageScaleText, scaleFeetPerInch);
+    return typed ? scaleSetFor(selectedIndices, typed.pageScales) : null;
+  }, [selectedIndices, pageScaleText, scaleFeetPerInch]);
+  const probeScaleKey = probeScales ? scaleSetKey(probeScales) : null;
+  const probeScalesRef = useRef(probeScales);
+  probeScalesRef.current = probeScales;
+  /** What a CTO plan hand-off knows about the loaded document (null for any other
+   *  document), and the plan's hash (undefined while it is computed). */
+  const [planKnowledge, setPlanKnowledge] = useState<PlanKnowledge | null>(null);
+  const [planHash, setPlanHash] = useState<string | null | undefined>(undefined);
+  const planKnowledgeRef = useRef<PlanKnowledge | null>(null);
+  const scaleReason = missingScaleReason(missingScale);
   const [_ctoListening, setCtoListening] = useState(false);
   /** User-visible error for failed loads/adds (corrupt file, password, etc). */
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -140,6 +186,11 @@ export function AddPdfModal({
   /** Monotonic id; a probe reply whose docId != current is stale and ignored. */
   const probeDocIdRef = useRef(0);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
+  /** `scaleSetKey` of the scales `probe` was computed at. A commit reuses the probe
+   *  only when this equals the key of the scales it is committing. */
+  const [probeKey, setProbeKey] = useState<string | null>(null);
+  /** The key of the request in flight (see `postProbe`). */
+  const probeKeyRef = useRef<string | null>(null);
   const [probeState, setProbeState] = useState<"idle" | "running" | "done" | "error" | "skipped" | "too_slow">("idle");
   /** True once the probe reports OCR is in play (outlined-text sheets) — used to
    *  explain the longer wait in the "Checking alignment…" copy. */
@@ -214,6 +265,7 @@ export function AddPdfModal({
   const postProbe = useCallback((req: ProbeRequest) => {
     clearProbeBudget();
     probeReqRef.current = req;
+    probeKeyRef.current = scaleSetKey(scaleSetFor(req.pageIndices, new Map(req.pageScales ?? [])));
     probeInFlightRef.current = true;
     probeWorkerRef.current?.postMessage(req);
     const requested = req.docId;
@@ -328,6 +380,7 @@ export function AddPdfModal({
       const result = outcome.probe;
       console.debug("[stitchProbe] method", result.method, "aligned", result.alignedPageIndices.length, "/", result.placements.length);
       setProbe(result);
+      setProbeKey(probeKeyRef.current);
       setProbeState("done");
     };
     probeWorkerRef.current = w;
@@ -364,18 +417,42 @@ export function AddPdfModal({
     if (!pdfBytes || !mupdfDoc || pageCount === 0) return;
     stopProbe("supersede");
     setProbe(null);
+    setProbeKey(null);
     setProbeOcr(false);
-    if (selectedIndices.length < 2) {
+    const scales = probeScalesRef.current;
+    // Nothing to check below two pages, and nothing HONEST to check until every page
+    // has the scale the user typed (see `probeScales`); the scale line says so.
+    if (selectedIndices.length < 2 || !scales) {
       setProbeState("idle");
       return;
     }
     setProbeState("running");
     const bytes = pdfBytes;
     const pages = selectedIndices;
+    const knowledge = planKnowledge;
+    const hash = planHash;
     probeTimerRef.current = window.setTimeout(() => {
       probeTimerRef.current = null;
-      // userScale is null: placements are scale-invariant for a uniform set, so
-      // the probe outcome is unaffected and the effect needs no scale dep.
+      // A CTO plan hand-off: the droplet may already have answered this question. Its
+      // verdict is taken only when it was asked at THESE scales, pages and sheet codes
+      // (and this build + plan) — the same gate the embed strip applies.
+      if (knowledge?.serverProbe != null && hash !== undefined) {
+        const verdict = classifyServerProbe({
+          probe: knowledge.serverProbe,
+          engineVersion: ENGINE_VERSION,
+          planHash: hash,
+          canvas: scales,
+          pageCodes: knowledge.pageCodes,
+          nowMs: Date.now(),
+        });
+        if (verdict === "use") {
+          const row = knowledge.serverProbe as { result: ProbeResult };
+          setProbe({ ...row.result, docId: probeDocIdRef.current });
+          setProbeKey(scaleSetKey(scales));
+          setProbeState("done");
+          return;
+        }
+      }
       // A request the SELECTION asked for earns a fresh entitlement to one automatic
       // re-run; the re-run itself must not grant itself another (that is the loop).
       probeRecheckSpentRef.current = false;
@@ -383,7 +460,10 @@ export function AddPdfModal({
         docId: probeDocIdRef.current,
         pdfBytes: bytes,
         pageIndices: pages,
-        userScale: null,
+        // The TYPED scales, not the solver's default: see `probeScales`.
+        userScale: scales.uniformScale,
+        pageScales: [...scales.pageScales],
+        pageCodes: knowledge?.pageCodes?.size ? [...knowledge.pageCodes] : undefined,
       });
     }, PROBE_DEBOUNCE_MS);
     return () => {
@@ -392,7 +472,9 @@ export function AddPdfModal({
         probeTimerRef.current = null;
       }
     };
-  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, stopProbe, postProbe]);
+    // `probeScaleKey`, not the scale text: re-probe when a page's SCALE changes, not
+    // on every keystroke that leaves it the same ("10" → "10.0").
+  }, [pdfBytes, mupdfDoc, pageCount, selectedIndices, probeScaleKey, planKnowledge, planHash, stopProbe, postProbe]);
 
   const togglePage = useCallback((i: number) => {
     setSelectedPages((prev) => {
@@ -414,7 +496,7 @@ export function AddPdfModal({
   /** Load PDF from bytes + name into modal state.
    *  Shows the page grid immediately, then streams thumbnails progressively. */
   const loadPdfFromResult = useCallback(
-    async (data: Uint8Array, name: string) => {
+    async (data: Uint8Array, name: string, preset?: InitialPageSelection) => {
       // New generation — any in-flight thumbnail loop stops at its next check
       const gen = ++thumbGenRef.current;
 
@@ -442,8 +524,30 @@ export function AddPdfModal({
         setPdfFileName(name);
         setMupdfDoc(doc);
         setPageCount(count);
-        setSelectedPages(new Set());
-        setPageScaleText(new Map());
+        // A handed-over selection (see `initialPdf.selection`) is ticked with the
+        // scales that ARE known pre-filled; the missing ones stay blank, which is
+        // exactly what keeps the commit buttons disabled until they are typed.
+        const presetPages = (preset?.pageIndices ?? []).filter((i) => i >= 0 && i < count);
+        setSelectedPages(new Set(presetPages));
+        const presetText = new Map<number, string>();
+        for (const i of presetPages) {
+          const v = preset?.pageScales.get(i);
+          if (v != null && v > 0) presetText.set(i, String(v));
+        }
+        setPageScaleText(presetText);
+        const knowledge: PlanKnowledge | null =
+          preset && (preset.pageCodes?.size || preset.serverProbe != null)
+            ? { pageCodes: preset.pageCodes ?? null, serverProbe: preset.serverProbe ?? null, plan: preset.plan }
+            : null;
+        planKnowledgeRef.current = knowledge;
+        setPlanKnowledge(knowledge);
+        setPlanHash(knowledge?.serverProbe != null ? undefined : null);
+        if (knowledge?.serverProbe != null) {
+          void planHashHex(knowledge.plan).then((h) => {
+            // Still the same hand-off? A later load replaced `planKnowledge`.
+            if (planKnowledgeRef.current === knowledge) setPlanHash(h);
+          });
+        }
         // NO probe here. The probe used to walk the WHOLE document the moment a
         // PDF loaded, before the user had ticked anything — on a 22-page set that
         // is ~1.1 GB of retained page geometry in the worker and minutes of band
@@ -506,6 +610,8 @@ export function AddPdfModal({
       setPageCount(0);
       setSelectedPages(new Set());
       setPageScaleText(new Map());
+      planKnowledgeRef.current = null;
+      setPlanKnowledge(null);
       setThumbnails({});
       setThumbProgress(0);
       setProbe(null);
@@ -525,7 +631,7 @@ export function AddPdfModal({
 
     // When opened from CTO stitch with initial PDF, load it into page selection instead of auto-adding all.
     if (initialPdf?.pdfBytes && initialPdf?.fileName) {
-      loadPdfFromResult(initialPdf.pdfBytes, initialPdf.fileName);
+      loadPdfFromResult(initialPdf.pdfBytes, initialPdf.fileName, initialPdf.selection);
       onInitialConsumed?.();
       return;
     }
@@ -681,6 +787,10 @@ export function AddPdfModal({
 
   const handleAddToCanvas = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
+    const selected = Array.from(selectedPages).sort((a, b) => a - b);
+    // Every page must carry a scale the user typed; the button is disabled until then.
+    const typed = typedCommitScales(selected, pageScaleText, scaleFeetPerInch);
+    if (!typed) return;
     // Plain add must never wait on the probe: abort it BEFORE the render loop so
     // it stops queuing NEW OCR work behind this add. Abort is cooperative — any
     // OCR job already in flight finishes first — but the probe stops at its next
@@ -688,7 +798,6 @@ export function AddPdfModal({
     abortProbe();
     setAdding(true);
     setLoadError(null);
-    const selected = Array.from(selectedPages).sort((a, b) => a - b);
     setAddingProgress({ done: 0, total: selected.length });
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
@@ -699,8 +808,8 @@ export function AddPdfModal({
         pdfBytes,
         fileName: pdfFileName || undefined,
         selected,
-        pageScales,
-        uniformScale,
+        pageScales: typed.pageScales,
+        uniformScale: typed.uniformScale,
         removeWhiteBackground,
         renderer: rendererRef.current,
         onProgress: (done, total) => setAddingProgress({ done, total }),
@@ -713,32 +822,33 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, abortProbe, pageScales, uniformScale, onPagesAdded]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, abortProbe, pageScaleText, scaleFeetPerInch, onPagesAdded]);
 
   const handleAddAndAutoAlign = useCallback(async () => {
     if (!mupdfDoc || !pdfBytes || selectedPages.size === 0) return;
+    const selected = Array.from(selectedPages).sort((a, b) => a - b);
+    // Every page must carry a scale the user typed; the button is disabled until then.
+    const typed = typedCommitScales(selected, pageScaleText, scaleFeetPerInch);
+    if (!typed) return;
+    const { pageScales, uniformScale } = typed;
+    const commitKey = scaleSetKey(scaleSetFor(selected, pageScales));
     setAdding(true);
     setLoadError(null);
-    const selected = Array.from(selectedPages).sort((a, b) => a - b);
     setAddingProgress({ done: 0, total: selected.length });
     try {
       const mupdf = await import("mupdf").then((m) => m.default);
       if (!rendererRef.current) rendererRef.current = new PDFRenderer(mupdf);
       // Prefer the cached probe (skips the second stitch); else the helper falls back
       // to running the aligner live (probe absent/errored/running).
-      // The probe always ran with a uniform (null) scale, so its cached poses are
-      // only valid when this selection turns out uniform too — a mixed selection
-      // always takes the live path, which is per-page-scale aware.
+      // Reused ONLY when it was computed at exactly the scales being committed
+      // (`probeKey`): its seam statuses, gate and feet figures were decided at those
+      // scales. Anything else takes the live path, which solves at the typed scales.
       let cached: CachedProbePlacement | null = null;
-      if (probe && probeState === "done" && isUniform(selected, pageScales, uniformScale)) {
-        const sel = new Set(selected);
-        // Re-run the (cheap) layout over just the selected sheets so the committed
-        // tiles normalize to THIS selection's top-left (MARGIN), not the whole
-        // document's. The probe laid out all pages, so filtering alone would leave a
-        // partial selection offset off-canvas; the expensive stitch stays cached (poses).
-        const subset = probe.poses.filter((p) => sel.has(p.pageIndex));
+      if (probe && probeState === "done" && probeKey === commitKey) {
+        // Equal keys mean the probe ran over exactly these pages, so its own layout is
+        // this selection's layout (a stored server verdict need not carry poses).
         cached = {
-          placements: layoutPlacements(subset, probe.rootFtPerIn),
+          placements: probe.placements,
           rootFtPerIn: probe.rootFtPerIn,
           worstResidFt: probe.worstResidFt,
           // The honesty payload travels with the poses: without it the commit had no
@@ -764,6 +874,7 @@ export function AddPdfModal({
         onProgress: (done, total) => setAddingProgress({ done, total }),
         ocr: recognize,
         cached,
+        pageCodes: planKnowledge?.pageCodes ? new Map(planKnowledge.pageCodes) : undefined,
       });
       if (result.message)
         useNotificationStore
@@ -777,7 +888,7 @@ export function AddPdfModal({
     } finally {
       setAdding(false);
     }
-  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeState, pageScales, uniformScale, onAutoAlignResult]);
+  }, [mupdfDoc, pdfBytes, pdfFileName, selectedPages, onClose, removeWhiteBackground, probe, probeKey, probeState, pageScaleText, scaleFeetPerInch, planKnowledge, onAutoAlignResult]);
 
   const feasibility = useMemo(
     () => (probe ? deriveFeasibility(probe, selectedIndices) : null),
@@ -807,6 +918,8 @@ export function AddPdfModal({
                 setPageCount(0);
                 setSelectedPages(new Set());
                 setPageScaleText(new Map());
+                planKnowledgeRef.current = null;
+                setPlanKnowledge(null);
                 setThumbnails({});
                 setLoadError(null);
                 stopProbe("supersede");
@@ -829,6 +942,8 @@ export function AddPdfModal({
                 setPageCount(0);
                 setSelectedPages(new Set());
                 setPageScaleText(new Map());
+                planKnowledgeRef.current = null;
+                setPlanKnowledge(null);
                 setThumbnails({});
                 setLoadError(null);
                 stopProbe("supersede");
@@ -934,17 +1049,23 @@ export function AddPdfModal({
                 />
                 Remove white background
               </label>
+              {/* The set scale: fills every selected page whose own box is blank. No
+                  numeric placeholder — a greyed "20" read as a pre-filled value and
+                  stitched 1"=10' sheets at 1"=20'. */}
               <label className="flex items-center gap-2 text-sm">
                 <span className="text-muted-foreground whitespace-nowrap">Scale 1&quot;=</span>
                 <input
                   type="text"
-                  inputMode="numeric"
-                  placeholder="20"
+                  inputMode="decimal"
+                  aria-label="Scale for all selected pages, feet per inch"
+                  placeholder={missingScale.length > 0 ? "required" : ""}
                   value={scaleFeetPerInch}
                   onChange={(e) => setScaleFeetPerInch(e.target.value)}
-                  className="w-14 rounded border border-input bg-background px-2 py-1 text-sm"
+                  className={`w-20 rounded border bg-background px-2 py-1 text-sm placeholder:italic placeholder:text-muted-foreground/60 ${
+                    scaleFeetPerInch.trim() && uniformScale == null ? "border-destructive" : "border-input"
+                  }`}
                 />
-                <span className="text-muted-foreground text-xs">ft</span>
+                <span className="text-muted-foreground text-xs">ft (all pages)</span>
               </label>
             </div>
             {/* Thumbnail progress bar */}
@@ -1000,7 +1121,10 @@ export function AddPdfModal({
                         type="text"
                         inputMode="decimal"
                         aria-label={`Scale for page ${i + 1}, feet per inch`}
-                        placeholder={String(uniformScale ?? DEFAULT_SCALE_FT_PER_IN)}
+                        // Shows the SET scale the page will inherit (a value the user
+                        // typed), never a default. Blank + outlined when the page has
+                        // no scale yet.
+                        placeholder={uniformScale != null ? String(uniformScale) : ""}
                         value={pageScaleText.get(i) ?? ""}
                         onChange={(e) => {
                           const value = e.target.value;
@@ -1011,7 +1135,10 @@ export function AddPdfModal({
                           });
                         }}
                         onClick={(e) => e.stopPropagation()}
-                        className="w-10 rounded border border-input bg-background px-1 py-0.5 text-[10px]"
+                        aria-invalid={missingScaleSet.has(i) || undefined}
+                        className={`w-10 rounded border bg-background px-1 py-0.5 text-[10px] placeholder:italic placeholder:text-muted-foreground/60 ${
+                          missingScaleSet.has(i) ? "border-amber-500" : "border-input"
+                        }`}
                       />
                       ft
                     </span>
@@ -1070,13 +1197,21 @@ export function AddPdfModal({
             Alignment check skipped — add pages and align manually
           </p>
         )}
+        {/* Why the commit buttons are disabled: a sheet sized at a guessed scale is
+            wrong in every measurement taken off it, so there is no default. */}
+        {!adding && pdfBytes && scaleReason && (
+          <p className="text-xs text-amber-600 dark:text-amber-500 text-right px-1" role="status">
+            {scaleReason} — type it under each page, or in Scale 1&quot;= for all of them
+          </p>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
           <Button
             onClick={handleAddToCanvas}
-            disabled={!pdfBytes || selectedPages.size === 0 || adding}
+            disabled={!pdfBytes || selectedPages.size === 0 || adding || missingScale.length > 0}
+            title={scaleReason ?? undefined}
           >
             {adding ? "Adding…" : `Add ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""} to canvas`}
           </Button>
@@ -1097,7 +1232,8 @@ export function AddPdfModal({
             // verified gets the honest "can't verify" copy instead of the bare
             // "unavailable" (which reads as "these aren't tiles at all").
             const cannotVerify = unstitchable && !!feasibility?.reason;
-            const disabled = adding || tooFew || checking || unstitchable || skipped || tooSlow;
+            const needsScale = missingScale.length > 0;
+            const disabled = adding || tooFew || checking || unstitchable || skipped || tooSlow || needsScale;
             const label = adding
               ? "Aligning…"
               : checking
@@ -1111,6 +1247,8 @@ export function AddPdfModal({
               : `Add & auto-align ${selectedPages.size} page${selectedPages.size !== 1 ? "s" : ""}`;
             const title = tooFew
               ? "Select at least 2 pages to auto-align"
+              : needsScale
+              ? scaleReason ?? undefined
               : skipped
               ? "Alignment check skipped — add pages and align manually"
               : tooSlow

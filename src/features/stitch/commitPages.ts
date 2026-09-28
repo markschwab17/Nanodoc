@@ -22,7 +22,7 @@ import { frameMask, type TilePlacement } from "@/features/stitch/autostitch/layo
 import type { AlignmentVerdict, SeamStatus, SeamReportEntry } from "@/features/stitch/autostitch/stitchCore";
 import { AUTO_ALIGN_UNAVAILABLE_REASONS, type AutoAlignReason } from "./addToProjectCopy";
 import type { recognize } from "./autostitch/ocrService";
-import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, newTileCanvasFactor } from "./pageScales";
+import { resolvePageScale, isUniform, tileSizeAtReference, referenceScaleFor, referenceBaseline, newTileCanvasFactor, assertEveryPageScaled } from "./pageScales";
 import { tileRenderScale, encodeTileRasterPng, TILE_RENDER_SCALE } from "./rasterEncode";
 
 export { TILE_RENDER_SCALE };
@@ -59,7 +59,10 @@ export interface CommitInput {
   selected: number[];
   /** Per-page feet-per-inch overrides. */
   pageScales: Map<number, number>;
-  /** The typed set scale, or null when the user left the field empty. */
+  /** The typed set scale, or null when the user left the field empty. Between them,
+   *  `pageScales` and `uniformScale` MUST give every selected page a scale: a commit
+   *  throws `MissingSheetScaleError` before rendering anything rather than size a
+   *  sheet at a guessed 1"=20' (see `assertEveryPageScaled`). */
   uniformScale: number | null;
   /** Sheet identity the caller already knows, per page (CTO's plan labels). Fed
    *  straight to `autoStitch`; ignored by a plain add. */
@@ -212,6 +215,8 @@ function fitCanvasIfUntouched(): void {
 export async function commitPlainAdd(input: CommitInput): Promise<CommitResult> {
   const { doc, pdfBytes, fileName, selected, pageScales, uniformScale, removeWhiteBackground, renderer, onProgress, shouldAbort } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
+  // No sheet is ever sized at a guessed scale: fail before any work if one has none.
+  assertEveryPageScaled(selected, pageScales, uniformScale);
 
   const newTiles: Array<TileData & { x: number; y: number }> = [];
   // ONE reference scale for the whole commit: the typed set scale wins; else a
@@ -327,6 +332,9 @@ export async function commitAutoAlign(
     removeWhiteBackground, renderer, onProgress, ocr, cached, shouldAbort, replaceTileIds,
   } = input;
   const checkAbort = () => { if (shouldAbort?.()) throw new AutoStitchAborted(); };
+  // No sheet is ever sized at a guessed scale — and the live solver below would
+  // otherwise fill a gap with its own 1"=20' default. Fail before any work.
+  assertEveryPageScaled(selected, pageScales, uniformScale);
 
   // 1. Render rasters for the selected pages (same as the plain add).
   // Keyed by page index and holding the BLOB: a two-strip page commits twice,
